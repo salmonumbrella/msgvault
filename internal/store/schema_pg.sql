@@ -666,6 +666,142 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_person_contact_points_property_identity
     WHERE source_ref IS NOT NULL AND vcard_prop_id IS NOT NULL
       AND superseded_at IS NULL;
 
+CREATE TABLE IF NOT EXISTS person_addresses (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    person_id BIGINT NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    address_kind TEXT NOT NULL DEFAULT 'postal',
+    post_office_box TEXT,
+    extended_address TEXT,
+    street_address TEXT,
+    locality TEXT,
+    region TEXT,
+    postal_code TEXT,
+    country_name TEXT,
+    extended_components TEXT,
+    free_text TEXT,
+    label TEXT,
+    geo_uri TEXT,
+    timezone TEXT,
+    country_code TEXT,
+    place_uri TEXT,
+    original_value TEXT NOT NULL,
+    pref INTEGER CHECK (pref IS NULL OR pref BETWEEN 1 AND 100),
+    ordinal INTEGER NOT NULL DEFAULT 0,
+    type_label TEXT,
+    type_tokens TEXT,
+    vcard_property TEXT,
+    vcard_group TEXT,
+    vcard_prop_id TEXT,
+    vcard_pid TEXT,
+    vcard_altid TEXT,
+    source TEXT NOT NULL CHECK (source IN (
+        'user', 'carddav_import', 'vcard_import', 'archive_observation',
+        'extraction', 'enrichment', 'system'
+    )),
+    source_ref TEXT,
+    confidence DOUBLE PRECISION CHECK (confidence IS NULL OR (
+        confidence >= 0 AND confidence <= 1
+        AND source NOT IN ('user', 'carddav_import', 'vcard_import')
+    )),
+    active_from TIMESTAMPTZ,
+    active_until TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    superseded_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_person_addresses_current
+    ON person_addresses(person_id, address_kind, pref, ordinal)
+    WHERE active_until IS NULL AND superseded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_person_addresses_person ON person_addresses(person_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_person_addresses_property_identity
+    ON person_addresses(person_id, source, source_ref, vcard_property, vcard_prop_id)
+    WHERE source_ref IS NOT NULL AND vcard_prop_id IS NOT NULL
+      AND superseded_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS person_dates (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    person_id BIGINT NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    date_kind TEXT NOT NULL,
+    label TEXT,
+    date_year INTEGER CHECK (date_year BETWEEN 1 AND 9999),
+    date_month INTEGER CHECK (date_month BETWEEN 1 AND 12),
+    date_day INTEGER CHECK (date_day BETWEEN 1 AND 31),
+    date_text TEXT,
+    calendar_scale TEXT,
+    original_value TEXT NOT NULL,
+    pref INTEGER CHECK (pref IS NULL OR pref BETWEEN 1 AND 100),
+    ordinal INTEGER NOT NULL DEFAULT 0,
+    type_label TEXT,
+    type_tokens TEXT,
+    vcard_property TEXT,
+    vcard_group TEXT,
+    vcard_prop_id TEXT,
+    vcard_pid TEXT,
+    vcard_altid TEXT,
+    source TEXT NOT NULL CHECK (source IN (
+        'user', 'carddav_import', 'vcard_import', 'archive_observation',
+        'extraction', 'enrichment', 'system'
+    )),
+    source_ref TEXT,
+    confidence DOUBLE PRECISION CHECK (confidence IS NULL OR (
+        confidence >= 0 AND confidence <= 1
+        AND source NOT IN ('user', 'carddav_import', 'vcard_import')
+    )),
+    active_from TIMESTAMPTZ,
+    active_until TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    superseded_at TIMESTAMPTZ,
+    CHECK (date_day IS NULL OR date_month IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_person_dates_current
+    ON person_dates(person_id, date_kind, ordinal)
+    WHERE active_until IS NULL AND superseded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_person_dates_month_day
+    ON person_dates(date_month, date_day)
+    WHERE active_until IS NULL AND superseded_at IS NULL AND date_month IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_person_dates_person ON person_dates(person_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_person_dates_property_identity
+    ON person_dates(person_id, source, source_ref, vcard_property, vcard_prop_id)
+    WHERE source_ref IS NOT NULL AND vcard_prop_id IS NOT NULL
+      AND superseded_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS person_categories (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    person_id BIGINT NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    original_value TEXT NOT NULL,
+    normalized_value TEXT NOT NULL,
+    pref INTEGER CHECK (pref IS NULL OR pref BETWEEN 1 AND 100),
+    ordinal INTEGER NOT NULL DEFAULT 0,
+    type_label TEXT,
+    type_tokens TEXT,
+    vcard_property TEXT,
+    vcard_group TEXT,
+    vcard_prop_id TEXT,
+    vcard_pid TEXT,
+    vcard_altid TEXT,
+    source TEXT NOT NULL CHECK (source IN (
+        'user', 'carddav_import', 'vcard_import', 'archive_observation',
+        'extraction', 'enrichment', 'system'
+    )),
+    source_ref TEXT,
+    confidence DOUBLE PRECISION CHECK (confidence IS NULL OR (
+        confidence >= 0 AND confidence <= 1
+        AND source NOT IN ('user', 'carddav_import', 'vcard_import')
+    )),
+    active_from TIMESTAMPTZ,
+    active_until TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    superseded_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_person_categories_current_value
+    ON person_categories(person_id, normalized_value)
+    WHERE active_until IS NULL AND superseded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_person_categories_value
+    ON person_categories(normalized_value)
+    WHERE active_until IS NULL AND superseded_at IS NULL;
+
 -- Marks one-time data migrations that have already run. Schema DDL is
 -- idempotent via IF NOT EXISTS; this table is for *data* migrations
 -- (e.g. moving legacy config into per-account records) that must run

@@ -204,3 +204,57 @@ func nullTimePtr(value sql.NullTime) *time.Time {
 	}
 	return &value.Time
 }
+
+// profileEnvelopeScanValues lets profile tables append the shared envelope
+// scan destinations after their table-specific columns without duplicating
+// the null-conversion contract.
+type profileEnvelopeScanValues struct {
+	pref, ordinal                       sql.NullInt64
+	typeLabel, typeTokens               sql.NullString
+	property, group, propID, pid, altID sql.NullString
+	source, sourceRef                   sql.NullString
+	confidence                          sql.NullFloat64
+	activeFrom, activeUntil             sql.NullTime
+	createdAt, updatedAt, supersededAt  sql.NullTime
+}
+
+func (v *profileEnvelopeScanValues) destinations() []any {
+	return []any{
+		&v.pref, &v.ordinal, &v.typeLabel, &v.typeTokens,
+		&v.property, &v.group, &v.propID, &v.pid, &v.altID,
+		&v.source, &v.sourceRef, &v.confidence, &v.activeFrom, &v.activeUntil,
+		&v.createdAt, &v.updatedAt, &v.supersededAt,
+	}
+}
+
+func (v *profileEnvelopeScanValues) apply(env *ValueEnvelope) error {
+	env.Pref = nullIntPtr(v.pref)
+	if v.ordinal.Valid {
+		env.Ordinal = int(v.ordinal.Int64)
+	}
+	env.TypeLabel = nullStringPtr(v.typeLabel)
+	env.TypeTokens = splitTypeTokens(nullStringPtr(v.typeTokens))
+	env.VCard = VCardIdentity{
+		Property: v.property.String,
+		Group:    nullStringPtr(v.group),
+		PropID:   nullStringPtr(v.propID),
+		PID:      splitTypeTokens(nullStringPtr(v.pid)),
+		AltID:    nullStringPtr(v.altID),
+	}
+	env.Source = Provenance(v.source.String)
+	env.SourceRef = nullStringPtr(v.sourceRef)
+	env.Confidence = nullFloatPtr(v.confidence)
+	env.ActiveFrom = nullTimePtr(v.activeFrom)
+	env.ActiveUntil = nullTimePtr(v.activeUntil)
+	var err error
+	env.CreatedAt, err = requireNullTime(v.createdAt, "created_at")
+	if err != nil {
+		return err
+	}
+	env.UpdatedAt, err = requireNullTime(v.updatedAt, "updated_at")
+	if err != nil {
+		return err
+	}
+	env.SupersededAt = nullTimePtr(v.supersededAt)
+	return nil
+}
