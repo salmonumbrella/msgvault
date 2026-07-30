@@ -790,6 +790,56 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_person_names_property_identity
     WHERE source_ref IS NOT NULL AND vcard_prop_id IS NOT NULL
       AND superseded_at IS NULL;
 
+CREATE TABLE IF NOT EXISTS person_contact_points (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    address_kind TEXT NOT NULL,
+    service_id INTEGER REFERENCES communication_services(id) ON DELETE RESTRICT,
+    scope_kind TEXT,
+    scope_value TEXT,
+    original_value TEXT NOT NULL,
+    normalized_value TEXT NOT NULL,
+    normalization TEXT NOT NULL DEFAULT 'none',
+    normalization_version INTEGER NOT NULL DEFAULT 1,
+    uri TEXT,
+    pref INTEGER CHECK (pref IS NULL OR pref BETWEEN 1 AND 100),
+    ordinal INTEGER NOT NULL DEFAULT 0,
+    type_label TEXT,
+    type_tokens TEXT,
+    vcard_property TEXT,
+    vcard_group TEXT,
+    vcard_prop_id TEXT,
+    vcard_pid TEXT,
+    vcard_altid TEXT,
+    source TEXT NOT NULL
+        CHECK (source IN ('user', 'carddav_import', 'vcard_import',
+                          'archive_observation', 'extraction', 'enrichment', 'system')),
+    source_ref TEXT,
+    confidence REAL
+        CHECK (confidence IS NULL
+               OR (confidence >= 0 AND confidence <= 1
+                   AND source NOT IN ('user', 'carddav_import', 'vcard_import'))),
+    active_from DATETIME,
+    active_until DATETIME,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    superseded_at DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_person_contact_points_current_lookup
+    ON person_contact_points(address_kind, service_id, scope_kind, scope_value, normalized_value)
+    WHERE active_until IS NULL AND superseded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_person_contact_points_person_current
+    ON person_contact_points(person_id, address_kind, pref, ordinal)
+    WHERE active_until IS NULL AND superseded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_person_contact_points_person
+    ON person_contact_points(person_id);
+CREATE INDEX IF NOT EXISTS idx_person_contact_points_service
+    ON person_contact_points(service_id) WHERE service_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_person_contact_points_property_identity
+    ON person_contact_points(person_id, source, source_ref, vcard_property, vcard_prop_id)
+    WHERE source_ref IS NOT NULL AND vcard_prop_id IS NOT NULL
+      AND superseded_at IS NULL;
+
 -- ============================================================================
 -- APPLIED MIGRATIONS
 -- ============================================================================
