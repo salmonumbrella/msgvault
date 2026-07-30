@@ -249,55 +249,34 @@ func TestParseFile_GroupedProperties(t *testing.T) {
 	assert.Equal([]string{"grouped@example.com"}, contacts[0].Emails, "grouped emails")
 }
 
-func TestDecodeQuotedPrintable(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"hello", "hello"},
-		{"Ren=C3=A9", "René"},
-		{"=C3=A9=C3=A8", "éè"},
-		{"no=encoding", "no=encoding"},
-		{"end=", "end="},
-	}
-	for _, tt := range tests {
-		got := decodeQuotedPrintable(tt.input)
-		assert.Equal(t, tt.want, got, "decodeQuotedPrintable(%q)", tt.input)
-	}
+func TestParseFileProjectsContactFromV4Codec(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	vcf := "BEGIN:VCARD\r\n" +
+		"VERSION:4.0\r\n" +
+		"FN:Alice Example\r\n" +
+		"item1.EMAIL;TYPE=HOME:Alice@Example.com\r\n" +
+		"item2.TEL;VALUE=uri:tel:+1-202-555-0123\r\n" +
+		"X-UNMAPPED:preserve me\r\n" +
+		"END:VCARD\r\n"
+	path := filepath.Join(t.TempDir(), "contact.vcf")
+	require.NoError(os.WriteFile(path, []byte(vcf), 0o600))
+
+	contacts, err := ParseFile(path)
+	require.NoError(err)
+	require.Len(contacts, 1)
+	assert.Equal("Alice Example", contacts[0].FullName)
+	assert.Equal([]string{"alice@example.com"}, contacts[0].Emails)
+	assert.Equal([]string{"+12025550123"}, contacts[0].Phones)
 }
 
-func TestExtractValue(t *testing.T) {
-	tests := []struct {
-		line string
-		want string
-	}{
-		{"FN:John Doe", "John Doe"},
-		{"FN;CHARSET=UTF-8:John Doe", "John Doe"},
-		{"TEL;CELL:+447700900000", "+447700900000"},
-		{"TEL;TYPE=CELL:+447700900000", "+447700900000"},
-		{"TEL:+447700900000", "+447700900000"},
-		{"NO_COLON", ""},
-	}
-	for _, tt := range tests {
-		got := extractValue(tt.line)
-		assert.Equal(t, tt.want, got, "extractValue(%q)", tt.line)
-	}
-}
+func TestParseFileReturnsMalformedContentLineError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.vcf")
+	require.NoError(t, os.WriteFile(path, []byte(
+		"BEGIN:VCARD\r\nVERSION:4.0\r\nBROKEN\r\nEND:VCARD\r\n",
+	), 0o600))
 
-func TestNormalizedPropertyKey(t *testing.T) {
-	tests := []struct {
-		line string
-		want string
-	}{
-		{"FN:John Doe", "FN"},
-		{"FN;CHARSET=UTF-8:John Doe", "FN"},
-		{"item1.FN:John Doe", "FN"},
-		{"item2.TEL;TYPE=CELL:+447700900000", "TEL"},
-		{"item3.EMAIL;TYPE=INTERNET:alice@example.com", "EMAIL"},
-		{"NO_COLON", ""},
-	}
-	for _, tt := range tests {
-		got := normalizedPropertyKey(tt.line)
-		assert.Equal(t, tt.want, got, "normalizedPropertyKey(%q)", tt.line)
-	}
+	_, err := ParseFile(path)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "physical line 3")
 }
