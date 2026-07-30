@@ -1070,6 +1070,10 @@ func (s *Store) InitSchema() error {
 	// backends that carry FTS inside their main schema.
 	s.fts5Available = s.dialect.FTSAvailable(s.db.DB)
 
+	if err := s.EnsureSeededAttributeDefinitions(); err != nil {
+		return fmt.Errorf("ensure seeded attribute definitions: %w", err)
+	}
+
 	// Ensure the default "All" collection exists and contains every source.
 	if err := s.EnsureDefaultCollection(); err != nil {
 		return fmt.Errorf("ensure default collection: %w", err)
