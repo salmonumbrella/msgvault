@@ -84,6 +84,10 @@ type GetPersonContextSummaryBody = ExploreHTTPRequest
 
 type GetPersonTimelineBody = ExploreHTTPRequest
 
+type CreatePersonRelationshipBody = CreatePersonRelationshipRequest
+
+type PatchPersonRelationshipBody = PatchPersonRelationshipRequest
+
 type CreatePersonBody = CreatePersonRequest
 
 type PatchPersonBody = PatchPersonRequest
@@ -93,6 +97,10 @@ type SetPersonAttributeBody = SetPersonAttributeRequest
 type PatchPersonStructuredProfileBody = PersonProfilePatch
 
 type RunQueryBody = QueryRequest
+
+type CreateRelationshipTypeBody = CreateRelationshipTypeRequest
+
+type PatchRelationshipTypeBody = PatchRelationshipTypeRequest
 
 type ListRelationshipsBody = RelationshipsHTTPRequest
 

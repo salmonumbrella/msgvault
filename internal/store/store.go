@@ -1088,6 +1088,14 @@ func (s *Store) InitSchema() error {
 		return fmt.Errorf("ensure seeded attribute definitions: %w", err)
 	}
 
+	// Reconcile the system relationship type catalog on every open: insert
+	// missing seeds, repair structural drift, and leave user-owned labels,
+	// colours, icons, and descriptions alone. See
+	// EnsureSeededRelationshipTypes for the two column classes.
+	if err := s.EnsureSeededRelationshipTypes(); err != nil {
+		return err
+	}
+
 	// Ensure the default "All" collection exists and contains every source.
 	if err := s.EnsureDefaultCollection(); err != nil {
 		return fmt.Errorf("ensure default collection: %w", err)

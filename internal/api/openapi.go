@@ -152,7 +152,11 @@ import (
 // profiles, update the display-name override and delete a profile with
 // revision-tag optimistic concurrency, and surface the covering profile on
 // the /people/{id} analytical detail.
-const APISchemaVersion = "1.32.0"
+// 1.33.0 adds typed temporal person relationships: relationship-type CRUD,
+// one canonical edge with endpoint-aware presentation, optimistic PATCH and
+// delete operations, and unresolved RELATED review listing. Additive (minor
+// bump): existing endpoints and response fields are unchanged.
+const APISchemaVersion = "1.33.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.
@@ -183,7 +187,21 @@ func baseOpenAPIDocument() *huma.OpenAPI {
 	hardenExploreSchemas(doc)
 	hardenSearchCoverageSchemas(doc)
 	hardenTaskLinkSchemas(doc)
+	hardenPersonRelationshipSchemas(doc)
 	return doc
+}
+
+func hardenPersonRelationshipSchemas(doc *huma.OpenAPI) {
+	if doc == nil || doc.Components == nil || doc.Components.Schemas == nil {
+		return
+	}
+	minProperties := 1
+	for _, name := range []string{"PatchPersonRelationshipRequest", "PatchRelationshipTypeRequest"} {
+		patch := doc.Components.Schemas.Map()[name]
+		if patch != nil {
+			patch.MinProperties = &minProperties
+		}
+	}
 }
 
 func hardenTaskLinkSchemas(doc *huma.OpenAPI) {
