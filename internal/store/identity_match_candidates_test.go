@@ -22,8 +22,8 @@ func TestUsernameOnlyCandidateCannotBeAcceptedWithoutCorroboration(t *testing.T)
 	candidate, created, err := st.UpsertIdentityMatchCandidateContext(ctx, store.IdentityMatchCandidateInput{
 		LeftKind: store.IdentityMatchParticipant, LeftID: left,
 		RightKind: store.IdentityMatchParticipant, RightID: right,
-		Basis: store.IdentityMatchServiceScopeUsername, ServiceSlug: strPtr("x"),
-		NormalizedValue: strPtr("shared"), State: store.IdentityMatchStateCandidate,
+		Basis: store.IdentityMatchServiceScopeUsername, ServiceSlug: new("x"),
+		NormalizedValue: new("shared"), State: store.IdentityMatchStateCandidate,
 		Source: store.ProvenanceArchiveObservation,
 	})
 	require.NoError(err)
@@ -37,9 +37,9 @@ func TestUsernameOnlyCandidateCannotBeAcceptedWithoutCorroboration(t *testing.T)
 	_, err = st.DecideIdentityMatchCandidateContext(
 		ctx, candidate.ID, store.IdentityMatchStateAccepted, "system", nil,
 	)
-	assert.ErrorIs(err, store.ErrIdentityMatchNotAcceptable)
+	require.ErrorIs(err, store.ErrIdentityMatchNotAcceptable)
 	accepted, err := st.DecideIdentityMatchCandidateContext(
-		ctx, candidate.ID, store.IdentityMatchStateAccepted, "user", strPtr("confirmed"),
+		ctx, candidate.ID, store.IdentityMatchStateAccepted, "user", new("confirmed"),
 	)
 	require.NoError(err)
 	assert.Equal(store.IdentityMatchStateAccepted, accepted.State)
@@ -100,5 +100,5 @@ func TestRejectedCandidateIsRetainedAndEndpointsCanonical(t *testing.T) {
 		Basis: store.IdentityMatchEmail, State: store.IdentityMatchStateCandidate,
 		Source: store.ProvenanceArchiveObservation,
 	})
-	assert.ErrorIs(err, store.ErrIdentityMatchSelfLink)
+	require.ErrorIs(err, store.ErrIdentityMatchSelfLink)
 }

@@ -25,7 +25,7 @@ func TestPersonCategoriesAreOneRowPerTagWithHistory(t *testing.T) {
 	_, err := st.AddPersonCategoryContext(ctx, personID, store.PersonCategoryInput{
 		OriginalValue: "friends", Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
-	assert.ErrorIs(err, store.ErrPersonCategoryDuplicate)
+	require.ErrorIs(err, store.ErrPersonCategoryDuplicate)
 	categories, err := st.ListPersonCategoriesContext(ctx, personID, true)
 	require.NoError(err)
 	require.Len(categories, 2)
@@ -41,11 +41,11 @@ func TestPersonCategoriesAreOneRowPerTagWithHistory(t *testing.T) {
 }
 
 func TestAddPersonCategoryRejectsBlankValue(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 	st := storetest.New(t).Store
 	personID := newTestPerson(t, st)
 	_, err := st.AddPersonCategoryContext(context.Background(), personID, store.PersonCategoryInput{
 		OriginalValue: "   ", Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
-	assert.ErrorIs(err, store.ErrPersonCategoryEmpty)
+	require.ErrorIs(err, store.ErrPersonCategoryEmpty)
 }

@@ -127,7 +127,7 @@ func (s *Store) ListPersonDatesContext(
 ) ([]PersonDate, error) {
 	query := personDateSelect + ` WHERE person_id = ?`
 	if currentOnly {
-		query += ` AND active_until IS NULL AND superseded_at IS NULL`
+		query += currentProfileValueFilter
 	}
 	query += ` ORDER BY date_kind,
 		CASE WHEN pref IS NULL THEN 1 ELSE 0 END, pref, ordinal, id`
@@ -135,7 +135,7 @@ func (s *Store) ListPersonDatesContext(
 	if err != nil {
 		return nil, fmt.Errorf("list person dates: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	dates := make([]PersonDate, 0)
 	for rows.Next() {
 		date, err := scanPersonDate(rows)

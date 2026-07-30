@@ -374,7 +374,7 @@ func queryProfileRowsTx[T any](
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	values := make([]T, 0)
 	for rows.Next() {
 		value, err := scan(rows)
@@ -391,7 +391,7 @@ func (s *Store) listPersonNamesTx(
 ) ([]PersonName, error) {
 	query := personNameSelect + ` WHERE person_id = ?`
 	if currentOnly {
-		query += ` AND active_until IS NULL AND superseded_at IS NULL`
+		query += currentProfileValueFilter
 	}
 	query += ` ORDER BY name_kind,
 		CASE WHEN pref IS NULL THEN 1 ELSE 0 END, pref, ordinal, id`
@@ -415,7 +415,7 @@ func (s *Store) listPersonAddressesTx(
 ) ([]PersonAddress, error) {
 	query := personAddressSelect + ` WHERE person_id = ?`
 	if currentOnly {
-		query += ` AND active_until IS NULL AND superseded_at IS NULL`
+		query += currentProfileValueFilter
 	}
 	query += ` ORDER BY address_kind,
 		CASE WHEN pref IS NULL THEN 1 ELSE 0 END, pref, ordinal, id`
@@ -427,7 +427,7 @@ func (s *Store) listPersonDatesTx(
 ) ([]PersonDate, error) {
 	query := personDateSelect + ` WHERE person_id = ?`
 	if currentOnly {
-		query += ` AND active_until IS NULL AND superseded_at IS NULL`
+		query += currentProfileValueFilter
 	}
 	query += ` ORDER BY date_kind,
 		CASE WHEN pref IS NULL THEN 1 ELSE 0 END, pref, ordinal, id`
@@ -439,7 +439,7 @@ func (s *Store) listPersonCategoriesTx(
 ) ([]PersonCategory, error) {
 	query := personCategorySelect + ` WHERE person_id = ?`
 	if currentOnly {
-		query += ` AND active_until IS NULL AND superseded_at IS NULL`
+		query += currentProfileValueFilter
 	}
 	query += ` ORDER BY normalized_value,
 		CASE WHEN pref IS NULL THEN 1 ELSE 0 END, pref, ordinal, id`
@@ -451,7 +451,7 @@ func (s *Store) listPersonMediaTx(
 ) ([]PersonMedia, error) {
 	query := personMediaSelect + ` WHERE person_id = ?`
 	if currentOnly {
-		query += ` AND active_until IS NULL AND superseded_at IS NULL`
+		query += currentProfileValueFilter
 	}
 	query += ` ORDER BY media_kind,
 		CASE WHEN pref IS NULL THEN 1 ELSE 0 END, pref, ordinal, id`
@@ -550,7 +550,7 @@ func (s *Store) addPersonContactPointTx(
 	if err != nil {
 		return nil, err
 	}
-	normalization, version := fallbackContactNormalization(input.AddressKind)
+	normalization, version := fallbackContactNormalization(input.AddressKind), 1
 	var serviceID any
 	if service != nil {
 		serviceID, normalization, version = service.ID, service.Normalization, service.NormalizationVersion
@@ -807,7 +807,7 @@ func resolveCommunicationServiceTx(
 	ctx context.Context, tx *loggedTx, slug *string,
 ) (*CommunicationService, error) {
 	if slug == nil || strings.TrimSpace(*slug) == "" {
-		return nil, nil
+		return nil, nil //nolint:nilnil // No slug means the optional service is absent.
 	}
 	lookup := strings.ToLower(strings.TrimSpace(*slug))
 	service, err := scanCommunicationService(tx.QueryRowContext(ctx, serviceSelect+`

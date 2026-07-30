@@ -18,18 +18,18 @@ func TestPersonAddressRoundTripsStructuredComponentsAndMetadata(t *testing.T) {
 	personID := newTestPerson(t, st)
 
 	address, err := st.AddPersonAddressContext(ctx, personID, store.PersonAddressInput{
-		AddressKind: store.PersonAddressPostal, PostOfficeBox: strPtr("PO Box 42"),
-		ExtendedAddress: strPtr("Suite 3"), StreetAddress: strPtr("123 Example St."),
-		Locality: strPtr("Exampleville"), Region: strPtr("CA"), PostalCode: strPtr("90000"),
-		CountryName:        strPtr("United States"),
-		ExtendedComponents: strPtr("Room 5;Apt 2;Floor 3;123;Example St.;;;;;"),
-		Label:              strPtr("Home\nExampleville"), GeoURI: strPtr("geo:37.386,-122.084"),
-		Timezone: strPtr("America/Los_Angeles"), CountryCode: strPtr("US"),
+		AddressKind: store.PersonAddressPostal, PostOfficeBox: new("PO Box 42"),
+		ExtendedAddress: new("Suite 3"), StreetAddress: new("123 Example St."),
+		Locality: new("Exampleville"), Region: new("CA"), PostalCode: new("90000"),
+		CountryName:        new("United States"),
+		ExtendedComponents: new("Room 5;Apt 2;Floor 3;123;Example St.;;;;;"),
+		Label:              new("Home\nExampleville"), GeoURI: new("geo:37.386,-122.084"),
+		Timezone: new("America/Los_Angeles"), CountryCode: new("US"),
 		OriginalValue: "PO Box 42;Suite 3;123 Example St.;Exampleville;CA;90000;United States",
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceVCardImport,
-			SourceRef: strPtr("resource-1"), Pref: intPtr(1),
+			SourceRef: new("resource-1"), Pref: new(1),
 			TypeTokens: []string{"home"}, VCard: store.VCardIdentity{
-				Property: "ADR", PropID: strPtr("a1"), Group: strPtr("item1"),
+				Property: "ADR", PropID: new("a1"), Group: new("item1"),
 			}},
 	})
 	require.NoError(err)
@@ -48,14 +48,14 @@ func TestBirthAndDeathPlacesAreAddressRows(t *testing.T) {
 	ctx := context.Background()
 	personID := newTestPerson(t, st)
 	_, err := st.AddPersonAddressContext(ctx, personID, store.PersonAddressInput{
-		AddressKind: store.PersonAddressBirthPlace, FreeText: strPtr("Exampleville, CA"),
+		AddressKind: store.PersonAddressBirthPlace, FreeText: new("Exampleville, CA"),
 		OriginalValue: "Exampleville, CA",
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceVCardImport,
 			VCard: store.VCardIdentity{Property: "BIRTHPLACE"}},
 	})
 	require.NoError(err)
 	_, err = st.AddPersonAddressContext(ctx, personID, store.PersonAddressInput{
-		AddressKind: store.PersonAddressDeathPlace, PlaceURI: strPtr("geo:37.386,-122.084"),
+		AddressKind: store.PersonAddressDeathPlace, PlaceURI: new("geo:37.386,-122.084"),
 		OriginalValue: "geo:37.386,-122.084",
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceVCardImport,
 			VCard: store.VCardIdentity{Property: "DEATHPLACE"}},
@@ -75,17 +75,17 @@ func TestPersonAddressValidationAndSupersession(t *testing.T) {
 	ctx := context.Background()
 	personID := newTestPerson(t, st)
 	_, err := st.AddPersonAddressContext(ctx, personID, store.PersonAddressInput{
-		AddressKind: "billing", StreetAddress: strPtr("123 Example St."),
+		AddressKind: "billing", StreetAddress: new("123 Example St."),
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
-	assert.ErrorIs(err, store.ErrInvalidPersonAddressKind)
+	require.ErrorIs(err, store.ErrInvalidPersonAddressKind)
 	_, err = st.AddPersonAddressContext(ctx, personID, store.PersonAddressInput{
 		AddressKind: store.PersonAddressPostal,
 		Envelope:    store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
-	assert.ErrorIs(err, store.ErrPersonAddressValueMissing)
+	require.ErrorIs(err, store.ErrPersonAddressValueMissing)
 	address, err := st.AddPersonAddressContext(ctx, personID, store.PersonAddressInput{
-		AddressKind: store.PersonAddressPostal, StreetAddress: strPtr("123 Example St."),
+		AddressKind: store.PersonAddressPostal, StreetAddress: new("123 Example St."),
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
 	require.NoError(err)

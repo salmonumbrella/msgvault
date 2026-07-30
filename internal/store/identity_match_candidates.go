@@ -226,7 +226,7 @@ func (s *Store) AddIdentityMatchEvidenceContext(
 		if !input.Source.Valid() {
 			return nil, ErrInvalidProvenance
 		}
-		return nil, fmt.Errorf("identity match evidence kind is required")
+		return nil, errors.New("identity match evidence kind is required")
 	}
 	var evidence *IdentityMatchEvidence
 	err := s.withTxContext(ctx, func(tx *loggedTx) error {
@@ -291,7 +291,7 @@ func (s *Store) ListIdentityMatchCandidatesContext(
 	if err != nil {
 		return nil, fmt.Errorf("list identity match candidates: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	candidates := make([]IdentityMatchCandidate, 0)
 	for rows.Next() {
 		candidate, err := scanIdentityMatchCandidate(rows)
@@ -383,9 +383,9 @@ func findIdentityMatchCandidateTx(
 	err := tx.QueryRowContext(ctx, `SELECT id FROM identity_match_candidates
 		WHERE left_kind = ? AND left_id = ?
 		  AND right_kind = ? AND right_id = ? AND basis = ?
-		  AND (service_id = ? OR (service_id IS NULL AND ? IS NULL))
-		  AND (scope_kind = ? OR (scope_kind IS NULL AND ? IS NULL))
-		  AND (scope_value = ? OR (scope_value IS NULL AND ? IS NULL))`+lockClause,
+		  AND (service_id = ? OR (service_id IS NULL AND CAST(? AS BIGINT) IS NULL))
+		  AND (scope_kind = ? OR (scope_kind IS NULL AND CAST(? AS TEXT) IS NULL))
+		  AND (scope_value = ? OR (scope_value IS NULL AND CAST(? AS TEXT) IS NULL))`+lockClause,
 		leftKind, leftID, rightKind, rightID, basis,
 		serviceID, serviceID,
 		stringValue(scopeKind), stringValue(scopeKind),
@@ -477,7 +477,7 @@ func loadCandidateEvidenceTx(
 }
 
 func scanIdentityMatchEvidenceRows(rows *loggedRows) ([]IdentityMatchEvidence, error) {
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	evidence := make([]IdentityMatchEvidence, 0)
 	for rows.Next() {
 		var item IdentityMatchEvidence

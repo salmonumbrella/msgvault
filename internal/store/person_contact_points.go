@@ -69,7 +69,8 @@ func (s *Store) AddPersonContactPointContext(
 	if err != nil {
 		return nil, err
 	}
-	normalization, normalizationVersion := fallbackContactNormalization(input.AddressKind)
+	normalization := fallbackContactNormalization(input.AddressKind)
+	normalizationVersion := 1
 	var serviceID any
 	if service != nil {
 		serviceID = service.ID
@@ -146,7 +147,7 @@ func (s *Store) ListPersonContactPointsContext(
 	if err != nil {
 		return nil, fmt.Errorf("list person contact points: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	points := make([]PersonContactPoint, 0)
 	for rows.Next() {
 		point, err := scanPersonContactPoint(rows)
@@ -177,9 +178,9 @@ func (s *Store) FindPersonContactPointsContext(
 	}
 	rows, err := s.db.QueryContext(ctx, personContactPointSelect+`
 		WHERE p.address_kind = ?
-		  AND (p.service_id = ? OR (p.service_id IS NULL AND ? IS NULL))
-		  AND (p.scope_kind = ? OR (p.scope_kind IS NULL AND ? IS NULL))
-		  AND (p.scope_value = ? OR (p.scope_value IS NULL AND ? IS NULL))
+		  AND (p.service_id = ? OR (p.service_id IS NULL AND CAST(? AS BIGINT) IS NULL))
+		  AND (p.scope_kind = ? OR (p.scope_kind IS NULL AND CAST(? AS TEXT) IS NULL))
+		  AND (p.scope_value = ? OR (p.scope_value IS NULL AND CAST(? AS TEXT) IS NULL))
 		  AND p.normalized_value = ?
 		  AND p.active_until IS NULL AND p.superseded_at IS NULL
 		ORDER BY p.person_id, p.id`,
@@ -192,7 +193,7 @@ func (s *Store) FindPersonContactPointsContext(
 	if err != nil {
 		return nil, fmt.Errorf("find person contact points: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	points := make([]PersonContactPoint, 0)
 	for rows.Next() {
 		point, err := scanPersonContactPoint(rows)
@@ -236,16 +237,16 @@ func (s *Store) SupersedePersonContactPointContext(
 	})
 }
 
-func fallbackContactNormalization(kind ContactAddressKind) (string, int) {
+func fallbackContactNormalization(kind ContactAddressKind) string {
 	switch kind {
 	case ContactAddressEmail:
-		return NormalizationEmail, 1
+		return NormalizationEmail
 	case ContactAddressPhone:
-		return NormalizationPhoneE164, 1
+		return NormalizationPhoneE164
 	case ContactAddressLanguage:
-		return NormalizationLower, 1
+		return NormalizationLower
 	default:
-		return NormalizationNone, 1
+		return NormalizationNone
 	}
 }
 
@@ -253,7 +254,7 @@ func (s *Store) resolveOptionalCommunicationServiceContext(
 	ctx context.Context, slug *string,
 ) (*CommunicationService, error) {
 	if slug == nil || strings.TrimSpace(*slug) == "" {
-		return nil, nil
+		return nil, nil //nolint:nilnil // No slug means the optional service is absent.
 	}
 	return s.ResolveCommunicationServiceContext(ctx, *slug)
 }

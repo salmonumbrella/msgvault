@@ -18,13 +18,13 @@ func TestPersonKeepsManyCurrentAndHistoricalContactPointsWithoutJSONBundling(t *
 	personID := newTestPerson(t, st)
 
 	inputs := []store.PersonContactPointInput{
-		{AddressKind: store.ContactAddressPhone, ServiceSlug: strPtr("whatsapp"),
+		{AddressKind: store.ContactAddressPhone, ServiceSlug: new("whatsapp"),
 			OriginalValue: "+1 (202) 555-0123",
-			Envelope:      store.ValueEnvelope{Source: store.ProvenanceUser, Pref: intPtr(1)}},
+			Envelope:      store.ValueEnvelope{Source: store.ProvenanceUser, Pref: new(1)}},
 		{AddressKind: store.ContactAddressEmail, OriginalValue: "Alice@Example.com",
 			Envelope: store.ValueEnvelope{Source: store.ProvenanceUser}},
-		{AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("slack"),
-			ScopeKind: strPtr("workspace"), ScopeValue: strPtr("T0EXAMPLE"),
+		{AddressKind: store.ContactAddressUsername, ServiceSlug: new("slack"),
+			ScopeKind: new("workspace"), ScopeValue: new("T0EXAMPLE"),
 			OriginalValue: "Alice",
 			Envelope:      store.ValueEnvelope{Source: store.ProvenanceArchiveObservation}},
 	}
@@ -55,15 +55,15 @@ func TestSameUsernameIsSafeAcrossServicesAndScopes(t *testing.T) {
 
 	for _, scope := range []string{"irc.example.net", "irc.example.org"} {
 		_, err := st.AddPersonContactPointContext(ctx, personID, store.PersonContactPointInput{
-			AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("irc"),
-			ScopeKind: strPtr("network"), ScopeValue: strPtr(scope), OriginalValue: "alice",
+			AddressKind: store.ContactAddressUsername, ServiceSlug: new("irc"),
+			ScopeKind: new("network"), ScopeValue: new(scope), OriginalValue: "alice",
 			Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 		})
 		require.NoError(err)
 	}
 	found, err := st.FindPersonContactPointsContext(ctx, store.ContactPointQuery{
-		AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("irc"),
-		ScopeKind: strPtr("network"), ScopeValue: strPtr("irc.example.net"),
+		AddressKind: store.ContactAddressUsername, ServiceSlug: new("irc"),
+		ScopeKind: new("network"), ScopeValue: new("irc.example.net"),
 		NormalizedValue: "alice",
 	})
 	require.NoError(err)
@@ -79,15 +79,15 @@ func TestContactPointScopeKindAndLanguageValidation(t *testing.T) {
 	personID := newTestPerson(t, st)
 
 	_, err := st.AddPersonContactPointContext(ctx, personID, store.PersonContactPointInput{
-		AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("slack"),
+		AddressKind: store.ContactAddressUsername, ServiceSlug: new("slack"),
 		OriginalValue: "alice", Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
-	assert.ErrorIs(err, store.ErrServiceScopeRequired)
+	require.ErrorIs(err, store.ErrServiceScopeRequired)
 	_, err = st.AddPersonContactPointContext(ctx, personID, store.PersonContactPointInput{
 		AddressKind: "pager", OriginalValue: "12345",
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
-	assert.ErrorIs(err, store.ErrInvalidContactAddressKind)
+	require.ErrorIs(err, store.ErrInvalidContactAddressKind)
 	point, err := st.AddPersonContactPointContext(ctx, personID, store.PersonContactPointInput{
 		AddressKind: store.ContactAddressLanguage, OriginalValue: "en-GB",
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceVCardImport,
@@ -105,9 +105,9 @@ func TestRetractedContactPointLeavesCurrentSetButStaysInHistory(t *testing.T) {
 	ctx := context.Background()
 	personID := newTestPerson(t, st)
 	_, err := st.AddPersonContactPointContext(ctx, personID, store.PersonContactPointInput{
-		AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("x"),
+		AddressKind: store.ContactAddressUsername, ServiceSlug: new("x"),
 		OriginalValue: "@alice",
-		Envelope:      store.ValueEnvelope{Source: store.ProvenanceExtraction, Confidence: floatPtr(0.6)},
+		Envelope:      store.ValueEnvelope{Source: store.ProvenanceExtraction, Confidence: new(0.6)},
 	})
 	require.NoError(err)
 	_, err = st.DB().ExecContext(ctx, "UPDATE person_contact_points SET superseded_at = CURRENT_TIMESTAMP")

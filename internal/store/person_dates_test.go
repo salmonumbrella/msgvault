@@ -47,8 +47,8 @@ func TestPersonDateAcceptsTextValueAndCalendarScale(t *testing.T) {
 	st := storetest.New(t).Store
 	personID := newTestPerson(t, st)
 	stored, err := st.AddPersonDateContext(context.Background(), personID, store.PersonDateInput{
-		DateKind: store.PersonDateBirthday, DateText: strPtr("circa 1800"),
-		CalendarScale: strPtr("gregorian"), OriginalValue: "circa 1800",
+		DateKind: store.PersonDateBirthday, DateText: new("circa 1800"),
+		CalendarScale: new("gregorian"), OriginalValue: "circa 1800",
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceVCardImport},
 	})
 	require.NoError(err)
@@ -57,7 +57,7 @@ func TestPersonDateAcceptsTextValueAndCalendarScale(t *testing.T) {
 }
 
 func TestPersonDateValidation(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 	st := storetest.New(t).Store
 	ctx := context.Background()
 	personID := newTestPerson(t, st)
@@ -65,22 +65,21 @@ func TestPersonDateValidation(t *testing.T) {
 		DateKind: "graduation", Date: partialDate(2001, 5, 1),
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
-	assert.ErrorIs(err, store.ErrInvalidPersonDateKind)
+	require.ErrorIs(err, store.ErrInvalidPersonDateKind)
 	_, err = st.AddPersonDateContext(ctx, personID, store.PersonDateInput{
 		DateKind: store.PersonDateBirthday,
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
-	assert.ErrorIs(err, store.ErrPersonDateValueMissing)
+	require.ErrorIs(err, store.ErrPersonDateValueMissing)
 	_, err = st.AddPersonDateContext(ctx, personID, store.PersonDateInput{
 		DateKind: store.PersonDateBirthday, Date: partialDate(1985, 2, 29),
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
-	assert.ErrorIs(err, store.ErrInvalidPartialDate)
+	require.ErrorIs(err, store.ErrInvalidPartialDate)
 }
 
 func TestPersonDateComponentChecksAreEnforcedBySQL(t *testing.T) {
 	require := require.New(t)
-	assert := assert.New(t)
 	st := storetest.New(t).Store
 	ctx := context.Background()
 	personID := newTestPerson(t, st)
@@ -94,7 +93,7 @@ func TestPersonDateComponentChecksAreEnforcedBySQL(t *testing.T) {
 		"(?, 'birthday', 1985, 4, 12, 'x', 'extraction', 1.5)",
 	} {
 		_, err := st.DB().ExecContext(ctx, st.Rebind(insert+values), personID)
-		assert.Error(err, values)
+		require.Error(err, values)
 	}
 	for _, values := range []string{
 		"(?, 'birthday', NULL, 4, 12, '--0412', 'user', NULL)",

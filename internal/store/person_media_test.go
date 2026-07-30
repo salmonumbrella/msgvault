@@ -22,11 +22,11 @@ func TestPersonMediaStoresInlineBytesWithHashAndSize(t *testing.T) {
 	payload := bytes.Repeat([]byte{0x89, 0x50, 0x4e, 0x47}, 64)
 	digest := sha256.Sum256(payload)
 	stored, err := st.AddPersonMediaContext(ctx, personID, store.PersonMediaInput{
-		MediaKind: store.PersonMediaPhoto, MediaType: strPtr("image/png"),
+		MediaKind: store.PersonMediaPhoto, MediaType: new("image/png"),
 		Data: payload, OriginalValue: "data:image/png;base64,<elided>",
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceCardDAVImport,
-			SourceRef: strPtr("resource-1"), VCard: store.VCardIdentity{
-				Property: "PHOTO", PropID: strPtr("p1"),
+			SourceRef: new("resource-1"), VCard: store.VCardIdentity{
+				Property: "PHOTO", PropID: new("p1"),
 			}},
 	})
 	require.NoError(err)
@@ -46,15 +46,15 @@ func TestPersonMediaStoresURIReferenceWithoutBytes(t *testing.T) {
 	ctx := context.Background()
 	personID := newTestPerson(t, st)
 	stored, err := st.AddPersonMediaContext(ctx, personID, store.PersonMediaInput{
-		MediaKind: store.PersonMediaPhoto, URI: strPtr("https://example.com/alice.png"),
-		MediaType: strPtr("image/png"),
+		MediaKind: store.PersonMediaPhoto, URI: new("https://example.com/alice.png"),
+		MediaType: new("image/png"),
 		Envelope:  store.ValueEnvelope{Source: store.ProvenanceVCardImport},
 	})
 	require.NoError(err)
 	assert.False(stored.HasData)
 	assert.Nil(stored.ByteSize)
 	_, _, err = st.ReadPersonMediaDataContext(ctx, personID, stored.Envelope.ID)
-	assert.ErrorIs(err, store.ErrPersonMediaNoData)
+	require.ErrorIs(err, store.ErrPersonMediaNoData)
 }
 
 func TestPersonMediaHoldsAllFourVCardMediaKinds(t *testing.T) {
@@ -83,7 +83,7 @@ func TestPersonMediaHoldsAllFourVCardMediaKinds(t *testing.T) {
 }
 
 func TestPersonMediaValidation(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 	st := storetest.New(t).Store
 	personID := newTestPerson(t, st)
 	ctx := context.Background()
@@ -91,15 +91,15 @@ func TestPersonMediaValidation(t *testing.T) {
 		MediaKind: "avatar", Data: []byte("synthetic"),
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
-	assert.ErrorIs(err, store.ErrInvalidPersonMediaKind)
+	require.ErrorIs(err, store.ErrInvalidPersonMediaKind)
 	_, err = st.AddPersonMediaContext(ctx, personID, store.PersonMediaInput{
 		MediaKind: store.PersonMediaPhoto,
 		Envelope:  store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
-	assert.ErrorIs(err, store.ErrPersonMediaEmpty)
+	require.ErrorIs(err, store.ErrPersonMediaEmpty)
 	_, err = st.AddPersonMediaContext(ctx, personID, store.PersonMediaInput{
 		MediaKind: store.PersonMediaPhoto, Data: make([]byte, store.MaxPersonMediaBytes+1),
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
-	assert.ErrorIs(err, store.ErrPersonMediaTooLarge)
+	require.ErrorIs(err, store.ErrPersonMediaTooLarge)
 }

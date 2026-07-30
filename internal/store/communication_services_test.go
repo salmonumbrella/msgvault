@@ -52,7 +52,7 @@ func TestServiceAliasesResolveToOneCanonicalService(t *testing.T) {
 		assert.Equal(test.want, service.Slug, test.lookup)
 	}
 	_, err := st.ResolveCommunicationServiceContext(ctx, "no-such-bridge")
-	assert.ErrorIs(err, store.ErrServiceNotFound)
+	require.ErrorIs(err, store.ErrServiceNotFound)
 }
 
 func TestUnknownServiceIsRegisteredWithoutASchemaMigration(t *testing.T) {
@@ -93,7 +93,7 @@ func TestServiceSeedIsIdempotentAndPreservesUserEdits(t *testing.T) {
 	require.NoError(err)
 	renamed, err := st.UpdateCommunicationServiceContext(ctx, service.ID, store.CommunicationServiceInput{
 		Slug: "slack", DisplayLabel: "Work Chat",
-		ScopePolicy: store.ScopePolicyRequired, DefaultScopeKind: strPtr("workspace"),
+		ScopePolicy: store.ScopePolicyRequired, DefaultScopeKind: new("workspace"),
 		Normalization: store.NormalizationLower, NormalizationVersion: 1,
 	})
 	require.NoError(err)
@@ -117,7 +117,7 @@ func TestServiceAliasCannotBeStolenFromAnotherService(t *testing.T) {
 		NormalizationVersion: 1,
 	})
 	require.Error(err)
-	assert.ErrorIs(err, store.ErrServiceAliasConflict)
+	require.ErrorIs(err, store.ErrServiceAliasConflict)
 	resolved, err := st.ResolveCommunicationServiceContext(ctx, "twitter")
 	require.NoError(err)
 	assert.Equal("x", resolved.Slug)
@@ -151,7 +151,7 @@ func TestNormalizeServiceValuePerStrategy(t *testing.T) {
 		require.NoError(err)
 		got, err := store.NormalizeServiceValue(service, test.addressKind, test.raw)
 		if test.wantErr {
-			assert.ErrorIs(err, store.ErrNormalizationRejected)
+			require.ErrorIs(err, store.ErrNormalizationRejected)
 			continue
 		}
 		require.NoError(err)
@@ -169,11 +169,11 @@ func TestValidateServiceScopeFollowsScopePolicy(t *testing.T) {
 	require.NoError(err)
 	whatsapp, err := st.ResolveCommunicationServiceContext(ctx, "whatsapp")
 	require.NoError(err)
-	assert.ErrorIs(store.ValidateServiceScope(slack, nil, nil), store.ErrServiceScopeRequired)
-	assert.NoError(store.ValidateServiceScope(slack, strPtr("workspace"), strPtr("T0EXAMPLE")))
+	require.ErrorIs(store.ValidateServiceScope(slack, nil, nil), store.ErrServiceScopeRequired)
+	assert.NoError(store.ValidateServiceScope(slack, new("workspace"), new("T0EXAMPLE")))
 	assert.NoError(store.ValidateServiceScope(whatsapp, nil, nil))
-	assert.ErrorIs(
-		store.ValidateServiceScope(whatsapp, strPtr("workspace"), strPtr("T0EXAMPLE")),
+	require.ErrorIs(
+		store.ValidateServiceScope(whatsapp, new("workspace"), new("T0EXAMPLE")),
 		store.ErrServiceScopeForbidden,
 	)
 }

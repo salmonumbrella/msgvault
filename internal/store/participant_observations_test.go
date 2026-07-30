@@ -20,15 +20,15 @@ func TestObservationsAttachManyAddressesToOneParticipant(t *testing.T) {
 	)
 	require.NoError(err)
 	inputs := []store.ParticipantContactObservationInput{
-		{AddressKind: store.ContactAddressPhone, ServiceSlug: strPtr("whatsapp"),
-			ProviderUserID: strPtr("wa-1"), OriginalValue: "+1 202 555 0123",
+		{AddressKind: store.ContactAddressPhone, ServiceSlug: new("whatsapp"),
+			ProviderUserID: new("wa-1"), OriginalValue: "+1 202 555 0123",
 			Envelope: store.ValueEnvelope{Source: store.ProvenanceArchiveObservation}},
-		{AddressKind: store.ContactAddressEmail, ServiceSlug: strPtr("google-chat"),
-			ProviderUserID: strPtr("wa-1"), OriginalValue: "Alice@Example.com",
+		{AddressKind: store.ContactAddressEmail, ServiceSlug: new("google-chat"),
+			ProviderUserID: new("wa-1"), OriginalValue: "Alice@Example.com",
 			Envelope: store.ValueEnvelope{Source: store.ProvenanceArchiveObservation}},
-		{AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("slack"),
-			ScopeKind: strPtr("workspace"), ScopeValue: strPtr("T0EXAMPLE"),
-			ProviderUserID: strPtr("wa-1"), OriginalValue: "Alice",
+		{AddressKind: store.ContactAddressUsername, ServiceSlug: new("slack"),
+			ScopeKind: new("workspace"), ScopeValue: new("T0EXAMPLE"),
+			ProviderUserID: new("wa-1"), OriginalValue: "Alice",
 			Envelope: store.ValueEnvelope{Source: store.ProvenanceArchiveObservation}},
 	}
 	for _, input := range inputs {
@@ -52,8 +52,8 @@ func TestRecordingTheSameObservationTwiceIsIdempotent(t *testing.T) {
 	)
 	require.NoError(err)
 	input := store.ParticipantContactObservationInput{
-		AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("x"),
-		ProviderUserID: strPtr("x-1"), OriginalValue: "@alice",
+		AddressKind: store.ContactAddressUsername, ServiceSlug: new("x"),
+		ProviderUserID: new("x-1"), OriginalValue: "@alice",
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceArchiveObservation},
 	}
 	first, err := st.RecordContactObservationContext(ctx, participantID, input)
@@ -74,21 +74,21 @@ func TestDuplicateUsernameUnderDifferentStableIDsBecomesAConflict(t *testing.T) 
 	right, err := st.EnsureParticipantByIdentifier("beeper", "@bob:example.org", "Bob Example")
 	require.NoError(err)
 	input := store.ParticipantContactObservationInput{
-		AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("x"),
+		AddressKind: store.ContactAddressUsername, ServiceSlug: new("x"),
 		OriginalValue: "@shared",
 		Envelope:      store.ValueEnvelope{Source: store.ProvenanceArchiveObservation},
 	}
-	input.ProviderUserID = strPtr("x-left")
+	input.ProviderUserID = new("x-left")
 	first, err := st.RecordContactObservationContext(ctx, left, input)
 	require.NoError(err)
 	assert.False(first.Conflicting)
-	input.ProviderUserID = strPtr("x-right")
+	input.ProviderUserID = new("x-right")
 	second, err := st.RecordContactObservationContext(ctx, right, input)
 	require.NoError(err)
 	assert.True(second.Conflicting)
 	assert.NotNil(second.CandidateID)
 	found, err := st.FindObservationsByAddressContext(ctx, store.ContactPointQuery{
-		AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("x"),
+		AddressKind: store.ContactAddressUsername, ServiceSlug: new("x"),
 		NormalizedValue: "shared",
 	})
 	require.NoError(err)
@@ -111,14 +111,14 @@ func TestSameUsernameOnDifferentScopesIsNotAConflict(t *testing.T) {
 	right, err := st.EnsureParticipantByIdentifier("beeper", "@bob:example.org", "Bob Example")
 	require.NoError(err)
 	input := store.ParticipantContactObservationInput{
-		AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("slack"),
-		ScopeKind: strPtr("workspace"), OriginalValue: "alice",
+		AddressKind: store.ContactAddressUsername, ServiceSlug: new("slack"),
+		ScopeKind: new("workspace"), OriginalValue: "alice",
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceArchiveObservation},
 	}
-	input.ScopeValue, input.ProviderUserID = strPtr("T0EXAMPLE"), strPtr("slack-left")
+	input.ScopeValue, input.ProviderUserID = new("T0EXAMPLE"), new("slack-left")
 	_, err = st.RecordContactObservationContext(ctx, left, input)
 	require.NoError(err)
-	input.ScopeValue, input.ProviderUserID = strPtr("T0OTHER"), strPtr("slack-right")
+	input.ScopeValue, input.ProviderUserID = new("T0OTHER"), new("slack-right")
 	result, err := st.RecordContactObservationContext(ctx, right, input)
 	require.NoError(err)
 	assert.False(result.Conflicting)
@@ -134,8 +134,8 @@ func TestRenameSupersedesWithoutMovingHistoryBetweenParticipants(t *testing.T) {
 	)
 	require.NoError(err)
 	old, err := st.RecordContactObservationContext(ctx, participantID, store.ParticipantContactObservationInput{
-		AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("x"),
-		ProviderUserID: strPtr("x-1"), OriginalValue: "@alice_old",
+		AddressKind: store.ContactAddressUsername, ServiceSlug: new("x"),
+		ProviderUserID: new("x-1"), OriginalValue: "@alice_old",
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceArchiveObservation},
 	})
 	require.NoError(err)
@@ -143,8 +143,8 @@ func TestRenameSupersedesWithoutMovingHistoryBetweenParticipants(t *testing.T) {
 		ctx, participantID, old.Observation.Envelope.ID, nil,
 	))
 	_, err = st.RecordContactObservationContext(ctx, participantID, store.ParticipantContactObservationInput{
-		AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("x"),
-		ProviderUserID: strPtr("x-1"), OriginalValue: "@alice_new",
+		AddressKind: store.ContactAddressUsername, ServiceSlug: new("x"),
+		ProviderUserID: new("x-1"), OriginalValue: "@alice_new",
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceArchiveObservation},
 	})
 	require.NoError(err)

@@ -69,7 +69,8 @@ func (s *Store) RecordContactObservationContext(
 	if err != nil {
 		return nil, err
 	}
-	normalization, normalizationVersion := fallbackContactNormalization(input.AddressKind)
+	normalization := fallbackContactNormalization(input.AddressKind)
+	normalizationVersion := 1
 	var serviceID any
 	if service != nil {
 		serviceID = service.ID
@@ -207,9 +208,9 @@ func (s *Store) FindObservationsByAddressContext(
 	}
 	return s.queryParticipantObservationsContext(ctx, participantObservationSelect+`
 		WHERE o.address_kind = ?
-		  AND (o.service_id = ? OR (o.service_id IS NULL AND ? IS NULL))
-		  AND (o.scope_kind = ? OR (o.scope_kind IS NULL AND ? IS NULL))
-		  AND (o.scope_value = ? OR (o.scope_value IS NULL AND ? IS NULL))
+		  AND (o.service_id = ? OR (o.service_id IS NULL AND CAST(? AS BIGINT) IS NULL))
+		  AND (o.scope_kind = ? OR (o.scope_kind IS NULL AND CAST(? AS TEXT) IS NULL))
+		  AND (o.scope_value = ? OR (o.scope_value IS NULL AND CAST(? AS TEXT) IS NULL))
 		  AND o.normalized_value = ?
 		  AND o.active_until IS NULL AND o.superseded_at IS NULL
 		ORDER BY o.participant_id, o.id`,
@@ -253,7 +254,7 @@ func (s *Store) queryParticipantObservationsContext(
 	if err != nil {
 		return nil, fmt.Errorf("query participant observations: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	observations := make([]ParticipantContactObservation, 0)
 	for rows.Next() {
 		observation, err := scanParticipantObservation(rows)
@@ -280,9 +281,9 @@ func findParticipantObservationTx(
 	observation, err := scanParticipantObservation(tx.QueryRowContext(ctx,
 		participantObservationSelect+`
 		WHERE o.participant_id = ? AND o.address_kind = ?
-		  AND (o.service_id = ? OR (o.service_id IS NULL AND ? IS NULL))
-		  AND (o.scope_kind = ? OR (o.scope_kind IS NULL AND ? IS NULL))
-		  AND (o.scope_value = ? OR (o.scope_value IS NULL AND ? IS NULL))
+		  AND (o.service_id = ? OR (o.service_id IS NULL AND CAST(? AS BIGINT) IS NULL))
+		  AND (o.scope_kind = ? OR (o.scope_kind IS NULL AND CAST(? AS TEXT) IS NULL))
+		  AND (o.scope_value = ? OR (o.scope_value IS NULL AND CAST(? AS TEXT) IS NULL))
 		  AND o.normalized_value = ?
 		  AND o.active_until IS NULL AND o.superseded_at IS NULL`,
 		participantID, addressKind, serviceID, serviceID,
@@ -308,9 +309,9 @@ func findConflictingObservationTx(
 	rows, err := tx.QueryContext(ctx, `SELECT participant_id, provider_user_id
 		FROM participant_contact_observations
 		WHERE participant_id != ? AND address_kind = ?
-		  AND (service_id = ? OR (service_id IS NULL AND ? IS NULL))
-		  AND (scope_kind = ? OR (scope_kind IS NULL AND ? IS NULL))
-		  AND (scope_value = ? OR (scope_value IS NULL AND ? IS NULL))
+		  AND (service_id = ? OR (service_id IS NULL AND CAST(? AS BIGINT) IS NULL))
+		  AND (scope_kind = ? OR (scope_kind IS NULL AND CAST(? AS TEXT) IS NULL))
+		  AND (scope_value = ? OR (scope_value IS NULL AND CAST(? AS TEXT) IS NULL))
 		  AND normalized_value = ?
 		  AND active_until IS NULL AND superseded_at IS NULL
 		ORDER BY participant_id, id`,
@@ -321,7 +322,7 @@ func findConflictingObservationTx(
 	if err != nil {
 		return 0, false, fmt.Errorf("find conflicting observation: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var otherID int64
 		var otherProvider sql.NullString

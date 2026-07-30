@@ -151,7 +151,7 @@ func (s *Store) ListPersonAddressesContext(
 ) ([]PersonAddress, error) {
 	query := personAddressSelect + ` WHERE person_id = ?`
 	if currentOnly {
-		query += ` AND active_until IS NULL AND superseded_at IS NULL`
+		query += currentProfileValueFilter
 	}
 	query += ` ORDER BY address_kind,
 		CASE WHEN pref IS NULL THEN 1 ELSE 0 END, pref, ordinal, id`
@@ -159,7 +159,7 @@ func (s *Store) ListPersonAddressesContext(
 	if err != nil {
 		return nil, fmt.Errorf("list person addresses: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	addresses := make([]PersonAddress, 0)
 	for rows.Next() {
 		address, err := scanPersonAddress(rows)

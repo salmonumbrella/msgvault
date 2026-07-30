@@ -102,34 +102,32 @@ var serviceSlugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 var seededCommunicationServices = []CommunicationServiceInput{
 	{Slug: "whatsapp", DisplayLabel: "WhatsApp", ScopePolicy: ScopePolicyNone, Normalization: NormalizationPhoneE164, NormalizationVersion: 1},
-	{Slug: "telegram", DisplayLabel: "Telegram", ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, URIScheme: serviceString("tg"), ProfileURLTemplate: serviceString("https://t.me/{username}")},
-	{Slug: "facebook", DisplayLabel: "Facebook", ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, ProfileURLTemplate: serviceString("https://www.facebook.com/{username}")},
-	{Slug: "messenger", DisplayLabel: "Messenger", ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, ProfileURLTemplate: serviceString("https://m.me/{username}")},
-	{Slug: "instagram", DisplayLabel: "Instagram", ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, ProfileURLTemplate: serviceString("https://www.instagram.com/{username}")},
+	{Slug: "telegram", DisplayLabel: "Telegram", ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, URIScheme: new("tg"), ProfileURLTemplate: new("https://t.me/{username}")},
+	{Slug: "facebook", DisplayLabel: "Facebook", ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, ProfileURLTemplate: new("https://www.facebook.com/{username}")},
+	{Slug: "messenger", DisplayLabel: "Messenger", ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, ProfileURLTemplate: new("https://m.me/{username}")},
+	{Slug: "instagram", DisplayLabel: "Instagram", ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, ProfileURLTemplate: new("https://www.instagram.com/{username}")},
 	{Slug: "signal", DisplayLabel: "Signal", ScopePolicy: ScopePolicyNone, Normalization: NormalizationPhoneE164, NormalizationVersion: 1},
-	{Slug: "x", DisplayLabel: "X", Aliases: []string{"twitter"}, ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, ProfileURLTemplate: serviceString("https://x.com/{username}")},
+	{Slug: "x", DisplayLabel: "X", Aliases: []string{"twitter"}, ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, ProfileURLTemplate: new("https://x.com/{username}")},
 	{Slug: "discord", DisplayLabel: "Discord", ScopePolicy: ScopePolicyNone, Normalization: NormalizationLower, NormalizationVersion: 1},
-	{Slug: "slack", DisplayLabel: "Slack", ScopePolicy: ScopePolicyRequired, DefaultScopeKind: serviceString("workspace"), Normalization: NormalizationLower, NormalizationVersion: 1},
-	{Slug: "linkedin", DisplayLabel: "LinkedIn", ScopePolicy: ScopePolicyNone, Normalization: NormalizationLower, NormalizationVersion: 1, ProfileURLTemplate: serviceString("https://www.linkedin.com/in/{username}")},
-	{Slug: "sms", DisplayLabel: "SMS", ScopePolicy: ScopePolicyNone, Normalization: NormalizationPhoneE164, NormalizationVersion: 1, URIScheme: serviceString("sms")},
-	{Slug: "rcs", DisplayLabel: "RCS", ScopePolicy: ScopePolicyNone, Normalization: NormalizationPhoneE164, NormalizationVersion: 1, URIScheme: serviceString("sms")},
-	{Slug: "google-messages", DisplayLabel: "Google Messages", Aliases: []string{"gmessages"}, ScopePolicy: ScopePolicyNone, Normalization: NormalizationPhoneE164, NormalizationVersion: 1, URIScheme: serviceString("sms")},
-	{Slug: "google-voice", DisplayLabel: "Google Voice", ScopePolicy: ScopePolicyNone, Normalization: NormalizationPhoneE164, NormalizationVersion: 1, URIScheme: serviceString("tel")},
-	{Slug: "google-chat", DisplayLabel: "Google Chat", ScopePolicy: ScopePolicyOptional, DefaultScopeKind: serviceString("account"), Normalization: NormalizationEmail, NormalizationVersion: 1},
-	{Slug: "irc", DisplayLabel: "IRC", ScopePolicy: ScopePolicyRequired, DefaultScopeKind: serviceString("network"), Normalization: NormalizationLower, NormalizationVersion: 1, URIScheme: serviceString("irc")},
+	{Slug: "slack", DisplayLabel: "Slack", ScopePolicy: ScopePolicyRequired, DefaultScopeKind: new("workspace"), Normalization: NormalizationLower, NormalizationVersion: 1},
+	{Slug: "linkedin", DisplayLabel: "LinkedIn", ScopePolicy: ScopePolicyNone, Normalization: NormalizationLower, NormalizationVersion: 1, ProfileURLTemplate: new("https://www.linkedin.com/in/{username}")},
+	{Slug: "sms", DisplayLabel: "SMS", ScopePolicy: ScopePolicyNone, Normalization: NormalizationPhoneE164, NormalizationVersion: 1, URIScheme: new("sms")},
+	{Slug: "rcs", DisplayLabel: "RCS", ScopePolicy: ScopePolicyNone, Normalization: NormalizationPhoneE164, NormalizationVersion: 1, URIScheme: new("sms")},
+	{Slug: "google-messages", DisplayLabel: "Google Messages", Aliases: []string{"gmessages"}, ScopePolicy: ScopePolicyNone, Normalization: NormalizationPhoneE164, NormalizationVersion: 1, URIScheme: new("sms")},
+	{Slug: "google-voice", DisplayLabel: "Google Voice", ScopePolicy: ScopePolicyNone, Normalization: NormalizationPhoneE164, NormalizationVersion: 1, URIScheme: new("tel")},
+	{Slug: "google-chat", DisplayLabel: "Google Chat", ScopePolicy: ScopePolicyOptional, DefaultScopeKind: new("account"), Normalization: NormalizationEmail, NormalizationVersion: 1},
+	{Slug: "irc", DisplayLabel: "IRC", ScopePolicy: ScopePolicyRequired, DefaultScopeKind: new("network"), Normalization: NormalizationLower, NormalizationVersion: 1, URIScheme: new("irc")},
 	{Slug: "groupme", DisplayLabel: "GroupMe", ScopePolicy: ScopePolicyNone, Normalization: NormalizationPhoneE164, NormalizationVersion: 1},
 	{Slug: "imessage", DisplayLabel: "iMessage", ScopePolicy: ScopePolicyNone, Normalization: NormalizationByAddressKind, NormalizationVersion: 1},
 	{Slug: "line", DisplayLabel: "LINE", ScopePolicy: ScopePolicyNone, Normalization: NormalizationLower, NormalizationVersion: 1},
-	{Slug: "bluesky", DisplayLabel: "Bluesky", Aliases: []string{"bsky"}, ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, ProfileURLTemplate: serviceString("https://bsky.app/profile/{username}")},
+	{Slug: "bluesky", DisplayLabel: "Bluesky", Aliases: []string{"bsky"}, ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, ProfileURLTemplate: new("https://bsky.app/profile/{username}")},
 	// Matrix identifiers remain case-sensitive; lowercasing could merge two
 	// distinct archived participants.
-	{Slug: "matrix", DisplayLabel: "Matrix", ScopePolicy: ScopePolicyRequired, DefaultScopeKind: serviceString("server"), Normalization: NormalizationNone, NormalizationVersion: 1, URIScheme: serviceString("matrix")},
-	{Slug: "reddit", DisplayLabel: "Reddit", ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, ProfileURLTemplate: serviceString("https://www.reddit.com/user/{username}")},
+	{Slug: "matrix", DisplayLabel: "Matrix", ScopePolicy: ScopePolicyRequired, DefaultScopeKind: new("server"), Normalization: NormalizationNone, NormalizationVersion: 1, URIScheme: new("matrix")},
+	{Slug: "reddit", DisplayLabel: "Reddit", ScopePolicy: ScopePolicyNone, Normalization: NormalizationStripAtLower, NormalizationVersion: 1, ProfileURLTemplate: new("https://www.reddit.com/user/{username}")},
 	{Slug: "kakaotalk", DisplayLabel: "KakaoTalk", ScopePolicy: ScopePolicyNone, Normalization: NormalizationLower, NormalizationVersion: 1},
 	{Slug: "wechat", DisplayLabel: "WeChat", ScopePolicy: ScopePolicyNone, Normalization: NormalizationLower, NormalizationVersion: 1},
 }
-
-func serviceString(value string) *string { return &value }
 
 func (s *Store) ListCommunicationServicesContext(ctx context.Context, includeInactive bool) ([]CommunicationService, error) {
 	query := `SELECT id, slug, display_label, scope_policy, default_scope_kind,
@@ -144,7 +142,7 @@ func (s *Store) ListCommunicationServicesContext(ctx context.Context, includeIna
 	if err != nil {
 		return nil, fmt.Errorf("list communication services: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	services := make([]CommunicationService, 0)
 	for rows.Next() {
@@ -294,7 +292,7 @@ func NormalizeServiceValue(service *CommunicationService, addressKind ContactAdd
 	if value == "" {
 		return "", ErrNormalizationRejected
 	}
-	strategy := NormalizationNone
+	var strategy string
 	if service != nil {
 		strategy = service.Normalization
 	} else {
@@ -329,7 +327,7 @@ func NormalizeServiceValue(service *CommunicationService, addressKind ContactAdd
 	case NormalizationPhoneE164:
 		normalized, err := textimport.NormalizePhone(value)
 		if err != nil {
-			return "", fmt.Errorf("%w: %v", ErrNormalizationRejected, err)
+			return "", fmt.Errorf("%w: %w", ErrNormalizationRejected, err)
 		}
 		return normalized, nil
 	default:
@@ -472,7 +470,7 @@ func loadServiceAliasesTx(ctx context.Context, tx *loggedTx, serviceID int64) ([
 }
 
 func scanAliases(rows *loggedRows) ([]string, error) {
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	aliases := make([]string, 0)
 	for rows.Next() {
 		var alias string
@@ -494,7 +492,7 @@ func (s *Store) loadAllServiceAliasesContext(ctx context.Context) (map[int64][]s
 	if err != nil {
 		return nil, fmt.Errorf("load communication service aliases: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	aliases := make(map[int64][]string)
 	for rows.Next() {
 		var serviceID int64

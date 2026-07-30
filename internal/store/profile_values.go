@@ -3,7 +3,6 @@ package store
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 )
@@ -12,6 +11,8 @@ var (
 	ErrInvalidProfilePref   = errors.New("profile value pref must be between 1 and 100")
 	ErrProfileValueNotFound = errors.New("profile value not found")
 )
+
+const currentProfileValueFilter = ` AND active_until IS NULL AND superseded_at IS NULL`
 
 // VCardIdentity identifies one property inside one vCard resource.
 type VCardIdentity struct {
@@ -66,7 +67,7 @@ func (e ValueEnvelope) Validate() error {
 		return ErrConfidenceScope
 	}
 	if e.ActiveFrom != nil && e.ActiveUntil != nil && e.ActiveUntil.Before(*e.ActiveFrom) {
-		return fmt.Errorf("profile value active_until precedes active_from")
+		return errors.New("profile value active_until precedes active_from")
 	}
 	return nil
 }
@@ -95,57 +96,6 @@ func profileEnvelopeArgs(env ValueEnvelope) []any {
 		timeValue(env.ActiveFrom),
 		timeValue(env.ActiveUntil),
 	}
-}
-
-func scanProfileEnvelope(row scanner, env *ValueEnvelope) error {
-	var (
-		pref, ordinal                           sql.NullInt64
-		typeLabel, typeTokens                   sql.NullString
-		vcardProperty, vcardGroup, vcardPropID  sql.NullString
-		vcardPID, vcardAltID, source, sourceRef sql.NullString
-		confidence                              sql.NullFloat64
-		activeFrom, activeUntil                 sql.NullTime
-		createdAt, updatedAt, supersededAt      sql.NullTime
-	)
-	if err := row.Scan(
-		&env.ID,
-		&pref, &ordinal, &typeLabel, &typeTokens,
-		&vcardProperty, &vcardGroup, &vcardPropID, &vcardPID, &vcardAltID,
-		&source, &sourceRef, &confidence, &activeFrom, &activeUntil,
-		&createdAt, &updatedAt, &supersededAt,
-	); err != nil {
-		return err
-	}
-
-	env.Pref = nullIntPtr(pref)
-	if ordinal.Valid {
-		env.Ordinal = int(ordinal.Int64)
-	}
-	env.TypeLabel = nullStringPtr(typeLabel)
-	env.TypeTokens = splitTypeTokens(nullStringPtr(typeTokens))
-	env.VCard = VCardIdentity{
-		Property: vcardProperty.String,
-		Group:    nullStringPtr(vcardGroup),
-		PropID:   nullStringPtr(vcardPropID),
-		PID:      splitTypeTokens(nullStringPtr(vcardPID)),
-		AltID:    nullStringPtr(vcardAltID),
-	}
-	env.Source = Provenance(source.String)
-	env.SourceRef = nullStringPtr(sourceRef)
-	env.Confidence = nullFloatPtr(confidence)
-	env.ActiveFrom = nullTimePtr(activeFrom)
-	env.ActiveUntil = nullTimePtr(activeUntil)
-	var err error
-	env.CreatedAt, err = requireNullTime(createdAt, "created_at")
-	if err != nil {
-		return err
-	}
-	env.UpdatedAt, err = requireNullTime(updatedAt, "updated_at")
-	if err != nil {
-		return err
-	}
-	env.SupersededAt = nullTimePtr(supersededAt)
-	return nil
 }
 
 func joinTypeTokens(tokens []string) *string {

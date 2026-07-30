@@ -10,7 +10,6 @@ import (
 
 func TestValueEnvelopeValidate(t *testing.T) {
 	require := require.New(t)
-	assert := assert.New(t)
 
 	confidence := 0.4
 	tests := []struct {
@@ -20,7 +19,7 @@ func TestValueEnvelopeValidate(t *testing.T) {
 	}{
 		{
 			name: "declared user value",
-			env:  ValueEnvelope{Source: ProvenanceUser, Pref: intPtr(1)},
+			env:  ValueEnvelope{Source: ProvenanceUser, Pref: new(1)},
 		},
 		{
 			name:    "unknown source",
@@ -29,12 +28,12 @@ func TestValueEnvelopeValidate(t *testing.T) {
 		},
 		{
 			name:    "pref below range",
-			env:     ValueEnvelope{Source: ProvenanceUser, Pref: intPtr(0)},
+			env:     ValueEnvelope{Source: ProvenanceUser, Pref: new(0)},
 			wantErr: ErrInvalidProfilePref,
 		},
 		{
 			name:    "pref above range",
-			env:     ValueEnvelope{Source: ProvenanceUser, Pref: intPtr(101)},
+			env:     ValueEnvelope{Source: ProvenanceUser, Pref: new(101)},
 			wantErr: ErrInvalidProfilePref,
 		},
 		{
@@ -53,7 +52,7 @@ func TestValueEnvelopeValidate(t *testing.T) {
 			require.NoError(err, test.name)
 			continue
 		}
-		assert.ErrorIs(err, test.wantErr, test.name)
+		require.ErrorIs(err, test.wantErr, test.name)
 	}
 }
 
@@ -79,5 +78,3 @@ func TestTypeTokensRoundTripPreservesOrderAndSpelling(t *testing.T) {
 	assert.Nil(joinTypeTokens(nil))
 	assert.Empty(splitTypeTokens(nil))
 }
-
-func intPtr(value int) *int { return &value }

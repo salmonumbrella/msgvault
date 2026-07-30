@@ -38,7 +38,7 @@ func TestApplyPersonProfilePatchIsAtomicUnderRevision(t *testing.T) {
 	require.NoError(err)
 	patched, err := st.ApplyPersonProfilePatchContext(ctx, personID, person.Revision, store.PersonProfilePatch{
 		Names: &store.PersonNamePatch{Add: []store.PersonNameInput{{
-			NameKind: store.PersonNameFormatted, Formatted: strPtr("Alice Example"),
+			NameKind: store.PersonNameFormatted, Formatted: new("Alice Example"),
 			Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 		}}},
 		ContactPoints: &store.PersonContactPointPatch{Add: []store.PersonContactPointInput{{
@@ -52,11 +52,11 @@ func TestApplyPersonProfilePatchIsAtomicUnderRevision(t *testing.T) {
 	assert.Len(patched.ContactPoints, 1)
 	_, err = st.ApplyPersonProfilePatchContext(ctx, personID, person.Revision, store.PersonProfilePatch{
 		Names: &store.PersonNamePatch{Add: []store.PersonNameInput{{
-			NameKind: store.PersonNameNickname, Formatted: strPtr("Ally"),
+			NameKind: store.PersonNameNickname, Formatted: new("Ally"),
 			Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 		}}},
 	})
-	assert.ErrorIs(err, store.ErrPersonRevisionConflict)
+	require.ErrorIs(err, store.ErrPersonRevisionConflict)
 }
 
 func TestFailedPatchRollsBackEveryCollection(t *testing.T) {
@@ -69,15 +69,15 @@ func TestFailedPatchRollsBackEveryCollection(t *testing.T) {
 	require.NoError(err)
 	_, err = st.ApplyPersonProfilePatchContext(ctx, personID, person.Revision, store.PersonProfilePatch{
 		Names: &store.PersonNamePatch{Add: []store.PersonNameInput{{
-			NameKind: store.PersonNameFormatted, Formatted: strPtr("Alice Example"),
+			NameKind: store.PersonNameFormatted, Formatted: new("Alice Example"),
 			Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 		}}},
 		ContactPoints: &store.PersonContactPointPatch{Add: []store.PersonContactPointInput{{
-			AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("slack"),
+			AddressKind: store.ContactAddressUsername, ServiceSlug: new("slack"),
 			OriginalValue: "alice", Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 		}}},
 	})
-	assert.ErrorIs(err, store.ErrServiceScopeRequired)
+	require.ErrorIs(err, store.ErrServiceScopeRequired)
 	profile, err := st.GetPersonProfileContext(ctx, personID)
 	require.NoError(err)
 	assert.Empty(profile.Names)
@@ -106,14 +106,14 @@ func TestPatchSupersedeMovesValuesIntoHistoryOnly(t *testing.T) {
 }
 
 func TestPatchRejectsEmptyAndOversizedRequests(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 	st := storetest.New(t).Store
 	ctx := context.Background()
 	personID := newTestPerson(t, st)
 	person, err := st.GetPersonContext(ctx, personID)
-	require.NoError(t, err)
+	require.NoError(err)
 	_, err = st.ApplyPersonProfilePatchContext(ctx, personID, person.Revision, store.PersonProfilePatch{})
-	assert.ErrorIs(err, store.ErrPersonProfilePatchEmpty)
+	require.ErrorIs(err, store.ErrPersonProfilePatchEmpty)
 	adds := make([]store.PersonCategoryInput, store.MaxPersonProfilePatchOperations+1)
 	for i := range adds {
 		adds[i] = store.PersonCategoryInput{
@@ -124,7 +124,7 @@ func TestPatchRejectsEmptyAndOversizedRequests(t *testing.T) {
 	_, err = st.ApplyPersonProfilePatchContext(ctx, personID, person.Revision, store.PersonProfilePatch{
 		Categories: &store.PersonCategoryPatch{Add: adds},
 	})
-	assert.ErrorIs(err, store.ErrPersonProfilePatchTooLarge)
+	require.ErrorIs(err, store.ErrPersonProfilePatchTooLarge)
 }
 
 func TestGetPersonProfileHistoryIncludesParticipantObservations(t *testing.T) {
@@ -139,7 +139,7 @@ func TestGetPersonProfileHistoryIncludesParticipantObservations(t *testing.T) {
 	person, _, err := st.CreatePersonFromParticipantContext(ctx, participantID)
 	require.NoError(err)
 	_, err = st.RecordContactObservationContext(ctx, participantID, store.ParticipantContactObservationInput{
-		AddressKind: store.ContactAddressUsername, ServiceSlug: strPtr("x"),
+		AddressKind: store.ContactAddressUsername, ServiceSlug: new("x"),
 		OriginalValue: "@alice",
 		Envelope:      store.ValueEnvelope{Source: store.ProvenanceArchiveObservation},
 	})
@@ -155,10 +155,10 @@ func seedFullProfile(t *testing.T, st *store.Store, personID int64) {
 	require := require.New(t)
 	ctx := context.Background()
 	for _, input := range []store.PersonNameInput{
-		{NameKind: store.PersonNameFormatted, Formatted: strPtr("Alice Example"),
+		{NameKind: store.PersonNameFormatted, Formatted: new("Alice Example"),
 			Envelope: store.ValueEnvelope{Source: store.ProvenanceUser}},
-		{NameKind: store.PersonNameStructured, FamilyName: strPtr("Example"),
-			GivenName: strPtr("Alice"), Envelope: store.ValueEnvelope{Source: store.ProvenanceUser}},
+		{NameKind: store.PersonNameStructured, FamilyName: new("Example"),
+			GivenName: new("Alice"), Envelope: store.ValueEnvelope{Source: store.ProvenanceUser}},
 	} {
 		_, err := st.AddPersonNameContext(ctx, personID, input)
 		require.NoError(err)
@@ -166,14 +166,14 @@ func seedFullProfile(t *testing.T, st *store.Store, personID int64) {
 	for _, input := range []store.PersonContactPointInput{
 		{AddressKind: store.ContactAddressEmail, OriginalValue: "alice@example.com",
 			Envelope: store.ValueEnvelope{Source: store.ProvenanceUser}},
-		{AddressKind: store.ContactAddressPhone, ServiceSlug: strPtr("whatsapp"),
+		{AddressKind: store.ContactAddressPhone, ServiceSlug: new("whatsapp"),
 			OriginalValue: "+12025550123", Envelope: store.ValueEnvelope{Source: store.ProvenanceUser}},
 	} {
 		_, err := st.AddPersonContactPointContext(ctx, personID, input)
 		require.NoError(err)
 	}
 	_, err := st.AddPersonAddressContext(ctx, personID, store.PersonAddressInput{
-		AddressKind: store.PersonAddressPostal, StreetAddress: strPtr("123 Example St."),
+		AddressKind: store.PersonAddressPostal, StreetAddress: new("123 Example St."),
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
 	require.NoError(err)
@@ -187,7 +187,8 @@ func seedFullProfile(t *testing.T, st *store.Store, personID int64) {
 	})
 	require.NoError(err)
 	_, err = st.AddPersonMediaContext(ctx, personID, store.PersonMediaInput{
-		MediaKind: store.PersonMediaPhoto, Data: []byte("synthetic-photo"),
+		MediaKind: store.PersonMediaPhoto, MediaType: new("image/png"),
+		Data:     []byte("synthetic-photo"),
 		Envelope: store.ValueEnvelope{Source: store.ProvenanceUser},
 	})
 	require.NoError(err)

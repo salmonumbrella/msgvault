@@ -100,14 +100,14 @@ func (s *Store) AddPersonNameContext(ctx context.Context, personID int64, input 
 func (s *Store) ListPersonNamesContext(ctx context.Context, personID int64, currentOnly bool) ([]PersonName, error) {
 	query := personNameSelect + ` WHERE person_id = ?`
 	if currentOnly {
-		query += ` AND active_until IS NULL AND superseded_at IS NULL`
+		query += currentProfileValueFilter
 	}
 	query += ` ORDER BY name_kind, CASE WHEN pref IS NULL THEN 1 ELSE 0 END, pref, ordinal, id`
 	rows, err := s.db.QueryContext(ctx, query, personID)
 	if err != nil {
 		return nil, fmt.Errorf("list person names: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	names := make([]PersonName, 0)
 	for rows.Next() {
 		name, err := scanPersonName(rows)

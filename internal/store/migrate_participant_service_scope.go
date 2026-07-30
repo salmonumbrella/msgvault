@@ -54,7 +54,7 @@ func (s *Store) classifiedIdentifierServiceSlugs(
 	if err != nil {
 		return nil, fmt.Errorf("list classified participant identifiers: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	classified := make(map[string]string)
 	for rows.Next() {
 		var kind, value string
