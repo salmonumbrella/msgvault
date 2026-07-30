@@ -733,6 +733,64 @@ CREATE INDEX IF NOT EXISTS idx_person_attribute_values_current_text
       AND active_until IS NULL AND superseded_at IS NULL;
 
 -- ============================================================================
+-- PEOPLE PROFILE PRIMITIVES
+-- ============================================================================
+
+-- Structured, ordered person-name forms with the shared provenance and
+-- two-axis history envelope.
+CREATE TABLE IF NOT EXISTS person_names (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id             INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    name_kind             TEXT NOT NULL,
+    formatted             TEXT,
+    family_name           TEXT,
+    given_name            TEXT,
+    additional_names      TEXT,
+    honorific_prefixes    TEXT,
+    honorific_suffixes    TEXT,
+    secondary_surname     TEXT,
+    generation            TEXT,
+    language              TEXT,
+    script                TEXT,
+    phonetic_system       TEXT,
+    phonetic_script       TEXT,
+    sort_as               TEXT,
+    is_derived            BOOLEAN NOT NULL DEFAULT FALSE,
+    original_value        TEXT NOT NULL,
+    pref                  INTEGER CHECK (pref IS NULL OR pref BETWEEN 1 AND 100),
+    ordinal               INTEGER NOT NULL DEFAULT 0,
+    type_label            TEXT,
+    type_tokens           TEXT,
+    vcard_property        TEXT,
+    vcard_group           TEXT,
+    vcard_prop_id         TEXT,
+    vcard_pid             TEXT,
+    vcard_altid           TEXT,
+    source                TEXT NOT NULL
+        CHECK (source IN ('user', 'carddav_import', 'vcard_import',
+                          'archive_observation', 'extraction', 'enrichment', 'system')),
+    source_ref            TEXT,
+    confidence            REAL
+        CHECK (confidence IS NULL
+               OR (confidence >= 0 AND confidence <= 1
+                   AND source NOT IN ('user', 'carddav_import', 'vcard_import'))),
+    active_from           DATETIME,
+    active_until          DATETIME,
+    created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    superseded_at         DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_person_names_current
+    ON person_names(person_id, name_kind, ordinal)
+    WHERE active_until IS NULL AND superseded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_person_names_person
+    ON person_names(person_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_person_names_property_identity
+    ON person_names(person_id, source, source_ref, vcard_property, vcard_prop_id)
+    WHERE source_ref IS NOT NULL AND vcard_prop_id IS NOT NULL
+      AND superseded_at IS NULL;
+
+-- ============================================================================
 -- APPLIED MIGRATIONS
 -- ============================================================================
 

@@ -177,5 +177,3 @@ func TestValidateServiceScopeFollowsScopePolicy(t *testing.T) {
 		store.ErrServiceScopeForbidden,
 	)
 }
-
-func strPtr(value string) *string { return &value }
