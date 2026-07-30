@@ -130,6 +130,31 @@ func (g GetDomainTimelinePath) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(g))
 }
 
+type DeleteEmploymentPath struct {
+	// ID Employment ID
+	ID int64 `json:"id"`
+}
+
+type GetEmploymentPath struct {
+	// ID Employment ID
+	ID int64 `json:"id"`
+}
+
+type PatchEmploymentPath struct {
+	// ID Employment ID
+	ID int64 `json:"id"`
+}
+
+type EndEmploymentPath struct {
+	// ID Employment ID
+	ID int64 `json:"id"`
+}
+
+type SetPrimaryEmploymentPath struct {
+	// ID Employment ID
+	ID int64 `json:"id"`
+}
+
 type GetFilePath struct {
 	// ID File attachment ID
 	ID int64 `json:"id"`
@@ -170,6 +195,56 @@ type UnlinkMessageTaskPath struct {
 
 func (u UnlinkMessageTaskPath) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(u))
+}
+
+type ResolveOrganizationDuplicateSuggestionPath struct {
+	// ID Duplicate suggestion ID
+	ID int64 `json:"id"`
+}
+
+type DeleteOrganizationPath struct {
+	// ID Organization ID
+	ID int64 `json:"id"`
+}
+
+type GetOrganizationPath struct {
+	// ID Organization ID
+	ID int64 `json:"id"`
+}
+
+type PatchOrganizationPath struct {
+	// ID Organization ID
+	ID int64 `json:"id"`
+}
+
+type ListOrganizationAttributesPath struct {
+	// ID Organization ID
+	ID int64 `json:"id"`
+}
+
+type SetOrganizationAttributePath struct {
+	// ID Organization ID
+	ID int64 `json:"id"`
+}
+
+type ListOrganizationEmploymentsPath struct {
+	// ID Organization ID
+	ID int64 `json:"id"`
+}
+
+type GetOrganizationHistoryPath struct {
+	// ID Organization ID
+	ID int64 `json:"id"`
+}
+
+type MergeOrganizationPath struct {
+	// ID Organization ID
+	ID int64 `json:"id"`
+}
+
+type PutOrganizationProfilePath struct {
+	// ID Organization ID
+	ID int64 `json:"id"`
 }
 
 type GetPersonPath struct {
@@ -234,6 +309,11 @@ type SetPersonAttributePath struct {
 
 func (s SetPersonAttributePath) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(s))
+}
+
+type ListPersonEmploymentsPath struct {
+	// ID Person ID
+	ID int64 `json:"id"`
 }
 
 type GetPersonStructuredProfilePath struct {

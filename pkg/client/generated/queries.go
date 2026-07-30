@@ -425,6 +425,50 @@ func (g GetMessageInlinePartQuery) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(g))
 }
 
+type ListOrganizationsQuery struct {
+	// Limit Maximum results
+	Limit *int64 `json:"limit,omitempty"`
+
+	// Offset Results to skip
+	Offset *int64 `json:"offset,omitempty"`
+
+	// IncludeRetired Include retired organizations
+	IncludeRetired *bool `json:"include_retired,omitempty"`
+
+	// Q Normalized-name search
+	Q *string `json:"q,omitempty"`
+}
+
+type ListOrganizationDuplicateSuggestionsQuery struct {
+	// Status Filter by status
+	Status *string `json:"status,omitempty"`
+
+	// Limit Maximum results
+	Limit *int64 `json:"limit,omitempty"`
+
+	// Offset Results to skip
+	Offset *int64 `json:"offset,omitempty"`
+}
+
+type ListOrganizationAttributesQuery struct {
+	// IncludeSuperseded Include superseded values
+	IncludeSuperseded *bool `json:"include_superseded,omitempty"`
+
+	// DefinitionSlug Restrict to one definition
+	DefinitionSlug *string `json:"definition_slug,omitempty"`
+}
+
+type ListOrganizationEmploymentsQuery struct {
+	// CurrentOnly Only current employments
+	CurrentOnly *bool `json:"current_only,omitempty"`
+
+	// Limit Maximum results
+	Limit *int64 `json:"limit,omitempty"`
+
+	// Offset Results to skip
+	Offset *int64 `json:"offset,omitempty"`
+}
+
 type ListPersonAttributesQuery struct {
 	// History Include superseded values
 	History *bool `json:"history,omitempty"`
@@ -444,6 +488,17 @@ type ClearPersonAttributeQuery struct {
 type SetPersonAttributeQuery struct {
 	// DryRun Validate and preview without writing
 	DryRun *bool `json:"dry_run,omitempty"`
+}
+
+type ListPersonEmploymentsQuery struct {
+	// CurrentOnly Only current employments
+	CurrentOnly *bool `json:"current_only,omitempty"`
+
+	// Limit Maximum results
+	Limit *int64 `json:"limit,omitempty"`
+
+	// Offset Results to skip
+	Offset *int64 `json:"offset,omitempty"`
 }
 
 type SearchMessagesQuery struct {

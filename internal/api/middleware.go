@@ -48,7 +48,7 @@ func defaultCORSAllowedMethods() []string {
 // updates, X-Request-Id the idempotency key for task creation.
 func defaultCORSAllowedHeaders() []string {
 	return []string{
-		"Accept", "Authorization", "Content-Type", "If-Match",
+		"Accept", "Authorization", "Content-Type", ifMatchHeader,
 		"X-API-Key", "X-Request-Id", csrfHeaderName,
 	}
 }

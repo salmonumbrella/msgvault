@@ -56,6 +56,10 @@ type GetDomainContextSummaryBody = ExploreHTTPRequest
 
 type GetDomainTimelineBody = ExploreHTTPRequest
 
+type CreateEmploymentBody = EmploymentBody
+
+type PatchEmploymentBody = EmploymentBody
+
 type ExploreBody = ExploreHTTPRequest
 
 type ListExploreFilesBody = ExploreFilesHTTPRequest
@@ -75,6 +79,12 @@ type LinkIdentityParticipantsBody = IdentityLinkRequest
 type UnlinkIdentityParticipantsBody = IdentityLinkRequest
 
 type CreateOrLinkMessageTaskBody = TaskLinkMutationRequest
+
+type CreateOrganizationBody = OrganizationCreateBody
+
+type PatchOrganizationBody = OrganizationBody
+
+type PutOrganizationProfileBody = OrganizationProfileBody
 
 type SearchPeopleBody = IdentitySearchHTTPRequest
 

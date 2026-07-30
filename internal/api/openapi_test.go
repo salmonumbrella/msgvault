@@ -32,6 +32,54 @@ func TestOpenAPIDocumentUsesAPISchemaVersion(t *testing.T) {
 	assert.NotEmpty(t, doc.Paths, "paths")
 }
 
+func TestOrganizationCreateOpenAPIDocumentsLocationHeader(t *testing.T) {
+	require := require.New(t)
+	for _, document := range []*huma.OpenAPI{
+		OpenAPIDocument(),
+		openAPIClientDocument(),
+	} {
+		operation := document.Paths[organizationsPath].Post
+		require.NotNil(operation)
+		response := operation.Responses[httpStatusKey(http.StatusCreated)]
+		require.NotNil(response)
+		require.Contains(response.Headers, "Location")
+		require.Equal(huma.TypeString, response.Headers["Location"].Schema.Type)
+	}
+}
+
+func TestOrganizationCreateSchemaOmitsPatchOnlyRetiredState(t *testing.T) {
+	require := require.New(t)
+	for _, document := range []*huma.OpenAPI{
+		OpenAPIDocument(),
+		openAPIClientDocument(),
+	} {
+		createSchema := operationBodySchema(
+			t, document, document.Paths[organizationsPath].Post)
+		patchSchema := operationBodySchema(
+			t, document, document.Paths[organizationsPath+"/{id}"].Patch)
+		require.NotContains(createSchema.Properties, "retired")
+		require.Contains(patchSchema.Properties, "retired")
+	}
+}
+
+func operationBodySchema(
+	t *testing.T, document *huma.OpenAPI, operation *huma.Operation,
+) *huma.Schema {
+	t.Helper()
+	require.NotNil(t, operation)
+	require.NotNil(t, operation.RequestBody)
+	schema := operation.RequestBody.Content["application/json"].Schema
+	require.NotNil(t, schema)
+	if schema.Ref == "" {
+		return schema
+	}
+	const prefix = "#/components/schemas/"
+	require.True(t, strings.HasPrefix(schema.Ref, prefix), schema.Ref)
+	resolved := document.Components.Schemas.Map()[strings.TrimPrefix(schema.Ref, prefix)]
+	require.NotNil(t, resolved)
+	return resolved
+}
+
 func TestSourceStatusRunReferencesAreNullable(t *testing.T) {
 	requirements := require.New(t)
 	assertions := assert.New(t)
