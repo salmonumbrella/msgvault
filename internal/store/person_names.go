@@ -76,76 +76,23 @@ var (
 )
 
 func (s *Store) AddPersonNameContext(ctx context.Context, personID int64, input PersonNameInput) (*PersonName, error) {
-	if !input.NameKind.Valid() {
-		return nil, ErrInvalidPersonNameKind
-	}
-	if err := input.Envelope.Validate(); err != nil {
-		return nil, err
-	}
-	original := strings.TrimSpace(input.OriginalValue)
-	if original == "" {
-		original = firstNonBlankNameComponent(input)
-	}
-	if original == "" {
-		return nil, ErrPersonNameValueMissing
-	}
-
 	var result *PersonName
 	err := s.withTxContext(ctx, func(tx *loggedTx) error {
 		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
 			return err
 		}
-		var exists int
-		if err := tx.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM persons WHERE id = ?`, personID,
-		).Scan(&exists); err != nil {
-			return fmt.Errorf("check person: %w", err)
+		if err := ensureProfilePersonTx(ctx, tx, personID); err != nil {
+			return err
 		}
-		if exists == 0 {
-			return ErrPersonNotFound
-		}
-		env := input.Envelope
-		if env.Ordinal == 0 {
-			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(ordinal) + 1, 0)
-				FROM person_names
-				WHERE person_id = ? AND name_kind = ?
-				  AND active_until IS NULL AND superseded_at IS NULL`,
-				personID, input.NameKind,
-			).Scan(&env.Ordinal); err != nil {
-				return fmt.Errorf("choose person name ordinal: %w", err)
-			}
-		}
-		args := []any{
-			personID, input.NameKind, stringValue(input.Formatted),
-			stringValue(input.FamilyName), stringValue(input.GivenName),
-			stringValue(input.AdditionalNames), stringValue(input.HonorificPrefixes),
-			stringValue(input.HonorificSuffixes), stringValue(input.SecondarySurname),
-			stringValue(input.Generation), stringValue(input.Language),
-			stringValue(input.Script), stringValue(input.PhoneticSystem),
-			stringValue(input.PhoneticScript), stringValue(input.SortAs),
-			input.IsDerived, original,
-		}
-		args = append(args, profileEnvelopeArgs(env)...)
-		var id int64
-		if err := tx.QueryRowContext(ctx, `INSERT INTO person_names (
-			person_id, name_kind, formatted, family_name, given_name,
-			additional_names, honorific_prefixes, honorific_suffixes,
-			secondary_surname, generation, language, script, phonetic_system,
-			phonetic_script, sort_as, is_derived, original_value, `+
-			profileEnvelopeWriteColumns+`, created_at, updated_at
-		) VALUES (
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-			`+s.dialect.Now()+`, `+s.dialect.Now()+`
-		) RETURNING id`, args...).Scan(&id); err != nil {
-			return fmt.Errorf("add person name: %w", err)
+		var err error
+		result, err = s.addPersonNameTx(ctx, tx, personID, input)
+		if err != nil {
+			return err
 		}
 		if err := s.bumpPersonRevisionsTx(ctx, tx, personID); err != nil {
 			return err
 		}
-		var err error
-		result, err = getPersonNameTx(ctx, tx, personID, id)
-		return err
+		return nil
 	})
 	return result, err
 }
