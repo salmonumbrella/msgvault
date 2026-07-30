@@ -82,8 +82,15 @@ CREATE TABLE IF NOT EXISTS participant_identifiers (
 
     is_primary BOOLEAN DEFAULT FALSE,
 
+    service_id BIGINT REFERENCES communication_services(id) ON DELETE SET NULL,
+    scope_kind TEXT,
+    scope_value TEXT,
+
     UNIQUE(identifier_type, identifier_value)
 );
+CREATE INDEX IF NOT EXISTS idx_participant_identifiers_service_scope
+    ON participant_identifiers(service_id, scope_kind, scope_value, identifier_value)
+    WHERE service_id IS NOT NULL;
 
 -- Durable, user-curated people. A person's vCard UID is generated once and
 -- never depends on mutable participant identifiers or link-graph topology.
@@ -850,6 +857,112 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_person_media_property_identity
     ON person_media(person_id, source, source_ref, vcard_property, vcard_prop_id)
     WHERE source_ref IS NOT NULL AND vcard_prop_id IS NOT NULL
       AND superseded_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS participant_contact_observations (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    participant_id BIGINT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+    source_id BIGINT REFERENCES sources(id) ON DELETE CASCADE,
+    address_kind TEXT NOT NULL,
+    service_id BIGINT REFERENCES communication_services(id) ON DELETE SET NULL,
+    scope_kind TEXT,
+    scope_value TEXT,
+    provider_user_id TEXT,
+    original_value TEXT NOT NULL,
+    normalized_value TEXT NOT NULL,
+    normalization TEXT NOT NULL DEFAULT 'none',
+    normalization_version INTEGER NOT NULL DEFAULT 1,
+    observed_at TIMESTAMPTZ,
+    pref INTEGER CHECK (pref IS NULL OR pref BETWEEN 1 AND 100),
+    ordinal INTEGER NOT NULL DEFAULT 0,
+    type_label TEXT,
+    type_tokens TEXT,
+    vcard_property TEXT,
+    vcard_group TEXT,
+    vcard_prop_id TEXT,
+    vcard_pid TEXT,
+    vcard_altid TEXT,
+    source TEXT NOT NULL CHECK (source IN (
+        'user', 'carddav_import', 'vcard_import', 'archive_observation',
+        'extraction', 'enrichment', 'system'
+    )),
+    source_ref TEXT,
+    confidence DOUBLE PRECISION CHECK (confidence IS NULL OR (
+        confidence >= 0 AND confidence <= 1
+        AND source NOT IN ('user', 'carddav_import', 'vcard_import')
+    )),
+    active_from TIMESTAMPTZ,
+    active_until TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    superseded_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_participant_observations_current_lookup
+    ON participant_contact_observations(
+        address_kind, service_id, scope_kind, scope_value, normalized_value
+    ) WHERE active_until IS NULL AND superseded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_participant_observations_participant
+    ON participant_contact_observations(participant_id);
+CREATE INDEX IF NOT EXISTS idx_participant_observations_source
+    ON participant_contact_observations(source_id) WHERE source_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_participant_observations_provider_user
+    ON participant_contact_observations(provider_user_id) WHERE provider_user_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_participant_observations_identity
+    ON participant_contact_observations(
+        participant_id, address_kind, service_id, scope_kind, scope_value, normalized_value
+    ) WHERE active_until IS NULL AND superseded_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS identity_match_candidates (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    left_kind TEXT NOT NULL,
+    left_id BIGINT NOT NULL,
+    right_kind TEXT NOT NULL,
+    right_id BIGINT NOT NULL,
+    basis TEXT NOT NULL,
+    service_id BIGINT REFERENCES communication_services(id) ON DELETE SET NULL,
+    scope_kind TEXT,
+    scope_value TEXT,
+    normalized_value TEXT,
+    state TEXT NOT NULL DEFAULT 'candidate',
+    confidence DOUBLE PRECISION CHECK (confidence IS NULL OR (
+        confidence >= 0 AND confidence <= 1
+        AND source NOT IN ('user', 'carddav_import', 'vcard_import')
+    )),
+    source TEXT NOT NULL CHECK (source IN (
+        'user', 'carddav_import', 'vcard_import', 'archive_observation',
+        'extraction', 'enrichment', 'system'
+    )),
+    source_ref TEXT,
+    decided_by TEXT,
+    decided_at TIMESTAMPTZ,
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_match_candidates_edge
+    ON identity_match_candidates(
+        left_kind, left_id, right_kind, right_id, basis,
+        service_id, scope_kind, scope_value
+    );
+CREATE INDEX IF NOT EXISTS idx_identity_match_candidates_state
+    ON identity_match_candidates(state, id);
+CREATE INDEX IF NOT EXISTS idx_identity_match_candidates_value
+    ON identity_match_candidates(basis, normalized_value)
+    WHERE normalized_value IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS identity_match_evidence (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    candidate_id BIGINT NOT NULL REFERENCES identity_match_candidates(id) ON DELETE CASCADE,
+    evidence_kind TEXT NOT NULL,
+    evidence_ref TEXT,
+    detail TEXT,
+    source TEXT NOT NULL CHECK (source IN (
+        'user', 'carddav_import', 'vcard_import', 'archive_observation',
+        'extraction', 'enrichment', 'system'
+    )),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_identity_match_evidence_candidate
+    ON identity_match_evidence(candidate_id, id);
 
 -- Marks one-time data migrations that have already run. Schema DDL is
 -- idempotent via IF NOT EXISTS; this table is for *data* migrations

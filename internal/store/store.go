@@ -840,6 +840,12 @@ func (s *Store) InitSchema() error {
 		}
 	}
 
+	// This one-shot backfill must run after LegacyColumnMigrations so upgraded
+	// databases have the nullable service/scope columns before they are read.
+	if err := s.ensureParticipantIdentifierServiceScope(context.Background()); err != nil {
+		return fmt.Errorf("classify participant identifier service scope: %w", err)
+	}
+
 	// Partial expression indexes for live-message listing and date filtering.
 	// The first is a covering index for the ListMessages page
 	// (GET /api/v1/messages).
