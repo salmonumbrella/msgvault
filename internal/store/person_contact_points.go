@@ -24,13 +24,13 @@ type PersonContactPoint struct {
 }
 
 type PersonContactPointInput struct {
-	AddressKind   ContactAddressKind
-	ServiceSlug   *string
-	ScopeKind     *string
-	ScopeValue    *string
-	OriginalValue string
-	URI           *string
-	Envelope      ValueEnvelope
+	AddressKind   ContactAddressKind `json:"address_kind"`
+	ServiceSlug   *string            `json:"service_slug,omitempty"`
+	ScopeKind     *string            `json:"scope_kind,omitempty"`
+	ScopeValue    *string            `json:"scope_value,omitempty"`
+	OriginalValue string             `json:"original_value"`
+	URI           *string            `json:"uri,omitempty"`
+	Envelope      ValueEnvelope      `json:"envelope"`
 }
 
 type ContactPointQuery struct {

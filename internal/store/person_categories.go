@@ -17,8 +17,8 @@ type PersonCategory struct {
 }
 
 type PersonCategoryInput struct {
-	OriginalValue string
-	Envelope      ValueEnvelope
+	OriginalValue string        `json:"original_value"`
+	Envelope      ValueEnvelope `json:"envelope"`
 }
 
 var (

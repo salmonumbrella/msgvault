@@ -59,6 +59,45 @@ func (c CreateAttributeDefinitionRequestObjectType) Validate() error {
 	}
 }
 
+type CreateCommunicationServiceRequestNormalization string
+
+const (
+	ByAddressKind CreateCommunicationServiceRequestNormalization = "by_address_kind"
+	Email         CreateCommunicationServiceRequestNormalization = "email"
+	Lower         CreateCommunicationServiceRequestNormalization = "lower"
+	None          CreateCommunicationServiceRequestNormalization = "none"
+	PhoneE164     CreateCommunicationServiceRequestNormalization = "phone_e164"
+	StripAtLower  CreateCommunicationServiceRequestNormalization = "strip_at_lower"
+)
+
+// Validate checks if the CreateCommunicationServiceRequestNormalization value is valid
+func (c CreateCommunicationServiceRequestNormalization) Validate() error {
+	switch c {
+	case ByAddressKind, Email, Lower, None, PhoneE164, StripAtLower:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid CreateCommunicationServiceRequestNormalization value, got: %v", c))
+	}
+}
+
+type CreateCommunicationServiceRequestScopePolicy string
+
+const (
+	CreateCommunicationServiceRequestScopePolicyNone CreateCommunicationServiceRequestScopePolicy = "none"
+	Optional                                         CreateCommunicationServiceRequestScopePolicy = "optional"
+	Required                                         CreateCommunicationServiceRequestScopePolicy = "required"
+)
+
+// Validate checks if the CreateCommunicationServiceRequestScopePolicy value is valid
+func (c CreateCommunicationServiceRequestScopePolicy) Validate() error {
+	switch c {
+	case CreateCommunicationServiceRequestScopePolicyNone, Optional, Required:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid CreateCommunicationServiceRequestScopePolicy value, got: %v", c))
+	}
+}
+
 type ExploreCacheUnavailableResponseReadiness string
 
 const (
@@ -477,16 +516,16 @@ func (s SecretSettingUpdateAction) Validate() error {
 type SessionStatusAuthMode string
 
 const (
-	APIKey   SessionStatusAuthMode = "api_key"
-	Loopback SessionStatusAuthMode = "loopback"
-	Required SessionStatusAuthMode = "required"
-	Session  SessionStatusAuthMode = "session"
+	APIKey                        SessionStatusAuthMode = "api_key"
+	Loopback                      SessionStatusAuthMode = "loopback"
+	Session                       SessionStatusAuthMode = "session"
+	SessionStatusAuthModeRequired SessionStatusAuthMode = "required"
 )
 
 // Validate checks if the SessionStatusAuthMode value is valid
 func (s SessionStatusAuthMode) Validate() error {
 	switch s {
-	case APIKey, Loopback, Required, Session:
+	case APIKey, Loopback, Session, SessionStatusAuthModeRequired:
 		return nil
 	default:
 		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid SessionStatusAuthMode value, got: %v", s))

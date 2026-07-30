@@ -42,6 +42,8 @@ type AddCLIIdentityBody = AddRequest
 
 type RunCLIBody = CLIRunRequest
 
+type CreateCommunicationServiceBody = CreateCommunicationServiceRequest
+
 type GetRemoteImageBody = RemoteImageRequest
 
 type StageDeletionBody = StageDeletionRequest
@@ -87,6 +89,8 @@ type CreatePersonBody = CreatePersonRequest
 type PatchPersonBody = PatchPersonRequest
 
 type SetPersonAttributeBody = SetPersonAttributeRequest
+
+type PatchPersonStructuredProfileBody = PersonProfilePatch
 
 type RunQueryBody = QueryRequest
 

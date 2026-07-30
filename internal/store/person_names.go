@@ -51,23 +51,23 @@ type PersonName struct {
 }
 
 type PersonNameInput struct {
-	NameKind          PersonNameKind
-	Formatted         *string
-	FamilyName        *string
-	GivenName         *string
-	AdditionalNames   *string
-	HonorificPrefixes *string
-	HonorificSuffixes *string
-	SecondarySurname  *string
-	Generation        *string
-	Language          *string
-	Script            *string
-	PhoneticSystem    *string
-	PhoneticScript    *string
-	SortAs            *string
-	IsDerived         bool
-	OriginalValue     string
-	Envelope          ValueEnvelope
+	NameKind          PersonNameKind `json:"name_kind"`
+	Formatted         *string        `json:"formatted,omitempty"`
+	FamilyName        *string        `json:"family_name,omitempty"`
+	GivenName         *string        `json:"given_name,omitempty"`
+	AdditionalNames   *string        `json:"additional_names,omitempty"`
+	HonorificPrefixes *string        `json:"honorific_prefixes,omitempty"`
+	HonorificSuffixes *string        `json:"honorific_suffixes,omitempty"`
+	SecondarySurname  *string        `json:"secondary_surname,omitempty"`
+	Generation        *string        `json:"generation,omitempty"`
+	Language          *string        `json:"language,omitempty"`
+	Script            *string        `json:"script,omitempty"`
+	PhoneticSystem    *string        `json:"phonetic_system,omitempty"`
+	PhoneticScript    *string        `json:"phonetic_script,omitempty"`
+	SortAs            *string        `json:"sort_as,omitempty"`
+	IsDerived         bool           `json:"is_derived,omitempty"`
+	OriginalValue     string         `json:"original_value"`
+	Envelope          ValueEnvelope  `json:"envelope"`
 }
 
 var (

@@ -39,13 +39,13 @@ type PersonDate struct {
 }
 
 type PersonDateInput struct {
-	DateKind      PersonDateKind
-	Label         *string
-	Date          PartialDate
-	DateText      *string
-	CalendarScale *string
-	OriginalValue string
-	Envelope      ValueEnvelope
+	DateKind      PersonDateKind `json:"date_kind"`
+	Label         *string        `json:"label,omitempty"`
+	Date          PartialDate    `json:"date"`
+	DateText      *string        `json:"date_text,omitempty"`
+	CalendarScale *string        `json:"calendar_scale,omitempty"`
+	OriginalValue string         `json:"original_value"`
+	Envelope      ValueEnvelope  `json:"envelope"`
 }
 
 var (

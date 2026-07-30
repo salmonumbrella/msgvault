@@ -48,23 +48,23 @@ type PersonAddress struct {
 }
 
 type PersonAddressInput struct {
-	AddressKind        PersonAddressKind
-	PostOfficeBox      *string
-	ExtendedAddress    *string
-	StreetAddress      *string
-	Locality           *string
-	Region             *string
-	PostalCode         *string
-	CountryName        *string
-	ExtendedComponents *string
-	FreeText           *string
-	Label              *string
-	GeoURI             *string
-	Timezone           *string
-	CountryCode        *string
-	PlaceURI           *string
-	OriginalValue      string
-	Envelope           ValueEnvelope
+	AddressKind        PersonAddressKind `json:"address_kind"`
+	PostOfficeBox      *string           `json:"post_office_box,omitempty"`
+	ExtendedAddress    *string           `json:"extended_address,omitempty"`
+	StreetAddress      *string           `json:"street_address,omitempty"`
+	Locality           *string           `json:"locality,omitempty"`
+	Region             *string           `json:"region,omitempty"`
+	PostalCode         *string           `json:"postal_code,omitempty"`
+	CountryName        *string           `json:"country_name,omitempty"`
+	ExtendedComponents *string           `json:"extended_components,omitempty"`
+	FreeText           *string           `json:"free_text,omitempty"`
+	Label              *string           `json:"label,omitempty"`
+	GeoURI             *string           `json:"geo_uri,omitempty"`
+	Timezone           *string           `json:"timezone,omitempty"`
+	CountryCode        *string           `json:"country_code,omitempty"`
+	PlaceURI           *string           `json:"place_uri,omitempty"`
+	OriginalValue      string            `json:"original_value"`
+	Envelope           ValueEnvelope     `json:"envelope"`
 }
 
 var (

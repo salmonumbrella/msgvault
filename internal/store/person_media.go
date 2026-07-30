@@ -44,12 +44,12 @@ type PersonMedia struct {
 }
 
 type PersonMediaInput struct {
-	MediaKind     PersonMediaKind
-	MediaType     *string
-	URI           *string
-	Data          []byte
-	OriginalValue string
-	Envelope      ValueEnvelope
+	MediaKind     PersonMediaKind `json:"media_kind"`
+	MediaType     *string         `json:"media_type,omitempty"`
+	URI           *string         `json:"uri,omitempty"`
+	Data          []byte          `json:"data,omitempty"`
+	OriginalValue string          `json:"original_value"`
+	Envelope      ValueEnvelope   `json:"envelope"`
 }
 
 var (
