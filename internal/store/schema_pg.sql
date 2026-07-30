@@ -6,6 +6,36 @@ CREATE TABLE IF NOT EXISTS archive_metadata (
     value TEXT NOT NULL
 );
 
+-- Open catalog of communication services. Seeded slugs are presentation and
+-- normalization metadata, NOT a database enum and not a compatibility
+-- ceiling: an unknown bridge type or a custom service is registered as a new
+-- row, never by a schema migration. Slugs are immutable machine identities;
+-- display labels remain mutable and are never overwritten by re-seeding.
+CREATE TABLE IF NOT EXISTS communication_services (
+    id                    BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    slug                  TEXT NOT NULL UNIQUE,
+    display_label         TEXT NOT NULL,
+    scope_policy          TEXT NOT NULL DEFAULT 'none',
+    default_scope_kind    TEXT,
+    normalization         TEXT NOT NULL DEFAULT 'none',
+    normalization_version INTEGER NOT NULL DEFAULT 1,
+    uri_scheme            TEXT,
+    profile_url_template  TEXT,
+    is_system             BOOLEAN NOT NULL DEFAULT FALSE,
+    is_active             BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Aliases resolve to one canonical service without changing captured source
+-- values. A primary key makes alias uniqueness a database constraint.
+CREATE TABLE IF NOT EXISTS communication_service_aliases (
+    alias      TEXT PRIMARY KEY,
+    service_id BIGINT NOT NULL REFERENCES communication_services(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_communication_service_aliases_service
+    ON communication_service_aliases(service_id);
+
 -- ============================================================================
 -- SOURCES & IDENTITY
 -- ============================================================================

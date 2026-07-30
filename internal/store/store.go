@@ -807,6 +807,14 @@ func (s *Store) InitSchema() error {
 		return fmt.Errorf("ensure idx_participants_phone unique: %w", err)
 	}
 
+	// Seed the open communication-service catalog. The catalog is
+	// presentation and normalization metadata, not an enum: unknown bridges
+	// are registered as rows at runtime. The migration ledger prevents
+	// startup from fighting later user edits or deletions.
+	if err := s.seedCommunicationServices(context.Background()); err != nil {
+		return fmt.Errorf("seed communication services: %w", err)
+	}
+
 	// Migrations: add columns for databases created before these features.
 	// The dialect determines the list. Both backends return ADD COLUMN
 	// migrations for DBs created before later columns were introduced:
