@@ -303,6 +303,8 @@ func NormalizeServiceValue(service *CommunicationService, addressKind ContactAdd
 			strategy = NormalizationEmail
 		case ContactAddressPhone:
 			strategy = NormalizationPhoneE164
+		case ContactAddressLanguage:
+			strategy = NormalizationLower
 		default:
 			strategy = NormalizationNone
 		}
