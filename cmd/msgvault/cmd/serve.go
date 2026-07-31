@@ -329,6 +329,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if err := registerAttachmentMaintenanceJob(sched, attachmentMaint); err != nil {
 		return fmt.Errorf("schedule attachment maintenance: %w", err)
 	}
+	if err := registerActivityProjectionJob(
+		sched, s, cfg.Activity, logger); err != nil {
+		return fmt.Errorf("schedule activity projection: %w", err)
+	}
 
 	if cfg.Beeper.Enabled && cfg.Beeper.Schedule == "" {
 		logger.Warn("beeper is enabled but has no schedule — the daemon will not sync it; its freshness will eventually go stale",

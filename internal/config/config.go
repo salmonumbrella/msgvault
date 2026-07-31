@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/robfig/cron/v3"
 	"go.kenn.io/msgvault/internal/fileutil"
 	"go.kenn.io/msgvault/internal/taskclient"
 	"go.kenn.io/msgvault/internal/vector"
@@ -332,6 +333,7 @@ type Config struct {
 	Circleback   []CirclebackSource `toml:"circleback"`
 	Backup       BackupConfig       `toml:"backup"`
 	Discord      DiscordConfig      `toml:"discord"`
+	Activity     ActivityConfig     `toml:"activity"`
 
 	// Computed paths (not from config file)
 	HomeDir    string `toml:"-"`
@@ -470,6 +472,50 @@ type SyncConfig struct {
 	RateLimitQPS int `toml:"rate_limit_qps"`
 }
 
+type ActivityConfig struct {
+	Timezone              string `toml:"timezone"`
+	MaxDirectCounterparts int    `toml:"max_direct_counterparts"`
+	BatchSize             int    `toml:"batch_size"`
+	Schedule              string `toml:"schedule"`
+}
+
+func (a *ActivityConfig) ApplyDefaults() {
+	if a.Timezone == "" {
+		a.Timezone = "UTC"
+	}
+	if a.MaxDirectCounterparts == 0 {
+		a.MaxDirectCounterparts = 25
+	}
+	if a.BatchSize == 0 {
+		a.BatchSize = 500
+	}
+}
+
+func (a *ActivityConfig) Validate() error {
+	a.ApplyDefaults()
+	if _, err := time.LoadLocation(a.Timezone); err != nil {
+		return fmt.Errorf("invalid [activity] timezone %q: %w", a.Timezone, err)
+	}
+	if a.MaxDirectCounterparts < 1 || a.MaxDirectCounterparts > 10_000 {
+		return fmt.Errorf(
+			"invalid [activity] max_direct_counterparts %d (want 1-10000)",
+			a.MaxDirectCounterparts)
+	}
+	if a.BatchSize < 1 || a.BatchSize > 10_000 {
+		return fmt.Errorf("invalid [activity] batch_size %d (want 1-10000)",
+			a.BatchSize)
+	}
+	if a.Schedule == "" {
+		return nil
+	}
+	parser := cron.NewParser(
+		cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	if _, err := parser.Parse(a.Schedule); err != nil {
+		return fmt.Errorf("invalid [activity] schedule %q: %w", a.Schedule, err)
+	}
+	return nil
+}
+
 // DefaultHome returns the default msgvault home directory.
 // Respects MSGVAULT_HOME environment variable and expands ~ in its value.
 func DefaultHome() string {
@@ -520,12 +566,19 @@ func NewDefaultConfig() *Config {
 		Accounts:    []AccountSchedule{},
 		SynctechSMS: SynctechSMSConfig{Sources: []SynctechSMSSource{}},
 		GCal:        []GCalSource{},
+		Activity: ActivityConfig{
+			Timezone:              "UTC",
+			MaxDirectCounterparts: 25,
+			BatchSize:             500,
+			Schedule:              "17 * * * *",
+		},
 	}
 	cfg.Vector.ApplyDefaults()
 	cfg.Server.ApplyDefaults()
 	cfg.Discord.ApplyDefaults()
 	cfg.Web.ApplyDefaults()
 	cfg.Integrations.Tasks.ApplyDefaults()
+	cfg.Activity.ApplyDefaults()
 	return cfg
 }
 
@@ -660,6 +713,10 @@ func decodeConfig(cfg *Config, path string, explicit, homeOverride bool, content
 	}
 	cfg.Integrations.Tasks.ApplyDefaults()
 	if err := cfg.Integrations.Tasks.Validate(); err != nil {
+		return nil, err
+	}
+	cfg.Activity.ApplyDefaults()
+	if err := cfg.Activity.Validate(); err != nil {
 		return nil, err
 	}
 	if err := cfg.Backup.Validate(); err != nil {

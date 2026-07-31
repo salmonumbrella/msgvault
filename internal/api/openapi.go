@@ -152,7 +152,11 @@ import (
 // profiles, update the display-name override and delete a profile with
 // revision-tag optimistic concurrency, and surface the covering profile on
 // the /people/{id} analytical detail.
-const APISchemaVersion = "1.32.0"
+// 1.33.0 adds authenticated person/day activity intersections, computed
+// contact state, and ordered authored daily-note entry routes. Person and day
+// views expose independent bounded activity and note paging over the same
+// stable archive references.
+const APISchemaVersion = "1.33.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.
@@ -183,7 +187,38 @@ func baseOpenAPIDocument() *huma.OpenAPI {
 	hardenExploreSchemas(doc)
 	hardenSearchCoverageSchemas(doc)
 	hardenTaskLinkSchemas(doc)
+	hardenActivitySchemas(doc)
 	return doc
+}
+
+func hardenActivitySchemas(doc *huma.OpenAPI) {
+	if doc == nil || doc.Components == nil || doc.Components.Schemas == nil {
+		return
+	}
+	for schemaName, arrayFields := range map[string][]string{
+		"PersonDaysPage":           {"days"},
+		"PersonDayPage":            {"activity", "entries"},
+		"DayPage":                  {"persons", "entries"},
+		"DayPerson":                {"activity"},
+		"DailyNoteEntriesResponse": {"entries"},
+	} {
+		schema := doc.Components.Schemas.Map()[schemaName]
+		if schema == nil {
+			continue
+		}
+		for _, field := range arrayFields {
+			if property := schema.Properties[field]; property != nil {
+				property.Nullable = false
+			}
+		}
+	}
+	if request := doc.Components.Schemas.Map()["CreateDailyNoteEntryRequest"]; request != nil {
+		if personIDs := request.Properties["person_ids"]; personIDs != nil &&
+			personIDs.Items != nil {
+			minimum := float64(1)
+			personIDs.Items.Minimum = &minimum
+		}
+	}
 }
 
 func hardenTaskLinkSchemas(doc *huma.OpenAPI) {

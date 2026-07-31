@@ -387,8 +387,8 @@ func (d *PostgreSQLDialect) EnsureFTSIndex(q querier) error {
 	return nil
 }
 
-// EnsureTriggers creates the last_modified maintenance triggers idempotently.
-// Two triggers feed messages.last_modified:
+// EnsureTriggers creates database-maintained maintenance triggers
+// idempotently. Two triggers feed messages.last_modified:
 //
 //   - trg_messages_last_modified (BEFORE UPDATE on messages): sets
 //     NEW.last_modified in-row. BEFORE → no secondary write → no recursion.
@@ -398,6 +398,10 @@ func (d *PostgreSQLDialect) EnsureFTSIndex(q querier) error {
 //   - trg_message_bodies_last_modified (AFTER INSERT OR UPDATE on
 //     message_bodies): bumps the parent message's last_modified so body
 //     edits move the worker's CAS token too.
+//
+// Activity triggers enqueue messages after message, recipient, or conversation
+// membership mutations. A separate delete trigger dirties surviving contact
+// state when a direct activity link disappears through a hard cascade.
 //
 // CREATE TRIGGER is not idempotent before PG14, so each trigger is dropped
 // (IF EXISTS) and recreated; the functions use CREATE OR REPLACE. Re-running
@@ -426,10 +430,114 @@ func (d *PostgreSQLDialect) EnsureTriggers(q querier) error {
 		`CREATE TRIGGER trg_message_bodies_last_modified
 		     AFTER INSERT OR UPDATE ON message_bodies FOR EACH ROW
 		     EXECUTE FUNCTION bump_message_last_modified()`,
+		`CREATE OR REPLACE FUNCTION enqueue_activity_message_mutation() RETURNS trigger AS $$
+		 BEGIN
+		     INSERT INTO activity_projection_queue (message_id, revision, queued_at)
+		     VALUES (NEW.id, 1, CURRENT_TIMESTAMP)
+		     ON CONFLICT(message_id) DO UPDATE SET
+		         revision = activity_projection_queue.revision + 1,
+		         queued_at = CURRENT_TIMESTAMP;
+		     RETURN NEW;
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS trg_activity_queue_messages ON messages`,
+		`CREATE TRIGGER trg_activity_queue_messages
+		     AFTER INSERT OR UPDATE ON messages FOR EACH ROW
+		     EXECUTE FUNCTION enqueue_activity_message_mutation()`,
+		`CREATE OR REPLACE FUNCTION enqueue_activity_recipient_mutation() RETURNS trigger AS $$
+		 BEGIN
+		     IF TG_OP = 'DELETE' OR TG_OP = 'UPDATE' THEN
+		         INSERT INTO activity_projection_queue (message_id, revision, queued_at)
+		         SELECT id, 1, CURRENT_TIMESTAMP
+		         FROM messages
+		         WHERE id = OLD.message_id
+		         ON CONFLICT(message_id) DO UPDATE SET
+		             revision = activity_projection_queue.revision + 1,
+		             queued_at = CURRENT_TIMESTAMP;
+		     END IF;
+		     IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
+		         INSERT INTO activity_projection_queue (message_id, revision, queued_at)
+		         VALUES (NEW.message_id, 1, CURRENT_TIMESTAMP)
+		         ON CONFLICT(message_id) DO UPDATE SET
+		             revision = activity_projection_queue.revision + 1,
+		             queued_at = CURRENT_TIMESTAMP;
+		     END IF;
+		     IF TG_OP = 'DELETE' THEN
+		         RETURN OLD;
+		     END IF;
+		     RETURN NEW;
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS trg_activity_queue_recipients ON message_recipients`,
+		`CREATE TRIGGER trg_activity_queue_recipients
+		     AFTER INSERT OR UPDATE OR DELETE ON message_recipients FOR EACH ROW
+		     EXECUTE FUNCTION enqueue_activity_recipient_mutation()`,
+		`CREATE OR REPLACE FUNCTION enqueue_activity_conversation_person_mutation() RETURNS trigger AS $$
+		 BEGIN
+		     IF TG_OP = 'DELETE' OR TG_OP = 'UPDATE' THEN
+		         INSERT INTO activity_projection_queue (message_id, revision, queued_at)
+		         SELECT id, 1, CURRENT_TIMESTAMP
+		         FROM messages
+		         WHERE conversation_id = OLD.conversation_id
+		         ON CONFLICT(message_id) DO UPDATE SET
+		             revision = activity_projection_queue.revision + 1,
+		             queued_at = CURRENT_TIMESTAMP;
+		     END IF;
+		     IF TG_OP = 'INSERT' OR TG_OP = 'UPDATE' THEN
+		         INSERT INTO activity_projection_queue (message_id, revision, queued_at)
+		         SELECT id, 1, CURRENT_TIMESTAMP
+		         FROM messages
+		         WHERE conversation_id = NEW.conversation_id
+		         ON CONFLICT(message_id) DO UPDATE SET
+		             revision = activity_projection_queue.revision + 1,
+		             queued_at = CURRENT_TIMESTAMP;
+		     END IF;
+		     IF TG_OP = 'DELETE' THEN
+		         RETURN OLD;
+		     END IF;
+		     RETURN NEW;
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS trg_activity_queue_conversation_people ON conversation_participants`,
+		`CREATE TRIGGER trg_activity_queue_conversation_people
+		     AFTER INSERT OR UPDATE OR DELETE ON conversation_participants FOR EACH ROW
+		     EXECUTE FUNCTION enqueue_activity_conversation_person_mutation()`,
+		`CREATE OR REPLACE FUNCTION enqueue_activity_conversation_type_mutation() RETURNS trigger AS $$
+		 BEGIN
+		     IF OLD.conversation_type IS DISTINCT FROM NEW.conversation_type THEN
+		         INSERT INTO activity_projection_queue (message_id, revision, queued_at)
+		         SELECT id, 1, CURRENT_TIMESTAMP
+		         FROM messages
+		         WHERE conversation_id IN (OLD.id, NEW.id)
+		         ON CONFLICT(message_id) DO UPDATE SET
+		             revision = activity_projection_queue.revision + 1,
+		             queued_at = CURRENT_TIMESTAMP;
+		     END IF;
+		     RETURN NEW;
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS trg_activity_queue_conversation_type ON conversations`,
+		`CREATE TRIGGER trg_activity_queue_conversation_type
+		     AFTER UPDATE OF conversation_type ON conversations FOR EACH ROW
+		     EXECUTE FUNCTION enqueue_activity_conversation_type_mutation()`,
+		`CREATE OR REPLACE FUNCTION dirty_contact_state_after_direct_link_delete() RETURNS trigger AS $$
+		 BEGIN
+		     IF OLD.evidence = 'direct' THEN
+		         UPDATE person_contact_state
+		         SET dirty_at = CURRENT_TIMESTAMP
+		         WHERE person_id = OLD.person_id;
+		     END IF;
+		     RETURN OLD;
+		 END;
+		 $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS trg_activity_direct_link_delete_dirty ON activity_event_persons`,
+		`CREATE TRIGGER trg_activity_direct_link_delete_dirty
+		     AFTER DELETE ON activity_event_persons FOR EACH ROW
+		     EXECUTE FUNCTION dirty_contact_state_after_direct_link_delete()`,
 	}
 	for _, stmt := range stmts {
 		if _, err := q.Exec(stmt); err != nil {
-			return fmt.Errorf("ensure last_modified triggers: %w", err)
+			return fmt.Errorf("ensure database-maintained triggers: %w", err)
 		}
 	}
 	return nil
@@ -548,6 +656,11 @@ var exclusiveLockTables = []string{
 	// Beeper import path) repoints bindings and bumps person revisions, so
 	// both belong to the sync/import write set this lock mirrors.
 	"persons", "person_participants",
+	// Activity projection rows are written from and cascade with the sync
+	// archive. The queue is trigger-written by every message/participant
+	// mutation, so it belongs to the same exclusive write set.
+	"activity_events", "activity_event_persons", "person_contact_state",
+	"activity_projection_queue",
 	"collections", "collection_sources", "account_identities", "applied_migrations",
 	"source_import_items", "sync_run_items", "sync_checkpoints",
 	"imap_folder_state",

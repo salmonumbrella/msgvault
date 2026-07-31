@@ -44,6 +44,8 @@ type RunCLIBody = CLIRunRequest
 
 type GetRemoteImageBody = RemoteImageRequest
 
+type CreateDayEntryBody = CreateDailyNoteEntryRequest
+
 type StageDeletionBody = StageDeletionRequest
 
 type SearchDomainsBody = IdentitySearchHTTPRequest
