@@ -165,6 +165,9 @@ func (r *unixCredentialStoreRoot) save(profileName string, data []byte) (retErr 
 	if r.hooks != nil && r.hooks.afterCandidateOpen != nil {
 		r.hooks.afterCandidateOpen(candidateName)
 	}
+	if err := validateUnixCredentialFD(int(candidate.Fd()), "candidate"); err != nil {
+		return err
+	}
 	if _, err := candidate.Write(data); err != nil {
 		return fmt.Errorf("write pinned people provider credential candidate: %w", err)
 	}
@@ -177,7 +180,7 @@ func (r *unixCredentialStoreRoot) save(profileName string, data []byte) (retErr 
 	var currentCandidate unix.Stat_t
 	if err := unix.Fstatat(r.fd, candidateName, &currentCandidate, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
 		candidateIdentity.Dev != currentCandidate.Dev || candidateIdentity.Ino != currentCandidate.Ino ||
-		currentCandidate.Mode&unix.S_IFMT != unix.S_IFREG {
+		validateUnixCredentialStat(currentCandidate, "candidate") != nil {
 		return errors.New("people provider credential candidate changed before publication")
 	}
 	if r.hooks != nil && r.hooks.beforeCandidatePublish != nil {
@@ -288,29 +291,27 @@ func (r *unixCredentialStoreRoot) delete(profileName string) error {
 	if err := validateUnixCredentialStat(opened, "file"); err != nil {
 		return err
 	}
-	if opened.Size == 0 {
-		// A zero-length record is the bounded, idempotent deletion tombstone.
-		return nil
-	}
 	if r.hooks != nil && r.hooks.afterCredentialOpen != nil {
 		r.hooks.afterCredentialOpen("delete")
 	}
-	var current unix.Stat_t
-	if err := unix.Fstatat(r.fd, name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return fmt.Errorf("revalidate people provider credential before deletion: %w", err)
+	if opened.Size == 0 {
+		// A zero-length record is the bounded, idempotent deletion tombstone.
+		if !unixCredentialEntryMatches(r.fd, name, opened) {
+			return errors.New("people provider credential changed during deletion")
+		}
+		return nil
 	}
-	if opened.Dev != current.Dev || opened.Ino != current.Ino ||
-		current.Mode&unix.S_IFMT != unix.S_IFREG {
+	if !unixCredentialEntryMatches(r.fd, name, opened) {
 		return errors.New("people provider credential changed before deletion")
 	}
 	if r.hooks != nil && r.hooks.beforeCredentialRetire != nil {
 		r.hooks.beforeCredentialRetire()
 	}
+	if err := validateUnixCredentialFD(fd, "file"); err != nil {
+		return errors.New("people provider credential changed before deletion")
+	}
 	wipeErr := wipeUnixCredentialFD(fd)
-	var retained unix.Stat_t
-	if err := unix.Fstatat(r.fd, name, &retained, unix.AT_SYMLINK_NOFOLLOW); err != nil ||
-		opened.Dev != retained.Dev || opened.Ino != retained.Ino ||
-		retained.Mode&unix.S_IFMT != unix.S_IFREG {
+	if !unixCredentialEntryMatches(r.fd, name, opened) {
 		return errors.New("people provider credential changed during deletion")
 	}
 	if wipeErr != nil {
@@ -346,6 +347,9 @@ func wipeUnixCredentialFD(fd int) error {
 }
 
 func wipeFailedUnixCredentialCandidate(candidate *os.File, hooks *credentialStoreHooks) error {
+	if err := validateUnixCredentialFD(int(candidate.Fd()), "candidate"); err != nil {
+		return errors.New("people provider credential candidate wipe refused")
+	}
 	var truncateErr error
 	if hooks != nil && hooks.failedCandidateTruncate != nil {
 		truncateErr = hooks.failedCandidateTruncate()
@@ -385,5 +389,20 @@ func validateUnixCredentialStat(stat unix.Stat_t, kind string) error {
 	if stat.Mode&0o777 != 0o600 {
 		return fmt.Errorf("people provider credential %s permissions are not private", kind)
 	}
+	if stat.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("people provider credential %s owner does not match the current user", kind)
+	}
+	if uint64(stat.Nlink) != 1 {
+		return fmt.Errorf("people provider credential %s has an unsafe number of links", kind)
+	}
 	return nil
+}
+
+func unixCredentialEntryMatches(rootFD int, name string, opened unix.Stat_t) bool {
+	var current unix.Stat_t
+	if err := unix.Fstatat(rootFD, name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return false
+	}
+	return opened.Dev == current.Dev && opened.Ino == current.Ino &&
+		validateUnixCredentialStat(current, "file") == nil
 }

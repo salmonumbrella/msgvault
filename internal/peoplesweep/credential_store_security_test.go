@@ -119,6 +119,96 @@ func TestCredentialStoreSaveDetectsCandidateSwapAtPublicationBoundary(t *testing
 	require.Error(t, loadErr)
 }
 
+func TestCredentialStoreRejectsHardLinkedMutationTargets(t *testing.T) {
+	t.Run("candidate", func(t *testing.T) {
+		tokensDir := t.TempDir()
+		store := NewFileCredentialStore(tokensDir)
+		require.NoError(t, store.Save("seed", NewCredential(AuthBearer, credentialSecurityTestValue)))
+		root := filepath.Join(tokensDir, "people-providers")
+		external := filepath.Join(t.TempDir(), "external")
+		const externalContents = "external file must remain unchanged"
+		require.NoError(t, os.WriteFile(external, []byte(externalContents), 0o600))
+		require.NoError(t, os.Link(external, filepath.Join(root, unixCredentialCandidateName)))
+
+		err := store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue))
+		require.ErrorContains(t, err, "links")
+		contents, readErr := os.ReadFile(external)
+		require.NoError(t, readErr)
+		assert.True(t, string(contents) == externalContents, "candidate reuse modified an external hard link")
+		assert.NoFileExists(t, filepath.Join(root, "profile.json"))
+	})
+
+	t.Run("candidate linked after open", func(t *testing.T) {
+		tokensDir := t.TempDir()
+		store := NewFileCredentialStore(tokensDir)
+		require.NoError(t, store.Save("seed", NewCredential(AuthBearer, credentialSecurityTestValue)))
+		root := filepath.Join(tokensDir, "people-providers")
+		external := filepath.Join(t.TempDir(), "external")
+		const externalContents = "opened candidate must remain unchanged"
+		store.hooks = &credentialStoreHooks{afterCandidateOpen: func(candidateName string) {
+			candidatePath := filepath.Join(root, candidateName)
+			require.NoError(t, os.WriteFile(candidatePath, []byte(externalContents), 0o600))
+			require.NoError(t, os.Link(candidatePath, external))
+		}}
+
+		err := store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue))
+		require.ErrorContains(t, err, "links")
+		contents, readErr := os.ReadFile(external)
+		require.NoError(t, readErr)
+		assert.True(t, string(contents) == externalContents,
+			"candidate write or cleanup modified a hard link added after open")
+	})
+
+	t.Run("credential deletion", func(t *testing.T) {
+		tokensDir := t.TempDir()
+		store := NewFileCredentialStore(tokensDir)
+		require.NoError(t, store.Save("seed", NewCredential(AuthBearer, credentialSecurityTestValue)))
+		root := filepath.Join(tokensDir, "people-providers")
+		external := filepath.Join(t.TempDir(), "external")
+		const externalContents = "external file must remain unchanged"
+		require.NoError(t, os.WriteFile(external, []byte(externalContents), 0o600))
+		require.NoError(t, os.Link(external, filepath.Join(root, "profile.json")))
+
+		err := store.Delete("profile")
+		require.ErrorContains(t, err, "links")
+		contents, readErr := os.ReadFile(external)
+		require.NoError(t, readErr)
+		assert.True(t, string(contents) == externalContents, "credential deletion modified an external hard link")
+	})
+
+	t.Run("credential linked before wipe", func(t *testing.T) {
+		tokensDir := t.TempDir()
+		store := NewFileCredentialStore(tokensDir)
+		require.NoError(t, store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue)))
+		root := filepath.Join(tokensDir, "people-providers")
+		credentialPath := filepath.Join(root, "profile.json")
+		external := filepath.Join(t.TempDir(), "external")
+		before, statErr := os.Stat(credentialPath)
+		require.NoError(t, statErr)
+		store.hooks = &credentialStoreHooks{beforeCredentialRetire: func() {
+			require.NoError(t, os.Link(credentialPath, external))
+		}}
+
+		err := store.Delete("profile")
+		require.ErrorContains(t, err, "changed")
+		after, statErr := os.Stat(external)
+		require.NoError(t, statErr)
+		assert.Equal(t, before.Size(), after.Size(), "credential wipe modified a hard link added at the boundary")
+	})
+}
+
+func TestValidateUnixCredentialStatRejectsForeignOwner(t *testing.T) {
+	foreignUID := uint32(os.Geteuid()) ^ 1
+	stat := unix.Stat_t{
+		Mode:  unix.S_IFREG | 0o600,
+		Nlink: 1,
+		Uid:   foreignUID,
+	}
+
+	err := validateUnixCredentialStat(stat, "file")
+	require.ErrorContains(t, err, "owner")
+}
+
 func TestCredentialStoreDeleteRefusesSwappedEntry(t *testing.T) {
 	tokensDir := t.TempDir()
 	store := NewFileCredentialStore(tokensDir)
@@ -167,6 +257,37 @@ func TestCredentialStoreDeleteDetectsSwapAtRemovalBoundary(t *testing.T) {
 	originalInfo, statErr := os.Stat(original)
 	require.NoError(t, statErr)
 	assert.Zero(t, originalInfo.Size(), "the pinned credential was not wiped after the deletion race")
+}
+
+func TestCredentialStoreDeleteDetectsZeroTombstoneSwap(t *testing.T) {
+	tokensDir := t.TempDir()
+	store := NewFileCredentialStore(tokensDir)
+	require.NoError(t, store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue)))
+	require.NoError(t, store.Delete("profile"))
+	root := filepath.Join(tokensDir, "people-providers")
+	tombstone := filepath.Join(root, "profile.json")
+	retained := filepath.Join(root, "profile.tombstone")
+	replacement := filepath.Join(t.TempDir(), "replacement.json")
+	require.NoError(t, os.WriteFile(replacement,
+		[]byte(`{"scheme":"bearer","value":"replacement-test-value"}`), 0o600))
+	var swapped atomic.Bool
+	store.hooks = &credentialStoreHooks{afterCredentialOpen: func(operation string) {
+		if operation != "delete" {
+			return
+		}
+		require.NoError(t, os.Rename(tombstone, retained))
+		require.NoError(t, os.Rename(replacement, tombstone))
+		swapped.Store(true)
+	}}
+
+	err := store.Delete("profile")
+	require.ErrorContains(t, err, "changed during deletion")
+	assert.True(t, swapped.Load(), "zero-length deletion did not reach the final boundary")
+	store.hooks = nil
+	credential, loadErr := store.Load("profile")
+	require.NoError(t, loadErr)
+	assert.True(t, credential.Value() == "replacement-test-value",
+		"deletion modified the live replacement credential")
 }
 
 func TestCredentialStoreRejectsFIFOWithoutBlocking(t *testing.T) {
@@ -224,29 +345,37 @@ func TestCredentialStoreFailedSavesKeepArtifactsBounded(t *testing.T) {
 
 func TestCredentialStoreSaveReportsCandidateWipeFailure(t *testing.T) {
 	tests := []struct {
-		name       string
-		configure  func(*credentialStoreHooks)
-		wantError  string
-		wantZeroed bool
+		name            string
+		configure       func(*credentialStoreHooks, *atomic.Bool)
+		wantError       string
+		wantZeroed      bool
+		wantSyncAttempt bool
 	}{
 		{
 			name: "truncate",
-			configure: func(hooks *credentialStoreHooks) {
+			configure: func(hooks *credentialStoreHooks, syncAttempted *atomic.Bool) {
 				hooks.failedCandidateTruncate = func() error {
 					return errors.New("injected truncate failure")
 				}
+				hooks.failedCandidateSync = func() error {
+					syncAttempted.Store(true)
+					return nil
+				}
 			},
-			wantError: "wipe failed",
+			wantError:       "wipe failed",
+			wantSyncAttempt: true,
 		},
 		{
 			name: "sync",
-			configure: func(hooks *credentialStoreHooks) {
+			configure: func(hooks *credentialStoreHooks, syncAttempted *atomic.Bool) {
 				hooks.failedCandidateSync = func() error {
+					syncAttempted.Store(true)
 					return errors.New("injected sync failure")
 				}
 			},
-			wantError:  "durable wipe failed",
-			wantZeroed: true,
+			wantError:       "durable wipe failed",
+			wantZeroed:      true,
+			wantSyncAttempt: true,
 		},
 	}
 
@@ -262,7 +391,8 @@ func TestCredentialStoreSaveReportsCandidateWipeFailure(t *testing.T) {
 				candidateName = name
 				require.NoError(t, os.Mkdir(target, 0o700))
 			}}
-			test.configure(hooks)
+			var syncAttempted atomic.Bool
+			test.configure(hooks, &syncAttempted)
 			store.hooks = hooks
 
 			err := store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue))
@@ -279,6 +409,8 @@ func TestCredentialStoreSaveReportsCandidateWipeFailure(t *testing.T) {
 			} else {
 				assert.Positive(t, candidateInfo.Size(), "injected truncate failure unexpectedly zeroed the candidate")
 			}
+			assert.Equal(t, test.wantSyncAttempt, syncAttempted.Load(),
+				"candidate sync cleanup attempt did not remain independent")
 		})
 	}
 }
