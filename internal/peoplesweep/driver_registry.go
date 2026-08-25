@@ -37,7 +37,8 @@ func NewDriverRegistry(
 ) (*DriverRegistry, error) {
 	return &DriverRegistry{
 		drivers: map[Protocol]StructuredDriver{
-			ProtocolOpenAIChat: NewOpenAIChatDriver(httpClient),
+			ProtocolOpenAIChat:      NewOpenAIChatDriver(httpClient),
+			ProtocolOpenAIResponses: NewOpenAIResponsesDriver(httpClient),
 		},
 		commands: commands, isolation: isolation,
 	}, nil
