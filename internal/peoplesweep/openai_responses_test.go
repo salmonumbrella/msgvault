@@ -149,6 +149,11 @@ func TestOpenAIResponsesRejectsMisplacedOrBlankOutputText(t *testing.T) {
 				`{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"}]}`,
 		},
 		{
+			name: "valid before misplaced",
+			output: `{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"}]},` +
+				`{"type":"reasoning","content":[{"type":"output_text","text":"{\"ok\":false}"}]}`,
+		},
+		{
 			name:   "empty alone",
 			output: `{"type":"message","content":[{"type":"output_text","text":""}]}`,
 		},
@@ -158,6 +163,11 @@ func TestOpenAIResponsesRejectsMisplacedOrBlankOutputText(t *testing.T) {
 				`{"type":"output_text","text":"{\"ok\":true}"}]}`,
 		},
 		{
+			name: "valid before empty",
+			output: `{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"},` +
+				`{"type":"output_text","text":""}]}`,
+		},
+		{
 			name:   "whitespace alone",
 			output: `{"type":"message","content":[{"type":"output_text","text":" \n\t "}]}`,
 		},
@@ -165,6 +175,11 @@ func TestOpenAIResponsesRejectsMisplacedOrBlankOutputText(t *testing.T) {
 			name: "whitespace alongside valid",
 			output: `{"type":"message","content":[{"type":"output_text","text":" \n\t "},` +
 				`{"type":"output_text","text":"{\"ok\":true}"}]}`,
+		},
+		{
+			name: "valid before whitespace",
+			output: `{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"},` +
+				`{"type":"output_text","text":" \n\t "}]}`,
 		},
 	}
 	for _, test := range tests {
