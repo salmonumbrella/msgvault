@@ -199,7 +199,8 @@ func newOpenAISweepFixture(
 	}
 
 	runner, err := peoplesweep.NewRunner(config, st,
-		peoplesweep.NewOpenAICompatibleTransport(server.Client()),
+		peoplesweep.NewTestDriverRegistry(peoplesweep.ProtocolOpenAIChat,
+			peoplesweep.NewOpenAIChatDriver(server.Client())),
 		peoplesweep.NewCredentialResolver(nil, func(name string) (string, bool) {
 			assert.Equal(t, "SYNTHETIC_OPENAI_KEY", name)
 			return "synthetic-api-key", true
@@ -486,7 +487,7 @@ func inspectOpenAISweepFactState(
 	return nil
 }
 
-func TestOpenAICompatibleSweepAppliesSupportedClaimEndToEnd(t *testing.T) {
+func TestOpenAIChatSweepAppliesSupportedClaimEndToEnd(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	var wantProjection peoplesweep.ProjectedValue
@@ -526,7 +527,7 @@ func TestOpenAICompatibleSweepAppliesSupportedClaimEndToEnd(t *testing.T) {
 		SELECT provider_version, model_version FROM person_fact_generations
 		WHERE person_id = ? ORDER BY id DESC LIMIT 1`), fixture.personID).
 		Scan(&providerVersion, &modelVersion))
-	assert.Equal(peoplesweep.OpenAICompatibleProviderVersion, providerVersion)
+	assert.Equal(peoplesweep.OpenAIChatProviderVersion, providerVersion)
 	assert.Equal(sweepResponseModel, modelVersion)
 	var optimistic int64
 	require.NoError(fixture.store.DB().QueryRowContext(t.Context(), fixture.store.Rebind(`
@@ -535,7 +536,7 @@ func TestOpenAICompatibleSweepAppliesSupportedClaimEndToEnd(t *testing.T) {
 	assert.Positive(optimistic)
 }
 
-func TestOpenAICompatibleRejectsMissingResponseModel(t *testing.T) {
+func TestOpenAIChatRejectsMissingResponseModel(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	provider := &openAISweepServer{t: t, responses: []openAISweepResponse{{
@@ -556,7 +557,7 @@ func TestOpenAICompatibleRejectsMissingResponseModel(t *testing.T) {
 	assertOpenAISweepCursorUnchanged(t, fixture)
 }
 
-func TestOpenAICompatibleSweepRejectsMixedModelVersions(t *testing.T) {
+func TestOpenAIChatSweepRejectsMixedModelVersions(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	provider := &openAISweepServer{t: t}
@@ -584,7 +585,7 @@ func TestOpenAICompatibleSweepRejectsMixedModelVersions(t *testing.T) {
 	assertOpenAISweepCursorUnchanged(t, fixture)
 }
 
-func TestOpenAICompatibleRetryAfterBoundsRetry(t *testing.T) {
+func TestOpenAIChatRetryAfterBoundsRetry(t *testing.T) {
 	tests := []struct {
 		name    string
 		header  func() string
@@ -629,7 +630,7 @@ func TestOpenAICompatibleRetryAfterBoundsRetry(t *testing.T) {
 	}
 }
 
-func TestOpenAICompatibleSweepFailureNeverAdvancesCursor(t *testing.T) {
+func TestOpenAIChatSweepFailureNeverAdvancesCursor(t *testing.T) {
 	tests := []struct {
 		name      string
 		response  openAISweepResponse

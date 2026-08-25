@@ -46,11 +46,11 @@ type ProviderAuthority interface {
 type CredentialLookup func(string) (string, bool)
 
 // Runner enforces request, exact-consent, source, credential, and output-schema
-// policy around one structured transport.
+// policy around one protocol-selected structured driver.
 type Runner struct {
 	config    Config
 	authority ProviderAuthority
-	transport StructuredTransport
+	driver    StructuredDriver
 	resolver  CredentialResolver
 }
 
@@ -59,20 +59,25 @@ type Runner struct {
 func NewRunner(
 	config Config,
 	authority ProviderAuthority,
-	transport StructuredTransport,
+	registry *DriverRegistry,
 	resolver CredentialResolver,
 ) (*Runner, error) {
 	if authority == nil {
 		return nil, errors.New("people inference runner requires provider authority")
 	}
-	if transport == nil {
-		return nil, errors.New("people inference runner requires a transport")
+	if registry == nil {
+		return nil, errors.New("people inference runner requires a driver registry")
 	}
 	if resolver == nil {
 		return nil, errors.New("people inference runner requires a credential resolver")
 	}
-	if _, _, err := config.ActiveProviderConfig(); err != nil {
+	_, provider, err := config.ActiveProviderConfig()
+	if err != nil {
 		return nil, err
+	}
+	driver, err := registry.Driver(provider.Protocol, provider)
+	if err != nil {
+		return nil, fmt.Errorf("select people inference driver: %w", err)
 	}
 	providers := make(map[string]ProviderConfig, len(config.Providers))
 	for name, provider := range config.Providers {
@@ -81,7 +86,7 @@ func NewRunner(
 	}
 	config.Providers = providers
 	return &Runner{
-		config: config, authority: authority, transport: transport, resolver: resolver,
+		config: config, authority: authority, driver: driver, resolver: resolver,
 	}, nil
 }
 
@@ -139,7 +144,7 @@ func (r *Runner) prepare(
 	if err := validateRequestPolicy(request, profile, synthetic); err != nil {
 		return PreparedStructuredRequest{}, err
 	}
-	prepared, err := r.transport.PrepareJSON(profile, request)
+	prepared, err := r.driver.Prepare(profile, request)
 	if err != nil {
 		return PreparedStructuredRequest{}, fmt.Errorf("prepare structured inference: %w", err)
 	}
@@ -174,7 +179,7 @@ func (r *Runner) runPrepared(
 	if err != nil {
 		return StructuredResponse{}, err
 	}
-	expected, err := r.transport.PrepareJSON(profile, request)
+	expected, err := r.driver.Prepare(profile, request)
 	if err != nil {
 		return StructuredResponse{}, fmt.Errorf("re-encode prepared structured inference: %w", err)
 	}
@@ -231,13 +236,14 @@ func (r *Runner) generateAndValidate(
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, provider.RequestTimeout)
 	defer cancel()
-	response, err := r.transport.GeneratePreparedJSON(requestCtx, profile, credential.Value(), prepared)
+	driverResponse, err := r.driver.GeneratePrepared(requestCtx, profile, credential, prepared)
 	if err != nil {
 		if errors.Is(err, ErrInvalidStructuredOutput) {
-			return response, fmt.Errorf("generate structured inference: %w", err)
+			return structuredResponseFromDriver(driverResponse), fmt.Errorf("generate structured inference: %w", err)
 		}
 		return StructuredResponse{}, fmt.Errorf("generate structured inference: %w", err)
 	}
+	response := structuredResponseFromDriver(driverResponse)
 	if !safeProviderMetadata(response.ProviderVersion) || !safeProviderMetadata(response.ModelVersion) {
 		return response, fmt.Errorf("%w: missing authoritative version metadata", ErrInvalidStructuredOutput)
 	}
@@ -249,6 +255,16 @@ func (r *Runner) generateAndValidate(
 		return response, fmt.Errorf("%w: output does not match requested schema", ErrInvalidStructuredOutput)
 	}
 	return response, nil
+}
+
+func structuredResponseFromDriver(response DriverResponse) StructuredResponse {
+	return StructuredResponse{
+		Output:            append(json.RawMessage(nil), response.CandidateJSON...),
+		ProviderRequestID: response.ProviderRequestID,
+		ProviderVersion:   response.ProviderVersion,
+		ModelVersion:      response.ModelVersion,
+		Usage:             response.Usage,
+	}
 }
 
 func decodeJSONSchemaInstance(data []byte, destination *any) error {

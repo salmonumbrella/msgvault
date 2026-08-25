@@ -40,7 +40,19 @@ type TokenUsage struct {
 	OutputTokens int64 `json:"output_tokens"`
 }
 
-// StructuredResponse contains only parsed JSON and safe provider metadata.
+// DriverResponse contains one candidate JSON value and normalized safe
+// metadata. UsageKnown distinguishes an omitted usage object from reported
+// zero usage.
+type DriverResponse struct {
+	CandidateJSON     json.RawMessage
+	ProviderRequestID string
+	ProviderVersion   string
+	ModelVersion      string
+	Usage             TokenUsage
+	UsageKnown        bool
+}
+
+// StructuredResponse contains only locally validated JSON and safe provider metadata.
 type StructuredResponse struct {
 	Output            json.RawMessage `json:"output"`
 	ProviderRequestID string          `json:"provider_request_id,omitempty"`
@@ -49,11 +61,11 @@ type StructuredResponse struct {
 	Usage             TokenUsage      `json:"usage"`
 }
 
-// StructuredTransport is the network-only adapter boundary. Callers must use
-// Runner rather than invoke a transport directly outside this package.
-type StructuredTransport interface {
-	PrepareJSON(profile ProviderProfile, request StructuredRequest) (PreparedStructuredRequest, error)
-	GeneratePreparedJSON(ctx context.Context, profile ProviderProfile, credential string, prepared PreparedStructuredRequest) (StructuredResponse, error)
+// StructuredDriver is the one-attempt provider boundary. Callers must use
+// Runner rather than invoke a driver directly outside this package.
+type StructuredDriver interface {
+	Prepare(profile ProviderProfile, request StructuredRequest) (PreparedStructuredRequest, error)
+	GeneratePrepared(ctx context.Context, profile ProviderProfile, credential Credential, prepared PreparedStructuredRequest) (DriverResponse, error)
 }
 
 // StructuredRunner is the consent-gated entry point later people-sweep

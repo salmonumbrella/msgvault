@@ -12,7 +12,8 @@ import (
 )
 
 const (
-	OpenAICompatibleProviderVersion = "openai-chat-completions-json-schema-v1"
+	OpenAIChatProviderVersion       = "openai-chat-completions-json-schema-v1"
+	OpenAICompatibleProviderVersion = OpenAIChatProviderVersion
 	CodexAppServerProviderVersion   = "codex-app-server-v2"
 )
 
@@ -20,51 +21,73 @@ const (
 // its launch containment is implemented and independently release-gated.
 var ErrCodexIsolationUnreleased = errors.New("codex app-server isolation is not released")
 
-// NewStructuredTransport selects the configured provider adapter. Codex
-// construction requires an accepted containment attestation; every later
-// process launch obtains a fresh attestation and reverifies it immediately.
-func NewStructuredTransport(
-	cfg ProviderConfig,
+// DriverRegistry resolves one driver only from the saved protocol. Codex is
+// configured at selection time because its executable is operational config,
+// not part of the immutable provider profile.
+type DriverRegistry struct {
+	drivers   map[Protocol]StructuredDriver
+	commands  CommandStarter
+	isolation CodexIsolationGate
+}
+
+func NewDriverRegistry(
 	httpClient *http.Client,
 	commands CommandStarter,
 	isolation CodexIsolationGate,
-) (StructuredTransport, error) {
+) (*DriverRegistry, error) {
+	return &DriverRegistry{
+		drivers: map[Protocol]StructuredDriver{
+			ProtocolOpenAIChat: NewOpenAIChatDriver(httpClient),
+		},
+		commands: commands, isolation: isolation,
+	}, nil
+}
+
+func (r *DriverRegistry) Driver(
+	protocol Protocol,
+	provider ProviderConfig,
+) (StructuredDriver, error) {
+	if r == nil {
+		return nil, errors.New("people inference driver registry is required")
+	}
 	validation := Config{
 		Enabled: true, Provider: ProviderSelection{Name: "runtime"},
-		Providers: map[string]ProviderConfig{"runtime": cfg},
+		Providers: map[string]ProviderConfig{"runtime": provider},
 	}
 	validation.ApplyDefaults()
 	if err := validation.Validate(); err != nil {
 		return nil, err
 	}
-	_, provider, err := validation.ActiveProviderConfig()
+	_, canonical, err := validation.ActiveProviderConfig()
 	if err != nil {
 		return nil, err
 	}
-	switch provider.Protocol {
-	case ProtocolOpenAIChat:
-		return NewOpenAICompatibleTransport(httpClient), nil
-	case ProtocolCodexAppServer:
-		if commands == nil {
-			return nil, errors.New("codex app-server command starter is required")
-		}
-		if isolation == nil {
-			return nil, errors.New("codex app-server isolation gate is required")
-		}
-		attestation, err := isolation.Verify(
-			context.Background(), provider.Executable, provider.ExecutionBoundary,
-		)
-		if err != nil {
-			_ = attestation.Close()
-			return nil, fmt.Errorf("verify codex app-server isolation: %w", err)
-		}
-		if err := attestation.Close(); err != nil {
-			return nil, err
-		}
-		return NewCodexAppServerTransport(provider, commands, isolation)
-	default:
-		return nil, fmt.Errorf("unsupported people sweep protocol %q", provider.Protocol)
+	if protocol != canonical.Protocol {
+		return nil, errors.New("people inference driver protocol does not match provider configuration")
 	}
+	if driver, ok := r.drivers[protocol]; ok {
+		return driver, nil
+	}
+	if protocol != ProtocolCodexAppServer {
+		return nil, fmt.Errorf("unsupported people sweep protocol %q", protocol)
+	}
+	if r.commands == nil {
+		return nil, errors.New("codex app-server command starter is required")
+	}
+	if r.isolation == nil {
+		return nil, errors.New("codex app-server isolation gate is required")
+	}
+	attestation, err := r.isolation.Verify(
+		context.Background(), canonical.Executable, canonical.ExecutionBoundary,
+	)
+	if err != nil {
+		_ = attestation.Close()
+		return nil, fmt.Errorf("verify codex app-server isolation: %w", err)
+	}
+	if err := attestation.Close(); err != nil {
+		return nil, err
+	}
+	return NewCodexAppServerDriver(canonical, r.commands, r.isolation)
 }
 
 // CanonicalCodexProviderVersion derives a safe provider identity from the

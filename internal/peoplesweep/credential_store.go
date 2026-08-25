@@ -41,6 +41,10 @@ func (c Credential) Value() string {
 	return c.secret.value
 }
 
+func (c Credential) hasValue() bool {
+	return c.secret != nil && c.secret.value != ""
+}
+
 func (c Credential) String() string {
 	return fmt.Sprintf("people provider credential (%s)", c.Scheme)
 }

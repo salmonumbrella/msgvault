@@ -38,16 +38,17 @@ func (noStartCommandStarter) Start(context.Context, peoplesweep.CodexExecutable,
 	return nil, errors.New("unexpected process start")
 }
 
-func TestStructuredTransportSelectsOpenAICompatible(t *testing.T) {
+func TestDriverRegistrySelectsOpenAIChatByProtocol(t *testing.T) {
 	config := validConfig()
-	transport, err := peoplesweep.NewStructuredTransport(
-		activeProvider(config), http.DefaultClient, nil, nil)
+	registry, err := peoplesweep.NewDriverRegistry(http.DefaultClient, nil, nil)
 	require.NoError(t, err)
-	_, ok := transport.(*peoplesweep.OpenAICompatibleTransport)
+	driver, err := registry.Driver(peoplesweep.ProtocolOpenAIChat, activeProvider(config))
+	require.NoError(t, err)
+	_, ok := driver.(*peoplesweep.OpenAIChatDriver)
 	assert.True(t, ok)
 }
 
-func TestStructuredTransportSelectsAttestedCodex(t *testing.T) {
+func TestDriverRegistrySelectsAttestedCodexByProtocol(t *testing.T) {
 	config := validConfig()
 	setActiveProvider(&config, peoplesweep.ProviderConfig{
 		Protocol: peoplesweep.ProtocolCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
@@ -60,14 +61,16 @@ func TestStructuredTransportSelectsAttestedCodex(t *testing.T) {
 	config.ApplyDefaults()
 	gate := &attestingGate{}
 
-	transport, err := peoplesweep.NewStructuredTransport(activeProvider(config), http.DefaultClient, noStartCommandStarter{}, gate)
+	registry, err := peoplesweep.NewDriverRegistry(http.DefaultClient, noStartCommandStarter{}, gate)
 	require.NoError(t, err)
-	_, ok := transport.(*peoplesweep.CodexAppServerTransport)
+	driver, err := registry.Driver(peoplesweep.ProtocolCodexAppServer, activeProvider(config))
+	require.NoError(t, err)
+	_, ok := driver.(*peoplesweep.CodexAppServerDriver)
 	assert.True(t, ok)
 	assert.Equal(t, 1, gate.calls)
 }
 
-func TestStructuredTransportCodexFailsClosedWhenAttestationDenied(t *testing.T) {
+func TestDriverRegistryCodexFailsClosedWhenAttestationDenied(t *testing.T) {
 	config := validConfig()
 	setActiveProvider(&config, peoplesweep.ProviderConfig{
 		Protocol: peoplesweep.ProtocolCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
@@ -80,11 +83,11 @@ func TestStructuredTransportCodexFailsClosedWhenAttestationDenied(t *testing.T) 
 	config.ApplyDefaults()
 	gate := &attestingGate{err: peoplesweep.ErrCodexIsolationUnreleased}
 
-	transport, err := peoplesweep.NewStructuredTransport(
-		activeProvider(config), http.DefaultClient, noStartCommandStarter{}, gate,
-	)
+	registry, err := peoplesweep.NewDriverRegistry(http.DefaultClient, noStartCommandStarter{}, gate)
+	require.NoError(t, err)
+	driver, err := registry.Driver(peoplesweep.ProtocolCodexAppServer, activeProvider(config))
 	require.ErrorIs(t, err, peoplesweep.ErrCodexIsolationUnreleased)
-	assert.Nil(t, transport)
+	assert.Nil(t, driver)
 	assert.Equal(t, 1, gate.calls)
 }
 

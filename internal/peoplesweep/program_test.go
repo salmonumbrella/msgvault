@@ -25,12 +25,12 @@ func (extractionConsent) HasSuccessfulPersonInferenceCheck(context.Context, stri
 
 type extractionTransport struct{ output json.RawMessage }
 
-func (t extractionTransport) PrepareJSON(_ ProviderProfile, request StructuredRequest) (PreparedStructuredRequest, error) {
+func (t extractionTransport) Prepare(_ ProviderProfile, request StructuredRequest) (PreparedStructuredRequest, error) {
 	return NewPreparedStructuredRequest(request, []byte(`{"wire":"extraction"}`))
 }
 
-func (t extractionTransport) GeneratePreparedJSON(context.Context, ProviderProfile, string, PreparedStructuredRequest) (StructuredResponse, error) {
-	return StructuredResponse{Output: t.output, ProviderVersion: "provider-v1", ModelVersion: "model-v1"}, nil
+func (t extractionTransport) GeneratePrepared(context.Context, ProviderProfile, Credential, PreparedStructuredRequest) (DriverResponse, error) {
+	return DriverResponse{CandidateJSON: t.output, ProviderVersion: "provider-v1", ModelVersion: "model-v1"}, nil
 }
 
 func TestExtractionProgramFingerprintStable(t *testing.T) {
@@ -57,7 +57,8 @@ func TestExtractionProgramSchemaRunsIntegerConfidence(t *testing.T) {
 		AllowedSources: []SourceClass{SourceConversationText, SourceMeetingText}, SourceSince: "2020-01-01",
 		AllowSensitive: true,
 	})
-	runner, err := NewRunner(config, extractionConsent{}, extractionTransport{output: json.RawMessage(output)},
+	runner, err := NewRunner(config, extractionConsent{},
+		NewTestDriverRegistry(ProtocolOpenAIChat, extractionTransport{output: json.RawMessage(output)}),
 		NewCredentialResolver(nil, func(string) (string, bool) { return "credential", true }))
 	require.NoError(t, err)
 

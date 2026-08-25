@@ -194,7 +194,8 @@ func runEvaluationSensitivePolicy(
 		ModelVersion:       "frozen-sensitive-model-v1",
 	}))
 	runner, err := peoplesweep.NewRunner(config, f.Store,
-		peoplesweep.NewOpenAICompatibleTransport(server.Client()),
+		peoplesweep.NewTestDriverRegistry(peoplesweep.ProtocolOpenAIChat,
+			peoplesweep.NewOpenAIChatDriver(server.Client())),
 		peoplesweep.NewCredentialResolver(nil, func(name string) (string, bool) {
 			return "frozen-sensitive-key", name == "FROZEN_EVALUATION_API_KEY"
 		}))
@@ -325,8 +326,8 @@ func runEvaluationFixtureCase(t *testing.T, fixture evaluationFixture, metrics *
 		profile, err := config.Profile()
 		require.NoError(t, err)
 		for _, batch := range batches {
-			prepared, prepareErr := peoplesweep.NewOpenAICompatibleTransport(http.DefaultClient).
-				PrepareJSON(profile, batch.Request)
+			prepared, prepareErr := peoplesweep.NewOpenAIChatDriver(http.DefaultClient).
+				Prepare(profile, batch.Request)
 			require.NoError(t, prepareErr)
 			estimate, estimateErr := peoplesweep.EstimateWireTokenReservation(
 				prepared.WireRequest(), batch.Request.MaxOutputTokens)

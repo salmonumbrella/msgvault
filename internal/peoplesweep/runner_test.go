@@ -64,30 +64,30 @@ func (c *countingConsent) HasSuccessfulPersonInferenceCheck(
 }
 
 type countingTransport struct {
-	response         peoplesweep.StructuredResponse
+	response         peoplesweep.DriverResponse
 	err              error
 	calls            atomic.Int64
 	order            func(string)
 	mu               sync.Mutex
 	request          peoplesweep.StructuredRequest
 	profile          peoplesweep.ProviderProfile
-	key              string
+	credentialScheme peoplesweep.AuthScheme
 	preserveVersions bool
 }
 
-func (t *countingTransport) PrepareJSON(
+func (t *countingTransport) Prepare(
 	profile peoplesweep.ProviderProfile,
 	request peoplesweep.StructuredRequest,
 ) (peoplesweep.PreparedStructuredRequest, error) {
 	return peoplesweep.NewPreparedStructuredRequest(request, []byte(`{"prepared":true}`))
 }
 
-func (t *countingTransport) GeneratePreparedJSON(
+func (t *countingTransport) GeneratePrepared(
 	_ context.Context,
 	profile peoplesweep.ProviderProfile,
-	key string,
+	credential peoplesweep.Credential,
 	prepared peoplesweep.PreparedStructuredRequest,
-) (peoplesweep.StructuredResponse, error) {
+) (peoplesweep.DriverResponse, error) {
 	t.calls.Add(1)
 	if t.order != nil {
 		t.order("transport")
@@ -95,7 +95,7 @@ func (t *countingTransport) GeneratePreparedJSON(
 	t.mu.Lock()
 	t.request = prepared.Request()
 	t.profile = profile
-	t.key = key
+	t.credentialScheme = credential.Scheme
 	t.mu.Unlock()
 	response := t.response
 	if !t.preserveVersions && response.ProviderVersion == "" {
@@ -105,6 +105,10 @@ func (t *countingTransport) GeneratePreparedJSON(
 		response.ModelVersion = "test-model-v1"
 	}
 	return response, t.err
+}
+
+func testDriverRegistry(driver peoplesweep.StructuredDriver) *peoplesweep.DriverRegistry {
+	return peoplesweep.NewTestDriverRegistry(peoplesweep.ProtocolOpenAIChat, driver)
 }
 
 func runnerTestConfig() peoplesweep.Config {
@@ -129,11 +133,11 @@ func TestRunnerCallsVerificationConsentCredentialAndTransportInOrder(t *testing.
 	}
 	consent := &countingConsent{active: true, order: record}
 	transport := &countingTransport{
-		response: peoplesweep.StructuredResponse{Output: json.RawMessage(`{"ok":true}`)},
+		response: peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`)},
 		order:    record,
 	}
 	runner, err := peoplesweep.NewRunner(
-		runnerTestConfig(), consent, transport,
+		runnerTestConfig(), consent, testDriverRegistry(transport),
 		credentialResolverFunc(func(name string, profile peoplesweep.ProviderProfile) (peoplesweep.Credential, error) {
 			record("credential")
 			assert.Equal("default", name)
@@ -150,7 +154,7 @@ func TestRunnerCallsVerificationConsentCredentialAndTransportInOrder(t *testing.
 	assert.Equal(int64(1), consent.verificationCalls.Load())
 	assert.Equal(int64(1), consent.calls.Load())
 	assert.Equal(int64(1), transport.calls.Load())
-	assert.True(transport.key == credentialCanary, "transport received a different credential")
+	assert.Equal(peoplesweep.AuthBearer, transport.credentialScheme)
 }
 
 func TestRunnerFailsClosedBeforeCredentialOrTransport(t *testing.T) {
@@ -241,7 +245,7 @@ func TestRunnerFailsClosedBeforeCredentialOrTransport(t *testing.T) {
 			transport := &countingTransport{}
 			var credentialCalls atomic.Int64
 			runner, err := peoplesweep.NewRunner(
-				test.config, consent, transport,
+				test.config, consent, testDriverRegistry(transport),
 				lookupCredentialResolver(func(string) (string, bool) {
 					credentialCalls.Add(1)
 					return "test-key", true
@@ -265,7 +269,7 @@ func TestRunnerMissingCredentialDoesNotCallTransport(t *testing.T) {
 	transport := &countingTransport{}
 	var credentialCalls atomic.Int64
 	runner, err := peoplesweep.NewRunner(
-		runnerTestConfig(), consent, transport,
+		runnerTestConfig(), consent, testDriverRegistry(transport),
 		lookupCredentialResolver(func(name string) (string, bool) {
 			credentialCalls.Add(1)
 			assert.Equal("TEST_KEY", name)
@@ -311,11 +315,11 @@ func TestRunnerValidatesRequestAndOutputSchema(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			assert := assert.New(t)
 			consent := &countingConsent{active: true}
-			transport := &countingTransport{response: peoplesweep.StructuredResponse{
-				Output: json.RawMessage(test.output),
+			transport := &countingTransport{response: peoplesweep.DriverResponse{
+				CandidateJSON: json.RawMessage(test.output),
 			}}
 			runner, err := peoplesweep.NewRunner(
-				runnerTestConfig(), consent, transport,
+				runnerTestConfig(), consent, testDriverRegistry(transport),
 				lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 			)
 			require.NoError(t, err)
@@ -360,7 +364,7 @@ func TestRunnerRejectsStructuredRequestBounds(t *testing.T) {
 			consent := &countingConsent{active: true}
 			transport := &countingTransport{}
 			runner, err := peoplesweep.NewRunner(
-				runnerTestConfig(), consent, transport,
+				runnerTestConfig(), consent, testDriverRegistry(transport),
 				lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 			)
 			require.NoError(t, err)
@@ -376,11 +380,11 @@ func TestRunnerRejectsStructuredRequestBounds(t *testing.T) {
 func TestRunnerCheckUsesOnlyFixedSyntheticInput(t *testing.T) {
 	assert := assert.New(t)
 	consent := &countingConsent{unverified: true}
-	transport := &countingTransport{response: peoplesweep.StructuredResponse{
-		Output: json.RawMessage(`{"ok":true}`),
+	transport := &countingTransport{response: peoplesweep.DriverResponse{
+		CandidateJSON: json.RawMessage(`{"ok":true}`),
 	}}
 	runner, err := peoplesweep.NewRunner(
-		runnerTestConfig(), consent, transport,
+		runnerTestConfig(), consent, testDriverRegistry(transport),
 		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 	)
 	require.NoError(t, err)
@@ -404,11 +408,11 @@ func TestRunnerCheckUsesOnlyFixedSyntheticInput(t *testing.T) {
 }
 
 func TestRunnerCheckRejectsSchemaInvalidProviderOutput(t *testing.T) {
-	transport := &countingTransport{response: peoplesweep.StructuredResponse{
-		Output: json.RawMessage(`{"ok":false}`),
+	transport := &countingTransport{response: peoplesweep.DriverResponse{
+		CandidateJSON: json.RawMessage(`{"ok":false}`),
 	}}
 	runner, err := peoplesweep.NewRunner(
-		runnerTestConfig(), &countingConsent{active: true}, transport,
+		runnerTestConfig(), &countingConsent{active: true}, testDriverRegistry(transport),
 		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 	)
 	require.NoError(t, err)
@@ -419,42 +423,42 @@ func TestRunnerCheckRejectsSchemaInvalidProviderOutput(t *testing.T) {
 
 type blockingTransport struct{}
 
-func (blockingTransport) PrepareJSON(
+func (blockingTransport) Prepare(
 	_ peoplesweep.ProviderProfile,
 	request peoplesweep.StructuredRequest,
 ) (peoplesweep.PreparedStructuredRequest, error) {
 	return peoplesweep.NewPreparedStructuredRequest(request, []byte(`{"prepared":true}`))
 }
 
-func (blockingTransport) GeneratePreparedJSON(
+func (blockingTransport) GeneratePrepared(
 	ctx context.Context,
 	_ peoplesweep.ProviderProfile,
-	_ string,
+	_ peoplesweep.Credential,
 	_ peoplesweep.PreparedStructuredRequest,
-) (peoplesweep.StructuredResponse, error) {
+) (peoplesweep.DriverResponse, error) {
 	<-ctx.Done()
-	return peoplesweep.StructuredResponse{}, ctx.Err()
+	return peoplesweep.DriverResponse{}, ctx.Err()
 }
 
 func TestStructuredResponseCarriesAuthoritativeVersions(t *testing.T) {
 	for _, test := range []struct {
 		name     string
-		response peoplesweep.StructuredResponse
+		response peoplesweep.DriverResponse
 		want     string
 	}{
-		{"preserves versions", peoplesweep.StructuredResponse{Output: json.RawMessage(`{"ok":true}`), ProviderVersion: "provider-v1", ModelVersion: "model-v1"}, ""},
-		{"missing provider version", peoplesweep.StructuredResponse{Output: json.RawMessage(`{"ok":true}`), ModelVersion: "model-v1"}, "version metadata"},
-		{"missing model version", peoplesweep.StructuredResponse{Output: json.RawMessage(`{"ok":true}`), ProviderVersion: "provider-v1"}, "version metadata"},
-		{"unsafe model version", peoplesweep.StructuredResponse{Output: json.RawMessage(`{"ok":true}`), ProviderVersion: "provider-v1", ModelVersion: "model\nversion"}, "version metadata"},
-		{"provider version with spaces", peoplesweep.StructuredResponse{Output: json.RawMessage(`{"ok":true}`), ProviderVersion: "provider claim", ModelVersion: "model-v1"}, "version metadata"},
-		{"oversized model version", peoplesweep.StructuredResponse{Output: json.RawMessage(`{"ok":true}`), ProviderVersion: "provider-v1", ModelVersion: strings.Repeat("m", 129)}, "version metadata"},
+		{"preserves versions", peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`), ProviderVersion: "provider-v1", ModelVersion: "model-v1"}, ""},
+		{"missing provider version", peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`), ModelVersion: "model-v1"}, "version metadata"},
+		{"missing model version", peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`), ProviderVersion: "provider-v1"}, "version metadata"},
+		{"unsafe model version", peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`), ProviderVersion: "provider-v1", ModelVersion: "model\nversion"}, "version metadata"},
+		{"provider version with spaces", peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`), ProviderVersion: "provider claim", ModelVersion: "model-v1"}, "version metadata"},
+		{"oversized model version", peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`), ProviderVersion: "provider-v1", ModelVersion: strings.Repeat("m", 129)}, "version metadata"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			checks := assert.New(t)
 			requirements := require.New(t)
 			transport := &countingTransport{response: test.response, preserveVersions: true}
 			runner, err := peoplesweep.NewRunner(
-				runnerTestConfig(), &countingConsent{active: true}, transport,
+				runnerTestConfig(), &countingConsent{active: true}, testDriverRegistry(transport),
 				lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 			)
 			requirements.NoError(err)
@@ -490,12 +494,12 @@ func TestPreparedStructuredRequestUsesExactSentBytes(t *testing.T) {
 func TestRunnerRejectsForgedPreparedRequestWire(t *testing.T) {
 	checks := assert.New(t)
 	requirements := require.New(t)
-	transport := &countingTransport{response: peoplesweep.StructuredResponse{
-		Output: json.RawMessage(`{"ok":true}`),
+	transport := &countingTransport{response: peoplesweep.DriverResponse{
+		CandidateJSON: json.RawMessage(`{"ok":true}`),
 	}}
 	consent := &countingConsent{active: true}
 	runner, err := peoplesweep.NewRunner(
-		runnerTestConfig(), consent, transport,
+		runnerTestConfig(), consent, testDriverRegistry(transport),
 		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 	)
 	requirements.NoError(err)
@@ -513,12 +517,12 @@ func TestRunnerRejectsForgedPreparedRequestWire(t *testing.T) {
 func TestRunnerDoesNotTreatCallerProviderCheckAsSynthetic(t *testing.T) {
 	checks := assert.New(t)
 	requirements := require.New(t)
-	transport := &countingTransport{response: peoplesweep.StructuredResponse{
-		Output: json.RawMessage(`{"ok":true}`),
+	transport := &countingTransport{response: peoplesweep.DriverResponse{
+		CandidateJSON: json.RawMessage(`{"ok":true}`),
 	}}
 	consent := &countingConsent{active: true}
 	runner, err := peoplesweep.NewRunner(
-		runnerTestConfig(), consent, transport,
+		runnerTestConfig(), consent, testDriverRegistry(transport),
 		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 	)
 	requirements.NoError(err)
@@ -542,7 +546,7 @@ func TestRunnerAppliesConfiguredRequestTimeout(t *testing.T) {
 		provider.RequestTimeout = 20 * time.Millisecond
 	})
 	runner, err := peoplesweep.NewRunner(
-		config, &countingConsent{active: true}, blockingTransport{},
+		config, &countingConsent{active: true}, testDriverRegistry(blockingTransport{}),
 		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 	)
 	require.NoError(t, err)
@@ -568,11 +572,11 @@ func TestRunnerPreservesOnlyCompletedInvalidOutputMetadata(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			transport := &countingTransport{err: test.transportErr,
-				response: peoplesweep.StructuredResponse{Usage: peoplesweep.TokenUsage{
+				response: peoplesweep.DriverResponse{Usage: peoplesweep.TokenUsage{
 					InputTokens: 321, OutputTokens: 45,
 				}}}
 			runner, err := peoplesweep.NewRunner(
-				runnerTestConfig(), &countingConsent{active: true}, transport,
+				runnerTestConfig(), &countingConsent{active: true}, testDriverRegistry(transport),
 				lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 			)
 			require.NoError(t, err)
@@ -589,7 +593,7 @@ func TestRunnerReturnsConsentCheckFailureWithoutCredentialLookup(t *testing.T) {
 	consent := &countingConsent{err: consentErr}
 	var credentialCalls atomic.Int64
 	runner, err := peoplesweep.NewRunner(
-		runnerTestConfig(), consent, &countingTransport{},
+		runnerTestConfig(), consent, testDriverRegistry(&countingTransport{}),
 		lookupCredentialResolver(func(string) (string, bool) {
 			credentialCalls.Add(1)
 			return "test-key", true
@@ -607,7 +611,7 @@ func TestRunnerReturnsVerificationCheckFailureBeforeConsentOrCredential(t *testi
 	authority := &countingConsent{verificationErr: verificationErr}
 	var credentialCalls atomic.Int64
 	runner, err := peoplesweep.NewRunner(
-		runnerTestConfig(), authority, &countingTransport{},
+		runnerTestConfig(), authority, testDriverRegistry(&countingTransport{}),
 		lookupCredentialResolver(func(string) (string, bool) {
 			credentialCalls.Add(1)
 			return "test-key", true

@@ -520,23 +520,24 @@ func unreleasedCodexCommandDeps(
 	t.Helper()
 	deps := localPersonProviderDeps(config, st, nil)
 	deps.newChecker = func(config peoplesweep.Config, st personProviderStore) (personProviderChecker, error) {
-		transport, err := peoplesweep.NewStructuredTransport(
-			configuredPersonProvider(config), nil, starter, peoplesweep.NewReleasedCodexIsolationGate(),
-		)
+		registry, err := peoplesweep.NewDriverRegistry(nil, starter, peoplesweep.NewReleasedCodexIsolationGate())
 		if err != nil {
 			return nil, err
 		}
-		return peoplesweep.NewRunner(config, st, transport,
+		return peoplesweep.NewRunner(config, st, registry,
 			peoplesweep.NewCredentialResolver(nil, os.LookupEnv))
 	}
 	deps.newCodexClient = func(config peoplesweep.Config) (personProviderCodexClient, error) {
-		transport, err := peoplesweep.NewStructuredTransport(
-			configuredPersonProvider(config), nil, starter, peoplesweep.NewReleasedCodexIsolationGate(),
-		)
+		provider := configuredPersonProvider(config)
+		registry, err := peoplesweep.NewDriverRegistry(nil, starter, peoplesweep.NewReleasedCodexIsolationGate())
 		if err != nil {
 			return nil, err
 		}
-		codex, ok := transport.(*peoplesweep.CodexAppServerTransport)
+		driver, err := registry.Driver(provider.Protocol, provider)
+		if err != nil {
+			return nil, err
+		}
+		codex, ok := driver.(*peoplesweep.CodexAppServerDriver)
 		if !ok {
 			return nil, errors.New("expected Codex transport")
 		}
@@ -555,7 +556,7 @@ func TestCodexUnreleasedOperationsLaunchNothing(t *testing.T) {
 	st := testutil.NewSQLiteTestStore(t)
 	starter := &unreleasedOperationStarter{}
 	deps := unreleasedCodexCommandDeps(t, config, st, starter)
-	transport, err := peoplesweep.NewCodexAppServerTransport(
+	transport, err := peoplesweep.NewCodexAppServerDriver(
 		configuredPersonProvider(config), starter, peoplesweep.NewReleasedCodexIsolationGate(),
 	)
 	must.NoError(err)
@@ -568,7 +569,7 @@ func TestCodexUnreleasedOperationsLaunchNothing(t *testing.T) {
 		JSONSchema:      json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		MaxOutputTokens: 16,
 	}
-	prepared, err := transport.PrepareJSON(profile, request)
+	prepared, err := transport.Prepare(profile, request)
 	must.NoError(err)
 
 	operations := []struct {
@@ -577,7 +578,7 @@ func TestCodexUnreleasedOperationsLaunchNothing(t *testing.T) {
 		run         func() error
 	}{
 		{name: "generation", processable: true, run: func() error {
-			_, callErr := transport.GeneratePreparedJSON(t.Context(), profile, "", prepared)
+			_, callErr := transport.GeneratePrepared(t.Context(), profile, peoplesweep.Credential{}, prepared)
 			return callErr
 		}},
 		{name: "login", processable: true, run: func() error {
@@ -821,7 +822,7 @@ func codexCommandDeps(
 		return nil, func() {}, errors.New("archive store must not be opened")
 	}
 	deps.newCodexClient = func(config peoplesweep.Config) (personProviderCodexClient, error) {
-		return peoplesweep.NewCodexAppServerTransport(
+		return peoplesweep.NewCodexAppServerDriver(
 			configuredPersonProvider(config), starter, commandCodexGate{},
 		)
 	}

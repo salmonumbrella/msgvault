@@ -397,9 +397,9 @@ func TestCodexFactoryFailsBeforeStartingProcess(t *testing.T) {
 	})
 	starter := &isolationCountingStarter{}
 
-	transport, err := NewStructuredTransport(
-		codexIsolationTransportConfig(executable), nil, starter, NewReleasedCodexIsolationGate(),
-	)
+	registry, err := NewDriverRegistry(nil, starter, NewReleasedCodexIsolationGate())
+	require.NoError(t, err)
+	transport, err := registry.Driver(ProtocolCodexAppServer, codexIsolationTransportConfig(executable))
 	require.ErrorIs(t, err, ErrCodexIsolationUnreleased)
 	assert.Nil(t, transport)
 	assert.Zero(t, starter.starts.Load())
@@ -417,7 +417,7 @@ func TestCodexReverifyRejectsExecutableReplacement(t *testing.T) {
 		bytes: []byte("#!/bin/sh\nprintf 'replacement 0.149.0\\n'\n"),
 	}
 	starter := &isolationCountingStarter{}
-	transport, err := NewCodexAppServerTransport(
+	transport, err := NewCodexAppServerDriver(
 		codexIsolationTransportConfig(executable), starter, gate,
 	)
 	must.NoError(err)
@@ -431,9 +431,9 @@ func TestCodexReverifyRejectsExecutableReplacement(t *testing.T) {
 		JSONSchema:      []byte(`{"type":"object","properties":{},"additionalProperties":false}`),
 		MaxOutputTokens: 16,
 	}
-	prepared, err := transport.PrepareJSON(profile, request)
+	prepared, err := transport.Prepare(profile, request)
 	must.NoError(err)
-	_, err = transport.GeneratePreparedJSON(t.Context(), profile, "", prepared)
+	_, err = transport.GeneratePrepared(t.Context(), profile, Credential{}, prepared)
 	must.ErrorIs(err, ErrCodexIsolationUnreleased)
 	assert.Zero(t, starter.starts.Load(), "replacement must fail at reverify before Start")
 }

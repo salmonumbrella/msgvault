@@ -39,10 +39,14 @@ func (s *inProcessPersonProviderDaemonStore) RunCLICommand(
 		config peoplesweep.Config,
 		consent personProviderStore,
 	) (personProviderChecker, error) {
+		registry, err := peoplesweep.NewDriverRegistry(s.httpClient, nil, nil)
+		if err != nil {
+			return nil, err
+		}
 		return peoplesweep.NewRunner(
 			config,
 			consent,
-			peoplesweep.NewOpenAICompatibleTransport(s.httpClient),
+			registry,
 			peoplesweep.NewCredentialResolver(nil, func(name string) (string, bool) {
 				value, ok := req.Env[name]
 				return value, ok

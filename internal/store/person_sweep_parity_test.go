@@ -399,6 +399,13 @@ func newProductionPersonSweepParityFixture(t *testing.T) *personSweepParityFixtu
 	require.NoError(t, err)
 	_, err = f.store.EnsurePersonInferenceProfile(t.Context(), f.profile)
 	require.NoError(t, err)
+	require.NoError(t, f.store.RecordPersonInferenceCheck(t.Context(), store.PersonInferenceCheck{
+		ProfileFingerprint: f.profile.Fingerprint,
+		CheckedAt:          f.now,
+		DriverVersion:      f.profile.DriverVersion,
+		OutputMode:         f.profile.OutputMode,
+		ModelVersion:       "parity-reported-model",
+	}))
 	_, _, err = f.store.GrantPersonInferenceConsent(t.Context(), f.profile.Fingerprint, "parity")
 	require.NoError(t, err)
 	f.catalog, err = f.store.BuildPersonFactCatalogContext(t.Context(), false)
@@ -445,8 +452,10 @@ func newProductionPersonSweepParityFixture(t *testing.T) *personSweepParityFixtu
 	require.NoError(t, err)
 	httpClient := f.server.Client()
 	httpClient.Transport = parityRewriteTransport{base: httpClient.Transport, target: targetURL}
+	registry, err := peoplesweep.NewDriverRegistry(httpClient, nil, nil)
+	require.NoError(t, err)
 	runner, err := peoplesweep.NewRunner(f.config, f.store,
-		peoplesweep.NewOpenAICompatibleTransport(httpClient),
+		registry,
 		peoplesweep.NewCredentialResolver(nil, func(name string) (string, bool) {
 			assert.Equal(t, "PARITY_SYNTHETIC_KEY", name)
 			return "synthetic-parity-key", true

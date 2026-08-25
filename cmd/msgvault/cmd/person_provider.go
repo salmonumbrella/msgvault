@@ -125,12 +125,7 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 			return openWritableStoreAndInit()
 		},
 		newChecker: func(config peoplesweep.Config, st personProviderStore) (personProviderChecker, error) {
-			_, provider, err := config.ActiveProviderConfig()
-			if err != nil {
-				return nil, err
-			}
-			transport, err := peoplesweep.NewStructuredTransport(
-				provider,
+			registry, err := peoplesweep.NewDriverRegistry(
 				http.DefaultClient,
 				peoplesweep.NewCodexCommandStarter(),
 				peoplesweep.NewReleasedCodexIsolationGate(),
@@ -145,7 +140,7 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 			return peoplesweep.NewRunner(
 				config,
 				st,
-				transport,
+				registry,
 				peoplesweep.NewCredentialResolver(credentialStore, os.LookupEnv),
 			)
 		},
@@ -154,8 +149,7 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 			if err != nil {
 				return nil, err
 			}
-			transport, err := peoplesweep.NewStructuredTransport(
-				provider,
+			registry, err := peoplesweep.NewDriverRegistry(
 				http.DefaultClient,
 				peoplesweep.NewCodexCommandStarter(),
 				peoplesweep.NewReleasedCodexIsolationGate(),
@@ -163,7 +157,11 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 			if err != nil {
 				return nil, err
 			}
-			codex, ok := transport.(*peoplesweep.CodexAppServerTransport)
+			driver, err := registry.Driver(provider.Protocol, provider)
+			if err != nil {
+				return nil, err
+			}
+			codex, ok := driver.(*peoplesweep.CodexAppServerDriver)
 			if !ok {
 				return nil, errors.New("people inference provider is not codex_app_server")
 			}

@@ -50,12 +50,8 @@ func newProductionPersonSweepWorker(
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	_, provider, err := config.ActiveProviderConfig()
-	if err != nil {
-		return nil, err
-	}
-	transport, err := peoplesweep.NewStructuredTransport(
-		provider, http.DefaultClient,
+	registry, err := peoplesweep.NewDriverRegistry(
+		http.DefaultClient,
 		peoplesweep.NewCodexCommandStarter(), peoplesweep.NewReleasedCodexIsolationGate(),
 	)
 	if err != nil {
@@ -64,7 +60,7 @@ func newProductionPersonSweepWorker(
 	credentials := peoplesweep.NewCredentialResolver(
 		peoplesweep.NewFileCredentialStore(tokensDir), lookup,
 	)
-	runner, err := peoplesweep.NewRunner(config, st, transport, credentials)
+	runner, err := peoplesweep.NewRunner(config, st, registry, credentials)
 	if err != nil {
 		return nil, err
 	}
