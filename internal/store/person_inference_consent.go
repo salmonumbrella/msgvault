@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -35,6 +36,25 @@ type PersonInferenceConsentStatus struct {
 
 const personInferenceConsentColumns = `
 	id, profile_fingerprint, granted_by, granted_at, revoked_by, revoked_at`
+
+type legacyPersonInferencePolicy struct {
+	Kind                  string                    `json:"kind"`
+	Endpoint              string                    `json:"endpoint"`
+	Model                 string                    `json:"model"`
+	APIKeyEnv             string                    `json:"api_key_env"`
+	AllowAnonymous        bool                      `json:"allow_anonymous"`
+	RetentionPosture      string                    `json:"retention_posture"`
+	TrainingPosture       string                    `json:"training_posture"`
+	AllowedSources        []peoplesweep.SourceClass `json:"allowed_sources"`
+	SourceSince           string                    `json:"source_since"`
+	SourceUntil           string                    `json:"source_until"`
+	AllowSensitive        bool                      `json:"allow_sensitive"`
+	ReasoningEffort       string                    `json:"reasoning_effort"`
+	ExecutionBoundary     string                    `json:"execution_boundary"`
+	PacketRendererPolicy  string                    `json:"packet_renderer_policy"`
+	ProgramFingerprint    string                    `json:"program_fingerprint"`
+	DisclosedPacketFields []string                  `json:"disclosed_packet_fields"`
+}
 
 // EnsurePersonInferenceProfile persists one immutable canonical policy or
 // verifies the already-stored row has the same content.
@@ -384,16 +404,23 @@ func scanPersonInferenceProfile(row scanner) (peoplesweep.ProviderProfile, error
 	if err := json.Unmarshal([]byte(allowedSources), &storedSources); err != nil {
 		return peoplesweep.ProviderProfile{}, fmt.Errorf("decode allowed sources: %w", err)
 	}
-	var profile peoplesweep.ProviderProfile
-	if err := json.Unmarshal([]byte(policyJSON), &profile); err != nil {
-		return peoplesweep.ProviderProfile{}, fmt.Errorf("decode people inference policy: %w", err)
-	}
-	profile.Fingerprint = fingerprint
-	profile.PolicyJSON = json.RawMessage(policyJSON)
 	storedUntil := ""
 	if sourceUntil.Valid {
 		storedUntil = sourceUntil.String
 	}
+	var profile peoplesweep.ProviderProfile
+	if err := json.Unmarshal([]byte(policyJSON), &profile); err != nil {
+		return peoplesweep.ProviderProfile{}, fmt.Errorf("decode people inference policy: %w", err)
+	}
+	if profile.Protocol == "" {
+		return scanLegacyPersonInferenceProfile(
+			fingerprint, protocol, endpoint, model, credentialRef, allowAnonymous,
+			retention, training, storedSources, sourceSince, storedUntil, sensitive,
+			policyJSON,
+		)
+	}
+	profile.Fingerprint = fingerprint
+	profile.PolicyJSON = json.RawMessage(policyJSON)
 	if string(profile.Protocol) != protocol || profile.Endpoint != endpoint || profile.Model != model ||
 		profile.CredentialRef != credentialRef || (profile.Auth == peoplesweep.AuthNone) != allowAnonymous ||
 		profile.RetentionPosture != retention || profile.TrainingPosture != training ||
@@ -436,6 +463,94 @@ func scanPersonInferenceProfile(row scanner) (peoplesweep.ProviderProfile, error
 		return peoplesweep.ProviderProfile{}, err
 	}
 	return canonical, nil
+}
+
+func scanLegacyPersonInferenceProfile(
+	fingerprint, kind, endpoint, model, apiKeyEnv string,
+	allowAnonymous bool,
+	retention, training string,
+	storedSources []peoplesweep.SourceClass,
+	sourceSince, sourceUntil string,
+	allowSensitive bool,
+	policyJSON string,
+) (peoplesweep.ProviderProfile, error) {
+	var legacy legacyPersonInferencePolicy
+	if err := json.Unmarshal([]byte(policyJSON), &legacy); err != nil {
+		return peoplesweep.ProviderProfile{}, fmt.Errorf("decode legacy people inference policy: %w", err)
+	}
+	canonicalPolicy, err := json.Marshal(legacy)
+	if err != nil {
+		return peoplesweep.ProviderProfile{}, fmt.Errorf("encode legacy people inference policy: %w", err)
+	}
+	digest := sha256.Sum256(canonicalPolicy)
+	if fingerprint != fmt.Sprintf("%x", digest) || !equalJSON([]byte(policyJSON), canonicalPolicy) ||
+		legacy.Kind != kind || legacy.Endpoint != endpoint || legacy.Model != model ||
+		legacy.APIKeyEnv != apiKeyEnv || legacy.AllowAnonymous != allowAnonymous ||
+		legacy.RetentionPosture != retention || legacy.TrainingPosture != training ||
+		!slices.Equal(legacy.AllowedSources, storedSources) || legacy.SourceSince != sourceSince ||
+		legacy.SourceUntil != sourceUntil || legacy.AllowSensitive != allowSensitive {
+		return peoplesweep.ProviderProfile{}, errors.New(
+			"stored people inference profile does not match its immutable policy")
+	}
+
+	profile := peoplesweep.ProviderProfile{
+		Fingerprint: fingerprint, Endpoint: legacy.Endpoint, Model: legacy.Model,
+		CredentialRef: legacy.APIKeyEnv, OutputMode: peoplesweep.OutputModeNativeJSONSchema,
+		ReasoningEffort: legacy.ReasoningEffort, RetentionPosture: legacy.RetentionPosture,
+		TrainingPosture: legacy.TrainingPosture, AllowedSources: slices.Clone(legacy.AllowedSources),
+		SourceSince: legacy.SourceSince, SourceUntil: legacy.SourceUntil,
+		AllowSensitive: legacy.AllowSensitive, ExecutionBoundary: legacy.ExecutionBoundary,
+		PacketRendererPolicy:  legacy.PacketRendererPolicy,
+		ProgramFingerprint:    legacy.ProgramFingerprint,
+		DisclosedPacketFields: slices.Clone(legacy.DisclosedPacketFields),
+		PolicyJSON:            canonicalPolicy,
+	}
+	providerName := "legacy"
+	switch legacy.Kind {
+	case peoplesweep.ProviderOpenAICompatible:
+		profile.Protocol = peoplesweep.ProtocolOpenAIChat
+		profile.TokenLimitParameter = "max_completion_tokens"
+		if legacy.AllowAnonymous {
+			profile.Auth = peoplesweep.AuthNone
+			profile.Credential = peoplesweep.CredentialNone
+			profile.CredentialRef = ""
+		} else {
+			profile.Auth = peoplesweep.AuthBearer
+			profile.Credential = peoplesweep.CredentialEnv
+		}
+	case peoplesweep.ProviderCodexAppServer:
+		profile.Protocol = peoplesweep.ProtocolCodexAppServer
+		profile.Auth = peoplesweep.AuthNone
+		profile.Credential = peoplesweep.CredentialNone
+		profile.CredentialRef = ""
+	default:
+		return peoplesweep.ProviderProfile{}, fmt.Errorf(
+			"unsupported legacy people inference provider kind %q", legacy.Kind)
+	}
+	provider := peoplesweep.ProviderConfig{
+		Protocol: profile.Protocol, Endpoint: profile.Endpoint, Model: profile.Model,
+		Auth: profile.Auth, Credential: profile.Credential, CredentialEnv: profile.CredentialRef,
+		OutputMode: profile.OutputMode, TokenLimitParameter: profile.TokenLimitParameter,
+		ReasoningEffort: profile.ReasoningEffort, RetentionPosture: profile.RetentionPosture,
+		TrainingPosture: profile.TrainingPosture, AllowedSources: slices.Clone(profile.AllowedSources),
+		SourceSince: profile.SourceSince, SourceUntil: profile.SourceUntil,
+		AllowSensitive: profile.AllowSensitive, ExecutionBoundary: profile.ExecutionBoundary,
+		RequestTimeout: time.Second,
+	}
+	config := peoplesweep.Config{
+		Enabled: true, Provider: peoplesweep.ProviderSelection{Name: providerName},
+		Providers: map[string]peoplesweep.ProviderConfig{providerName: provider},
+	}
+	config.ApplyDefaults()
+	if err := config.Validate(); err != nil {
+		return peoplesweep.ProviderProfile{}, err
+	}
+	if legacy.Kind == peoplesweep.ProviderOpenAICompatible &&
+		(legacy.ReasoningEffort != "" || legacy.ExecutionBoundary != "") {
+		return peoplesweep.ProviderProfile{}, errors.New(
+			"legacy openai_compatible policy contains Codex-only fields")
+	}
+	return profile, nil
 }
 
 func validatePersonInferenceConsentInput(fingerprint, actor string) (string, error) {
