@@ -1,3 +1,5 @@
+agent = "codex"
+model = "gpt-5.6-terra"
 display_name = "msgvault"
 
 review_guidelines = """
