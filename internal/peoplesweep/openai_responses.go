@@ -160,12 +160,15 @@ func (d *OpenAIResponsesDriver) GeneratePrepared(
 
 	var candidate string
 	for _, item := range envelope.Output {
-		if item.Type != "message" {
-			continue
-		}
 		for _, block := range item.Content {
-			if block.Type != "output_text" || strings.TrimSpace(block.Text) == "" {
+			if block.Type != "output_text" {
 				continue
+			}
+			if item.Type != "message" {
+				return result, errors.Join(ErrInvalidStructuredOutput, errors.New("provider response has output text outside a message"))
+			}
+			if strings.TrimSpace(block.Text) == "" {
+				return result, errors.Join(ErrInvalidStructuredOutput, errors.New("provider response has empty structured content"))
 			}
 			if candidate != "" {
 				return result, errors.Join(ErrInvalidStructuredOutput, errors.New("provider response has multiple structured content candidates"))

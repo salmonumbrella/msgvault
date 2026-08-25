@@ -113,8 +113,8 @@ func TestOpenAIResponsesTraversesOutputItemsAndBlocks(t *testing.T) {
 		_, err := io.WriteString(w, `{
 			"id":"resp_123","model":"gpt-test-build",
 			"output":[
-				{"type":"reasoning","summary":[],"content":[{"type":"output_text","text":"{\"ok\":false}"}]},
-				{"type":"message","content":[{"type":"output_text","text":"  "}]},
+				{"type":"reasoning","summary":[]},
+				{"type":"message","content":[{"type":"refusal","refusal":"not applicable"}]},
 				{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"}]}
 			],
 			"usage":{"input_tokens":17,"output_tokens":5,"total_tokens":22}
@@ -134,6 +134,57 @@ func TestOpenAIResponsesTraversesOutputItemsAndBlocks(t *testing.T) {
 	assert.Equal(t, peoplesweep.TokenUsage{InputTokens: 17, OutputTokens: 5}, response.Usage)
 }
 
+func TestOpenAIResponsesRejectsMisplacedOrBlankOutputText(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{
+			name:   "misplaced alone",
+			output: `{"type":"reasoning","content":[{"type":"output_text","text":"{\"ok\":false}"}]}`,
+		},
+		{
+			name: "misplaced alongside valid",
+			output: `{"type":"reasoning","content":[{"type":"output_text","text":"{\"ok\":false}"}]},` +
+				`{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"}]}`,
+		},
+		{
+			name:   "empty alone",
+			output: `{"type":"message","content":[{"type":"output_text","text":""}]}`,
+		},
+		{
+			name: "empty alongside valid",
+			output: `{"type":"message","content":[{"type":"output_text","text":""},` +
+				`{"type":"output_text","text":"{\"ok\":true}"}]}`,
+		},
+		{
+			name:   "whitespace alone",
+			output: `{"type":"message","content":[{"type":"output_text","text":" \n\t "}]}`,
+		},
+		{
+			name: "whitespace alongside valid",
+			output: `{"type":"message","content":[{"type":"output_text","text":" \n\t "},` +
+				`{"type":"output_text","text":"{\"ok\":true}"}]}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, err := io.WriteString(w,
+					`{"model":"gpt-test-build","output":[`+test.output+`],"secret":"provider-secret-body"}`)
+				assert.NoError(t, err)
+			}))
+			defer server.Close()
+
+			_, err := generateOpenAIResponses(t, server,
+				responsesTestProfile(t, server.URL+"/v1", peoplesweep.OutputModeNativeJSONSchema, ""))
+			require.ErrorIs(t, err, peoplesweep.ErrInvalidStructuredOutput)
+			assert.NotContains(t, err.Error(), "provider-secret-body")
+			assert.NotContains(t, err.Error(), "test-key")
+		})
+	}
+}
+
 func TestOpenAIResponsesRequiresExactlyOneNonEmptyOutputText(t *testing.T) {
 	tests := []struct {
 		name string
@@ -141,7 +192,6 @@ func TestOpenAIResponsesRequiresExactlyOneNonEmptyOutputText(t *testing.T) {
 	}{
 		{"missing output", `{"model":"gpt-test-build"}`},
 		{"refusal only", `{"model":"gpt-test-build","output":[{"type":"message","content":[{"type":"refusal","refusal":"provider-secret-body"}]}]}`},
-		{"empty output text", `{"model":"gpt-test-build","output":[{"type":"message","content":[{"type":"output_text","text":" \n "}]}],"secret":"provider-secret-body"}`},
 		{"conflicting output text", `{"model":"gpt-test-build","output":[{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"}]},{"type":"message","content":[{"type":"output_text","text":"{\"ok\":false}"}]}],"secret":"provider-secret-body"}`},
 		{"duplicate output text", `{"model":"gpt-test-build","output":[{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"},{"type":"output_text","text":"{\"ok\":true}"}]}]}`},
 		{"invalid output JSON", `{"model":"gpt-test-build","output":[{"type":"message","content":[{"type":"output_text","text":"provider-secret-body"}]}]}`},
