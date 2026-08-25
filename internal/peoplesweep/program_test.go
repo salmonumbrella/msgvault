@@ -19,6 +19,10 @@ func (extractionConsent) HasActivePersonInferenceConsent(context.Context, string
 	return true, nil
 }
 
+func (extractionConsent) HasSuccessfulPersonInferenceCheck(context.Context, string) (bool, error) {
+	return true, nil
+}
+
 type extractionTransport struct{ output json.RawMessage }
 
 func (t extractionTransport) PrepareJSON(_ ProviderProfile, request StructuredRequest) (PreparedStructuredRequest, error) {

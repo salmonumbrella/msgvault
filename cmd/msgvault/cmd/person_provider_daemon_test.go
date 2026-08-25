@@ -149,9 +149,15 @@ func TestPersonProviderRealDaemonSyntheticCheckAndRevoke(t *testing.T) {
 
 	_, err = executePersonProviderCommand(t, deps, "revoke", "--json")
 	require.NoError(err)
-	_, err = executePersonProviderCommand(t, deps, "check", "--json")
-	require.ErrorContains(err, "active exact consent")
-	assert.Equal(int64(1), requestCount.Load(), "revoked check must not reach the provider")
+	output, err = executePersonProviderCommand(t, deps, "check", "--json")
+	require.NoError(err)
+	assert.JSONEq(`{
+		"ok":true,
+		"provider_request_id":"req-daemon",
+		"model":"test-model",
+		"usage":{"input_tokens":9,"output_tokens":2}
+	}`, output)
+	assert.Equal(int64(2), requestCount.Load(), "synthetic checks bypass archive consent")
 }
 
 func mustJSON(t *testing.T, value any) []byte {

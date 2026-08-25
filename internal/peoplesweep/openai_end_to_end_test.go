@@ -161,6 +161,13 @@ func newOpenAISweepFixture(
 	require.NoError(t, err)
 	_, err = st.EnsurePersonInferenceProfile(t.Context(), profile)
 	require.NoError(t, err)
+	require.NoError(t, st.RecordPersonInferenceCheck(t.Context(), store.PersonInferenceCheck{
+		ProfileFingerprint: profile.Fingerprint,
+		CheckedAt:          time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC),
+		DriverVersion:      profile.DriverVersion,
+		OutputMode:         profile.OutputMode,
+		ModelVersion:       "model-verified-2026",
+	}))
 	_, _, err = st.GrantPersonInferenceConsent(t.Context(), profile.Fingerprint, "synthetic-test")
 	require.NoError(t, err)
 	// Keep the real catalog path while limiting this provider-boundary fixture

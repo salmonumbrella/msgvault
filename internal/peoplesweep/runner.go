@@ -35,9 +35,10 @@ var syntheticCheckSchema = json.RawMessage(`{
 	"additionalProperties":false
 }`)
 
-// ConsentChecker is the runner's complete store dependency. It cannot read
+// ProviderAuthority is the runner's complete store dependency. It cannot read
 // messages, attachments, or any other archive content.
-type ConsentChecker interface {
+type ProviderAuthority interface {
+	HasSuccessfulPersonInferenceCheck(ctx context.Context, fingerprint string) (bool, error)
 	HasActivePersonInferenceConsent(ctx context.Context, fingerprint string) (bool, error)
 }
 
@@ -48,7 +49,7 @@ type CredentialLookup func(string) (string, bool)
 // policy around one structured transport.
 type Runner struct {
 	config    Config
-	consent   ConsentChecker
+	authority ProviderAuthority
 	transport StructuredTransport
 	resolver  CredentialResolver
 }
@@ -57,12 +58,12 @@ type Runner struct {
 // the network.
 func NewRunner(
 	config Config,
-	consent ConsentChecker,
+	authority ProviderAuthority,
 	transport StructuredTransport,
 	resolver CredentialResolver,
 ) (*Runner, error) {
-	if consent == nil {
-		return nil, errors.New("people inference runner requires a consent checker")
+	if authority == nil {
+		return nil, errors.New("people inference runner requires provider authority")
 	}
 	if transport == nil {
 		return nil, errors.New("people inference runner requires a transport")
@@ -80,7 +81,7 @@ func NewRunner(
 	}
 	config.Providers = providers
 	return &Runner{
-		config: config, consent: consent, transport: transport, resolver: resolver,
+		config: config, authority: authority, transport: transport, resolver: resolver,
 	}, nil
 }
 
@@ -147,8 +148,8 @@ func (r *Runner) prepare(
 	return prepared, nil
 }
 
-// RunPreparedStructured rechecks consent, resolves the credential, and sends
-// only the opaque prepared packet.
+// RunPreparedStructured rechecks exact profile authority, resolves the
+// credential, and sends only the opaque prepared packet.
 func (r *Runner) RunPreparedStructured(
 	ctx context.Context,
 	prepared PreparedStructuredRequest,
@@ -183,17 +184,42 @@ func (r *Runner) runPrepared(
 	if !bytes.Equal(prepared.WireRequest(), expected.WireRequest()) {
 		return StructuredResponse{}, errors.New("prepared structured request does not match deterministic provider encoding")
 	}
-	active, err := r.consent.HasActivePersonInferenceConsent(ctx, profile.Fingerprint)
-	if err != nil {
-		return StructuredResponse{}, fmt.Errorf("check exact people inference consent: %w", err)
-	}
-	if !active {
-		return StructuredResponse{}, fmt.Errorf("%w: people inference requires active exact consent",
-			ErrPersonSweepConsentRevoked)
-	}
 	if err := validateRequestPolicy(request, profile, synthetic); err != nil {
 		return StructuredResponse{}, err
 	}
+	if !synthetic {
+		if err := r.requireVerifiedAndConsented(ctx, profile.Fingerprint); err != nil {
+			return StructuredResponse{}, err
+		}
+	}
+	return r.generateAndValidate(ctx, profile, prepared, resolvedSchema)
+}
+
+func (r *Runner) requireVerifiedAndConsented(ctx context.Context, fingerprint string) error {
+	verified, err := r.authority.HasSuccessfulPersonInferenceCheck(ctx, fingerprint)
+	if err != nil {
+		return fmt.Errorf("check exact people inference provider verification: %w", err)
+	}
+	if !verified {
+		return errors.New("people inference requires a successful check for the exact provider profile")
+	}
+	active, err := r.authority.HasActivePersonInferenceConsent(ctx, fingerprint)
+	if err != nil {
+		return fmt.Errorf("check exact people inference consent: %w", err)
+	}
+	if !active {
+		return fmt.Errorf("%w: people inference requires active exact consent",
+			ErrPersonSweepConsentRevoked)
+	}
+	return nil
+}
+
+func (r *Runner) generateAndValidate(
+	ctx context.Context,
+	profile ProviderProfile,
+	prepared PreparedStructuredRequest,
+	resolvedSchema *jsonschema.Resolved,
+) (StructuredResponse, error) {
 
 	profileName, provider, err := r.config.ActiveProviderConfig()
 	if err != nil {

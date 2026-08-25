@@ -30,6 +30,7 @@ type personProviderStore interface {
 	RevokePersonInferenceConsent(ctx context.Context, fingerprint, actor string) (bool, error)
 	RevokeAllPersonInferenceConsents(ctx context.Context, actor string) (int64, error)
 	GetPersonInferenceConsentStatus(ctx context.Context, fingerprint string) (*store.PersonInferenceConsentStatus, error)
+	HasSuccessfulPersonInferenceCheck(ctx context.Context, fingerprint string) (bool, error)
 	HasActivePersonInferenceConsent(ctx context.Context, fingerprint string) (bool, error)
 	EnsurePersonSemanticEmbeddingProfile(ctx context.Context, profile vector.SemanticPersonEmbeddingProfile) (bool, error)
 	ListPersonSemanticEmbeddingProfiles(ctx context.Context) ([]vector.SemanticPersonEmbeddingProfile, error)

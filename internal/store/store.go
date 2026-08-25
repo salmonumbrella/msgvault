@@ -1136,6 +1136,12 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 			return fmt.Errorf("execute %s: %w", filename, err)
 		}
 	}
+	if err := s.runOnceMigration(
+		ctx, migrationPersonInferenceProviderV2, false,
+		s.migratePersonInferenceProviderV2,
+	); err != nil {
+		return fmt.Errorf("migrate people inference provider profiles: %w", err)
+	}
 	// Legacy databases may hold duplicate (message_id, content_hash)
 	// attachment rows from the old SELECT-then-INSERT UpsertAttachment.
 	// Dedupe before creating the partial unique index that enforces

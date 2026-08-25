@@ -186,6 +186,13 @@ func runEvaluationSensitivePolicy(
 	require.NoError(t, err)
 	_, err = f.Store.EnsurePersonInferenceProfile(t.Context(), profile)
 	require.NoError(t, err)
+	require.NoError(t, f.Store.RecordPersonInferenceCheck(t.Context(), store.PersonInferenceCheck{
+		ProfileFingerprint: profile.Fingerprint,
+		CheckedAt:          time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC),
+		DriverVersion:      profile.DriverVersion,
+		OutputMode:         profile.OutputMode,
+		ModelVersion:       "frozen-sensitive-model-v1",
+	}))
 	runner, err := peoplesweep.NewRunner(config, f.Store,
 		peoplesweep.NewOpenAICompatibleTransport(server.Client()),
 		peoplesweep.NewCredentialResolver(nil, func(name string) (string, bool) {

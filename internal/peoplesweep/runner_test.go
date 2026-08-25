@@ -16,10 +16,13 @@ import (
 )
 
 type countingConsent struct {
-	active bool
-	err    error
-	calls  atomic.Int64
-	order  func(string)
+	active            bool
+	err               error
+	calls             atomic.Int64
+	unverified        bool
+	verificationErr   error
+	verificationCalls atomic.Int64
+	order             func(string)
 }
 
 type credentialResolverFunc func(
@@ -47,6 +50,17 @@ func (c *countingConsent) HasActivePersonInferenceConsent(
 		c.order("consent")
 	}
 	return c.active, c.err
+}
+
+func (c *countingConsent) HasSuccessfulPersonInferenceCheck(
+	_ context.Context,
+	_ string,
+) (bool, error) {
+	c.verificationCalls.Add(1)
+	if c.order != nil {
+		c.order("verification")
+	}
+	return !c.unverified, c.verificationErr
 }
 
 type countingTransport struct {
@@ -104,7 +118,7 @@ func runnerTestConfig() peoplesweep.Config {
 	return config
 }
 
-func TestRunnerCallsConsentCredentialAndTransportInOrder(t *testing.T) {
+func TestRunnerCallsVerificationConsentCredentialAndTransportInOrder(t *testing.T) {
 	assert := assert.New(t)
 	var mu sync.Mutex
 	var order []string
@@ -132,7 +146,8 @@ func TestRunnerCallsConsentCredentialAndTransportInOrder(t *testing.T) {
 	got, err := runner.RunStructured(t.Context(), structuredTestRequest())
 	require.NoError(t, err)
 	assert.JSONEq(`{"ok":true}`, string(got.Output))
-	assert.Equal([]string{"consent", "credential", "transport"}, order)
+	assert.Equal([]string{"verification", "consent", "credential", "transport"}, order)
+	assert.Equal(int64(1), consent.verificationCalls.Load())
 	assert.Equal(int64(1), consent.calls.Load())
 	assert.Equal(int64(1), transport.calls.Load())
 	assert.True(transport.key == credentialCanary, "transport received a different credential")
@@ -145,6 +160,8 @@ func TestRunnerFailsClosedBeforeCredentialOrTransport(t *testing.T) {
 		config         peoplesweep.Config
 		request        peoplesweep.StructuredRequest
 		consented      bool
+		unverified     bool
+		wantVerified   int64
 		wantConsent    int64
 		wantCredential int64
 		want           string
@@ -167,8 +184,12 @@ func TestRunnerFailsClosedBeforeCredentialOrTransport(t *testing.T) {
 			request: baseRequest, consented: true, want: "disabled",
 		},
 		{
+			name: "missing verification", config: runnerTestConfig(), request: baseRequest,
+			unverified: true, wantVerified: 1, want: "successful check",
+		},
+		{
 			name: "missing consent", config: runnerTestConfig(), request: baseRequest,
-			wantConsent: 1, want: "exact consent",
+			wantVerified: 1, wantConsent: 1, want: "exact consent",
 		},
 		{
 			name: "source class", config: runnerTestConfig(), consented: true,
@@ -216,7 +237,7 @@ func TestRunnerFailsClosedBeforeCredentialOrTransport(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			assert := assert.New(t)
-			consent := &countingConsent{active: test.consented}
+			consent := &countingConsent{active: test.consented, unverified: test.unverified}
 			transport := &countingTransport{}
 			var credentialCalls atomic.Int64
 			runner, err := peoplesweep.NewRunner(
@@ -230,6 +251,7 @@ func TestRunnerFailsClosedBeforeCredentialOrTransport(t *testing.T) {
 
 			_, err = runner.RunStructured(t.Context(), test.request)
 			require.ErrorContains(t, err, test.want)
+			assert.Equal(test.wantVerified, consent.verificationCalls.Load())
 			assert.Equal(test.wantConsent, consent.calls.Load())
 			assert.Equal(test.wantCredential, credentialCalls.Load())
 			assert.Zero(transport.calls.Load())
@@ -353,7 +375,7 @@ func TestRunnerRejectsStructuredRequestBounds(t *testing.T) {
 
 func TestRunnerCheckUsesOnlyFixedSyntheticInput(t *testing.T) {
 	assert := assert.New(t)
-	consent := &countingConsent{active: true}
+	consent := &countingConsent{unverified: true}
 	transport := &countingTransport{response: peoplesweep.StructuredResponse{
 		Output: json.RawMessage(`{"ok":true}`),
 	}}
@@ -377,6 +399,8 @@ func TestRunnerCheckUsesOnlyFixedSyntheticInput(t *testing.T) {
 		"required":["ok"],
 		"additionalProperties":false
 	}`, string(transport.request.JSONSchema))
+	assert.Zero(consent.verificationCalls.Load())
+	assert.Zero(consent.calls.Load())
 }
 
 func TestRunnerCheckRejectsSchemaInvalidProviderOutput(t *testing.T) {
@@ -507,7 +531,8 @@ func TestRunnerDoesNotTreatCallerProviderCheckAsSynthetic(t *testing.T) {
 
 	_, err = runner.RunPreparedStructured(t.Context(), prepared)
 	requirements.ErrorContains(err, "source class")
-	checks.Equal(int64(1), consent.calls.Load())
+	checks.Zero(consent.verificationCalls.Load())
+	checks.Zero(consent.calls.Load())
 	checks.Zero(transport.calls.Load())
 }
 
@@ -574,5 +599,25 @@ func TestRunnerReturnsConsentCheckFailureWithoutCredentialLookup(t *testing.T) {
 
 	_, err = runner.RunStructured(t.Context(), structuredTestRequest())
 	require.ErrorIs(t, err, consentErr)
+	assert.Zero(t, credentialCalls.Load())
+}
+
+func TestRunnerReturnsVerificationCheckFailureBeforeConsentOrCredential(t *testing.T) {
+	verificationErr := errors.New("verification store unavailable")
+	authority := &countingConsent{verificationErr: verificationErr}
+	var credentialCalls atomic.Int64
+	runner, err := peoplesweep.NewRunner(
+		runnerTestConfig(), authority, &countingTransport{},
+		lookupCredentialResolver(func(string) (string, bool) {
+			credentialCalls.Add(1)
+			return "test-key", true
+		}),
+	)
+	require.NoError(t, err)
+
+	_, err = runner.RunStructured(t.Context(), structuredTestRequest())
+	require.ErrorIs(t, err, verificationErr)
+	assert.Equal(t, int64(1), authority.verificationCalls.Load())
+	assert.Zero(t, authority.calls.Load())
 	assert.Zero(t, credentialCalls.Load())
 }
