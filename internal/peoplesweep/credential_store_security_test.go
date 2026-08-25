@@ -1,9 +1,10 @@
+//go:build linux || darwin
+
 package peoplesweep
 
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -11,14 +12,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 const credentialSecurityTestValue = "credential-security-test-value"
 
 func TestCredentialStoreSaveUsesPinnedNamespaceAfterPathSwap(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("renaming an open directory is not supported on Windows")
-	}
 	tokensDir := t.TempDir()
 	store := NewFileCredentialStore(tokensDir)
 	require.NoError(t, store.Save("seed", NewCredential(AuthBearer, credentialSecurityTestValue)))
@@ -45,9 +44,6 @@ func TestCredentialStoreSaveUsesPinnedNamespaceAfterPathSwap(t *testing.T) {
 }
 
 func TestCredentialStoreLoadUsesPinnedEntryAfterSwap(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation requires privileges on Windows")
-	}
 	tokensDir := t.TempDir()
 	store := NewFileCredentialStore(tokensDir)
 	require.NoError(t, store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue)))
@@ -73,9 +69,6 @@ func TestCredentialStoreLoadUsesPinnedEntryAfterSwap(t *testing.T) {
 }
 
 func TestCredentialStoreSaveRefusesSwappedCandidate(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation requires privileges on Windows")
-	}
 	tokensDir := t.TempDir()
 	store := NewFileCredentialStore(tokensDir)
 	require.NoError(t, store.Save("seed", NewCredential(AuthBearer, credentialSecurityTestValue)))
@@ -98,10 +91,33 @@ func TestCredentialStoreSaveRefusesSwappedCandidate(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(root, "profile.json"))
 }
 
+func TestCredentialStoreSaveDetectsCandidateSwapAtPublicationBoundary(t *testing.T) {
+	tokensDir := t.TempDir()
+	store := NewFileCredentialStore(tokensDir)
+	require.NoError(t, store.Save("seed", NewCredential(AuthBearer, credentialSecurityTestValue)))
+	root := filepath.Join(tokensDir, "people-providers")
+	external := filepath.Join(t.TempDir(), "must-remain")
+	require.NoError(t, os.WriteFile(external, []byte("unchanged"), 0o600))
+	var retained string
+	store.hooks = &credentialStoreHooks{beforeCandidatePublish: func(candidateName string) {
+		retained = filepath.Join(root, candidateName+".retained")
+		require.NoError(t, os.Rename(filepath.Join(root, candidateName), retained))
+		require.NoError(t, os.Symlink(external, filepath.Join(root, candidateName)))
+	}}
+
+	err := store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue))
+	require.ErrorContains(t, err, "candidate changed")
+	contents, readErr := os.ReadFile(external)
+	require.NoError(t, readErr)
+	assert.Equal(t, "unchanged", string(contents))
+	retainedInfo, statErr := os.Stat(retained)
+	require.NoError(t, statErr)
+	assert.Zero(t, retainedInfo.Size(), "the pinned candidate was not wiped after the publication race")
+	_, loadErr := store.Load("profile")
+	require.Error(t, loadErr)
+}
+
 func TestCredentialStoreDeleteRefusesSwappedEntry(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation requires privileges on Windows")
-	}
 	tokensDir := t.TempDir()
 	store := NewFileCredentialStore(tokensDir)
 	require.NoError(t, store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue)))
@@ -128,10 +144,62 @@ func TestCredentialStoreDeleteRefusesSwappedEntry(t *testing.T) {
 	assert.FileExists(t, original)
 }
 
-func TestCredentialStoreLockReplacementCannotSplitExclusion(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("lock replacement semantics differ on Windows")
+func TestCredentialStoreDeleteDetectsSwapAtRemovalBoundary(t *testing.T) {
+	tokensDir := t.TempDir()
+	store := NewFileCredentialStore(tokensDir)
+	require.NoError(t, store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue)))
+	root := filepath.Join(tokensDir, "people-providers")
+	original := filepath.Join(root, "profile.original")
+	external := filepath.Join(t.TempDir(), "must-remain")
+	require.NoError(t, os.WriteFile(external, []byte("unchanged"), 0o600))
+	store.hooks = &credentialStoreHooks{beforeCredentialRetire: func() {
+		require.NoError(t, os.Rename(filepath.Join(root, "profile.json"), original))
+		require.NoError(t, os.Symlink(external, filepath.Join(root, "profile.json")))
+	}}
+
+	err := store.Delete("profile")
+	require.ErrorContains(t, err, "changed")
+	contents, readErr := os.ReadFile(external)
+	require.NoError(t, readErr)
+	assert.Equal(t, "unchanged", string(contents))
+	originalInfo, statErr := os.Stat(original)
+	require.NoError(t, statErr)
+	assert.Zero(t, originalInfo.Size(), "the pinned credential was not wiped after the deletion race")
+}
+
+func TestCredentialStoreRejectsFIFOWithoutBlocking(t *testing.T) {
+	for _, operation := range []string{"save", "load", "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			tokensDir := t.TempDir()
+			store := NewFileCredentialStore(tokensDir)
+			require.NoError(t, store.Save("seed", NewCredential(AuthBearer, credentialSecurityTestValue)))
+			fifo := filepath.Join(tokensDir, "people-providers", "profile.json")
+			require.NoError(t, unix.Mkfifo(fifo, 0o600))
+
+			result := make(chan error, 1)
+			go func() {
+				switch operation {
+				case "save":
+					result <- store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue))
+				case "load":
+					_, err := store.Load("profile")
+					result <- err
+				case "delete":
+					result <- store.Delete("profile")
+				}
+			}()
+
+			select {
+			case err := <-result:
+				require.ErrorContains(t, err, "not a regular file")
+			case <-time.After(time.Second):
+				assert.Fail(t, "credential operation blocked while inspecting a FIFO")
+			}
+		})
 	}
+}
+
+func TestCredentialStoreLockReplacementCannotSplitExclusion(t *testing.T) {
 	tokensDir := t.TempDir()
 	first := NewFileCredentialStore(tokensDir)
 	require.NoError(t, first.Save("seed", NewCredential(AuthBearer, credentialSecurityTestValue)))
@@ -183,9 +251,6 @@ func TestCredentialStoreLockReplacementCannotSplitExclusion(t *testing.T) {
 }
 
 func TestCredentialStoreSyncsNamespaceParentAfterCreation(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows has no supported directory fsync equivalent")
-	}
 	store := NewFileCredentialStore(t.TempDir())
 	var parentSynced atomic.Bool
 	store.hooks = &credentialStoreHooks{afterNamespaceParentSync: func() {

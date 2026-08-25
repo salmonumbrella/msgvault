@@ -1,4 +1,4 @@
-//go:build aix || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
+//go:build linux || darwin
 
 package peoplesweep
 
@@ -122,7 +122,7 @@ func validateUnixDirectoryFD(fd int, kind string) error {
 
 func ensureUnixCredentialLockMarker(rootFD int) error {
 	fd, err := unix.Openat(rootFD, ".credentials.lock",
-		unix.O_RDWR|unix.O_CLOEXEC|unix.O_CREAT|unix.O_NOFOLLOW, 0o600)
+		unix.O_RDWR|unix.O_CLOEXEC|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
 	if err != nil {
 		return fmt.Errorf("open people provider credential lock relative to pinned directory: %w", err)
 	}
@@ -148,15 +148,17 @@ func (r *unixCredentialStoreRoot) save(profileName string, data []byte) error {
 	var candidateIdentity unix.Stat_t
 	if err := unix.Fstat(int(candidate.Fd()), &candidateIdentity); err != nil {
 		_ = candidate.Close()
-		_ = unix.Unlinkat(r.fd, candidateName, 0)
 		return fmt.Errorf("identify opened people provider credential candidate: %w", err)
 	}
-	published := false
+	committed := false
 	defer func() {
-		_ = candidate.Close()
-		if !published {
-			_ = unix.Unlinkat(r.fd, candidateName, 0)
+		if !committed {
+			// Wipe through the pinned descriptor. The candidate name may now be
+			// attacker-controlled, so cleanup must not unlink it by pathname.
+			_ = candidate.Truncate(0)
+			_ = candidate.Sync()
 		}
+		_ = candidate.Close()
 	}()
 	if r.hooks != nil && r.hooks.afterCandidateOpen != nil {
 		r.hooks.afterCandidateOpen(candidateName)
@@ -167,9 +169,6 @@ func (r *unixCredentialStoreRoot) save(profileName string, data []byte) error {
 	if err := candidate.Sync(); err != nil {
 		return fmt.Errorf("sync pinned people provider credential candidate: %w", err)
 	}
-	if err := candidate.Close(); err != nil {
-		return fmt.Errorf("close pinned people provider credential candidate: %w", err)
-	}
 	if err := inspectUnixCredentialEntry(r.fd, targetName, true); err != nil {
 		return err
 	}
@@ -179,13 +178,28 @@ func (r *unixCredentialStoreRoot) save(profileName string, data []byte) error {
 		currentCandidate.Mode&unix.S_IFMT != unix.S_IFREG {
 		return errors.New("people provider credential candidate changed before publication")
 	}
+	if r.hooks != nil && r.hooks.beforeCandidatePublish != nil {
+		r.hooks.beforeCandidatePublish(candidateName)
+	}
 	if err := unix.Renameat(r.fd, candidateName, r.fd, targetName); err != nil {
 		return fmt.Errorf("publish people provider credential relative to pinned directory: %w", err)
 	}
-	published = true
+	publishedFD, err := unix.Openat(r.fd, targetName,
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return errors.New("people provider credential candidate changed during publication")
+	}
+	defer unix.Close(publishedFD)
+	var publishedIdentity unix.Stat_t
+	if err := unix.Fstat(publishedFD, &publishedIdentity); err != nil ||
+		candidateIdentity.Dev != publishedIdentity.Dev || candidateIdentity.Ino != publishedIdentity.Ino ||
+		validateUnixCredentialStat(publishedIdentity, "candidate") != nil {
+		return errors.New("people provider credential candidate changed during publication")
+	}
 	if err := unix.Fsync(r.fd); err != nil {
 		return fmt.Errorf("sync pinned people provider credential directory: %w", err)
 	}
+	committed = true
 	return nil
 }
 
@@ -206,12 +220,10 @@ func createUnixCredentialCandidate(rootFD int) (string, *os.File, error) {
 		}
 		if err := validateUnixCredentialFD(fd, "candidate"); err != nil {
 			_ = unix.Close(fd)
-			_ = unix.Unlinkat(rootFD, name, 0)
 			return "", nil, err
 		}
 		if err := unix.Fchmod(fd, 0o600); err != nil {
 			_ = unix.Close(fd)
-			_ = unix.Unlinkat(rootFD, name, 0)
 			return "", nil, fmt.Errorf("protect opened people provider credential candidate: %w", err)
 		}
 		return name, os.NewFile(uintptr(fd), name), nil
@@ -221,7 +233,8 @@ func createUnixCredentialCandidate(rootFD int) (string, *os.File, error) {
 
 func (r *unixCredentialStoreRoot) load(profileName string) ([]byte, error) {
 	name := profileName + ".json"
-	fd, err := unix.Openat(r.fd, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := unix.Openat(r.fd, name,
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err == unix.ENOENT {
 		return nil, fmt.Errorf("%w for profile %q", ErrCredentialNotFound, profileName)
 	}
@@ -245,7 +258,8 @@ func (r *unixCredentialStoreRoot) load(profileName string) ([]byte, error) {
 
 func (r *unixCredentialStoreRoot) delete(profileName string) error {
 	name := profileName + ".json"
-	fd, err := unix.Openat(r.fd, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := unix.Openat(r.fd, name,
+		unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err == unix.ENOENT {
 		return nil
 	}
@@ -271,8 +285,38 @@ func (r *unixCredentialStoreRoot) delete(profileName string) error {
 		current.Mode&unix.S_IFMT != unix.S_IFREG {
 		return errors.New("people provider credential changed before deletion")
 	}
-	if err := unix.Unlinkat(r.fd, name, 0); err != nil {
-		return fmt.Errorf("remove people provider credential relative to pinned directory: %w", err)
+	retirementFD, err := createUnixCredentialRetirementDirectory(r.fd)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(retirementFD)
+	if r.hooks != nil && r.hooks.beforeCredentialRetire != nil {
+		r.hooks.beforeCredentialRetire()
+	}
+	if err := unix.Renameat(r.fd, name, retirementFD, "credential"); err != nil {
+		_ = wipeUnixCredentialFD(fd)
+		return fmt.Errorf("retire people provider credential from pinned directory: %w", err)
+	}
+	// The retirement entry is deliberately retained as a wiped tombstone. An
+	// unlink after identity validation would recreate the race this move closes.
+	wipeErr := wipeUnixCredentialFD(fd)
+	retiredFD, err := unix.Openat(retirementFD, "credential",
+		unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return errors.New("people provider credential changed during deletion")
+	}
+	defer unix.Close(retiredFD)
+	var retired unix.Stat_t
+	if err := unix.Fstat(retiredFD, &retired); err != nil ||
+		opened.Dev != retired.Dev || opened.Ino != retired.Ino ||
+		retired.Mode&unix.S_IFMT != unix.S_IFREG {
+		return errors.New("people provider credential changed during deletion")
+	}
+	if wipeErr != nil {
+		return wipeErr
+	}
+	if err := unix.Fsync(retirementFD); err != nil {
+		return fmt.Errorf("sync pinned people provider credential retirement directory: %w", err)
 	}
 	if err := unix.Fsync(r.fd); err != nil {
 		return fmt.Errorf("sync pinned people provider credential directory after deletion: %w", err)
@@ -281,7 +325,8 @@ func (r *unixCredentialStoreRoot) delete(profileName string) error {
 }
 
 func inspectUnixCredentialEntry(rootFD int, name string, allowMissing bool) error {
-	fd, err := unix.Openat(rootFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := unix.Openat(rootFD, name,
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err == unix.ENOENT && allowMissing {
 		return nil
 	}
@@ -293,6 +338,46 @@ func inspectUnixCredentialEntry(rootFD int, name string, allowMissing bool) erro
 	}
 	defer unix.Close(fd)
 	return validateUnixCredentialFD(fd, "file")
+}
+
+func createUnixCredentialRetirementDirectory(rootFD int) (int, error) {
+	for range 128 {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return -1, fmt.Errorf("generate people provider credential retirement name: %w", err)
+		}
+		name := ".credential-retired-" + hex.EncodeToString(random[:])
+		if err := unix.Mkdirat(rootFD, name, 0o700); err == unix.EEXIST {
+			continue
+		} else if err != nil {
+			return -1, fmt.Errorf("create people provider credential retirement directory: %w", err)
+		}
+		fd, err := unix.Openat(rootFD, name,
+			unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			return -1, fmt.Errorf("pin people provider credential retirement directory: %w", err)
+		}
+		if err := validateUnixDirectoryFD(fd, "retirement"); err != nil {
+			_ = unix.Close(fd)
+			return -1, err
+		}
+		if err := unix.Fchmod(fd, 0o700); err != nil {
+			_ = unix.Close(fd)
+			return -1, fmt.Errorf("protect pinned people provider credential retirement directory: %w", err)
+		}
+		return fd, nil
+	}
+	return -1, errors.New("could not allocate a people provider credential retirement directory")
+}
+
+func wipeUnixCredentialFD(fd int) error {
+	if err := unix.Ftruncate(fd, 0); err != nil {
+		return fmt.Errorf("wipe pinned people provider credential during deletion: %w", err)
+	}
+	if err := unix.Fsync(fd); err != nil {
+		return fmt.Errorf("sync wiped people provider credential during deletion: %w", err)
+	}
+	return nil
 }
 
 func validateUnixCredentialFD(fd int, kind string) error {

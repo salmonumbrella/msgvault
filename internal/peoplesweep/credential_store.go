@@ -77,7 +77,9 @@ type credentialStoreHooks struct {
 	afterLockAcquired        func()
 	beforeOperation          func(string)
 	afterCandidateOpen       func(string)
+	beforeCandidatePublish   func(string)
 	afterCredentialOpen      func(string)
+	beforeCredentialRetire   func()
 }
 
 type credentialStoreRoot interface {

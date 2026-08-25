@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package peoplesweep_test
 
 import (
@@ -7,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -41,9 +42,6 @@ func TestCredentialNeverFormatsSecret(t *testing.T) {
 }
 
 func TestCredentialStoreLifecycleUsesPrivateFilesAndExactDeletion(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX permission bits are not enforced on Windows")
-	}
 	tokensDir := t.TempDir()
 	store := peoplesweep.NewFileCredentialStore(tokensDir)
 	require.NoError(t, store.Save("alpha", peoplesweep.NewCredential(peoplesweep.AuthBearer, credentialCanary)))
@@ -167,9 +165,6 @@ func TestCredentialStoreRejectsInvalidNamesAndMalformedJSON(t *testing.T) {
 }
 
 func TestCredentialStoreRejectsSymlinkedRootFileAndLock(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlink creation requires privileges on Windows")
-	}
 	credential := peoplesweep.NewCredential(peoplesweep.AuthBearer, credentialCanary)
 
 	t.Run("tokens directory", func(t *testing.T) {
