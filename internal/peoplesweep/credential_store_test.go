@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -155,6 +156,14 @@ func TestCredentialStoreRejectsInvalidNamesAndMalformedJSON(t *testing.T) {
 	_, err := store.Load("broken")
 	require.ErrorContains(t, err, "parse")
 	assert.NotContains(t, err.Error(), credentialCanary)
+
+	require.NoError(t, os.WriteFile(filepath.Join(root, "unknown.json"), []byte(fmt.Sprintf(
+		`{"scheme":"bearer","value":"safe-test-value",%q:true}`, credentialCanary)), 0o600))
+	_, err = store.Load("unknown")
+	require.Error(t, err)
+	if strings.Contains(err.Error(), credentialCanary) {
+		assert.Fail(t, "credential parse error disclosed an attacker-controlled field name")
+	}
 }
 
 func TestCredentialStoreRejectsSymlinkedRootFileAndLock(t *testing.T) {
