@@ -78,6 +78,8 @@ type credentialStoreHooks struct {
 	beforeOperation          func(string)
 	afterCandidateOpen       func(string)
 	beforeCandidatePublish   func(string)
+	failedCandidateTruncate  func() error
+	failedCandidateSync      func() error
 	afterCredentialOpen      func(string)
 	beforeCredentialRetire   func()
 }

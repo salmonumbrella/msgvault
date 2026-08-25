@@ -3,8 +3,10 @@
 package peoplesweep
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -197,6 +199,107 @@ func TestCredentialStoreRejectsFIFOWithoutBlocking(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCredentialStoreFailedSavesKeepArtifactsBounded(t *testing.T) {
+	tokensDir := t.TempDir()
+	store := NewFileCredentialStore(tokensDir)
+	require.NoError(t, store.Save("seed", NewCredential(AuthBearer, credentialSecurityTestValue)))
+	root := filepath.Join(tokensDir, "people-providers")
+	target := filepath.Join(root, "profile.json")
+	store.hooks = &credentialStoreHooks{beforeCandidatePublish: func(string) {
+		require.NoError(t, os.Mkdir(target, 0o700))
+	}}
+
+	for range 12 {
+		err := store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue))
+		require.Error(t, err)
+		require.NoError(t, os.Remove(target))
+	}
+
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(entries), 3, "failed saves accumulated credential-store artifacts")
+}
+
+func TestCredentialStoreSaveReportsCandidateWipeFailure(t *testing.T) {
+	tests := []struct {
+		name       string
+		configure  func(*credentialStoreHooks)
+		wantError  string
+		wantZeroed bool
+	}{
+		{
+			name: "truncate",
+			configure: func(hooks *credentialStoreHooks) {
+				hooks.failedCandidateTruncate = func() error {
+					return errors.New("injected truncate failure")
+				}
+			},
+			wantError: "wipe failed",
+		},
+		{
+			name: "sync",
+			configure: func(hooks *credentialStoreHooks) {
+				hooks.failedCandidateSync = func() error {
+					return errors.New("injected sync failure")
+				}
+			},
+			wantError:  "durable wipe failed",
+			wantZeroed: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tokensDir := t.TempDir()
+			store := NewFileCredentialStore(tokensDir)
+			require.NoError(t, store.Save("seed", NewCredential(AuthBearer, credentialSecurityTestValue)))
+			root := filepath.Join(tokensDir, "people-providers")
+			target := filepath.Join(root, "profile.json")
+			var candidateName string
+			hooks := &credentialStoreHooks{beforeCandidatePublish: func(name string) {
+				candidateName = name
+				require.NoError(t, os.Mkdir(target, 0o700))
+			}}
+			test.configure(hooks)
+			store.hooks = hooks
+
+			err := store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue))
+			require.ErrorContains(t, err, "publish")
+			require.ErrorContains(t, err, test.wantError)
+			assert.NotContains(t, err.Error(), "injected")
+			if strings.Contains(err.Error(), credentialSecurityTestValue) {
+				assert.Fail(t, "failed candidate cleanup disclosed the credential value")
+			}
+			candidateInfo, statErr := os.Stat(filepath.Join(root, candidateName))
+			require.NoError(t, statErr)
+			if test.wantZeroed {
+				assert.Zero(t, candidateInfo.Size(), "candidate truncate did not complete before sync failed")
+			} else {
+				assert.Positive(t, candidateInfo.Size(), "injected truncate failure unexpectedly zeroed the candidate")
+			}
+		})
+	}
+}
+
+func TestCredentialStoreRepeatedSaveDeleteKeepsArtifactsBounded(t *testing.T) {
+	tokensDir := t.TempDir()
+	store := NewFileCredentialStore(tokensDir)
+
+	for range 12 {
+		require.NoError(t, store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue)))
+		require.NoError(t, store.Delete("profile"))
+		_, err := store.Load("profile")
+		require.ErrorIs(t, err, ErrCredentialNotFound)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(tokensDir, "people-providers"))
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(entries), 2, "save/delete cycles accumulated credential-store artifacts")
+
+	_, err = store.Load("profile")
+	assert.True(t, errors.Is(err, ErrCredentialNotFound), "deleted credential did not remain logically absent")
 }
 
 func TestCredentialStoreLockReplacementCannotSplitExclusion(t *testing.T) {
