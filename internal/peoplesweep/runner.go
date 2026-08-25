@@ -50,7 +50,7 @@ type Runner struct {
 	config    Config
 	consent   ConsentChecker
 	transport StructuredTransport
-	lookup    CredentialLookup
+	resolver  CredentialResolver
 }
 
 // NewRunner creates a gated runner without resolving a credential or touching
@@ -59,7 +59,7 @@ func NewRunner(
 	config Config,
 	consent ConsentChecker,
 	transport StructuredTransport,
-	lookup CredentialLookup,
+	resolver CredentialResolver,
 ) (*Runner, error) {
 	if consent == nil {
 		return nil, errors.New("people inference runner requires a consent checker")
@@ -67,8 +67,8 @@ func NewRunner(
 	if transport == nil {
 		return nil, errors.New("people inference runner requires a transport")
 	}
-	if lookup == nil {
-		return nil, errors.New("people inference runner requires a credential lookup")
+	if resolver == nil {
+		return nil, errors.New("people inference runner requires a credential resolver")
 	}
 	if _, _, err := config.ActiveProviderConfig(); err != nil {
 		return nil, err
@@ -80,7 +80,7 @@ func NewRunner(
 	}
 	config.Providers = providers
 	return &Runner{
-		config: config, consent: consent, transport: transport, lookup: lookup,
+		config: config, consent: consent, transport: transport, resolver: resolver,
 	}, nil
 }
 
@@ -195,24 +195,17 @@ func (r *Runner) runPrepared(
 		return StructuredResponse{}, err
 	}
 
-	credential := ""
-	if profile.Credential == CredentialEnv {
-		value, ok := r.lookup(profile.CredentialRef)
-		if !ok || value == "" {
-			return StructuredResponse{}, fmt.Errorf(
-				"inference credential environment variable %s is not set",
-				profile.CredentialRef)
-		}
-		credential = value
-	}
-
-	_, provider, err := r.config.ActiveProviderConfig()
+	profileName, provider, err := r.config.ActiveProviderConfig()
 	if err != nil {
 		return StructuredResponse{}, err
 	}
+	credential, err := r.resolver.Resolve(profileName, profile)
+	if err != nil {
+		return StructuredResponse{}, fmt.Errorf("resolve people provider credential: %w", err)
+	}
 	requestCtx, cancel := context.WithTimeout(ctx, provider.RequestTimeout)
 	defer cancel()
-	response, err := r.transport.GeneratePreparedJSON(requestCtx, profile, credential, prepared)
+	response, err := r.transport.GeneratePreparedJSON(requestCtx, profile, credential.Value(), prepared)
 	if err != nil {
 		if errors.Is(err, ErrInvalidStructuredOutput) {
 			return response, fmt.Errorf("generate structured inference: %w", err)

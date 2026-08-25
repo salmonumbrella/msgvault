@@ -54,7 +54,7 @@ func TestExtractionProgramSchemaRunsIntegerConfidence(t *testing.T) {
 		AllowSensitive: true,
 	})
 	runner, err := NewRunner(config, extractionConsent{}, extractionTransport{output: json.RawMessage(output)},
-		func(string) (string, bool) { return "credential", true })
+		NewCredentialResolver(nil, func(string) (string, bool) { return "credential", true }))
 	require.NoError(t, err)
 
 	_, err = runner.RunStructured(t.Context(), batches[0].Request)

@@ -60,14 +60,14 @@ func TestProductionPeopleSweepCodexUsesReleasedIsolationGate(t *testing.T) {
 		provider.Executable = executable
 	})
 
-	worker, err := newProductionPersonSweepWorker(config, nil, os.LookupEnv)
+	worker, err := newProductionPersonSweepWorker(config, nil, t.TempDir(), os.LookupEnv)
 	must.ErrorIs(err, peoplesweep.ErrCodexIsolationUnreleased)
 	checks.Nil(worker)
 	if marker != "" {
 		checks.NoFileExists(marker)
 	}
 
-	err = newPeopleSweepScheduledRun(config, nil)(t.Context())
+	err = newPeopleSweepScheduledRun(config, nil, t.TempDir())(t.Context())
 	must.ErrorIs(err, peoplesweep.ErrCodexIsolationUnreleased)
 	if marker != "" {
 		checks.NoFileExists(marker)
@@ -122,7 +122,7 @@ func TestPeopleSweepSchedulerRecoversJournalGap(t *testing.T) {
 		SELECT MAX(sequence) FROM person_sweep_changes WHERE person_id = ?`), personID).
 		Scan(&journalHighWater))
 
-	run := newPeopleSweepScheduledRun(config, st)
+	run := newPeopleSweepScheduledRun(config, st, t.TempDir())
 	must.NoError(run(t.Context()))
 	var cursorHighWater int64
 	must.NoError(st.DB().QueryRowContext(t.Context(), st.Rebind(`

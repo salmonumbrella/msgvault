@@ -137,11 +137,15 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 			if err != nil {
 				return nil, err
 			}
+			var credentialStore peoplesweep.CredentialStore
+			if cfg != nil {
+				credentialStore = peoplesweep.NewFileCredentialStore(cfg.TokensDir())
+			}
 			return peoplesweep.NewRunner(
 				config,
 				st,
 				transport,
-				os.LookupEnv,
+				peoplesweep.NewCredentialResolver(credentialStore, os.LookupEnv),
 			)
 		},
 		newCodexClient: func(config peoplesweep.Config) (personProviderCodexClient, error) {

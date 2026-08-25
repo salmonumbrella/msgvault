@@ -43,10 +43,10 @@ func (s *inProcessPersonProviderDaemonStore) RunCLICommand(
 			config,
 			consent,
 			peoplesweep.NewOpenAICompatibleTransport(s.httpClient),
-			func(name string) (string, bool) {
+			peoplesweep.NewCredentialResolver(nil, func(name string) (string, bool) {
 				value, ok := req.Env[name]
 				return value, ok
-			},
+			}),
 		)
 	}
 

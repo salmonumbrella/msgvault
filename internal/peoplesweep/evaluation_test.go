@@ -188,9 +188,9 @@ func runEvaluationSensitivePolicy(
 	require.NoError(t, err)
 	runner, err := peoplesweep.NewRunner(config, f.Store,
 		peoplesweep.NewOpenAICompatibleTransport(server.Client()),
-		func(name string) (string, bool) {
+		peoplesweep.NewCredentialResolver(nil, func(name string) (string, bool) {
 			return "frozen-sensitive-key", name == "FROZEN_EVALUATION_API_KEY"
-		})
+		}))
 	require.NoError(t, err)
 	prepared, err := runner.PrepareStructured(t.Context(), batches[0].Request)
 	require.NoError(t, err)

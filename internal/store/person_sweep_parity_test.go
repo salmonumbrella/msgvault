@@ -447,10 +447,10 @@ func newProductionPersonSweepParityFixture(t *testing.T) *personSweepParityFixtu
 	httpClient.Transport = parityRewriteTransport{base: httpClient.Transport, target: targetURL}
 	runner, err := peoplesweep.NewRunner(f.config, f.store,
 		peoplesweep.NewOpenAICompatibleTransport(httpClient),
-		func(name string) (string, bool) {
+		peoplesweep.NewCredentialResolver(nil, func(name string) (string, bool) {
 			assert.Equal(t, "PARITY_SYNTHETIC_KEY", name)
 			return "synthetic-parity-key", true
-		})
+		}))
 	require.NoError(t, err)
 	f.sourceRecorder = &paritySourceRecorder{store: f.store}
 	f.sinkRecorder = &paritySinkRecorder{store: f.store}

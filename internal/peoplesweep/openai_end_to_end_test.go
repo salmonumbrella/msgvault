@@ -193,10 +193,10 @@ func newOpenAISweepFixture(
 
 	runner, err := peoplesweep.NewRunner(config, st,
 		peoplesweep.NewOpenAICompatibleTransport(server.Client()),
-		func(name string) (string, bool) {
+		peoplesweep.NewCredentialResolver(nil, func(name string) (string, bool) {
 			assert.Equal(t, "SYNTHETIC_OPENAI_KEY", name)
 			return "synthetic-api-key", true
-		})
+		}))
 	require.NoError(t, err)
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	ids := 0

@@ -26,10 +26,10 @@ func addPeopleSweepJob(
 }
 
 func newPeopleSweepScheduledRun(
-	config peoplesweep.Config, st *store.Store,
+	config peoplesweep.Config, st *store.Store, tokensDir string,
 ) func(context.Context) error {
 	return func(ctx context.Context) error {
-		worker, err := newProductionPersonSweepWorker(config, st, os.LookupEnv)
+		worker, err := newProductionPersonSweepWorker(config, st, tokensDir, os.LookupEnv)
 		if err != nil {
 			return err
 		}
@@ -44,6 +44,7 @@ func newPeopleSweepScheduledRun(
 func newProductionPersonSweepWorker(
 	config peoplesweep.Config,
 	st *store.Store,
+	tokensDir string,
 	lookup peoplesweep.CredentialLookup,
 ) (*peoplesweep.Worker, error) {
 	if err := config.Validate(); err != nil {
@@ -60,7 +61,10 @@ func newProductionPersonSweepWorker(
 	if err != nil {
 		return nil, err
 	}
-	runner, err := peoplesweep.NewRunner(config, st, transport, lookup)
+	credentials := peoplesweep.NewCredentialResolver(
+		peoplesweep.NewFileCredentialStore(tokensDir), lookup,
+	)
+	runner, err := peoplesweep.NewRunner(config, st, transport, credentials)
 	if err != nil {
 		return nil, err
 	}

@@ -526,7 +526,8 @@ func unreleasedCodexCommandDeps(
 		if err != nil {
 			return nil, err
 		}
-		return peoplesweep.NewRunner(config, st, transport, os.LookupEnv)
+		return peoplesweep.NewRunner(config, st, transport,
+			peoplesweep.NewCredentialResolver(nil, os.LookupEnv))
 	}
 	deps.newCodexClient = func(config peoplesweep.Config) (personProviderCodexClient, error) {
 		transport, err := peoplesweep.NewStructuredTransport(

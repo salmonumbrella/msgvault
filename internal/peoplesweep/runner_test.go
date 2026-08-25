@@ -22,6 +22,22 @@ type countingConsent struct {
 	order  func(string)
 }
 
+type credentialResolverFunc func(
+	profileName string,
+	profile peoplesweep.ProviderProfile,
+) (peoplesweep.Credential, error)
+
+func (f credentialResolverFunc) Resolve(
+	profileName string,
+	profile peoplesweep.ProviderProfile,
+) (peoplesweep.Credential, error) {
+	return f(profileName, profile)
+}
+
+func lookupCredentialResolver(lookup func(string) (string, bool)) peoplesweep.CredentialResolver {
+	return peoplesweep.NewCredentialResolver(nil, lookup)
+}
+
 func (c *countingConsent) HasActivePersonInferenceConsent(
 	_ context.Context,
 	_ string,
@@ -104,11 +120,12 @@ func TestRunnerCallsConsentCredentialAndTransportInOrder(t *testing.T) {
 	}
 	runner, err := peoplesweep.NewRunner(
 		runnerTestConfig(), consent, transport,
-		func(name string) (string, bool) {
+		credentialResolverFunc(func(name string, profile peoplesweep.ProviderProfile) (peoplesweep.Credential, error) {
 			record("credential")
-			assert.Equal("TEST_KEY", name)
-			return "test-key", true
-		},
+			assert.Equal("default", name)
+			assert.Equal("TEST_KEY", profile.CredentialRef)
+			return peoplesweep.NewCredential(peoplesweep.AuthBearer, credentialCanary), nil
+		}),
 	)
 	require.NoError(t, err)
 
@@ -118,7 +135,7 @@ func TestRunnerCallsConsentCredentialAndTransportInOrder(t *testing.T) {
 	assert.Equal([]string{"consent", "credential", "transport"}, order)
 	assert.Equal(int64(1), consent.calls.Load())
 	assert.Equal(int64(1), transport.calls.Load())
-	assert.Equal("test-key", transport.key)
+	assert.True(transport.key == credentialCanary, "transport received a different credential")
 }
 
 func TestRunnerFailsClosedBeforeCredentialOrTransport(t *testing.T) {
@@ -204,10 +221,10 @@ func TestRunnerFailsClosedBeforeCredentialOrTransport(t *testing.T) {
 			var credentialCalls atomic.Int64
 			runner, err := peoplesweep.NewRunner(
 				test.config, consent, transport,
-				func(string) (string, bool) {
+				lookupCredentialResolver(func(string) (string, bool) {
 					credentialCalls.Add(1)
 					return "test-key", true
-				},
+				}),
 			)
 			require.NoError(t, err)
 
@@ -227,11 +244,11 @@ func TestRunnerMissingCredentialDoesNotCallTransport(t *testing.T) {
 	var credentialCalls atomic.Int64
 	runner, err := peoplesweep.NewRunner(
 		runnerTestConfig(), consent, transport,
-		func(name string) (string, bool) {
+		lookupCredentialResolver(func(name string) (string, bool) {
 			credentialCalls.Add(1)
 			assert.Equal("TEST_KEY", name)
 			return "", false
-		},
+		}),
 	)
 	require.NoError(t, err)
 
@@ -277,7 +294,7 @@ func TestRunnerValidatesRequestAndOutputSchema(t *testing.T) {
 			}}
 			runner, err := peoplesweep.NewRunner(
 				runnerTestConfig(), consent, transport,
-				func(string) (string, bool) { return "test-key", true },
+				lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 			)
 			require.NoError(t, err)
 
@@ -322,7 +339,7 @@ func TestRunnerRejectsStructuredRequestBounds(t *testing.T) {
 			transport := &countingTransport{}
 			runner, err := peoplesweep.NewRunner(
 				runnerTestConfig(), consent, transport,
-				func(string) (string, bool) { return "test-key", true },
+				lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 			)
 			require.NoError(t, err)
 
@@ -342,7 +359,7 @@ func TestRunnerCheckUsesOnlyFixedSyntheticInput(t *testing.T) {
 	}}
 	runner, err := peoplesweep.NewRunner(
 		runnerTestConfig(), consent, transport,
-		func(string) (string, bool) { return "test-key", true },
+		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 	)
 	require.NoError(t, err)
 
@@ -368,7 +385,7 @@ func TestRunnerCheckRejectsSchemaInvalidProviderOutput(t *testing.T) {
 	}}
 	runner, err := peoplesweep.NewRunner(
 		runnerTestConfig(), &countingConsent{active: true}, transport,
-		func(string) (string, bool) { return "test-key", true },
+		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 	)
 	require.NoError(t, err)
 
@@ -414,7 +431,7 @@ func TestStructuredResponseCarriesAuthoritativeVersions(t *testing.T) {
 			transport := &countingTransport{response: test.response, preserveVersions: true}
 			runner, err := peoplesweep.NewRunner(
 				runnerTestConfig(), &countingConsent{active: true}, transport,
-				func(string) (string, bool) { return "test-key", true },
+				lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 			)
 			requirements.NoError(err)
 
@@ -455,7 +472,7 @@ func TestRunnerRejectsForgedPreparedRequestWire(t *testing.T) {
 	consent := &countingConsent{active: true}
 	runner, err := peoplesweep.NewRunner(
 		runnerTestConfig(), consent, transport,
-		func(string) (string, bool) { return "test-key", true },
+		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 	)
 	requirements.NoError(err)
 
@@ -478,7 +495,7 @@ func TestRunnerDoesNotTreatCallerProviderCheckAsSynthetic(t *testing.T) {
 	consent := &countingConsent{active: true}
 	runner, err := peoplesweep.NewRunner(
 		runnerTestConfig(), consent, transport,
-		func(string) (string, bool) { return "test-key", true },
+		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 	)
 	requirements.NoError(err)
 
@@ -501,7 +518,7 @@ func TestRunnerAppliesConfiguredRequestTimeout(t *testing.T) {
 	})
 	runner, err := peoplesweep.NewRunner(
 		config, &countingConsent{active: true}, blockingTransport{},
-		func(string) (string, bool) { return "test-key", true },
+		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 	)
 	require.NoError(t, err)
 
@@ -531,7 +548,7 @@ func TestRunnerPreservesOnlyCompletedInvalidOutputMetadata(t *testing.T) {
 				}}}
 			runner, err := peoplesweep.NewRunner(
 				runnerTestConfig(), &countingConsent{active: true}, transport,
-				func(string) (string, bool) { return "test-key", true },
+				lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
 			)
 			require.NoError(t, err)
 
@@ -548,10 +565,10 @@ func TestRunnerReturnsConsentCheckFailureWithoutCredentialLookup(t *testing.T) {
 	var credentialCalls atomic.Int64
 	runner, err := peoplesweep.NewRunner(
 		runnerTestConfig(), consent, &countingTransport{},
-		func(string) (string, bool) {
+		lookupCredentialResolver(func(string) (string, bool) {
 			credentialCalls.Add(1)
 			return "test-key", true
-		},
+		}),
 	)
 	require.NoError(t, err)
 
