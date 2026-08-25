@@ -213,7 +213,7 @@ The exact profile fingerprint continues to gate all archive egress. It includes:
 
 Changing any of these fields requires a new synthetic check and explicit consent. Rotating the secret value without changing its source reference does not require renewed consent because it does not change where or how archive content is disclosed.
 
-Remote endpoints require HTTPS. Plain HTTP is allowed only on loopback with `auth=none`. Redirects remain disabled so consent to one endpoint cannot be redirected to another host. Response bodies, archive prompts, credentials, and arbitrary provider headers are discarded from errors and logs. Safe request IDs, status codes, retry delays, token usage, and reported model versions may be recorded after character and size validation.
+Remote endpoints require HTTPS. Plain HTTP is allowed only on loopback; authenticated loopback gateways may still use a supported auth scheme, while `auth=none` is never allowed off loopback. Redirects remain disabled so consent to one endpoint cannot be redirected to another host. Response bodies, archive prompts, credentials, and arbitrary provider headers are discarded from errors and logs. Safe request IDs, status codes, retry delays, token usage, and reported model versions may be recorded after character and size validation.
 
 For aggregators, the consent screen states that the selected endpoint may route requests to upstream model operators under that service's own policy. Msgvault still sends only to the configured endpoint and does not perform its own provider fallback.
 
