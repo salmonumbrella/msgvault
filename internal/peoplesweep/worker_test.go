@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -258,15 +259,32 @@ func (s workerFailureSink) ApplyPersonSweep(context.Context, ApplyRequest) (Appl
 	return ApplyResult{}, s.err
 }
 
+func testConfigWithProvider(provider ProviderConfig) Config {
+	config := Config{
+		Enabled: true, Provider: ProviderSelection{Name: "default"},
+		Providers: map[string]ProviderConfig{"default": provider},
+	}
+	config.ApplyDefaults()
+	return config
+}
+
+func mutateTestProvider(config *Config, mutate func(*ProviderConfig)) {
+	provider := config.Providers[config.Provider.Name]
+	provider.AllowedSources = slices.Clone(provider.AllowedSources)
+	mutate(&provider)
+	config.Providers[config.Provider.Name] = provider
+}
+
 func workerTestConfig(t *testing.T) (Config, personfacts.Catalog) {
 	t.Helper()
-	config := Config{Enabled: true, Provider: ProviderConfig{
-		Kind: ProviderOpenAICompatible, Endpoint: "https://api.example.test/v1",
-		Model: "gpt-test", APIKeyEnv: "TEST_KEY", RetentionPosture: "zero_retention",
-		TrainingPosture: "no_training", AllowedSources: []SourceClass{SourceConversationText},
+	config := testConfigWithProvider(ProviderConfig{
+		Protocol: ProtocolOpenAIChat, Endpoint: "https://api.example.test/v1",
+		Model: "gpt-test", Auth: AuthBearer, Credential: CredentialEnv, CredentialEnv: "TEST_KEY",
+		OutputMode: OutputModeNativeJSONSchema, TokenLimitParameter: "max_completion_tokens",
+		RetentionPosture: "zero_retention",
+		TrainingPosture:  "no_training", AllowedSources: []SourceClass{SourceConversationText},
 		SourceSince: "2025-01-01", RequestTimeout: time.Second,
-	}}
-	config.ApplyDefaults()
+	})
 	catalog, err := personfacts.BuildCatalog(nil, personfacts.CatalogOptions{})
 	require.NoError(t, err)
 	return config, catalog
@@ -561,7 +579,9 @@ func TestPersonSweepWorkerSharesRequestBudgetAcrossSourceLanes(t *testing.T) {
 	checks := assert.New(t)
 	requirements := require.New(t)
 	config, catalog := workerTestConfig(t)
-	config.Provider.AllowedSources = []SourceClass{SourceConversationText, SourceMeetingText}
+	mutateTestProvider(&config, func(provider *ProviderConfig) {
+		provider.AllowedSources = []SourceClass{SourceConversationText, SourceMeetingText}
+	})
 	config.Budgets.MaxRequestsPerPerson = 1
 	config.Budgets.MaxOutputTokensPerPerson = extractionMaxOutputTokens
 	config.EvidenceMaxItems = 1
@@ -605,7 +625,9 @@ func TestPersonSweepWorkerRequeuesUnprocessedForcedBackstopLane(t *testing.T) {
 	checks := assert.New(t)
 	must := require.New(t)
 	config, catalog := workerTestConfig(t)
-	config.Provider.AllowedSources = []SourceClass{SourceConversationText, SourceMeetingText}
+	mutateTestProvider(&config, func(provider *ProviderConfig) {
+		provider.AllowedSources = []SourceClass{SourceConversationText, SourceMeetingText}
+	})
 	config.Budgets.MaxRequestsPerPerson = 1
 	config.Budgets.MaxOutputTokensPerPerson = extractionMaxOutputTokens
 	config.EvidenceMaxItems = 1

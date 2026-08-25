@@ -100,7 +100,9 @@ func TestPersonProviderRealDaemonSyntheticCheckAndRevoke(t *testing.T) {
 	t.Cleanup(provider.Close)
 
 	peopleConfig := personProviderTestConfig()
-	peopleConfig.Provider.Endpoint = provider.URL + "/v1"
+	mutateConfiguredPersonProvider(&peopleConfig, func(config *peoplesweep.ProviderConfig) {
+		config.Endpoint = provider.URL + "/v1"
+	})
 	st := testutil.NewSQLiteTestStore(t)
 	daemonConfig := &config.Config{People: peoplesweep.PeopleConfig{Sweep: peopleConfig}}
 	daemonStore := &inProcessPersonProviderDaemonStore{

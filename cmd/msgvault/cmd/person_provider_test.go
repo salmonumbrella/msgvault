@@ -27,20 +27,37 @@ import (
 
 func personProviderTestConfig() peoplesweep.Config {
 	config := peoplesweep.Config{
-		Enabled: true,
-		Provider: peoplesweep.ProviderConfig{
-			Kind: peoplesweep.ProviderOpenAICompatible, Endpoint: "https://provider.example/v1",
-			Model: "test-model", APIKeyEnv: "TEST_PROVIDER_KEY",
-			RetentionPosture: "zero_data_retention", TrainingPosture: "no_training",
+		Enabled:  true,
+		Provider: peoplesweep.ProviderSelection{Name: "default"},
+		Providers: map[string]peoplesweep.ProviderConfig{"default": {
+			Protocol: peoplesweep.ProtocolOpenAIChat, Endpoint: "https://provider.example/v1",
+			Model: "test-model", Auth: peoplesweep.AuthBearer,
+			Credential: peoplesweep.CredentialEnv, CredentialEnv: "TEST_PROVIDER_KEY",
+			OutputMode:          peoplesweep.OutputModeNativeJSONSchema,
+			TokenLimitParameter: "max_completion_tokens",
+			RetentionPosture:    "zero_data_retention", TrainingPosture: "no_training",
 			AllowedSources: []peoplesweep.SourceClass{
 				peoplesweep.SourceMeetingText, peoplesweep.SourceConversationText,
 			},
 			SourceSince: "2025-01-01", SourceUntil: "2025-12-31",
 			RequestTimeout: time.Second,
-		},
+		}},
 	}
 	config.ApplyDefaults()
 	return config
+}
+
+func configuredPersonProvider(config peoplesweep.Config) peoplesweep.ProviderConfig {
+	return config.Providers[config.Provider.Name]
+}
+
+func mutateConfiguredPersonProvider(
+	config *peoplesweep.Config,
+	mutate func(*peoplesweep.ProviderConfig),
+) {
+	provider := configuredPersonProvider(*config)
+	mutate(&provider)
+	config.Providers[config.Provider.Name] = provider
 }
 
 type fixedPersonProviderChecker struct {
@@ -488,7 +505,9 @@ func unreleasedCodexCommandConfig(t *testing.T) peoplesweep.Config {
 	executable, err := os.Executable()
 	require.NoError(t, err)
 	config := commandCodexConfig()
-	config.Provider.Executable = executable
+	mutateConfiguredPersonProvider(&config, func(provider *peoplesweep.ProviderConfig) {
+		provider.Executable = executable
+	})
 	return config
 }
 
@@ -502,7 +521,7 @@ func unreleasedCodexCommandDeps(
 	deps := localPersonProviderDeps(config, st, nil)
 	deps.newChecker = func(config peoplesweep.Config, st personProviderStore) (personProviderChecker, error) {
 		transport, err := peoplesweep.NewStructuredTransport(
-			config.Provider, nil, starter, peoplesweep.NewReleasedCodexIsolationGate(),
+			configuredPersonProvider(config), nil, starter, peoplesweep.NewReleasedCodexIsolationGate(),
 		)
 		if err != nil {
 			return nil, err
@@ -511,7 +530,7 @@ func unreleasedCodexCommandDeps(
 	}
 	deps.newCodexClient = func(config peoplesweep.Config) (personProviderCodexClient, error) {
 		transport, err := peoplesweep.NewStructuredTransport(
-			config.Provider, nil, starter, peoplesweep.NewReleasedCodexIsolationGate(),
+			configuredPersonProvider(config), nil, starter, peoplesweep.NewReleasedCodexIsolationGate(),
 		)
 		if err != nil {
 			return nil, err
@@ -536,7 +555,7 @@ func TestCodexUnreleasedOperationsLaunchNothing(t *testing.T) {
 	starter := &unreleasedOperationStarter{}
 	deps := unreleasedCodexCommandDeps(t, config, st, starter)
 	transport, err := peoplesweep.NewCodexAppServerTransport(
-		config.Provider, starter, peoplesweep.NewReleasedCodexIsolationGate(),
+		configuredPersonProvider(config), starter, peoplesweep.NewReleasedCodexIsolationGate(),
 	)
 	must.NoError(err)
 	profile, err := config.Profile()
@@ -619,7 +638,7 @@ func TestPersonProviderStatusCodexUnreleased(t *testing.T) {
 	checks.Contains(output, "Codex isolation: unavailable")
 	checks.Contains(output, "Execution boundary: "+peoplesweep.CodexExecutionBoundaryV1)
 	checks.Contains(output, "Reason: "+peoplesweep.ErrCodexIsolationUnreleased.Error())
-	checks.NotContains(output, config.Provider.Executable)
+	checks.NotContains(output, configuredPersonProvider(config).Executable)
 	checks.NotContains(output, authStore)
 	checks.NotContains(output, "environment-sensitive-value")
 	checks.Zero(starter.starts.Load())
@@ -717,13 +736,17 @@ func (commandCodexGate) ReverifyForLaunch(peoplesweep.CodexAttestation) error { 
 
 func commandCodexConfig() peoplesweep.Config {
 	config := personProviderTestConfig()
-	config.Provider = peoplesweep.ProviderConfig{
-		Kind: peoplesweep.ProviderCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
-		RetentionPosture: "zero_data_retention", TrainingPosture: "no_training",
-		AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText},
-		SourceSince:    "2025-01-01", Executable: "codex",
-		ExecutionBoundary: peoplesweep.CodexExecutionBoundaryV1, RequestTimeout: time.Second,
-	}
+	mutateConfiguredPersonProvider(&config, func(provider *peoplesweep.ProviderConfig) {
+		*provider = peoplesweep.ProviderConfig{
+			Protocol: peoplesweep.ProtocolCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
+			Auth: peoplesweep.AuthNone, Credential: peoplesweep.CredentialNone,
+			OutputMode:       peoplesweep.OutputModeNativeJSONSchema,
+			RetentionPosture: "zero_data_retention", TrainingPosture: "no_training",
+			AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText},
+			SourceSince:    "2025-01-01", Executable: "codex",
+			ExecutionBoundary: peoplesweep.CodexExecutionBoundaryV1, RequestTimeout: time.Second,
+		}
+	})
 	config.ApplyDefaults()
 	return config
 }
@@ -797,7 +820,9 @@ func codexCommandDeps(
 		return nil, func() {}, errors.New("archive store must not be opened")
 	}
 	deps.newCodexClient = func(config peoplesweep.Config) (personProviderCodexClient, error) {
-		return peoplesweep.NewCodexAppServerTransport(config.Provider, starter, commandCodexGate{})
+		return peoplesweep.NewCodexAppServerTransport(
+			configuredPersonProvider(config), starter, commandCodexGate{},
+		)
 	}
 	return deps
 }
@@ -875,7 +900,9 @@ func TestPersonProviderLoginAndModelsUseConfiguredTimeout(t *testing.T) {
 			var opens atomic.Int64
 			deps := codexCommandDeps(t, starter, &opens)
 			config := commandCodexConfig()
-			config.Provider.RequestTimeout = 30 * time.Millisecond
+			mutateConfiguredPersonProvider(&config, func(provider *peoplesweep.ProviderConfig) {
+				provider.RequestTimeout = 30 * time.Millisecond
+			})
 			deps.config = func() peoplesweep.Config { return config }
 			parentCtx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 			defer cancel()

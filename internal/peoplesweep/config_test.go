@@ -14,14 +14,19 @@ import (
 
 func validConfig() peoplesweep.Config {
 	config := peoplesweep.Config{
-		Enabled: true,
-		Provider: peoplesweep.ProviderConfig{
-			Kind:             peoplesweep.ProviderOpenAICompatible,
-			Endpoint:         "https://api.example.test/v1/",
-			Model:            "gpt-test",
-			APIKeyEnv:        "TEST_KEY",
-			RetentionPosture: "zero_retention",
-			TrainingPosture:  "no_training",
+		Enabled:  true,
+		Provider: peoplesweep.ProviderSelection{Name: "default"},
+		Providers: map[string]peoplesweep.ProviderConfig{"default": {
+			Protocol:            peoplesweep.ProtocolOpenAIChat,
+			Endpoint:            "https://api.example.test/v1/",
+			Model:               "gpt-test",
+			Auth:                peoplesweep.AuthBearer,
+			Credential:          peoplesweep.CredentialEnv,
+			CredentialEnv:       "TEST_KEY",
+			OutputMode:          peoplesweep.OutputModeNativeJSONSchema,
+			TokenLimitParameter: "max_completion_tokens",
+			RetentionPosture:    "zero_retention",
+			TrainingPosture:     "no_training",
 			AllowedSources: []peoplesweep.SourceClass{
 				peoplesweep.SourceMeetingText,
 				peoplesweep.SourceConversationText,
@@ -29,7 +34,45 @@ func validConfig() peoplesweep.Config {
 			SourceSince:    "2025-01-01",
 			SourceUntil:    "2025-12-31",
 			RequestTimeout: 45 * time.Second,
-		},
+		}},
+	}
+	config.ApplyDefaults()
+	return config
+}
+
+func activeProvider(config peoplesweep.Config) peoplesweep.ProviderConfig {
+	return config.Providers[config.Provider.Name]
+}
+
+func setActiveProvider(config *peoplesweep.Config, provider peoplesweep.ProviderConfig) {
+	providers := make(map[string]peoplesweep.ProviderConfig, len(config.Providers))
+	for name, configured := range config.Providers {
+		providers[name] = configured
+	}
+	providers[config.Provider.Name] = provider
+	config.Providers = providers
+}
+
+func mutateActiveProvider(config *peoplesweep.Config, mutate func(*peoplesweep.ProviderConfig)) {
+	provider := activeProvider(*config)
+	provider.AllowedSources = slices.Clone(provider.AllowedSources)
+	mutate(&provider)
+	setActiveProvider(config, provider)
+}
+
+func cloneConfig(config peoplesweep.Config) peoplesweep.Config {
+	mutateActiveProvider(&config, func(*peoplesweep.ProviderConfig) {})
+	return config
+}
+
+func providerMutation(mutate func(*peoplesweep.ProviderConfig)) func(*peoplesweep.Config) {
+	return func(config *peoplesweep.Config) { mutateActiveProvider(config, mutate) }
+}
+
+func configWithProvider(provider peoplesweep.ProviderConfig) peoplesweep.Config {
+	config := peoplesweep.Config{
+		Enabled: true, Provider: peoplesweep.ProviderSelection{Name: "default"},
+		Providers: map[string]peoplesweep.ProviderConfig{"default": provider},
 	}
 	config.ApplyDefaults()
 	return config
@@ -40,12 +83,13 @@ func TestConfigDefaultsStayDisabled(t *testing.T) {
 	assert := assert.New(t)
 	var config peoplesweep.Config
 	config.ApplyDefaults()
+	provider := activeProvider(config)
 
 	assert.False(config.Enabled)
-	assert.Equal(peoplesweep.ProviderOpenAICompatible, config.Provider.Kind)
-	assert.Equal("https://api.openai.com/v1", config.Provider.Endpoint)
-	assert.Equal("OPENAI_API_KEY", config.Provider.APIKeyEnv)
-	assert.Equal(time.Minute, config.Provider.RequestTimeout)
+	assert.Equal(peoplesweep.ProtocolOpenAIChat, provider.Protocol)
+	assert.Equal("https://api.openai.com/v1", provider.Endpoint)
+	assert.Equal("OPENAI_API_KEY", provider.CredentialEnv)
+	assert.Equal(time.Minute, provider.RequestTimeout)
 	require.NoError(config.Validate())
 	_, err := config.Profile()
 	require.ErrorContains(err, "disabled")
@@ -53,8 +97,11 @@ func TestConfigDefaultsStayDisabled(t *testing.T) {
 
 func TestCodexProviderFingerprintIncludesExecutionBoundaryAndEffort(t *testing.T) {
 	base := validConfig()
-	base.Provider = peoplesweep.ProviderConfig{
-		Kind:              peoplesweep.ProviderCodexAppServer,
+	setActiveProvider(&base, peoplesweep.ProviderConfig{
+		Protocol:          peoplesweep.ProtocolCodexAppServer,
+		Auth:              peoplesweep.AuthNone,
+		Credential:        peoplesweep.CredentialNone,
+		OutputMode:        peoplesweep.OutputModeNativeJSONSchema,
 		Model:             "gpt-test",
 		RetentionPosture:  "zero_retention",
 		TrainingPosture:   "no_training",
@@ -62,7 +109,7 @@ func TestCodexProviderFingerprintIncludesExecutionBoundaryAndEffort(t *testing.T
 		SourceSince:       "2025-01-01",
 		ReasoningEffort:   "high",
 		ExecutionBoundary: peoplesweep.CodexExecutionBoundaryV1,
-	}
+	})
 	base.ApplyDefaults()
 	want, err := base.Profile()
 	require.NoError(t, err)
@@ -71,14 +118,13 @@ func TestCodexProviderFingerprintIncludesExecutionBoundaryAndEffort(t *testing.T
 		name   string
 		mutate func(*peoplesweep.Config)
 	}{
-		{"effort", func(c *peoplesweep.Config) { c.Provider.ReasoningEffort = "medium" }},
-		{"boundary", func(c *peoplesweep.Config) { c.Provider.ExecutionBoundary = "different-boundary" }},
+		{"effort", providerMutation(func(p *peoplesweep.ProviderConfig) { p.ReasoningEffort = "medium" })},
+		{"boundary", providerMutation(func(p *peoplesweep.ProviderConfig) { p.ExecutionBoundary = "different-boundary" })},
 	} {
 		t.Run(mutation.name, func(t *testing.T) {
 			checks := assert.New(t)
 			requirements := require.New(t)
-			gotConfig := base
-			gotConfig.Provider.AllowedSources = slices.Clone(base.Provider.AllowedSources)
+			gotConfig := cloneConfig(base)
 			mutation.mutate(&gotConfig)
 			got, profileErr := gotConfig.Profile()
 			if mutation.name == "boundary" {
@@ -96,18 +142,20 @@ func TestCodexProviderFingerprintIncludesExecutionBoundaryAndEffort(t *testing.T
 // path being incorporated as if it were a released binary identity.
 func TestCodexProviderExecutableCannotSelfAttest(t *testing.T) {
 	base := validConfig()
-	base.Provider = peoplesweep.ProviderConfig{
-		Kind: peoplesweep.ProviderCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
+	setActiveProvider(&base, peoplesweep.ProviderConfig{
+		Protocol: peoplesweep.ProtocolCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
+		Auth: peoplesweep.AuthNone, Credential: peoplesweep.CredentialNone,
+		OutputMode:       peoplesweep.OutputModeNativeJSONSchema,
 		RetentionPosture: "zero_retention", TrainingPosture: "no_training",
 		AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText},
 		SourceSince:    "2025-01-01", Executable: "/synthetic/path/codex-one",
 		ExecutionBoundary: peoplesweep.CodexExecutionBoundaryV1,
-	}
+	})
 	base.ApplyDefaults()
 	want, err := base.Profile()
 	require.NoError(t, err)
 
-	base.Provider.Executable = "/synthetic/path/codex-two"
+	mutateActiveProvider(&base, func(p *peoplesweep.ProviderConfig) { p.Executable = "/synthetic/path/codex-two" })
 	got, err := base.Profile()
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
@@ -131,15 +179,14 @@ func TestOpenAIProviderProfileOperationalFieldsExcluded(t *testing.T) {
 		name   string
 		mutate func(*peoplesweep.Config)
 	}{
-		{"timeout", func(c *peoplesweep.Config) { c.Provider.RequestTimeout = 2 * time.Minute }},
-		{"executable", func(c *peoplesweep.Config) { c.Provider.Executable = "other-codex" }},
+		{"timeout", providerMutation(func(p *peoplesweep.ProviderConfig) { p.RequestTimeout = 2 * time.Minute })},
+		{"executable", providerMutation(func(p *peoplesweep.ProviderConfig) { p.Executable = "other-codex" })},
 		{"schedule", func(c *peoplesweep.Config) { c.Schedule = "0 3 * * *" }},
 		{"lease", func(c *peoplesweep.Config) { c.LeaseDuration = 30 * time.Minute }},
 		{"retry", func(c *peoplesweep.Config) { c.RetryBase = 2 * time.Minute }},
 	} {
 		t.Run(mutation.name, func(t *testing.T) {
-			gotConfig := base
-			gotConfig.Provider.AllowedSources = slices.Clone(base.Provider.AllowedSources)
+			gotConfig := cloneConfig(base)
 			mutation.mutate(&gotConfig)
 			got, profileErr := gotConfig.Profile()
 			require.NoError(t, profileErr)
@@ -157,27 +204,102 @@ func TestProviderFingerprintIncludesEgressPolicy(t *testing.T) {
 		name   string
 		mutate func(*peoplesweep.Config)
 	}{
-		{"endpoint", func(c *peoplesweep.Config) { c.Provider.Endpoint = "https://other.example.test/v1" }},
-		{"model", func(c *peoplesweep.Config) { c.Provider.Model = "other-model" }},
-		{"key environment", func(c *peoplesweep.Config) { c.Provider.APIKeyEnv = "OTHER_KEY" }},
-		{"retention", func(c *peoplesweep.Config) { c.Provider.RetentionPosture = "provider-policy" }},
-		{"training", func(c *peoplesweep.Config) { c.Provider.TrainingPosture = "provider-policy" }},
-		{"sources", func(c *peoplesweep.Config) {
-			c.Provider.AllowedSources = []peoplesweep.SourceClass{peoplesweep.SourceDocumentText}
-		}},
-		{"source since", func(c *peoplesweep.Config) { c.Provider.SourceSince = "2024-01-01" }},
-		{"source until", func(c *peoplesweep.Config) { c.Provider.SourceUntil = "2026-01-01" }},
-		{"sensitive", func(c *peoplesweep.Config) { c.Provider.AllowSensitive = true }},
+		{"endpoint", providerMutation(func(p *peoplesweep.ProviderConfig) { p.Endpoint = "https://other.example.test/v1" })},
+		{"model", providerMutation(func(p *peoplesweep.ProviderConfig) { p.Model = "other-model" })},
+		{"key environment", providerMutation(func(p *peoplesweep.ProviderConfig) { p.CredentialEnv = "OTHER_KEY" })},
+		{"retention", providerMutation(func(p *peoplesweep.ProviderConfig) { p.RetentionPosture = "provider-policy" })},
+		{"training", providerMutation(func(p *peoplesweep.ProviderConfig) { p.TrainingPosture = "provider-policy" })},
+		{"sources", providerMutation(func(p *peoplesweep.ProviderConfig) {
+			p.AllowedSources = []peoplesweep.SourceClass{peoplesweep.SourceDocumentText}
+		})},
+		{"source since", providerMutation(func(p *peoplesweep.ProviderConfig) { p.SourceSince = "2024-01-01" })},
+		{"source until", providerMutation(func(p *peoplesweep.ProviderConfig) { p.SourceUntil = "2026-01-01" })},
+		{"sensitive", providerMutation(func(p *peoplesweep.ProviderConfig) { p.AllowSensitive = true })},
 	} {
 		t.Run(mutation.name, func(t *testing.T) {
-			gotConfig := base
-			gotConfig.Provider.AllowedSources = slices.Clone(base.Provider.AllowedSources)
+			gotConfig := cloneConfig(base)
 			mutation.mutate(&gotConfig)
 			got, profileErr := gotConfig.Profile()
 			require.NoError(t, profileErr)
 			assert.NotEqual(t, want.Fingerprint, got.Fingerprint)
 		})
 	}
+}
+
+func TestProviderFingerprintIncludesProtocolCapabilities(t *testing.T) {
+	base := peoplesweep.Config{
+		Enabled:  true,
+		Provider: peoplesweep.ProviderSelection{Name: "glm"},
+		Providers: map[string]peoplesweep.ProviderConfig{
+			"glm": {
+				Protocol: peoplesweep.ProtocolOpenAIChat, Endpoint: "https://api.example.test/v1",
+				Model: "gpt-test", Auth: peoplesweep.AuthBearer,
+				Credential: peoplesweep.CredentialEnv, CredentialEnv: "TEST_KEY",
+				OutputMode: peoplesweep.OutputModeJSONObject, TokenLimitParameter: "max_tokens",
+				ReasoningEffort: "high", DriverVersion: "openai-chat-v1",
+				RetentionPosture: "zero_retention", TrainingPosture: "no_training",
+				AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText},
+				SourceSince:    "2025-01-01", RequestTimeout: time.Minute,
+			},
+		},
+	}
+	base.ApplyDefaults()
+	encodedSelection, err := base.Provider.MarshalTOML()
+	require.NoError(t, err)
+	assert.Equal(t, `"glm"`, string(encodedSelection))
+	want, err := base.Profile()
+	require.NoError(t, err)
+
+	for _, mutation := range []struct {
+		name   string
+		mutate func(*peoplesweep.ProviderConfig)
+	}{
+		{"protocol", func(p *peoplesweep.ProviderConfig) {
+			p.Protocol = peoplesweep.ProtocolOpenAIResponses
+			p.TokenLimitParameter = ""
+		}},
+		{"endpoint", func(p *peoplesweep.ProviderConfig) { p.Endpoint = "https://other.example.test/v1" }},
+		{"model", func(p *peoplesweep.ProviderConfig) { p.Model = "other-model" }},
+		{"auth", func(p *peoplesweep.ProviderConfig) { p.Auth = peoplesweep.AuthXAPIKey }},
+		{"credential source", func(p *peoplesweep.ProviderConfig) { p.Credential = peoplesweep.CredentialStored; p.CredentialEnv = "" }},
+		{"credential reference", func(p *peoplesweep.ProviderConfig) { p.CredentialEnv = "OTHER_KEY" }},
+		{"output mode", func(p *peoplesweep.ProviderConfig) { p.OutputMode = peoplesweep.OutputModePromptJSON }},
+		{"token parameter", func(p *peoplesweep.ProviderConfig) { p.TokenLimitParameter = "max_completion_tokens" }},
+		{"reasoning effort", func(p *peoplesweep.ProviderConfig) { p.ReasoningEffort = "medium" }},
+		{"reasoning mode", func(p *peoplesweep.ProviderConfig) { p.ReasoningMode = "enabled" }},
+		{"driver version", func(p *peoplesweep.ProviderConfig) { p.DriverVersion = "openai-chat-v2" }},
+		{"privacy", func(p *peoplesweep.ProviderConfig) { p.AllowSensitive = true }},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			changed := base
+			provider := changed.Providers["glm"]
+			provider.AllowedSources = slices.Clone(provider.AllowedSources)
+			mutation.mutate(&provider)
+			changed.Providers = map[string]peoplesweep.ProviderConfig{"glm": provider}
+			got, profileErr := changed.Profile()
+			require.NoError(t, profileErr)
+			assert.NotEqual(t, want.Fingerprint, got.Fingerprint)
+		})
+	}
+
+	t.Run("operational values", func(t *testing.T) {
+		changed := base
+		provider := changed.Providers["glm"]
+		provider.RequestTimeout = 2 * time.Minute
+		changed.Providers = map[string]peoplesweep.ProviderConfig{"glm": provider}
+		got, profileErr := changed.Profile()
+		require.NoError(t, profileErr)
+		assert.Equal(t, want.Fingerprint, got.Fingerprint)
+	})
+
+	assert.Contains(t, string(want.PolicyJSON), peoplesweep.PacketRendererPolicyV1)
+	assert.Contains(t, string(want.PolicyJSON), peoplesweep.ProgramFingerprint())
+	mutated := want
+	mutated.PacketRendererPolicy = "other-renderer"
+	assert.Error(t, mutated.Validate())
+	mutated = want
+	mutated.ProgramFingerprint = "other-program"
+	assert.Error(t, mutated.Validate())
 }
 
 func TestPeopleSweepDefaults(t *testing.T) {
@@ -214,18 +336,23 @@ func TestProviderProfileHasStableCanonicalPolicy(t *testing.T) {
 		peoplesweep.SourceMeetingText,
 	}, profile.AllowedSources)
 	assert.JSONEq(strings.ReplaceAll(`{
-		"kind":"openai_compatible",
+		"protocol":"openai_chat",
 		"endpoint":"https://api.example.test/v1",
 		"model":"gpt-test",
-		"api_key_env":"TEST_KEY",
-		"allow_anonymous":false,
+		"auth":"bearer",
+		"credential":"env",
+		"credential_ref":"TEST_KEY",
+		"output_mode":"native_json_schema",
+		"token_limit_parameter":"max_completion_tokens",
+		"reasoning_effort":"",
+		"reasoning_mode":"",
+		"driver_version":"openai-chat-completions-json-schema-v1",
 		"retention_posture":"zero_retention",
 		"training_posture":"no_training",
 		"allowed_sources":["conversation_text","meeting_text"],
 		"source_since":"2025-01-01",
 		"source_until":"2025-12-31",
 		"allow_sensitive":false,
-		"reasoning_effort":"",
 		"execution_boundary":"",
 		"packet_renderer_policy":"person-sweep-packet-v1",
 		"program_fingerprint":"PROGRAM_FINGERPRINT",
@@ -244,31 +371,31 @@ func TestProviderProfileFingerprintCoversConsentPolicy(t *testing.T) {
 		name   string
 		mutate func(*peoplesweep.Config)
 	}{
-		{"kind", func(c *peoplesweep.Config) { c.Provider.Kind = "other" }},
-		{"endpoint", func(c *peoplesweep.Config) { c.Provider.Endpoint = "https://other.example.test/v1" }},
-		{"model", func(c *peoplesweep.Config) { c.Provider.Model = "another-model" }},
-		{"key env", func(c *peoplesweep.Config) { c.Provider.APIKeyEnv = "OTHER_API_KEY" }},
-		{"anonymous", func(c *peoplesweep.Config) {
-			c.Provider.Endpoint = "http://127.0.0.1:11434/v1"
-			c.Provider.APIKeyEnv = ""
-			c.Provider.AllowAnonymous = true
-		}},
-		{"retention", func(c *peoplesweep.Config) { c.Provider.RetentionPosture = "provider_policy" }},
-		{"training", func(c *peoplesweep.Config) { c.Provider.TrainingPosture = "provider_policy" }},
-		{"sources", func(c *peoplesweep.Config) {
-			c.Provider.AllowedSources = append(c.Provider.AllowedSources, peoplesweep.SourceDocumentText)
-		}},
-		{"source since", func(c *peoplesweep.Config) { c.Provider.SourceSince = "2024-01-01" }},
-		{"source until", func(c *peoplesweep.Config) { c.Provider.SourceUntil = "2026-01-01" }},
-		{"sensitive", func(c *peoplesweep.Config) { c.Provider.AllowSensitive = true }},
+		{"protocol", providerMutation(func(p *peoplesweep.ProviderConfig) { p.Protocol = "other" })},
+		{"endpoint", providerMutation(func(p *peoplesweep.ProviderConfig) { p.Endpoint = "https://other.example.test/v1" })},
+		{"model", providerMutation(func(p *peoplesweep.ProviderConfig) { p.Model = "another-model" })},
+		{"key env", providerMutation(func(p *peoplesweep.ProviderConfig) { p.CredentialEnv = "OTHER_API_KEY" })},
+		{"anonymous", providerMutation(func(p *peoplesweep.ProviderConfig) {
+			p.Endpoint = "http://127.0.0.1:11434/v1"
+			p.Auth = peoplesweep.AuthNone
+			p.Credential = peoplesweep.CredentialNone
+			p.CredentialEnv = ""
+		})},
+		{"retention", providerMutation(func(p *peoplesweep.ProviderConfig) { p.RetentionPosture = "provider_policy" })},
+		{"training", providerMutation(func(p *peoplesweep.ProviderConfig) { p.TrainingPosture = "provider_policy" })},
+		{"sources", providerMutation(func(p *peoplesweep.ProviderConfig) {
+			p.AllowedSources = append(p.AllowedSources, peoplesweep.SourceDocumentText)
+		})},
+		{"source since", providerMutation(func(p *peoplesweep.ProviderConfig) { p.SourceSince = "2024-01-01" })},
+		{"source until", providerMutation(func(p *peoplesweep.ProviderConfig) { p.SourceUntil = "2026-01-01" })},
+		{"sensitive", providerMutation(func(p *peoplesweep.ProviderConfig) { p.AllowSensitive = true })},
 	}
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
-			gotConfig := base
-			gotConfig.Provider.AllowedSources = slices.Clone(base.Provider.AllowedSources)
+			gotConfig := cloneConfig(base)
 			mutation.mutate(&gotConfig)
 			got, profileErr := gotConfig.Profile()
-			if mutation.name == "kind" {
+			if mutation.name == "protocol" {
 				require.Error(t, profileErr)
 				return
 			}
@@ -278,19 +405,21 @@ func TestProviderProfileFingerprintCoversConsentPolicy(t *testing.T) {
 	}
 
 	t.Run("source order is canonical", func(t *testing.T) {
-		reordered := base
-		reordered.Provider.AllowedSources = []peoplesweep.SourceClass{
-			peoplesweep.SourceConversationText,
-			peoplesweep.SourceMeetingText,
-		}
+		reordered := cloneConfig(base)
+		mutateActiveProvider(&reordered, func(p *peoplesweep.ProviderConfig) {
+			p.AllowedSources = []peoplesweep.SourceClass{
+				peoplesweep.SourceConversationText,
+				peoplesweep.SourceMeetingText,
+			}
+		})
 		got, profileErr := reordered.Profile()
 		require.NoError(t, profileErr)
 		assert.Equal(t, want.Fingerprint, got.Fingerprint)
 	})
 
 	t.Run("timeout is operational", func(t *testing.T) {
-		changed := base
-		changed.Provider.RequestTimeout = 2 * time.Minute
+		changed := cloneConfig(base)
+		mutateActiveProvider(&changed, func(p *peoplesweep.ProviderConfig) { p.RequestTimeout = 2 * time.Minute })
 		got, profileErr := changed.Profile()
 		require.NoError(t, profileErr)
 		assert.Equal(t, want.Fingerprint, got.Fingerprint)
@@ -345,44 +474,45 @@ func TestConfigValidationRejectsUnsafeOrAmbiguousPolicies(t *testing.T) {
 		mutate func(*peoplesweep.Config)
 		want   string
 	}{
-		{"missing model", func(c *peoplesweep.Config) { c.Provider.Model = "" }, "model"},
-		{"unsupported kind", func(c *peoplesweep.Config) { c.Provider.Kind = "other" }, "kind"},
-		{"remote http", func(c *peoplesweep.Config) { c.Provider.Endpoint = "http://api.example.test/v1" }, "HTTPS"},
-		{"URL credentials", func(c *peoplesweep.Config) { c.Provider.Endpoint = "https://user:pass@api.example.test/v1" }, "credentials"},
-		{"URL query", func(c *peoplesweep.Config) { c.Provider.Endpoint = "https://api.example.test/v1?x=1" }, "query"},
-		{"URL fragment", func(c *peoplesweep.Config) { c.Provider.Endpoint = "https://api.example.test/v1#x" }, "fragment"},
-		{"invalid key env", func(c *peoplesweep.Config) { c.Provider.APIKeyEnv = "bad-name" }, "api_key_env"},
-		{"missing auth", func(c *peoplesweep.Config) { c.Provider.APIKeyEnv = "" }, "anonymous"},
-		{"anonymous remote", func(c *peoplesweep.Config) {
-			c.Provider.APIKeyEnv = ""
-			c.Provider.AllowAnonymous = true
-		}, "loopback"},
-		{"missing retention", func(c *peoplesweep.Config) { c.Provider.RetentionPosture = "" }, "retention"},
-		{"unknown retention", func(c *peoplesweep.Config) { c.Provider.RetentionPosture = "unknown" }, "retention"},
-		{"missing training", func(c *peoplesweep.Config) { c.Provider.TrainingPosture = "" }, "training"},
-		{"unknown training", func(c *peoplesweep.Config) { c.Provider.TrainingPosture = "unknown" }, "training"},
-		{"missing sources", func(c *peoplesweep.Config) { c.Provider.AllowedSources = nil }, "allowed_sources"},
-		{"unknown source", func(c *peoplesweep.Config) {
-			c.Provider.AllowedSources = []peoplesweep.SourceClass{"raw_image"}
-		}, "allowed_sources"},
-		{"attachment caption without hydration", func(c *peoplesweep.Config) {
-			c.Provider.AllowedSources = []peoplesweep.SourceClass{peoplesweep.SourceAttachmentCaption}
-		}, "not yet supported"},
-		{"attachment OCR without hydration", func(c *peoplesweep.Config) {
-			c.Provider.AllowedSources = []peoplesweep.SourceClass{peoplesweep.SourceAttachmentOCR}
-		}, "not yet supported"},
-		{"duplicate source", func(c *peoplesweep.Config) {
-			c.Provider.AllowedSources = []peoplesweep.SourceClass{
+		{"missing model", providerMutation(func(p *peoplesweep.ProviderConfig) { p.Model = "" }), "model"},
+		{"unsupported protocol", providerMutation(func(p *peoplesweep.ProviderConfig) { p.Protocol = "other" }), "protocol"},
+		{"remote http", providerMutation(func(p *peoplesweep.ProviderConfig) { p.Endpoint = "http://api.example.test/v1" }), "HTTPS"},
+		{"URL credentials", providerMutation(func(p *peoplesweep.ProviderConfig) { p.Endpoint = "https://user:pass@api.example.test/v1" }), "credentials"},
+		{"URL query", providerMutation(func(p *peoplesweep.ProviderConfig) { p.Endpoint = "https://api.example.test/v1?x=1" }), "query"},
+		{"URL fragment", providerMutation(func(p *peoplesweep.ProviderConfig) { p.Endpoint = "https://api.example.test/v1#x" }), "fragment"},
+		{"invalid key env", providerMutation(func(p *peoplesweep.ProviderConfig) { p.CredentialEnv = "bad-name" }), "credential_env"},
+		{"missing credential", providerMutation(func(p *peoplesweep.ProviderConfig) { p.CredentialEnv = "" }), "credential_env"},
+		{"anonymous remote", providerMutation(func(p *peoplesweep.ProviderConfig) {
+			p.CredentialEnv = ""
+			p.Auth = peoplesweep.AuthNone
+			p.Credential = peoplesweep.CredentialNone
+		}), "loopback"},
+		{"missing retention", providerMutation(func(p *peoplesweep.ProviderConfig) { p.RetentionPosture = "" }), "retention"},
+		{"unknown retention", providerMutation(func(p *peoplesweep.ProviderConfig) { p.RetentionPosture = "unknown" }), "retention"},
+		{"missing training", providerMutation(func(p *peoplesweep.ProviderConfig) { p.TrainingPosture = "" }), "training"},
+		{"unknown training", providerMutation(func(p *peoplesweep.ProviderConfig) { p.TrainingPosture = "unknown" }), "training"},
+		{"missing sources", providerMutation(func(p *peoplesweep.ProviderConfig) { p.AllowedSources = nil }), "allowed_sources"},
+		{"unknown source", providerMutation(func(p *peoplesweep.ProviderConfig) {
+			p.AllowedSources = []peoplesweep.SourceClass{"raw_image"}
+		}), "allowed_sources"},
+		{"attachment caption without hydration", providerMutation(func(p *peoplesweep.ProviderConfig) {
+			p.AllowedSources = []peoplesweep.SourceClass{peoplesweep.SourceAttachmentCaption}
+		}), "not yet supported"},
+		{"attachment OCR without hydration", providerMutation(func(p *peoplesweep.ProviderConfig) {
+			p.AllowedSources = []peoplesweep.SourceClass{peoplesweep.SourceAttachmentOCR}
+		}), "not yet supported"},
+		{"duplicate source", providerMutation(func(p *peoplesweep.ProviderConfig) {
+			p.AllowedSources = []peoplesweep.SourceClass{
 				peoplesweep.SourceConversationText,
 				peoplesweep.SourceConversationText,
 			}
-		}, "duplicate"},
-		{"missing start", func(c *peoplesweep.Config) { c.Provider.SourceSince = "" }, "source_since"},
-		{"invalid start", func(c *peoplesweep.Config) { c.Provider.SourceSince = "2025-02-30" }, "source_since"},
-		{"invalid end", func(c *peoplesweep.Config) { c.Provider.SourceUntil = "tomorrow" }, "source_until"},
-		{"reversed dates", func(c *peoplesweep.Config) { c.Provider.SourceUntil = "2024-12-31" }, "before"},
-		{"zero timeout", func(c *peoplesweep.Config) { c.Provider.RequestTimeout = 0 }, "request_timeout"},
-		{"negative timeout", func(c *peoplesweep.Config) { c.Provider.RequestTimeout = -time.Second }, "request_timeout"},
+		}), "duplicate"},
+		{"missing start", providerMutation(func(p *peoplesweep.ProviderConfig) { p.SourceSince = "" }), "source_since"},
+		{"invalid start", providerMutation(func(p *peoplesweep.ProviderConfig) { p.SourceSince = "2025-02-30" }), "source_since"},
+		{"invalid end", providerMutation(func(p *peoplesweep.ProviderConfig) { p.SourceUntil = "tomorrow" }), "source_until"},
+		{"reversed dates", providerMutation(func(p *peoplesweep.ProviderConfig) { p.SourceUntil = "2024-12-31" }), "before"},
+		{"zero timeout", providerMutation(func(p *peoplesweep.ProviderConfig) { p.RequestTimeout = 0 }), "request_timeout"},
+		{"negative timeout", providerMutation(func(p *peoplesweep.ProviderConfig) { p.RequestTimeout = -time.Second }), "request_timeout"},
 		{"output budget below one request", func(c *peoplesweep.Config) {
 			c.Budgets.MaxOutputTokensPerPerson = 4095
 		}, "at least 4096"},
@@ -405,21 +535,26 @@ func TestConfigAllowsExplicitAnonymousLoopback(t *testing.T) {
 	} {
 		t.Run(endpoint, func(t *testing.T) {
 			config := validConfig()
-			config.Provider.Endpoint = endpoint
-			config.Provider.APIKeyEnv = ""
-			config.Provider.AllowAnonymous = true
+			mutateActiveProvider(&config, func(p *peoplesweep.ProviderConfig) {
+				p.Endpoint = endpoint
+				p.Auth = peoplesweep.AuthNone
+				p.Credential = peoplesweep.CredentialNone
+				p.CredentialEnv = ""
+			})
 
 			profile, err := config.Profile()
 			require.NoError(t, err)
-			assert.True(t, profile.AllowAnonymous)
-			assert.Empty(t, profile.APIKeyEnv)
+			assert.Equal(t, peoplesweep.AuthNone, profile.Auth)
+			assert.Empty(t, profile.CredentialRef)
 		})
 	}
 }
 
-func TestConfigRejectsAuthenticatedLoopbackHTTP(t *testing.T) {
+func TestConfigAllowsAuthenticatedLoopbackHTTP(t *testing.T) {
 	config := validConfig()
-	config.Provider.Endpoint = "http://127.0.0.1:11434/v1"
+	mutateActiveProvider(&config, func(p *peoplesweep.ProviderConfig) {
+		p.Endpoint = "http://127.0.0.1:11434/v1"
+	})
 
-	assert.ErrorContains(t, config.Validate(), "anonymous loopback")
+	assert.NoError(t, config.Validate())
 }

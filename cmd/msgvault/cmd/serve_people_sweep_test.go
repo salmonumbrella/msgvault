@@ -56,7 +56,9 @@ func TestProductionPeopleSweepCodexUsesReleasedIsolationGate(t *testing.T) {
 		), 0o700))
 	}
 	config := commandCodexConfig()
-	config.Provider.Executable = executable
+	mutateConfiguredPersonProvider(&config, func(provider *peoplesweep.ProviderConfig) {
+		provider.Executable = executable
+	})
 
 	worker, err := newProductionPersonSweepWorker(config, nil, os.LookupEnv)
 	must.ErrorIs(err, peoplesweep.ErrCodexIsolationUnreleased)

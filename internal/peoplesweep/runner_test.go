@@ -79,10 +79,12 @@ func (t *countingTransport) GeneratePreparedJSON(
 
 func runnerTestConfig() peoplesweep.Config {
 	config := validConfig()
-	config.Provider.AllowedSources = []peoplesweep.SourceClass{
-		peoplesweep.SourceConversationText,
-		peoplesweep.SourceMeetingText,
-	}
+	mutateActiveProvider(&config, func(provider *peoplesweep.ProviderConfig) {
+		provider.AllowedSources = []peoplesweep.SourceClass{
+			peoplesweep.SourceConversationText,
+			peoplesweep.SourceMeetingText,
+		}
+	})
 	return config
 }
 
@@ -494,7 +496,9 @@ func TestRunnerDoesNotTreatCallerProviderCheckAsSynthetic(t *testing.T) {
 
 func TestRunnerAppliesConfiguredRequestTimeout(t *testing.T) {
 	config := runnerTestConfig()
-	config.Provider.RequestTimeout = 20 * time.Millisecond
+	mutateActiveProvider(&config, func(provider *peoplesweep.ProviderConfig) {
+		provider.RequestTimeout = 20 * time.Millisecond
+	})
 	runner, err := peoplesweep.NewRunner(
 		config, &countingConsent{active: true}, blockingTransport{},
 		func(string) (string, bool) { return "test-key", true },

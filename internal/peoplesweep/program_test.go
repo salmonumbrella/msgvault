@@ -45,13 +45,14 @@ func TestExtractionProgramSchemaRunsIntegerConfidence(t *testing.T) {
 	require.NoError(t, err)
 	output := fmt.Sprintf(`{"claims":[{"target_key":%q,"relation":"support","value":"ramen","evidence_ids":[%q],"valid_from":null,"valid_until":null,"confidence_basis_points":875}]}`,
 		packet.Catalog.Targets[0].Key, packetEvidenceID(packet.Seeds[0]))
-	config := Config{Enabled: true, Provider: ProviderConfig{
-		Kind: ProviderOpenAICompatible, Endpoint: "https://example.test/v1", Model: "model",
-		APIKeyEnv: "TEST_KEY", RetentionPosture: "no-retention", TrainingPosture: "no-training",
+	config := testConfigWithProvider(ProviderConfig{
+		Protocol: ProtocolOpenAIChat, Endpoint: "https://example.test/v1", Model: "model",
+		Auth: AuthBearer, Credential: CredentialEnv, CredentialEnv: "TEST_KEY",
+		OutputMode: OutputModeNativeJSONSchema, TokenLimitParameter: "max_completion_tokens",
+		RetentionPosture: "no-retention", TrainingPosture: "no-training",
 		AllowedSources: []SourceClass{SourceConversationText, SourceMeetingText}, SourceSince: "2020-01-01",
 		AllowSensitive: true,
-	}}
-	config.ApplyDefaults()
+	})
 	runner, err := NewRunner(config, extractionConsent{}, extractionTransport{output: json.RawMessage(output)},
 		func(string) (string, bool) { return "credential", true })
 	require.NoError(t, err)

@@ -378,14 +378,17 @@ func newProductionPersonSweepParityFixture(t *testing.T) *personSweepParityFixtu
 	require.NoError(t, err)
 	_, err = f.store.SetPersonTrackingContext(t.Context(), f.personID, true)
 	require.NoError(t, err)
-	f.config = peoplesweep.Config{Enabled: true, Provider: peoplesweep.ProviderConfig{
-		Kind:     peoplesweep.ProviderOpenAICompatible,
-		Endpoint: "https://parity-provider.example.test/v1",
-		Model:    "parity-request-model", APIKeyEnv: "PARITY_SYNTHETIC_KEY",
-		RetentionPosture: "zero_retention", TrainingPosture: "no_training",
-		AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText},
-		SourceSince:    "2000-01-01", RequestTimeout: 2 * time.Second,
-	}}
+	f.config = peoplesweep.Config{Enabled: true, Provider: peoplesweep.ProviderSelection{Name: "default"},
+		Providers: map[string]peoplesweep.ProviderConfig{"default": {
+			Protocol: peoplesweep.ProtocolOpenAIChat,
+			Endpoint: "https://parity-provider.example.test/v1",
+			Model:    "parity-request-model", Auth: peoplesweep.AuthBearer,
+			Credential: peoplesweep.CredentialEnv, CredentialEnv: "PARITY_SYNTHETIC_KEY",
+			OutputMode: peoplesweep.OutputModeNativeJSONSchema, TokenLimitParameter: "max_completion_tokens",
+			RetentionPosture: "zero_retention", TrainingPosture: "no_training",
+			AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText},
+			SourceSince:    "2000-01-01", RequestTimeout: 2 * time.Second,
+		}}}
 	f.config.ApplyDefaults()
 	f.config.RetryBase, f.config.RetryMax = time.Millisecond, time.Millisecond
 	f.config.Budgets.InputCostMicroUSDPerMillionTokens = 2_000_000

@@ -43,12 +43,16 @@ func TestPersonSweepWorkerFilteredNoTextAdvancesCursorAndClearsWork(t *testing.T
 	checks := assert.New(t)
 	requirements := require.New(t)
 	f := newPersonSweepJournalFixture(t, true, false)
-	config := peoplesweep.Config{Enabled: true, Provider: peoplesweep.ProviderConfig{
-		Kind: peoplesweep.ProviderOpenAICompatible, Endpoint: "https://api.example.test/v1",
-		Model: "gpt-test", APIKeyEnv: "TEST_KEY", RetentionPosture: "zero_retention",
-		TrainingPosture: "no_training", AllowedSources: []peoplesweep.SourceClass{
-			peoplesweep.SourceConversationText}, SourceSince: "2027-01-01", RequestTimeout: time.Second,
-	}}
+	config := peoplesweep.Config{Enabled: true, Provider: peoplesweep.ProviderSelection{Name: "default"},
+		Providers: map[string]peoplesweep.ProviderConfig{"default": {
+			Protocol: peoplesweep.ProtocolOpenAIChat, Endpoint: "https://api.example.test/v1",
+			Model: "gpt-test", Auth: peoplesweep.AuthBearer,
+			Credential: peoplesweep.CredentialEnv, CredentialEnv: "TEST_KEY",
+			OutputMode: peoplesweep.OutputModeNativeJSONSchema, TokenLimitParameter: "max_completion_tokens",
+			RetentionPosture: "zero_retention",
+			TrainingPosture:  "no_training", AllowedSources: []peoplesweep.SourceClass{
+				peoplesweep.SourceConversationText}, SourceSince: "2027-01-01", RequestTimeout: time.Second,
+		}}}
 	config.ApplyDefaults()
 	profile, err := config.Profile()
 	requirements.NoError(err)

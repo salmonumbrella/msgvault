@@ -5,7 +5,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"go.kenn.io/msgvault/internal/config"
+	"go.kenn.io/msgvault/internal/peoplesweep"
 )
+
+func configureAPIProvider(cfg *config.Config, provider peoplesweep.ProviderConfig) {
+	cfg.People.Sweep.Provider = peoplesweep.ProviderSelection{Name: "default"}
+	cfg.People.Sweep.Providers = map[string]peoplesweep.ProviderConfig{"default": provider}
+}
 
 func TestCLIRunCommandAllowedPermitsExactPersonProviderCommands(t *testing.T) {
 	tests := []struct {
@@ -33,8 +39,10 @@ func TestCLIRunCommandAllowedPermitsExactPersonProviderCommands(t *testing.T) {
 func TestCLIRunEnvAllowedPermitsConfiguredPeopleProviderKeyOnly(t *testing.T) {
 	checks := assert.New(t)
 	srv := &Server{cfg: &config.Config{}}
-	srv.cfg.People.Sweep.Provider.Kind = "openai_compatible"
-	srv.cfg.People.Sweep.Provider.APIKeyEnv = "MSGVAULT_PEOPLE_PROVIDER_KEY"
+	configureAPIProvider(srv.cfg, peoplesweep.ProviderConfig{
+		Protocol: peoplesweep.ProtocolOpenAIChat, Credential: peoplesweep.CredentialEnv,
+		CredentialEnv: "MSGVAULT_PEOPLE_PROVIDER_KEY",
+	})
 
 	checks.True(srv.cliRunEnvAllowed("MSGVAULT_PEOPLE_PROVIDER_KEY"))
 	checks.False(srv.cliRunEnvAllowed("OPENAI_API_KEY"))
@@ -43,8 +51,9 @@ func TestCLIRunEnvAllowedPermitsConfiguredPeopleProviderKeyOnly(t *testing.T) {
 	checks.False(unconfigured.cliRunEnvAllowed("MSGVAULT_PEOPLE_PROVIDER_KEY"))
 
 	codex := &Server{cfg: &config.Config{}}
-	codex.cfg.People.Sweep.Provider.Kind = "codex_app_server"
-	codex.cfg.People.Sweep.Provider.APIKeyEnv = "MSGVAULT_PEOPLE_PROVIDER_KEY"
+	configureAPIProvider(codex.cfg, peoplesweep.ProviderConfig{
+		Protocol: peoplesweep.ProtocolCodexAppServer, Credential: peoplesweep.CredentialNone,
+	})
 	checks.False(codex.cliRunEnvAllowed("MSGVAULT_PEOPLE_PROVIDER_KEY"))
 }
 
@@ -68,8 +77,10 @@ func TestCLIAllowlistPermitsExactPersonSweepCommands(t *testing.T) {
 func TestCLIAllowlistPersonSweepForwardsExactCredentialOnly(t *testing.T) {
 	checks := assert.New(t)
 	srv := &Server{cfg: &config.Config{}}
-	srv.cfg.People.Sweep.Provider.Kind = "openai_compatible"
-	srv.cfg.People.Sweep.Provider.APIKeyEnv = "PEOPLE_SWEEP_KEY"
+	configureAPIProvider(srv.cfg, peoplesweep.ProviderConfig{
+		Protocol: peoplesweep.ProtocolOpenAIChat, Credential: peoplesweep.CredentialEnv,
+		CredentialEnv: "PEOPLE_SWEEP_KEY",
+	})
 	srv.cfg.Vector.Embeddings.APIKeyEnv = "EMBEDDINGS_KEY"
 	srv.cfg.Attachments.Documents.APIKeyEnv = "DOCUMENT_KEY"
 
@@ -99,8 +110,9 @@ func TestCLIAllowlistCodexProviderOperations(t *testing.T) {
 	}
 
 	srv := &Server{cfg: &config.Config{}}
-	srv.cfg.People.Sweep.Provider.Kind = "codex_app_server"
-	srv.cfg.People.Sweep.Provider.APIKeyEnv = "MUST_NOT_FORWARD"
+	configureAPIProvider(srv.cfg, peoplesweep.ProviderConfig{
+		Protocol: peoplesweep.ProtocolCodexAppServer, Credential: peoplesweep.CredentialNone,
+	})
 	for _, operation := range []string{"login", "models", "status", "check"} {
 		checks.False(srv.cliRunEnvAllowedForCommand(
 			[]string{"person", "provider", operation}, "MUST_NOT_FORWARD"), operation)

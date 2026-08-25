@@ -70,9 +70,12 @@ func TestPersonProviderFrontendRoutesExactCommandsAndCredential(t *testing.T) {
 
 func TestPersonProviderAnonymousCheckForwardsNoCredential(t *testing.T) {
 	config := personProviderTestConfig()
-	config.Provider.Endpoint = "http://127.0.0.1:11434/v1"
-	config.Provider.APIKeyEnv = ""
-	config.Provider.AllowAnonymous = true
+	mutateConfiguredPersonProvider(&config, func(provider *peoplesweep.ProviderConfig) {
+		provider.Endpoint = "http://127.0.0.1:11434/v1"
+		provider.Auth = peoplesweep.AuthNone
+		provider.Credential = peoplesweep.CredentialNone
+		provider.CredentialEnv = ""
+	})
 	var gotEnv map[string]string
 	deps := personProviderCommandDeps{
 		config:             func() peoplesweep.Config { return config },

@@ -274,14 +274,15 @@ func newPersonSweepHistoryCommand(deps personSweepCommandDeps) *cobra.Command {
 func personSweepForwardEnv(
 	config peoplesweep.Config, lookup peoplesweep.CredentialLookup,
 ) map[string]string {
-	if config.Provider.Kind != peoplesweep.ProviderOpenAICompatible || config.Provider.APIKeyEnv == "" {
+	_, provider, err := config.ActiveProviderConfig()
+	if err != nil || provider.Credential != peoplesweep.CredentialEnv || lookup == nil {
 		return nil
 	}
-	value, ok := lookup(config.Provider.APIKeyEnv)
+	value, ok := lookup(provider.CredentialEnv)
 	if !ok || value == "" {
 		return nil
 	}
-	return map[string]string{config.Provider.APIKeyEnv: value}
+	return map[string]string{provider.CredentialEnv: value}
 }
 
 func writePersonSweepRun(w io.Writer, result peoplesweep.RunResult, jsonOutput bool) error {

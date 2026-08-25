@@ -145,14 +145,15 @@ func newOpenAISweepFixture(
 	_, err = st.SetPersonTrackingContext(t.Context(), person.ID, true)
 	require.NoError(t, err)
 
-	config := peoplesweep.Config{Enabled: true, Provider: peoplesweep.ProviderConfig{
-		Kind: peoplesweep.ProviderOpenAICompatible, Endpoint: server.URL + "/compatible/custom",
-		Model: "model-request-2026", APIKeyEnv: "SYNTHETIC_OPENAI_KEY",
+	config := configWithProvider(peoplesweep.ProviderConfig{
+		Protocol: peoplesweep.ProtocolOpenAIChat, Endpoint: server.URL + "/compatible/custom",
+		Model: "model-request-2026", Auth: peoplesweep.AuthBearer,
+		Credential: peoplesweep.CredentialEnv, CredentialEnv: "SYNTHETIC_OPENAI_KEY",
+		OutputMode: peoplesweep.OutputModeNativeJSONSchema, TokenLimitParameter: "max_completion_tokens",
 		RetentionPosture: "zero_retention", TrainingPosture: "no_training",
 		AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText},
 		SourceSince:    "2026-01-01", RequestTimeout: 2 * time.Second, AllowSensitive: true,
-	}}
-	config.ApplyDefaults()
+	})
 	if configure != nil {
 		configure(&config)
 	}
@@ -632,7 +633,7 @@ func TestOpenAICompatibleSweepFailureNeverAdvancesCursor(t *testing.T) {
 		{name: "schema mismatch", response: openAISweepResponse{Body: staticOpenAIEnvelope(t, sweepResponseModel, `{"claims":[{"unexpected":true}]}`, 19, 4)}, class: peoplesweep.FailureInvalidOutput},
 		{name: "429", response: openAISweepResponse{Status: http.StatusTooManyRequests, Body: sweepProviderSecret}, class: peoplesweep.FailureRateLimited},
 		{name: "500", response: openAISweepResponse{Status: http.StatusInternalServerError, Body: sweepProviderSecret}, class: peoplesweep.FailureProviderHTTP},
-		{name: "timeout", response: openAISweepResponse{Wait: true}, configure: func(config *peoplesweep.Config) { config.Provider.RequestTimeout = 30 * time.Millisecond }, class: peoplesweep.FailureTimeout},
+		{name: "timeout", response: openAISweepResponse{Wait: true}, configure: providerMutation(func(provider *peoplesweep.ProviderConfig) { provider.RequestTimeout = 30 * time.Millisecond }), class: peoplesweep.FailureTimeout},
 		{name: "redirect", response: openAISweepResponse{Status: http.StatusTemporaryRedirect, Headers: map[string]string{"Location": "/forbidden"}, Body: sweepProviderSecret}, class: peoplesweep.FailureProviderHTTP},
 		{name: "oversized response", response: openAISweepResponse{Body: strings.Repeat(sweepProviderSecret, (1<<20)/len(sweepProviderSecret)+2)}, class: peoplesweep.FailureInvalidOutput},
 	}

@@ -70,8 +70,7 @@ func TestCodexIsolationAgainstPromptInjectedToolAccess(t *testing.T) {
 	}
 	transport, err = NewCodexAppServerTransport(config, NewCodexCommandStarter(), gate)
 	must.NoError(err)
-	profileConfig := Config{Enabled: true, Provider: config}
-	profileConfig.ApplyDefaults()
+	profileConfig := testConfigWithProvider(config)
 	profile, err := profileConfig.Profile()
 	must.NoError(err)
 

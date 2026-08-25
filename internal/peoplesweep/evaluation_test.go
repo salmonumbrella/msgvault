@@ -230,7 +230,7 @@ func runEvaluationSensitivePolicy(
 		SourceCursors: []personfacts.SourceCursor{{Lane: "sensitive-evaluation", Start: "0", End: "1"}},
 		ProgramID:     peoplesweep.ExtractionProgramID, ProgramVersion: peoplesweep.ExtractionProgramVersion,
 		ProgramFingerprint: peoplesweep.ProgramFingerprint(), CatalogFingerprint: allowedCatalog.Fingerprint,
-		Provider: profile.Kind, ProviderVersion: response.ProviderVersion,
+		Provider: string(profile.Protocol), ProviderVersion: response.ProviderVersion,
 		Model: profile.Model, ModelVersion: response.ModelVersion,
 		ResolvedAt: evaluationTime(t, step.ResolvedAt),
 		Policy: personfacts.PolicyContext{AllowSensitive: true,
@@ -424,14 +424,15 @@ func evaluationHasDecision(
 }
 
 func evaluationProviderConfig(allowSensitive bool, endpoint string) peoplesweep.Config {
-	config := peoplesweep.Config{Enabled: true, Provider: peoplesweep.ProviderConfig{
-		Kind: peoplesweep.ProviderOpenAICompatible, Endpoint: endpoint,
-		Model: "frozen-model", APIKeyEnv: "FROZEN_EVALUATION_API_KEY",
+	config := configWithProvider(peoplesweep.ProviderConfig{
+		Protocol: peoplesweep.ProtocolOpenAIChat, Endpoint: endpoint,
+		Model: "frozen-model", Auth: peoplesweep.AuthBearer,
+		Credential: peoplesweep.CredentialEnv, CredentialEnv: "FROZEN_EVALUATION_API_KEY",
+		OutputMode: peoplesweep.OutputModeNativeJSONSchema, TokenLimitParameter: "max_completion_tokens",
 		RetentionPosture: "zero_retention", TrainingPosture: "no_training",
 		AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText},
 		SourceSince:    "2000-01-01", AllowSensitive: allowSensitive,
-	}}
-	config.ApplyDefaults()
+	})
 	config.Budgets.InputCostMicroUSDPerMillionTokens = 2_000_000
 	config.Budgets.OutputCostMicroUSDPerMillionTokens = 6_000_000
 	config.Budgets.MaxEstimatedCostMicroUSDPerRun = 1_000_000_000

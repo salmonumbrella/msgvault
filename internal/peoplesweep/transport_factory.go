@@ -29,15 +29,22 @@ func NewStructuredTransport(
 	commands CommandStarter,
 	isolation CodexIsolationGate,
 ) (StructuredTransport, error) {
-	validation := Config{Enabled: true, Provider: cfg}
+	validation := Config{
+		Enabled: true, Provider: ProviderSelection{Name: "runtime"},
+		Providers: map[string]ProviderConfig{"runtime": cfg},
+	}
 	validation.ApplyDefaults()
 	if err := validation.Validate(); err != nil {
 		return nil, err
 	}
-	switch validation.Provider.Kind {
-	case ProviderOpenAICompatible:
+	_, provider, err := validation.ActiveProviderConfig()
+	if err != nil {
+		return nil, err
+	}
+	switch provider.Protocol {
+	case ProtocolOpenAIChat:
 		return NewOpenAICompatibleTransport(httpClient), nil
-	case ProviderCodexAppServer:
+	case ProtocolCodexAppServer:
 		if commands == nil {
 			return nil, errors.New("codex app-server command starter is required")
 		}
@@ -45,7 +52,7 @@ func NewStructuredTransport(
 			return nil, errors.New("codex app-server isolation gate is required")
 		}
 		attestation, err := isolation.Verify(
-			context.Background(), validation.Provider.Executable, validation.Provider.ExecutionBoundary,
+			context.Background(), provider.Executable, provider.ExecutionBoundary,
 		)
 		if err != nil {
 			_ = attestation.Close()
@@ -54,9 +61,9 @@ func NewStructuredTransport(
 		if err := attestation.Close(); err != nil {
 			return nil, err
 		}
-		return NewCodexAppServerTransport(validation.Provider, commands, isolation)
+		return NewCodexAppServerTransport(provider, commands, isolation)
 	default:
-		return nil, fmt.Errorf("unsupported people sweep provider %q", validation.Provider.Kind)
+		return nil, fmt.Errorf("unsupported people sweep protocol %q", provider.Protocol)
 	}
 }
 

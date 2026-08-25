@@ -71,12 +71,19 @@ func NewCodexAppServerTransport(
 	commands CommandStarter,
 	isolation CodexIsolationGate,
 ) (*CodexAppServerTransport, error) {
-	validation := Config{Enabled: true, Provider: cfg}
+	validation := Config{
+		Enabled: true, Provider: ProviderSelection{Name: "runtime"},
+		Providers: map[string]ProviderConfig{"runtime": cfg},
+	}
 	validation.ApplyDefaults()
 	if err := validation.Validate(); err != nil {
 		return nil, err
 	}
-	if validation.Provider.Kind != ProviderCodexAppServer {
+	_, provider, err := validation.ActiveProviderConfig()
+	if err != nil {
+		return nil, err
+	}
+	if provider.Protocol != ProtocolCodexAppServer {
 		return nil, errors.New("codex app-server transport requires codex_app_server configuration")
 	}
 	if commands == nil {
@@ -86,7 +93,7 @@ func NewCodexAppServerTransport(
 		return nil, errors.New("codex app-server isolation gate is required")
 	}
 	return &CodexAppServerTransport{
-		Config: validation.Provider, Commands: commands, Isolation: isolation,
+		Config: provider, Commands: commands, Isolation: isolation,
 	}, nil
 }
 
@@ -217,7 +224,7 @@ func (t *CodexAppServerTransport) validateProfile(profile ProviderProfile) error
 	if err := profile.Validate(); err != nil {
 		return err
 	}
-	if profile.Kind != ProviderCodexAppServer ||
+	if profile.Protocol != ProtocolCodexAppServer ||
 		profile.Model != strings.TrimSpace(t.Config.Model) ||
 		profile.ReasoningEffort != strings.TrimSpace(t.Config.ReasoningEffort) ||
 		profile.ExecutionBoundary != t.Config.ExecutionBoundary {

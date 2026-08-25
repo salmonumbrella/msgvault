@@ -70,7 +70,15 @@ func NewRunner(
 	if lookup == nil {
 		return nil, errors.New("people inference runner requires a credential lookup")
 	}
-	config.Provider.AllowedSources = slices.Clone(config.Provider.AllowedSources)
+	if _, _, err := config.ActiveProviderConfig(); err != nil {
+		return nil, err
+	}
+	providers := make(map[string]ProviderConfig, len(config.Providers))
+	for name, provider := range config.Providers {
+		provider.AllowedSources = slices.Clone(provider.AllowedSources)
+		providers[name] = provider
+	}
+	config.Providers = providers
 	return &Runner{
 		config: config, consent: consent, transport: transport, lookup: lookup,
 	}, nil
@@ -188,17 +196,21 @@ func (r *Runner) runPrepared(
 	}
 
 	credential := ""
-	if profile.APIKeyEnv != "" {
-		value, ok := r.lookup(profile.APIKeyEnv)
+	if profile.Credential == CredentialEnv {
+		value, ok := r.lookup(profile.CredentialRef)
 		if !ok || value == "" {
 			return StructuredResponse{}, fmt.Errorf(
 				"inference credential environment variable %s is not set",
-				profile.APIKeyEnv)
+				profile.CredentialRef)
 		}
 		credential = value
 	}
 
-	requestCtx, cancel := context.WithTimeout(ctx, r.config.Provider.RequestTimeout)
+	_, provider, err := r.config.ActiveProviderConfig()
+	if err != nil {
+		return StructuredResponse{}, err
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, provider.RequestTimeout)
 	defer cancel()
 	response, err := r.transport.GeneratePreparedJSON(requestCtx, profile, credential, prepared)
 	if err != nil {

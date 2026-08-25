@@ -1580,11 +1580,14 @@ func (s *Server) cliRunEnvAllowed(name string) bool {
 }
 
 func (s *Server) configuredPeopleProviderKeyEnv() string {
-	if s.cfg == nil ||
-		s.cfg.People.Sweep.Provider.Kind != peoplesweep.ProviderOpenAICompatible {
+	if s.cfg == nil {
 		return ""
 	}
-	return s.cfg.People.Sweep.Provider.APIKeyEnv
+	_, provider, err := s.cfg.People.Sweep.ActiveProviderConfig()
+	if err != nil || provider.Credential != peoplesweep.CredentialEnv {
+		return ""
+	}
+	return provider.CredentialEnv
 }
 
 func (s *Server) cliDedupDeleteStore() (CLIDedupDeleteStore, *apiHTTPError) {

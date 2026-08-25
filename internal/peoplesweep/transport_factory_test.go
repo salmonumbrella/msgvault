@@ -39,8 +39,9 @@ func (noStartCommandStarter) Start(context.Context, peoplesweep.CodexExecutable,
 }
 
 func TestStructuredTransportSelectsOpenAICompatible(t *testing.T) {
+	config := validConfig()
 	transport, err := peoplesweep.NewStructuredTransport(
-		validConfig().Provider, http.DefaultClient, nil, nil)
+		activeProvider(config), http.DefaultClient, nil, nil)
 	require.NoError(t, err)
 	_, ok := transport.(*peoplesweep.OpenAICompatibleTransport)
 	assert.True(t, ok)
@@ -48,16 +49,18 @@ func TestStructuredTransportSelectsOpenAICompatible(t *testing.T) {
 
 func TestStructuredTransportSelectsAttestedCodex(t *testing.T) {
 	config := validConfig()
-	config.Provider = peoplesweep.ProviderConfig{
-		Kind: peoplesweep.ProviderCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
+	setActiveProvider(&config, peoplesweep.ProviderConfig{
+		Protocol: peoplesweep.ProtocolCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
+		Auth: peoplesweep.AuthNone, Credential: peoplesweep.CredentialNone,
+		OutputMode:       peoplesweep.OutputModeNativeJSONSchema,
 		RetentionPosture: "zero_retention", TrainingPosture: "no_training",
 		AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText}, SourceSince: "2025-01-01",
 		ExecutionBoundary: peoplesweep.CodexExecutionBoundaryV1,
-	}
+	})
 	config.ApplyDefaults()
 	gate := &attestingGate{}
 
-	transport, err := peoplesweep.NewStructuredTransport(config.Provider, http.DefaultClient, noStartCommandStarter{}, gate)
+	transport, err := peoplesweep.NewStructuredTransport(activeProvider(config), http.DefaultClient, noStartCommandStarter{}, gate)
 	require.NoError(t, err)
 	_, ok := transport.(*peoplesweep.CodexAppServerTransport)
 	assert.True(t, ok)
@@ -66,17 +69,19 @@ func TestStructuredTransportSelectsAttestedCodex(t *testing.T) {
 
 func TestStructuredTransportCodexFailsClosedWhenAttestationDenied(t *testing.T) {
 	config := validConfig()
-	config.Provider = peoplesweep.ProviderConfig{
-		Kind: peoplesweep.ProviderCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
+	setActiveProvider(&config, peoplesweep.ProviderConfig{
+		Protocol: peoplesweep.ProtocolCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
+		Auth: peoplesweep.AuthNone, Credential: peoplesweep.CredentialNone,
+		OutputMode:       peoplesweep.OutputModeNativeJSONSchema,
 		RetentionPosture: "zero_retention", TrainingPosture: "no_training",
 		AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText}, SourceSince: "2025-01-01",
 		ExecutionBoundary: peoplesweep.CodexExecutionBoundaryV1,
-	}
+	})
 	config.ApplyDefaults()
 	gate := &attestingGate{err: peoplesweep.ErrCodexIsolationUnreleased}
 
 	transport, err := peoplesweep.NewStructuredTransport(
-		config.Provider, http.DefaultClient, noStartCommandStarter{}, gate,
+		activeProvider(config), http.DefaultClient, noStartCommandStarter{}, gate,
 	)
 	require.ErrorIs(t, err, peoplesweep.ErrCodexIsolationUnreleased)
 	assert.Nil(t, transport)

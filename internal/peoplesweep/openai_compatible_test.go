@@ -43,28 +43,27 @@ type capturedJSONSchema struct {
 
 func providerTestProfile(t *testing.T, endpoint string, anonymous bool) peoplesweep.ProviderProfile {
 	t.Helper()
-	apiKeyEnv := "TEST_KEY"
+	auth, credential, credentialEnv := peoplesweep.AuthBearer, peoplesweep.CredentialEnv, "TEST_KEY"
 	if anonymous {
-		apiKeyEnv = ""
+		auth, credential, credentialEnv = peoplesweep.AuthNone, peoplesweep.CredentialNone, ""
 	}
-	config := peoplesweep.Config{
-		Enabled: true,
-		Provider: peoplesweep.ProviderConfig{
-			Kind:             peoplesweep.ProviderOpenAICompatible,
-			Endpoint:         endpoint,
-			Model:            "gpt-test",
-			APIKeyEnv:        apiKeyEnv,
-			AllowAnonymous:   anonymous,
-			RetentionPosture: "zero_retention",
-			TrainingPosture:  "no_training",
-			AllowedSources: []peoplesweep.SourceClass{
-				peoplesweep.SourceConversationText,
-			},
-			SourceSince:    "2025-01-01",
-			RequestTimeout: time.Minute,
+	config := configWithProvider(peoplesweep.ProviderConfig{
+		Protocol:            peoplesweep.ProtocolOpenAIChat,
+		Endpoint:            endpoint,
+		Model:               "gpt-test",
+		Auth:                auth,
+		Credential:          credential,
+		CredentialEnv:       credentialEnv,
+		OutputMode:          peoplesweep.OutputModeNativeJSONSchema,
+		TokenLimitParameter: "max_completion_tokens",
+		RetentionPosture:    "zero_retention",
+		TrainingPosture:     "no_training",
+		AllowedSources: []peoplesweep.SourceClass{
+			peoplesweep.SourceConversationText,
 		},
-	}
-	config.ApplyDefaults()
+		SourceSince:    "2025-01-01",
+		RequestTimeout: time.Minute,
+	})
 	profile, err := config.Profile()
 	require.NoError(t, err)
 	return profile

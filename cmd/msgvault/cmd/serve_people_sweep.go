@@ -49,8 +49,12 @@ func newProductionPersonSweepWorker(
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
+	_, provider, err := config.ActiveProviderConfig()
+	if err != nil {
+		return nil, err
+	}
 	transport, err := peoplesweep.NewStructuredTransport(
-		config.Provider, http.DefaultClient,
+		provider, http.DefaultClient,
 		peoplesweep.NewCodexCommandStarter(), peoplesweep.NewReleasedCodexIsolationGate(),
 	)
 	if err != nil {

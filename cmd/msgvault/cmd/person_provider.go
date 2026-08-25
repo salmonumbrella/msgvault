@@ -124,8 +124,12 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 			return openWritableStoreAndInit()
 		},
 		newChecker: func(config peoplesweep.Config, st personProviderStore) (personProviderChecker, error) {
+			_, provider, err := config.ActiveProviderConfig()
+			if err != nil {
+				return nil, err
+			}
 			transport, err := peoplesweep.NewStructuredTransport(
-				config.Provider,
+				provider,
 				http.DefaultClient,
 				peoplesweep.NewCodexCommandStarter(),
 				peoplesweep.NewReleasedCodexIsolationGate(),
@@ -141,8 +145,12 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 			)
 		},
 		newCodexClient: func(config peoplesweep.Config) (personProviderCodexClient, error) {
+			_, provider, err := config.ActiveProviderConfig()
+			if err != nil {
+				return nil, err
+			}
 			transport, err := peoplesweep.NewStructuredTransport(
-				config.Provider,
+				provider,
 				http.DefaultClient,
 				peoplesweep.NewCodexCommandStarter(),
 				peoplesweep.NewReleasedCodexIsolationGate(),
@@ -312,20 +320,26 @@ func runPersonProviderStatus(
 		return runPersonSemanticProviderStatus(command, deps, all, jsonOutput)
 	}
 	var codexIsolation *personProviderCodexIsolationStatus
-	if !all && deps.config().Provider.Kind == peoplesweep.ProviderCodexAppServer {
-		boundary := deps.config().Provider.ExecutionBoundary
-		_, err := currentPersonProviderCodexClient(deps)
+	if !all {
+		_, provider, err := deps.config().ActiveProviderConfig()
 		if err != nil {
-			if !errors.Is(err, peoplesweep.ErrCodexIsolationUnreleased) {
-				return err
-			}
-			codexIsolation = &personProviderCodexIsolationStatus{
-				ExecutionBoundary: boundary,
-				Reason:            peoplesweep.ErrCodexIsolationUnreleased.Error(),
-			}
-		} else {
-			codexIsolation = &personProviderCodexIsolationStatus{
-				Available: true, ExecutionBoundary: boundary,
+			return err
+		}
+		if provider.Protocol == peoplesweep.ProtocolCodexAppServer {
+			boundary := provider.ExecutionBoundary
+			_, err := currentPersonProviderCodexClient(deps)
+			if err != nil {
+				if !errors.Is(err, peoplesweep.ErrCodexIsolationUnreleased) {
+					return err
+				}
+				codexIsolation = &personProviderCodexIsolationStatus{
+					ExecutionBoundary: boundary,
+					Reason:            peoplesweep.ErrCodexIsolationUnreleased.Error(),
+				}
+			} else {
+				codexIsolation = &personProviderCodexIsolationStatus{
+					Available: true, ExecutionBoundary: boundary,
+				}
 			}
 		}
 	}
@@ -685,7 +699,11 @@ func currentPersonProviderCodexClient(
 	deps personProviderCommandDeps,
 ) (personProviderCodexClient, error) {
 	config := deps.config()
-	if config.Provider.Kind != peoplesweep.ProviderCodexAppServer {
+	_, provider, err := config.ActiveProviderConfig()
+	if err != nil {
+		return nil, err
+	}
+	if provider.Protocol != peoplesweep.ProtocolCodexAppServer {
 		return nil, errors.New("person provider login and models require codex_app_server")
 	}
 	if _, err := config.Profile(); err != nil {
@@ -916,8 +934,10 @@ func printPersonProviderDisclosure(w io.Writer, profile peoplesweep.ProviderProf
 		dateRange = profile.SourceSince + " onward"
 	}
 	authentication := "anonymous loopback"
-	if profile.APIKeyEnv != "" {
-		authentication = "environment variable " + profile.APIKeyEnv
+	if profile.Credential == peoplesweep.CredentialEnv {
+		authentication = "environment variable " + profile.CredentialRef
+	} else if profile.Credential == peoplesweep.CredentialStored {
+		authentication = "stored credential (" + string(profile.Auth) + ")"
 	}
 	sensitive := "denied"
 	if profile.AllowSensitive {
@@ -986,7 +1006,11 @@ func personProviderForwardEnv(
 	config peoplesweep.Config,
 	lookup peoplesweep.CredentialLookup,
 ) map[string]string {
-	name := config.Provider.APIKeyEnv
+	_, provider, err := config.ActiveProviderConfig()
+	if err != nil || provider.Credential != peoplesweep.CredentialEnv {
+		return nil
+	}
+	name := provider.CredentialEnv
 	if name == "" || lookup == nil {
 		return nil
 	}

@@ -117,7 +117,9 @@ func (s *recordingCodexStarter) Start(
 
 func codexTestConfig() peoplesweep.ProviderConfig {
 	return peoplesweep.ProviderConfig{
-		Kind: peoplesweep.ProviderCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
+		Protocol: peoplesweep.ProtocolCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
+		Auth: peoplesweep.AuthNone, Credential: peoplesweep.CredentialNone,
+		OutputMode:       peoplesweep.OutputModeNativeJSONSchema,
 		RetentionPosture: "zero_data_retention", TrainingPosture: "no_training",
 		AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText},
 		SourceSince:    "2025-01-01", Executable: "codex",
@@ -127,8 +129,7 @@ func codexTestConfig() peoplesweep.ProviderConfig {
 
 func codexTestProfile(t *testing.T) peoplesweep.ProviderProfile {
 	t.Helper()
-	config := peoplesweep.Config{Enabled: true, Provider: codexTestConfig()}
-	config.ApplyDefaults()
+	config := configWithProvider(codexTestConfig())
 	profile, err := config.Profile()
 	require.NoError(t, err)
 	return profile

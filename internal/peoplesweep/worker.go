@@ -719,7 +719,7 @@ func (w *Worker) RunPerson(
 			ModelVersion: response.ModelVersion, Usage: response.Usage,
 			ActualCostMicroUSD: actualCost, Latency: latency})
 	}
-	provider, model := profile.Kind, profile.Model
+	provider, model := string(profile.Protocol), profile.Model
 	if len(completedBatches) == 0 {
 		provider, providerVersion = StatusOnlyProvider, StatusOnlyProviderVersion
 		model, modelVersion = StatusOnlyModel, StatusOnlyModelVersion

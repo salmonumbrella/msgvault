@@ -113,7 +113,7 @@ func (t *OpenAICompatibleTransport) GeneratePreparedJSON(
 	if err := profile.Validate(); err != nil {
 		return StructuredResponse{}, err
 	}
-	if profile.APIKeyEnv != "" && credential == "" {
+	if profile.Credential != CredentialNone && credential == "" {
 		return StructuredResponse{}, errors.New("inference provider credential is empty")
 	}
 	if err := prepared.validateWireHash(); err != nil {

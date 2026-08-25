@@ -137,7 +137,8 @@ func codexIsolationFixtureRegistry(contents []byte) map[CodexReleaseKey]CodexAtt
 
 func codexIsolationTransportConfig(executable string) ProviderConfig {
 	return ProviderConfig{
-		Kind: ProviderCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
+		Protocol: ProtocolCodexAppServer, Model: "gpt-test", ReasoningEffort: "high",
+		Auth: AuthNone, Credential: CredentialNone, OutputMode: OutputModeNativeJSONSchema,
 		RetentionPosture: "zero_data_retention", TrainingPosture: "no_training",
 		AllowedSources: []SourceClass{SourceConversationText}, SourceSince: "2025-01-01",
 		Executable: executable, ExecutionBoundary: CodexExecutionBoundaryV1,
@@ -420,8 +421,7 @@ func TestCodexReverifyRejectsExecutableReplacement(t *testing.T) {
 		codexIsolationTransportConfig(executable), starter, gate,
 	)
 	must.NoError(err)
-	config := Config{Enabled: true, Provider: codexIsolationTransportConfig(executable)}
-	config.ApplyDefaults()
+	config := testConfigWithProvider(codexIsolationTransportConfig(executable))
 	profile, err := config.Profile()
 	must.NoError(err)
 	request := StructuredRequest{
