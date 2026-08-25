@@ -143,3 +143,66 @@ go vet -tags "fts5 sqlite_vec" ./...
 ## Concerns
 
 The required aggregate command did not complete successfully in this environment. It hit the existing 10-minute package timeout in `cmd/msgvault/cmd` during slow SQLite schema initialization; the aggregate run completed `internal/peoplesweep`, `internal/config`, and `internal/api` successfully before `cmd/msgvault/cmd` timed out. Running the shown changed-surface command passed, and the specific test observed in the aggregate timeout (`TestSetupVectorFeatures_SelectsRunnerByAPIFormat`) passed alone in 9.917s. No Task 1 failure was reported by the aggregate run, but it must not be described as passing.
+
+## Review fix: legacy persisted policies
+
+Fix commit: `c03f3cbfe2de4d209e11bd5579a24354312d7941`
+
+The profile scan path now detects the historical `kind`-based policy JSON, verifies its original canonical SHA-256 fingerprint and every duplicated database column, and maps `kind`, `api_key_env`, and `allow_anonymous` to the typed protocol, credential, and authentication fields used by current audit/status output. It preserves the historical fingerprint, policy JSON, program fingerprint, and consent identity rather than replacing them with the current policy version.
+
+### Review-fix RED
+
+Command:
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/store -run '^TestPersonInferenceProfilesLoadLegacyPersistedPolicy$' -count=1
+```
+
+Output:
+
+```text
+2026/08/25 19:11:27 INFO sql slow kind=exec stmt="-- msgvault unified schema -- Supports: Gmail, Apple Messages, Google Messages, WhatsApp CREATE TABLE IF NOT EXISTS archive_metadata ( key TEXT PRIMARY KEY, value TEXT NOT NULL ); -- Open catalog of communication services. Seeded slugs are presentation and -- normalization metadata, NOT a database enum and not a compatibility -- ceiling: an unknown bridge type or a custom service is registered as a new -- row, never by a schema migration. Slugs are immutable machine identities; -- display labels remain mutable and are never overwritten by re-seeding. CREATE TABLE IF NOT EXISTS communication_services ( id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL UNIQUE, display_label TEXT NOT NULL, scope_policy TEXT NOT NULL DEFAULT 'none', default_scope_kind TEXT, normalization TEXT NOT NULL DEFAULT 'none', normalization_version INTEGER NOT NULL DEFAULT 1, uri_scheme TEXT, profile_url_template TEXT, is_system BOOLEAN NOT NULL DEFAULT FALSE, is_active BOOLEAN NOT NULL DEFAULT TRUE, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ); -- Aliases resolve to one canonical service without changing captured source -- values. A p ... PDATE OF conversation_type ON conversations FOR EACH ROW WHEN OLD.conversation_type IS NOT NEW.conversation_type BEGIN INSERT INTO activity_projection_queue (message_id, revision, queued_at) SELECT id, 1, CURRENT_TIMESTAMP FROM messages WHERE conversation_id = NEW.id ON CONFLICT(message_id) DO UPDATE SET revision = activity_projection_queue.revision + 1, queued_at = CURRENT_TIMESTAMP; END; -- Cascades can remove direct evidence without passing through the projector. -- Dirty only an existing row: person deletion must never resurrect state. CREATE TRIGGER IF NOT EXISTS trg_activity_direct_link_delete_dirty AFTER DELETE ON activity_event_persons FOR EACH ROW WHEN OLD.evidence = 'direct' BEGIN UPDATE person_contact_state SET dirty_at = CURRENT_TIMESTAMP WHERE person_id = OLD.person_id; END;" nargs=0 duration_ms=186 rows_affected=1 args_shape=""
+--- FAIL: TestPersonInferenceProfilesLoadLegacyPersistedPolicy (0.55s)
+    person_inference_consent_test.go:211:
+        Error Trace: /home/codex/repositories/github.com/kenn-io/msgvault/.worktrees/pr685-provider-registry/internal/store/person_inference_consent_test.go:211
+        Error:       Received unexpected error:
+                     read people inference profile: stored people inference profile does not match its immutable policy
+        Test:        TestPersonInferenceProfilesLoadLegacyPersistedPolicy
+FAIL
+FAIL    go.kenn.io/msgvault/internal/store  0.636s
+FAIL
+```
+
+This occurred because unmarshalling historical JSON directly into the new profile discarded `kind`, `api_key_env`, and `allow_anonymous`; immutable-policy comparison then saw an empty protocol and rejected the row.
+
+### Review-fix GREEN
+
+Command:
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/store -run '^TestPersonInferenceProfilesLoadLegacyPersistedPolicy$' -count=1
+```
+
+Output:
+
+```text
+ok  	go.kenn.io/msgvault/internal/store	0.636s
+```
+
+Additional changed-surface verification:
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/store -run 'TestPersonInference(Profile|Consent)' -count=1
+ok  	go.kenn.io/msgvault/internal/store	3.199s
+
+go test -tags "fts5 sqlite_vec" ./cmd/msgvault/cmd -run 'TestPersonProvider.*(Status|Revoke)' -count=1
+ok  	go.kenn.io/msgvault/cmd/msgvault/cmd	1.418s
+
+go vet -tags "fts5 sqlite_vec" ./internal/store
+[exit 0]
+
+git diff --check
+[exit 0]
+```
+
+No new concerns. Historical profiles deliberately retain the policy and fingerprint to which consent was granted; current profiles continue through the existing typed canonical-policy path.
