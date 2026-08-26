@@ -1571,8 +1571,25 @@ func cliRunPersonProviderArgsAllowed(operation string, args []string) bool {
 
 	positionals := 0
 	guardedRevoke := false
-	for index := 0; index < len(args); index++ {
-		argument := args[index]
+	pendingValueFlag := ""
+	consumeValue := func(name, value string) bool {
+		if value == "" || strings.HasPrefix(value, "-") {
+			return false
+		}
+		if name == "if-fingerprint" && !validPersonProviderFingerprint(value) {
+			return false
+		}
+		guardedRevoke = guardedRevoke || name == "if-fingerprint"
+		return true
+	}
+	for _, argument := range args {
+		if pendingValueFlag != "" {
+			if !consumeValue(pendingValueFlag, argument) {
+				return false
+			}
+			pendingValueFlag = ""
+			continue
+		}
 		if !strings.HasPrefix(argument, "--") {
 			positionals++
 			if positionals > maxPositionals || peoplesweep.ValidateProviderProfileName(argument) != nil {
@@ -1593,25 +1610,16 @@ func cliRunPersonProviderArgsAllowed(operation string, args []string) bool {
 		if !valueFlags[name] {
 			return false
 		}
-		flagValue := value
-		if hasValue {
-			if flagValue == "" {
-				return false
-			}
-		} else {
-			remaining := args[index:]
-			if len(remaining) < 2 {
-				return false
-			}
-			flagValue = remaining[1]
-			if flagValue == "" || strings.HasPrefix(flagValue, "-") {
-				return false
-			}
+		if !hasValue {
+			pendingValueFlag = name
+			continue
 		}
-		if name == "if-fingerprint" && !validPersonProviderFingerprint(flagValue) {
+		if !consumeValue(name, value) {
 			return false
 		}
-		guardedRevoke = guardedRevoke || name == "if-fingerprint"
+	}
+	if pendingValueFlag != "" {
+		return false
 	}
 	if guardedRevoke && positionals != 1 {
 		return false

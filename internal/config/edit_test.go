@@ -166,7 +166,7 @@ func TestRestoreMissingConfigRefusesConcurrentReplacement(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, operator, 0o600))
 
 	_, err = RestoreConfigFile(path, after, before)
-	assert.ErrorIs(t, err, ErrConfigConflict)
+	require.ErrorIs(t, err, ErrConfigConflict)
 	assert.Equal(t, operator, mustReadFile(t, path))
 }
 
@@ -594,7 +594,7 @@ kind = "openai_compatible"
 					"source_since": "2025-01-01",
 				},
 			}})
-			assert.ErrorIs(t, err, test.want)
+			require.ErrorIs(t, err, test.want)
 			assert.Equal(t, test.before, string(mustReadFile(t, path)))
 		})
 	}
@@ -610,7 +610,7 @@ func TestConfigEditTablesInsertOnlyRefusesExistingExactTable(t *testing.T) {
 	_, err = EditConfigTables(path, snapshot.ETag, []TableEdit{{
 		Path: []string{"web"}, Values: map[string]any{"theme": "dark"}, InsertOnly: true,
 	}})
-	assert.ErrorIs(t, err, ErrAmbiguousConfigTarget)
+	require.ErrorIs(t, err, ErrAmbiguousConfigTarget)
 	assert.Equal(t, before, string(mustReadFile(t, path)))
 }
 
