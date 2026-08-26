@@ -58,11 +58,10 @@ func TestHTTPDriverRejectsCaseFoldedDuplicateFixedHeadersBeforeNetwork(t *testin
 		NewCredential(AuthXAPIKey, "credential-secret-canary"),
 		[]byte(`{"ok":true}`), map[string]string{
 			"anthropic-version": "2023-06-01",
-			"Anthropic-Version": "duplicate-secret-canary",
+			"Anthropic-Version": "2023-06-01",
 		},
 	)
-	require.ErrorContains(t, err, "header")
-	assert.NotContains(t, err.Error(), "duplicate-secret-canary")
+	require.EqualError(t, err, "inference provider request header is duplicated")
 	assert.NotContains(t, err.Error(), "credential-secret-canary")
 	assert.Zero(t, calls.Load())
 }
