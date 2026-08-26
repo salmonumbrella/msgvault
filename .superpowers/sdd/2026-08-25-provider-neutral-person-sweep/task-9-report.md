@@ -298,3 +298,57 @@ git diff --check
 ```
 
 Open concern unchanged: compatible implementations that do not return the exact structured code and parameter contract fail closed to manual/custom selection.
+
+## Review fix round 5: 2026-08-26
+
+- Code commit: `42305c5b1f9eac5c15f3521ec7ba0c7670f5800f` (`fix: require absent representation error parameters`).
+- Representation-specific error codes now classify only when the protocol-specific structured parameter field is completely absent. Any present value, including an exact active representation field, stops negotiation; generic unsupported codes keep their exact emitted-field matching.
+- Unit coverage spans every active representation-code protocol/mode pair. Real TLS coverage spans both OpenAI representation modes plus Anthropic and Gemini native schema, and negotiation-level coverage proves one call, no representation switch, fixed path/model, and code/parameter/message/body/credential redaction for all four protocol families.
+- Parameterless representation-code TLS cases still retry once and accept the next successful synthetic response for every protocol family.
+
+Round-5 RED:
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'TestCapability(RepresentationCodesRequireAbsentParameter|DriversRejectParameterizedRepresentationCodesForEveryActiveMode|NegotiationStopsOnParameterizedRepresentationCodeForEveryProtocol|NegotiationRetriesClassifiedErrorsForEachProtocolFamily)' -count=1
+--- FAIL: TestCapabilityRepresentationCodesRequireAbsentParameter
+    --- FAIL: chat_native_schema
+    --- FAIL: chat_JSON_object
+    --- FAIL: responses_native_schema
+    --- FAIL: responses_JSON_object
+    --- FAIL: anthropic_native_schema
+    --- FAIL: google_native_schema
+    --- FAIL: google_native_response_format
+--- FAIL: TestCapabilityDriversRejectParameterizedRepresentationCodesForEveryActiveMode
+    --- FAIL: openai_chat_native_schema
+    --- FAIL: openai_chat_JSON_object
+    --- FAIL: openai_responses_native_schema
+    --- FAIL: openai_responses_JSON_object
+    --- FAIL: anthropic_native_schema
+    --- FAIL: google_native_schema
+--- FAIL: TestCapabilityNegotiationStopsOnParameterizedRepresentationCodeForEveryProtocol
+    --- FAIL: openai_chat (expected one call, got three)
+    --- FAIL: openai_responses (expected one call, got two)
+    --- FAIL: anthropic (expected one call, got two)
+    --- FAIL: google (expected one call, got two)
+FAIL
+```
+
+Round-5 GREEN:
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'Test(OpenAIChat|OpenAIResponses|AnthropicMessages|GoogleGenerateContent|DriverRegistry|Capability|ModelsDev)' -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  6.579s
+
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  28.402s
+
+go test -race -tags "fts5 sqlite_vec" ./internal/peoplesweep -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  40.653s
+
+go fmt ./...
+go vet -tags "fts5 sqlite_vec" ./...
+git diff --check
+[exit 0]
+```
+
+Open concern unchanged: compatible implementations that do not return the exact structured code and parameter contract fail closed to manual/custom selection.
