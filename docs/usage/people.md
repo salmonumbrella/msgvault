@@ -1,4 +1,5 @@
 ---
+last_edited: "2026-08-26"
 title: People, Profiles, and Source Identities
 description: Discover the addresses that mean you inside each source, curate stable person profiles, and store typed profile attributes.
 ---
@@ -17,6 +18,66 @@ mistaken for user-curated data:
 The Web UI's People and Relationships workspaces use observed identity
 evidence. The commands on this page add explicit source identities and durable
 profile data through the selected local or remote daemon.
+
+## Configure provider-backed person sweeps
+
+People sweeps can maintain supported profile fields from bounded archive
+evidence. Provider access is disabled until one exact named profile passes a
+synthetic check and you separately consent to its privacy policy.
+
+Add a profile with explicit custom values when you do not want catalog
+discovery. This path does not contact models.dev:
+
+```bash
+export ZAI_API_KEY="..."
+msgvault person provider add glm --custom \
+  --protocol openai_chat \
+  --endpoint https://api.z.ai/api/paas/v4 \
+  --model glm-5.3 \
+  --auth bearer \
+  --credential-env ZAI_API_KEY \
+  --retention-posture provider-declared \
+  --training-posture provider-declared \
+  --source conversation_text \
+  --source meeting_text \
+  --source-since 2026-01-01 \
+  --reasoning-effort max \
+  --yes
+```
+
+Omit `--custom` to allow interactive onboarding to consult models.dev for
+discovery hints. Models.dev is used only by `provider add`; it is not a runtime
+dependency and never receives archive content or credentials. The add command
+checks the selected endpoint with fixed synthetic input and saves the exact
+negotiated protocol behavior. It does not grant archive egress consent.
+
+Review the saved policy, then consent explicitly and run a bounded sweep:
+
+```bash
+msgvault person provider status glm
+msgvault person provider consent glm --yes
+msgvault person provider use glm
+msgvault person sweep run --limit 5
+msgvault person sweep status
+```
+
+Use `--api-key-stdin` during `provider add` to store a profile-specific key
+outside `config.toml`, or `--credential-env NAME` to store only an environment
+variable name. Never put the secret value in a command argument. Custom local
+gateways can use `--custom`; their synthetic check still calls the configured
+endpoint.
+
+GLM 5.3, Kimi K3, OpenRouter, Venice, open-agent-api, Gemini, Anthropic,
+OpenAI Responses, and Codex are examples of profiles over the supported
+protocols, not presets or provider-name branches. A gateway uses the protocol
+it exposes. OpenRouter and Venice may forward data to upstream operators, so
+review the complete routing path and its privacy terms. Use subscription and
+logged-in endpoints only as their terms allow.
+
+Msgvault never switches providers automatically. A locally invalid response
+may receive one repair call on the same resolved profile, credential, endpoint,
+and model. Any profile edit needs a fresh exact check and consent. Live
+credential checks are useful operator verification but are not CI tests.
 
 ## Discover source identities
 

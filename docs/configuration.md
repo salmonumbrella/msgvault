@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-08-17"
+last_edited: "2026-08-26"
 title: Configuration
 description: Configuration file reference, environment variables, and file locations.
 ---
@@ -177,6 +177,79 @@ google_account = "you@gmail.com"
 owner_phone = "+14155551234"
 schedule = "30 4 * * *"
 ```
+
+## People sweep inference
+
+People sweeps use one named protocol profile at a time. A profile records the
+exact endpoint, model, wire protocol, negotiated output mode, privacy posture,
+and source scope. It is configuration, not a provider preset. Msgvault never
+changes the active profile or switches providers automatically.
+
+```toml
+[people.sweep]
+enabled = true
+provider = "glm"
+
+[people.sweep.providers.glm]
+protocol = "openai_chat"
+endpoint = "https://api.z.ai/api/paas/v4"
+model = "glm-5.3"
+auth = "bearer"
+credential = "env"
+credential_env = "ZAI_API_KEY"
+output_mode = "prompt_json"
+token_limit_parameter = "max_tokens"
+reasoning_effort = "max"
+request_timeout = "1m"
+retention_posture = "provider-declared"
+training_posture = "provider-declared"
+allowed_sources = ["conversation_text", "meeting_text"]
+source_since = "2026-01-01"
+allow_sensitive = false
+```
+
+Supported protocols are `openai_chat`, `openai_responses`,
+`anthropic_messages`, `google_generate_content`, and `codex_app_server`.
+Onboarding negotiates and saves `native_json_schema`, `json_object`, or
+`prompt_json`. OpenAI Chat profiles also save either `max_completion_tokens`
+or `max_tokens`; the other protocols use their defined token-limit field.
+
+These are examples of protocol profiles, not built-in presets:
+
+| Example profile | Protocol | Typical profile choice |
+|---|---|---|
+| GLM 5.3 | `openai_chat` | Z.AI API base, `glm-5.3`, often `max_tokens` |
+| Kimi K3 | `openai_chat` or `anthropic_messages` | Choose the exact API surface the account exposes |
+| OpenRouter | `openai_chat` | OpenRouter API base and one explicit routed model ID |
+| Venice | `openai_chat` | Venice API base and one explicit model ID |
+| open-agent-api | `openai_chat` | The gateway's loopback API base and exposed model ID |
+| Gemini | `google_generate_content` | Google API base and one Gemini model ID |
+| Anthropic | `anthropic_messages` | Anthropic API base and one Claude model ID |
+| OpenAI Responses | `openai_responses` | OpenAI API base and one Responses model ID |
+| Codex | `codex_app_server` | Local attested Codex executable and packet-only boundary |
+
+Confirm current endpoints, model identifiers, privacy terms, and subscription
+rules with the selected operator before saving a profile. OpenRouter and Venice
+may route a request to another upstream operator, so the profile's retention
+and training declarations must cover that full path. Logged-in or
+subscription-backed endpoints, including local gateways, must be used within
+their provider terms.
+
+Credentials are not stored in this TOML. `credential = "stored"` keeps a
+profile-specific secret under the private tokens directory;
+`credential = "env"` stores only the selected environment-variable name.
+`credential = "none"` is restricted to credentialless local or Codex paths.
+Changing a credential value does not change the profile fingerprint, but
+changing its source or reference does.
+
+Only interactive `msgvault person provider add` onboarding may contact
+models.dev, and it sends no archive data or provider credential. `--custom`
+skips that catalog and works without models.dev; the required synthetic check
+still contacts the endpoint selected in the profile. The catalog is never used
+by scheduled or manual sweeps. A successful check does not grant consent:
+`msgvault person provider consent <name> --yes` is a separate explicit step.
+Live credential checks are optional developer or operator verification and are
+never CI requirements.
 
 ### Windows Paths
 
