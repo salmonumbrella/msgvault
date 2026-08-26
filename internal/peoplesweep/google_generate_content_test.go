@@ -1,0 +1,429 @@
+package peoplesweep_test
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/peoplesweep"
+)
+
+func googleTestProfile(
+	t *testing.T,
+	endpoint, model string,
+	mode peoplesweep.OutputMode,
+) peoplesweep.ProviderProfile {
+	t.Helper()
+	config := configWithProvider(peoplesweep.ProviderConfig{
+		Protocol: peoplesweep.ProtocolGoogleGenerateContent, Endpoint: endpoint, Model: model,
+		Auth: peoplesweep.AuthGoogleAPIKey, Credential: peoplesweep.CredentialEnv, CredentialEnv: "TEST_KEY",
+		OutputMode: mode, RetentionPosture: "zero_retention", TrainingPosture: "no_training",
+		AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText},
+		SourceSince:    "2025-01-01", RequestTimeout: time.Minute,
+	})
+	profile, err := config.Profile()
+	require.NoError(t, err)
+	return profile
+}
+
+func generateGoogleContent(
+	t *testing.T,
+	server *httptest.Server,
+	profile peoplesweep.ProviderProfile,
+) (peoplesweep.DriverResponse, error) {
+	t.Helper()
+	driver := peoplesweep.NewGoogleGenerateContentDriver(server.Client())
+	prepared, err := driver.Prepare(profile, structuredTestRequest())
+	require.NoError(t, err)
+	return driver.GeneratePrepared(
+		t.Context(), profile,
+		peoplesweep.NewCredential(peoplesweep.AuthGoogleAPIKey, "test-key"), prepared,
+	)
+}
+
+func TestGoogleGenerateContentEmitsNativeSchemaRequestExactly(t *testing.T) {
+	const want = `{"contents":[{"role":"user","parts":[{"text":"Synthetic input only."}]}],"systemInstruction":{"parts":[{"text":"Return one JSON value that strictly matches the supplied JSON Schema."}]},"generationConfig":{"maxOutputTokens":32,"responseMimeType":"application/json","responseSchema":{"type":"object","properties":{"ok":{"type":"boolean","const":true}},"required":["ok"],"additionalProperties":false}}}`
+	var calls atomic.Int64
+	var received []byte
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/v1beta/models/gemini%2F2.5%25flash:generateContent", r.RequestURI)
+		assert.Empty(t, r.URL.RawQuery)
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+		assert.Equal(t, "test-key", r.Header.Get("x-goog-api-key"))
+		assert.Empty(t, r.Header.Get("Authorization"))
+		assert.Empty(t, r.Header.Get("x-api-key"))
+		var err error
+		received, err = io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		_, err = io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":"},{"text":"true}"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":17,"candidatesTokenCount":5},"modelVersion":"gemini-test-001","responseId":"resp-google-1"}`)
+		assert.NoError(t, err)
+	}))
+	defer server.Close()
+
+	profile := googleTestProfile(t, server.URL+"/v1beta", "gemini/2.5%flash", peoplesweep.OutputModeNativeJSONSchema)
+	driver := peoplesweep.NewGoogleGenerateContentDriver(server.Client())
+	prepared, err := driver.Prepare(profile, structuredTestRequest())
+	require.NoError(t, err)
+	assert.Equal(t, want, string(prepared.WireRequest()))
+
+	response, err := driver.GeneratePrepared(
+		t.Context(), profile,
+		peoplesweep.NewCredential(peoplesweep.AuthGoogleAPIKey, "test-key"), prepared,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, want, string(received))
+	assert.JSONEq(t, `{"ok":true}`, string(response.CandidateJSON))
+	assert.Equal(t, "resp-google-1", response.ProviderRequestID)
+	assert.Equal(t, "google-generate-content-v1", response.ProviderVersion)
+	assert.Equal(t, "gemini-test-001", response.ModelVersion)
+	assert.True(t, response.UsageKnown)
+	assert.Equal(t, peoplesweep.TokenUsage{InputTokens: 17, OutputTokens: 5}, response.Usage)
+	assert.Equal(t, int64(1), calls.Load())
+}
+
+func TestGoogleGenerateContentPromptModeUsesSchemaInstruction(t *testing.T) {
+	const want = `{"contents":[{"role":"user","parts":[{"text":"Synthetic input only."}]}],"systemInstruction":{"parts":[{"text":"Return only one JSON value that strictly matches this JSON Schema:\n{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\",\"const\":true}},\"required\":[\"ok\"],\"additionalProperties\":false}"}]},"generationConfig":{"maxOutputTokens":32}}`
+	var received []byte
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		received, err = io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		_, err = io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001"}`)
+		assert.NoError(t, err)
+	}))
+	defer server.Close()
+
+	response, err := generateGoogleContent(t, server,
+		googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
+	require.NoError(t, err)
+	assert.Equal(t, want, string(received))
+	assert.JSONEq(t, `{"ok":true}`, string(response.CandidateJSON))
+}
+
+func TestGoogleGenerateContentRejectsUnsupportedModesAndReasoningBeforeIO(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer server.Close()
+
+	t.Run("JSON object", func(t *testing.T) {
+		profile := googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModeJSONObject)
+		_, err := peoplesweep.NewGoogleGenerateContentDriver(server.Client()).Prepare(profile, structuredTestRequest())
+		require.ErrorContains(t, err, "unsupported output mode")
+	})
+	for _, field := range []string{"effort", "mode"} {
+		t.Run("reasoning "+field, func(t *testing.T) {
+			provider := peoplesweep.ProviderConfig{
+				Protocol: peoplesweep.ProtocolGoogleGenerateContent, Endpoint: server.URL, Model: "gemini-test",
+				Auth: peoplesweep.AuthGoogleAPIKey, Credential: peoplesweep.CredentialEnv, CredentialEnv: "TEST_KEY",
+				OutputMode:       peoplesweep.OutputModePromptJSON,
+				RetentionPosture: "zero_retention", TrainingPosture: "no_training",
+				AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText}, SourceSince: "2025-01-01",
+			}
+			if field == "effort" {
+				provider.ReasoningEffort = "high"
+			} else {
+				provider.ReasoningMode = "enabled"
+			}
+			profile, err := configWithProvider(provider).Profile()
+			require.NoError(t, err)
+			_, err = peoplesweep.NewGoogleGenerateContentDriver(server.Client()).Prepare(profile, structuredTestRequest())
+			require.ErrorContains(t, err, "unsupported reasoning")
+		})
+	}
+	assert.Zero(t, calls.Load())
+}
+
+func TestGoogleGenerateContentRequiresGoogleAPIKeyBeforeIO(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer server.Close()
+	config := configWithProvider(peoplesweep.ProviderConfig{
+		Protocol: peoplesweep.ProtocolGoogleGenerateContent, Endpoint: server.URL, Model: "gemini-test",
+		Auth: peoplesweep.AuthBearer, Credential: peoplesweep.CredentialEnv, CredentialEnv: "TEST_KEY",
+		OutputMode:       peoplesweep.OutputModePromptJSON,
+		RetentionPosture: "zero_retention", TrainingPosture: "no_training",
+		AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText}, SourceSince: "2025-01-01",
+	})
+	profile, err := config.Profile()
+	require.NoError(t, err)
+
+	_, err = peoplesweep.NewGoogleGenerateContentDriver(server.Client()).Prepare(profile, structuredTestRequest())
+	require.ErrorContains(t, err, "google_api_key")
+	assert.Zero(t, calls.Load())
+}
+
+func TestGoogleGenerateContentRejectsUnsafeEndpointJoinBeforeIO(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer server.Close()
+
+	for _, test := range []struct {
+		name, endpoint, model string
+	}{
+		{name: "encoded endpoint path", endpoint: server.URL + "/v1beta/%2e%2e", model: "gemini-test"},
+		{name: "endpoint traversal", endpoint: server.URL + "/v1beta/../escape", model: "gemini-test"},
+		{name: "model traversal", endpoint: server.URL + "/v1beta", model: ".."},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			profile := googleTestProfile(t, test.endpoint, test.model, peoplesweep.OutputModePromptJSON)
+			_, err := peoplesweep.NewGoogleGenerateContentDriver(server.Client()).Prepare(profile, structuredTestRequest())
+			require.ErrorContains(t, err, "unsafe")
+		})
+	}
+
+	for _, endpoint := range []string{
+		server.URL + "/v1beta?key=credential-secret-canary",
+		server.URL + "/v1beta#credential-secret-canary",
+		strings.Replace(server.URL, "https://", "https://user:credential-secret-canary@", 1),
+	} {
+		provider := peoplesweep.ProviderConfig{
+			Protocol: peoplesweep.ProtocolGoogleGenerateContent, Endpoint: endpoint, Model: "gemini-test",
+			Auth: peoplesweep.AuthGoogleAPIKey, Credential: peoplesweep.CredentialEnv, CredentialEnv: "TEST_KEY",
+			OutputMode:       peoplesweep.OutputModePromptJSON,
+			RetentionPosture: "zero_retention", TrainingPosture: "no_training",
+			AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText}, SourceSince: "2025-01-01",
+		}
+		_, err := configWithProvider(provider).Profile()
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "credential-secret-canary")
+	}
+	assert.Zero(t, calls.Load())
+}
+
+func TestGoogleGenerateContentRejectsBlockedMissingAndAmbiguousCandidates(t *testing.T) {
+	tests := []struct {
+		name, body string
+	}{
+		{name: "prompt blocked", body: `{"promptFeedback":{"blockReason":"SAFETY","safetyRatings":[{"category":"HARM_CATEGORY_DANGEROUS_CONTENT","probability":"HIGH"}]},"modelVersion":"gemini-test-001"}`},
+		{name: "blocked candidate", body: `{"candidates":[{"content":{"role":"model","parts":[{"text":"provider-candidate-secret"}]},"finishReason":"SAFETY"}],"modelVersion":"gemini-test-001"}`},
+		{name: "safety only", body: `{"promptFeedback":{"safetyRatings":[{"category":"HARM_CATEGORY_DANGEROUS_CONTENT","probability":"LOW"}]},"modelVersion":"gemini-test-001"}`},
+		{name: "missing candidates", body: `{"modelVersion":"gemini-test-001"}`},
+		{name: "empty candidates", body: `{"candidates":[],"modelVersion":"gemini-test-001"}`},
+		{name: "empty candidate", body: `{"candidates":[{}],"modelVersion":"gemini-test-001"}`},
+		{name: "missing parts", body: `{"candidates":[{"content":{"role":"model"},"finishReason":"STOP"}],"modelVersion":"gemini-test-001"}`},
+		{name: "empty parts", body: `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001"}`},
+		{name: "multiple good", body: `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"},{"content":{"role":"model","parts":[{"text":"{\"ok\":false}"}]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001"}`},
+		{name: "good before blocked", body: `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"},{"content":{"role":"model","parts":[{"text":"provider-candidate-secret"}]},"finishReason":"SAFETY"}],"modelVersion":"gemini-test-001"}`},
+		{name: "blocked before good", body: `{"candidates":[{"content":{"role":"model","parts":[{"text":"provider-candidate-secret"}]},"finishReason":"SAFETY"},{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, err := io.WriteString(w, test.body)
+				assert.NoError(t, err)
+			}))
+			defer server.Close()
+
+			_, err := generateGoogleContent(t, server,
+				googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
+			require.ErrorIs(t, err, peoplesweep.ErrInvalidStructuredOutput)
+			assert.NotContains(t, err.Error(), "provider-candidate-secret")
+			assert.NotContains(t, err.Error(), "test-key")
+		})
+	}
+}
+
+func TestGoogleGenerateContentRejectsMalformedAndMixedPartsInEitherOrder(t *testing.T) {
+	tests := []struct {
+		name, parts string
+	}{
+		{name: "empty text", parts: `{"text":""}`},
+		{name: "nontext before text", parts: `{"inlineData":{"mimeType":"text/plain","data":"provider-candidate-secret"}},{"text":"{\"ok\":true}"}`},
+		{name: "text before nontext", parts: `{"text":"{\"ok\":true}"},{"functionCall":{"name":"provider-candidate-secret"}}`},
+		{name: "mixed before text", parts: `{"text":"{\"ok\":" ,"inlineData":{"data":"provider-candidate-secret"}},{"text":"true}"}`},
+		{name: "text before mixed", parts: `{"text":"{\"ok\":"},{"text":"true}","thought":true}`},
+		{name: "scalar part before text", parts: `false,{"text":"{\"ok\":true}"}`},
+		{name: "text before scalar part", parts: `{"text":"{\"ok\":true}"},false`},
+		{name: "invalid JSON", parts: `{"text":"provider-candidate-secret"}`},
+		{name: "trailing JSON", parts: `{"text":"{\"ok\":true} provider-candidate-secret"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"candidates":[{"content":{"role":"model","parts":[` + test.parts + `]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001","secret":"provider-body-secret"}`
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, err := io.WriteString(w, body)
+				assert.NoError(t, err)
+			}))
+			defer server.Close()
+
+			_, err := generateGoogleContent(t, server,
+				googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
+			require.ErrorIs(t, err, peoplesweep.ErrInvalidStructuredOutput)
+			assert.NotContains(t, err.Error(), "provider-candidate-secret")
+			assert.NotContains(t, err.Error(), "provider-body-secret")
+			assert.NotContains(t, err.Error(), "test-key")
+		})
+	}
+}
+
+func TestGoogleGenerateContentDistinguishesCompleteUsagePresence(t *testing.T) {
+	tests := []struct {
+		name, usage string
+		known       bool
+		want        peoplesweep.TokenUsage
+	}{
+		{name: "missing"},
+		{name: "empty metadata", usage: `,"usageMetadata":{}`},
+		{name: "reported zero", usage: `,"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0}`, known: true},
+		{name: "reported values", usage: `,"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":4}`, known: true, want: peoplesweep.TokenUsage{InputTokens: 11, OutputTokens: 4}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, err := io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001"`+test.usage+`}`)
+				assert.NoError(t, err)
+			}))
+			defer server.Close()
+
+			response, err := generateGoogleContent(t, server,
+				googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
+			require.NoError(t, err)
+			assert.Equal(t, test.known, response.UsageKnown)
+			assert.Equal(t, test.want, response.Usage)
+		})
+	}
+}
+
+func TestGoogleGenerateContentRejectsPartialNegativeAndOverflowUsage(t *testing.T) {
+	for _, usage := range []string{
+		`"promptTokenCount":1`,
+		`"candidatesTokenCount":1`,
+		`"promptTokenCount":-1,"candidatesTokenCount":2`,
+		`"promptTokenCount":2,"candidatesTokenCount":-1`,
+		`"promptTokenCount":9223372036854775808,"candidatesTokenCount":2`,
+		`"promptTokenCount":2,"candidatesTokenCount":9223372036854775808`,
+	} {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, err := io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001","usageMetadata":{`+usage+`},"secret":"provider-body-secret"}`)
+			assert.NoError(t, err)
+		}))
+
+		_, err := generateGoogleContent(t, server,
+			googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
+		server.Close()
+		require.ErrorIs(t, err, peoplesweep.ErrInvalidStructuredOutput)
+		assert.NotContains(t, err.Error(), "provider-body-secret")
+	}
+}
+
+func TestGoogleGenerateContentRejectsMalformedEnvelopeAndUnsafeMetadata(t *testing.T) {
+	for _, body := range []string{
+		`{provider-body-secret`,
+		`{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001"} provider-body-secret`,
+	} {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, err := io.WriteString(w, body)
+			assert.NoError(t, err)
+		}))
+		_, err := generateGoogleContent(t, server,
+			googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
+		server.Close()
+		require.ErrorIs(t, err, peoplesweep.ErrInvalidStructuredOutput)
+		assert.NotContains(t, err.Error(), "provider-body-secret")
+	}
+
+	for _, field := range []string{"modelVersion", "responseId"} {
+		body := map[string]any{
+			"candidates": []any{map[string]any{
+				"content":      map[string]any{"role": "model", "parts": []any{map[string]any{"text": `{"ok":true}`}}},
+				"finishReason": "STOP",
+			}},
+			"modelVersion": "gemini-test-001", "responseId": "response-safe",
+		}
+		body[field] = "unsafe metadata with provider-body-secret"
+		encoded, err := json.Marshal(body)
+		require.NoError(t, err)
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, writeErr := w.Write(encoded)
+			assert.NoError(t, writeErr)
+		}))
+		response, callErr := generateGoogleContent(t, server,
+			googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
+		server.Close()
+		if field == "modelVersion" {
+			require.ErrorIs(t, callErr, peoplesweep.ErrInvalidStructuredOutput)
+			assert.NotContains(t, callErr.Error(), "provider-body-secret")
+		} else {
+			require.NoError(t, callErr)
+			assert.Empty(t, response.ProviderRequestID)
+		}
+	}
+}
+
+func TestGoogleGenerateContentSanitizesHTTPFailureAndMakesOneAttempt(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("request-id", "req-safe")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, err := io.WriteString(w, `{"error":{"message":"provider-body-secret"}}`)
+		assert.NoError(t, err)
+	}))
+	defer server.Close()
+
+	_, err := generateGoogleContent(t, server,
+		googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
+	require.Error(t, err)
+	var providerErr *peoplesweep.ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, http.StatusInternalServerError, providerErr.StatusCode)
+	assert.Equal(t, "req-safe", providerErr.RequestID)
+	assert.NotContains(t, err.Error(), "provider-body-secret")
+	assert.NotContains(t, err.Error(), "test-key")
+	assert.Equal(t, int64(1), calls.Load())
+}
+
+func TestGoogleGenerateContentRejectsOversizeResponse(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, err := io.Copy(w, bytes.NewReader(bytes.Repeat([]byte("x"), (1<<20)+1)))
+		assert.NoError(t, err)
+	}))
+	defer server.Close()
+
+	_, err := generateGoogleContent(t, server,
+		googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
+	require.ErrorIs(t, err, peoplesweep.ErrInvalidStructuredOutput)
+	require.ErrorContains(t, err, "too large")
+}
+
+func TestGoogleGenerateContentRejectsMismatchedCredentialAndForgedWireBeforeIO(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer server.Close()
+	profile := googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON)
+	driver := peoplesweep.NewGoogleGenerateContentDriver(server.Client())
+	prepared, err := driver.Prepare(profile, structuredTestRequest())
+	require.NoError(t, err)
+
+	_, err = driver.GeneratePrepared(t.Context(), profile,
+		peoplesweep.NewCredential(peoplesweep.AuthBearer, "credential-secret-canary"), prepared)
+	require.ErrorContains(t, err, "scheme does not match")
+	assert.NotContains(t, err.Error(), "credential-secret-canary")
+	assert.Zero(t, calls.Load())
+
+	forged, err := peoplesweep.NewPreparedStructuredRequest(
+		structuredTestRequest(), []byte(`{"different":"wire"}`))
+	require.NoError(t, err)
+	_, err = driver.GeneratePrepared(t.Context(), profile,
+		peoplesweep.NewCredential(peoplesweep.AuthGoogleAPIKey, "test-key"), forged)
+	require.ErrorContains(t, err, "does not match deterministic provider encoding")
+	assert.Zero(t, calls.Load())
+}

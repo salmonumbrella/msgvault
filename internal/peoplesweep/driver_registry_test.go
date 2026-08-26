@@ -80,6 +80,22 @@ func TestDriverRegistrySelectsAnthropicMessagesByProtocol(t *testing.T) {
 	assert.True(t, ok)
 }
 
+func TestDriverRegistrySelectsGoogleGenerateContentByProtocol(t *testing.T) {
+	config := configWithProvider(peoplesweep.ProviderConfig{
+		Protocol: peoplesweep.ProtocolGoogleGenerateContent, Endpoint: "https://generativelanguage.example.test/v1beta", Model: "gemini-test",
+		Auth: peoplesweep.AuthGoogleAPIKey, Credential: peoplesweep.CredentialEnv, CredentialEnv: "TEST_KEY",
+		OutputMode:       peoplesweep.OutputModeNativeJSONSchema,
+		RetentionPosture: "zero_retention", TrainingPosture: "no_training",
+		AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText}, SourceSince: "2025-01-01",
+	})
+	registry, err := peoplesweep.NewDriverRegistry(http.DefaultClient, nil, nil)
+	require.NoError(t, err)
+	driver, err := registry.Driver(peoplesweep.ProtocolGoogleGenerateContent, activeProvider(config))
+	require.NoError(t, err)
+	_, ok := driver.(*peoplesweep.GoogleGenerateContentDriver)
+	assert.True(t, ok)
+}
+
 func TestDriverRegistrySelectsAttestedCodexByProtocol(t *testing.T) {
 	config := validConfig()
 	setActiveProvider(&config, peoplesweep.ProviderConfig{
