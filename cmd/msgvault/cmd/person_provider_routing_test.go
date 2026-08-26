@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -157,8 +159,8 @@ func TestPersonProviderFrontendRemoveProxiesOnlyNamedRevoke(t *testing.T) {
 			events = append(events, "edit")
 			return config.EditConfigTables(path, etag, edits)
 		},
-		restoreConfigFile: func(etag string, before config.ConfigFile) (config.ConfigFile, error) {
-			return config.RestoreConfigFile(path, etag, before)
+		restoreConfigFile: func(published, before config.ConfigFile) (config.ConfigFile, error) {
+			return config.RestoreConfigFile(path, published, before)
 		},
 		configHomeDir: func() string { return filepath.Dir(path) },
 	}
@@ -169,6 +171,71 @@ func TestPersonProviderFrontendRemoveProxiesOnlyNamedRevoke(t *testing.T) {
 		"person", "provider", "revoke", "--if-fingerprint=" + profile.Fingerprint, "beta",
 	}, gotArgs)
 	assert.Equal(t, []string{"revoke", "edit"}, events)
+}
+
+func TestPersonProviderRemoveCompletesLocalPreflightBeforeRevoke(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		configured peoplesweep.Config
+		mutateFile func(t *testing.T, path string)
+		wantError  string
+	}{
+		{
+			name:       "only selected profile",
+			configured: func() peoplesweep.Config { c := personProviderTestConfig(); c.Enabled = false; return c }(),
+			wantError:  "only configured",
+		},
+		{
+			name: "descendant extension table",
+			configured: func() peoplesweep.Config {
+				c := personProviderTestConfig()
+				c.Enabled = false
+				beta := configuredPersonProvider(c)
+				beta.Model = "beta-model"
+				c.Providers["beta"] = beta
+				c.Provider = peoplesweep.ProviderSelection{Name: "beta"}
+				return c
+			}(),
+			mutateFile: func(t *testing.T, path string) {
+				file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+				require.NoError(t, err)
+				_, writeErr := file.WriteString("\n[people.sweep.providers.beta.operator_extension]\nanswer = 42\n")
+				require.NoError(t, errors.Join(writeErr, file.Close()))
+			},
+			wantError: "descendant content",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path, _ := retainedPersonProviderTestConfig(t, test.configured)
+			if test.mutateFile != nil {
+				test.mutateFile(t, path)
+			}
+			revokes := 0
+			edits := 0
+			deps := personProviderCommandDeps{
+				config:                     func() peoplesweep.Config { return test.configured },
+				isDaemonSubprocess:         func() bool { return false },
+				providerStoreOwnedByDaemon: func(context.Context) (bool, error) { return true, nil },
+				proxy: func(*cobra.Command, []string, map[string]string) error {
+					revokes++
+					return nil
+				},
+				readConfigFile: func() (config.ConfigFile, error) { return config.ReadConfigFile(path) },
+				editConfigTables: func(etag string, planned []config.TableEdit) (config.ConfigFile, error) {
+					edits++
+					return config.EditConfigTables(path, etag, planned)
+				},
+				restoreConfigFile: func(published, before config.ConfigFile) (config.ConfigFile, error) {
+					return config.RestoreConfigFile(path, published, before)
+				},
+			}
+
+			_, err := executePersonProviderCommand(t, deps, "remove", test.configured.Provider.Name)
+			require.ErrorContains(t, err, test.wantError)
+			assert.Zero(t, revokes)
+			assert.Zero(t, edits)
+		})
+	}
 }
 
 func TestPersonProviderAnonymousCheckForwardsNoCredential(t *testing.T) {

@@ -71,7 +71,7 @@ type personProviderCommandDeps struct {
 	readConfigFile             func() (config.ConfigFile, error)
 	configHomeDir              func() string
 	editConfigTables           func(string, []config.TableEdit) (config.ConfigFile, error)
-	restoreConfigFile          func(string, config.ConfigFile) (config.ConfigFile, error)
+	restoreConfigFile          func(config.ConfigFile, config.ConfigFile) (config.ConfigFile, error)
 	setup                      personProviderSetupDeps
 }
 
@@ -138,8 +138,11 @@ type personSemanticProviderRevokeAllOutput struct {
 
 func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 	setup := defaultPersonProviderSetupDeps()
-	if cfg != nil {
-		setup.credentials = peoplesweep.NewFileCredentialStore(cfg.TokensDir())
+	setup.openCredentialStore = func() (peoplesweep.CredentialStore, error) {
+		if cfg == nil {
+			return nil, errors.New("configuration is unavailable")
+		}
+		return peoplesweep.NewFileCredentialStore(cfg.TokensDir()), nil
 	}
 	return personProviderCommandDeps{
 		config: func() peoplesweep.Config {
@@ -177,8 +180,15 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 				return nil, err
 			}
 			var credentialStore peoplesweep.CredentialStore
-			if cfg != nil {
-				credentialStore = peoplesweep.NewFileCredentialStore(cfg.TokensDir())
+			_, provider, err := config.ActiveProviderConfig()
+			if err != nil {
+				return nil, err
+			}
+			if provider.Credential == peoplesweep.CredentialStored {
+				credentialStore, err = setup.resolveCredentialStore()
+				if err != nil {
+					return nil, err
+				}
 			}
 			return peoplesweep.NewRunner(
 				config,
@@ -246,11 +256,11 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 			}
 			return config.EditConfigTables(cfg.ConfigFilePath(), ifMatch, edits)
 		},
-		restoreConfigFile: func(ifMatch string, before config.ConfigFile) (config.ConfigFile, error) {
+		restoreConfigFile: func(published, before config.ConfigFile) (config.ConfigFile, error) {
 			if cfg == nil {
 				return config.ConfigFile{}, errors.New("configuration is unavailable")
 			}
-			return config.RestoreConfigFile(cfg.ConfigFilePath(), ifMatch, before)
+			return config.RestoreConfigFile(cfg.ConfigFilePath(), published, before)
 		},
 		setup: setup,
 	}
@@ -484,19 +494,6 @@ func runPersonProviderRemove(
 	if err != nil {
 		return err
 	}
-	directStore := deps.isDaemonSubprocess != nil && deps.isDaemonSubprocess()
-	if !directStore && deps.providerStoreOwnedByDaemon != nil {
-		owned, ownershipErr := deps.providerStoreOwnedByDaemon(command.Context())
-		if ownershipErr != nil {
-			return ownershipErr
-		}
-		directStore = !owned
-	}
-	if !directStore {
-		if err := proxySavedPersonProviderRevoke(command, deps, name, profile.Fingerprint); err != nil {
-			return err
-		}
-	}
 	edits := make([]config.TableEdit, 0, 2)
 	if active {
 		names := make([]string, 0, len(configured.Providers)-1)
@@ -516,6 +513,29 @@ func runPersonProviderRemove(
 	edits = append(edits, config.TableEdit{
 		Path: []string{"people", "sweep", "providers", name}, Remove: true,
 	})
+	if err := config.ValidateConfigTableEdits(before, edits); err != nil {
+		return err
+	}
+	var credentials peoplesweep.CredentialStore
+	if provider.Credential == peoplesweep.CredentialStored {
+		credentials, err = deps.setup.resolveCredentialStore()
+		if err != nil {
+			return err
+		}
+	}
+	directStore := deps.isDaemonSubprocess != nil && deps.isDaemonSubprocess()
+	if !directStore && deps.providerStoreOwnedByDaemon != nil {
+		owned, ownershipErr := deps.providerStoreOwnedByDaemon(command.Context())
+		if ownershipErr != nil {
+			return ownershipErr
+		}
+		directStore = !owned
+	}
+	if !directStore {
+		if err := proxySavedPersonProviderRevoke(command, deps, name, profile.Fingerprint); err != nil {
+			return err
+		}
+	}
 	after, err := deps.editConfigTables(before.ETag, edits)
 	if err != nil {
 		if errors.Is(err, config.ErrConfigChanged) {
@@ -543,11 +563,7 @@ func runPersonProviderRemove(
 		}
 	}
 	if provider.Credential == peoplesweep.CredentialStored {
-		if deps.setup.credentials == nil {
-			restoreErr := restoreRemovedPersonProviderConfig(deps, after, before)
-			return errors.Join(errors.New("people provider credential store is unavailable"), restoreErr)
-		}
-		if err := deps.setup.credentials.Delete(name); err != nil {
+		if err := credentials.Delete(name); err != nil {
 			restoreErr := restoreRemovedPersonProviderConfig(deps, after, before)
 			return errors.Join(err, restoreErr)
 		}
@@ -560,7 +576,7 @@ func restoreRemovedPersonProviderConfig(
 	deps personProviderCommandDeps,
 	after, before config.ConfigFile,
 ) error {
-	if _, err := deps.restoreConfigFile(after.ETag, before); err != nil {
+	if _, err := deps.restoreConfigFile(after, before); err != nil {
 		return fmt.Errorf("restore removed people provider config: %w", err)
 	}
 	return nil
@@ -572,15 +588,7 @@ func rollbackUncertainPersonProviderRemove(
 	before, expected config.ConfigFile,
 	consentRevoked bool,
 ) error {
-	current, err := deps.readConfigFile()
-	if err != nil {
-		cause = errors.Join(cause, fmt.Errorf("inspect uncertain people provider removal: %w", err))
-	} else if config.SameConfigFileVersion(current, expected) {
-		cause = errors.Join(cause, restoreRemovedPersonProviderConfig(deps, current, before))
-	} else {
-		cause = errors.Join(cause,
-			errors.New("people provider removal publication is uncertain and the current version was preserved"))
-	}
+	cause = errors.Join(cause, restoreRemovedPersonProviderConfig(deps, expected, before))
 	if consentRevoked {
 		cause = errors.Join(cause, errors.New("exact people provider consent remains revoked"))
 	}

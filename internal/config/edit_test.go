@@ -145,7 +145,7 @@ func TestRestoreConfigFileRestoresOriginallyMissingSnapshot(t *testing.T) {
 	after, err := EditConfigFile(path, before.ETag, []Edit{{Key: "web.theme", Value: "dark"}})
 	require.NoError(t, err)
 
-	restored, err := RestoreConfigFile(path, after.ETag, before)
+	restored, err := RestoreConfigFile(path, after, before)
 	require.NoError(t, err)
 	assert.False(t, restored.Exists)
 	_, statErr := os.Stat(path)
@@ -165,9 +165,85 @@ func TestRestoreMissingConfigRefusesConcurrentReplacement(t *testing.T) {
 	operator := []byte("[web]\ntheme = \"light\"\n")
 	require.NoError(t, os.WriteFile(path, operator, 0o600))
 
-	_, err = RestoreConfigFile(path, after.ETag, before)
+	_, err = RestoreConfigFile(path, after, before)
 	assert.ErrorIs(t, err, ErrConfigConflict)
 	assert.Equal(t, operator, mustReadFile(t, path))
+}
+
+func TestRestoreConfigPinsExpectedPublishedIdentityAtFinalBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		swap func(t *testing.T, path string, content []byte)
+	}{
+		{
+			name: "different inode with identical bytes",
+			swap: func(t *testing.T, path string, content []byte) {
+				replacement := filepath.Join(filepath.Dir(path), "operator-replacement.toml")
+				require.NoError(t, os.WriteFile(replacement, content, 0o600))
+				require.NoError(t, os.Rename(replacement, path))
+			},
+		},
+		{
+			name: "symlink to identical bytes",
+			swap: func(t *testing.T, path string, content []byte) {
+				target := filepath.Join(filepath.Dir(path), "operator-target.toml")
+				require.NoError(t, os.WriteFile(target, content, 0o600))
+				require.NoError(t, os.Remove(path))
+				require.NoError(t, os.Symlink(target, path))
+			},
+		},
+		{
+			name: "hardlink to identical bytes",
+			swap: func(t *testing.T, path string, content []byte) {
+				target := filepath.Join(filepath.Dir(path), "operator-target.toml")
+				require.NoError(t, os.WriteFile(target, content, 0o600))
+				require.NoError(t, os.Remove(path))
+				require.NoError(t, os.Link(target, path))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			original := []byte("[web]\ntheme = \"system\"\n")
+			require.NoError(t, os.WriteFile(path, original, 0o600))
+			before, err := ReadConfigFile(path)
+			require.NoError(t, err)
+			after, err := EditConfigFile(path, before.ETag, []Edit{{Key: "web.theme", Value: "dark"}})
+			require.NoError(t, err)
+
+			ops := defaultConfigFileOps()
+			ops.beforeExchange = func() error {
+				test.swap(t, path, after.Content)
+				return nil
+			}
+			_, err = restoreConfigFile(path, after, before, ops)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrConfigConflict)
+			assert.Equal(t, after.Content, mustReadFile(t, path))
+		})
+	}
+}
+
+func TestRestoreMissingConfigPinsExpectedPublishedIdentityAtFinalBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	before, err := ReadConfigFile(path)
+	require.NoError(t, err)
+	after, err := EditConfigFile(path, before.ETag, []Edit{{Key: "web.theme", Value: "dark"}})
+	require.NoError(t, err)
+	operatorPath := filepath.Join(filepath.Dir(path), "operator.toml")
+	require.NoError(t, os.WriteFile(operatorPath, after.Content, 0o600))
+	ops := defaultConfigFileOps()
+	ops.beforeExchange = func() error {
+		return os.Rename(operatorPath, path)
+	}
+
+	_, err = restoreConfigFile(path, after, before, ops)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrConfigConflict)
+	assert.Equal(t, after.Content, mustReadFile(t, path))
+	operator, err := ReadConfigFile(path)
+	require.NoError(t, err)
+	assert.False(t, SameConfigFileVersion(after, operator))
 }
 
 func TestEditConfigDoesNotCreateDirectoriesBeforeConcurrencyCheck(t *testing.T) {
@@ -989,6 +1065,34 @@ func TestSameConfigFileVersionRejectsByteIdenticalReplacement(t *testing.T) {
 	concurrent, err := ReadConfigFile(path)
 	require.NoError(t, err)
 	assert.False(t, SameConfigFileVersion(transaction, concurrent))
+}
+
+func TestEditConfigReturnsPublishedIdentityWhenFinalReadSeesReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte("[web]\ntheme = \"system\"\n"), 0o600))
+	before, err := ReadConfigFile(path)
+	require.NoError(t, err)
+	ops := defaultConfigFileOps()
+	nativeRead := ops.read
+	readCalls := 0
+	ops.read = func(requested string) (ConfigFile, error) {
+		readCalls++
+		if readCalls == 3 {
+			content := mustReadFile(t, path)
+			replacement := filepath.Join(filepath.Dir(path), "operator-replacement.toml")
+			require.NoError(t, os.WriteFile(replacement, content, 0o600))
+			require.NoError(t, os.Rename(replacement, path))
+		}
+		return nativeRead(requested)
+	}
+
+	published, err := editConfigFile(path, before.ETag, []Edit{{Key: "web.theme", Value: "dark"}}, ops)
+	require.ErrorIs(t, err, ErrConfigChanged)
+	current, readErr := ReadConfigFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, current.Content, published.Content)
+	assert.False(t, SameConfigFileVersion(published, current))
+	assert.NotEmpty(t, published.identity)
 }
 
 func TestEditConfigPreservesDisplacedArtifactWhenConflictRollbackFails(t *testing.T) {

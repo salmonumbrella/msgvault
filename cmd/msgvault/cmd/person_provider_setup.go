@@ -19,12 +19,13 @@ import (
 const maxProviderCredentialBytes = 16 << 10
 
 type personProviderSetupDeps struct {
-	catalog     func(context.Context) ([]peoplesweep.ProviderSuggestion, error)
-	negotiate   func(context.Context, peoplesweep.ProviderConfig, peoplesweep.Credential) (peoplesweep.NegotiatedCapabilities, error)
-	credentials peoplesweep.CredentialStore
-	lookupEnv   peoplesweep.CredentialLookup
-	isTerminal  func(uintptr) bool
-	readMasked  func(*os.File, int) ([]byte, error)
+	catalog             func(context.Context) ([]peoplesweep.ProviderSuggestion, error)
+	negotiate           func(context.Context, peoplesweep.ProviderConfig, peoplesweep.Credential) (peoplesweep.NegotiatedCapabilities, error)
+	credentials         peoplesweep.CredentialStore
+	openCredentialStore func() (peoplesweep.CredentialStore, error)
+	lookupEnv           peoplesweep.CredentialLookup
+	isTerminal          func(uintptr) bool
+	readMasked          func(*os.File, int) ([]byte, error)
 }
 
 type personProviderCreateCredentialStore interface {
@@ -76,6 +77,23 @@ func defaultPersonProviderSetupDeps() personProviderSetupDeps {
 		isTerminal: term.IsTerminal,
 		readMasked: readBoundedMaskedCredential,
 	}
+}
+
+func (deps personProviderSetupDeps) resolveCredentialStore() (peoplesweep.CredentialStore, error) {
+	if deps.credentials != nil {
+		return deps.credentials, nil
+	}
+	if deps.openCredentialStore == nil {
+		return nil, errors.New("people provider credential store is unavailable")
+	}
+	credentials, err := deps.openCredentialStore()
+	if err != nil {
+		return nil, fmt.Errorf("open people provider credential store: %w", err)
+	}
+	if credentials == nil {
+		return nil, errors.New("people provider credential store is unavailable")
+	}
+	return credentials, nil
 }
 
 func newPersonProviderAddCommand(deps personProviderCommandDeps) *cobra.Command {
@@ -171,6 +189,20 @@ func runPersonProviderAdd(
 			return err
 		}
 	}
+	if err := validatePersonProviderProposal(configured, name, candidate, catalogPrices); err != nil {
+		return err
+	}
+	plannedEdits := personProviderAddEdits(name, candidate, catalogPrices)
+	if err := config.ValidateConfigTableEdits(before, plannedEdits); err != nil {
+		return err
+	}
+	var credentialStore peoplesweep.CredentialStore
+	if candidate.Credential == peoplesweep.CredentialStored {
+		credentialStore, err = deps.setup.resolveCredentialStore()
+		if err != nil {
+			return err
+		}
+	}
 
 	credential, stored, err := readPersonProviderCredential(command, deps.setup, name, candidate, options)
 	if err != nil {
@@ -188,16 +220,17 @@ func runPersonProviderAdd(
 	candidate.ReasoningEffort = capabilities.ReasoningEffort
 	candidate.ReasoningMode = capabilities.ReasoningMode
 	candidate.DriverVersion = capabilities.DriverVersion
-	if err := validatePersonProviderCandidate(configured, name, candidate); err != nil {
+	if err := validatePersonProviderProposal(configured, name, candidate, catalogPrices); err != nil {
+		return err
+	}
+	plannedEdits = personProviderAddEdits(name, candidate, catalogPrices)
+	if err := config.ValidateConfigTableEdits(before, plannedEdits); err != nil {
 		return err
 	}
 
 	createdCredential := false
 	if stored {
-		if deps.setup.credentials == nil {
-			return errors.New("people provider credential store is unavailable")
-		}
-		createStore, ok := deps.setup.credentials.(personProviderCreateCredentialStore)
+		createStore, ok := credentialStore.(personProviderCreateCredentialStore)
 		if !ok {
 			return errors.New("people provider credential store does not support create-only publication")
 		}
@@ -210,25 +243,12 @@ func runPersonProviderAdd(
 		}
 	}
 
-	edits := []config.TableEdit{
-		{Path: []string{"people", "sweep"}, Values: map[string]any{"provider": name}},
-		{Path: []string{"people", "sweep", "providers", name}, Values: personProviderTableValues(candidate), InsertOnly: true},
-	}
-	if catalogPrices != nil {
-		edits = append(edits, config.TableEdit{
-			Path: []string{"people", "sweep", "budgets"},
-			Values: map[string]any{
-				"input_cost_microusd_per_million_tokens":  catalogPrices.InputCostMicroUSDPerMillionTokens,
-				"output_cost_microusd_per_million_tokens": catalogPrices.OutputCostMicroUSDPerMillionTokens,
-			},
-		})
-	}
-	after, err := deps.editConfigTables(before.ETag, edits)
+	after, err := deps.editConfigTables(before.ETag, plannedEdits)
 	if err != nil {
 		if errors.Is(err, config.ErrConfigChanged) {
-			return rollbackUncertainPersonProviderAdd(err, deps, before, after, name, createdCredential)
+			return rollbackUncertainPersonProviderAdd(err, deps, before, after, credentialStore, name, createdCredential)
 		}
-		return rollbackNewPersonProviderCredential(err, deps.setup.credentials, name, createdCredential)
+		return rollbackNewPersonProviderCredential(err, credentialStore, name, createdCredential)
 	}
 	checkedConfig, err := personProviderConfigFromSnapshot(deps, after)
 	if err == nil {
@@ -237,7 +257,7 @@ func runPersonProviderAdd(
 		err = executeSavedPersonProviderCheck(command, checkedDeps, name)
 	}
 	if err != nil {
-		rollbackErr := rollbackPersonProviderAdd(deps, before, after, name, createdCredential)
+		rollbackErr := rollbackPersonProviderAdd(deps, before, after, credentialStore, name, createdCredential)
 		return errors.Join(err, rollbackErr)
 	}
 	_, _ = fmt.Fprintf(command.OutOrStdout(), "Added and checked people provider profile %q.\n", name)
@@ -469,6 +489,16 @@ func validatePersonProviderCandidate(
 	name string,
 	candidate peoplesweep.ProviderConfig,
 ) error {
+	configured = personProviderProposedConfig(configured, name, candidate)
+	_, err := configured.Profile()
+	return err
+}
+
+func personProviderProposedConfig(
+	configured peoplesweep.Config,
+	name string,
+	candidate peoplesweep.ProviderConfig,
+) peoplesweep.Config {
 	configured.Enabled = true
 	configured.Provider = peoplesweep.ProviderSelection{Name: name}
 	providers := make(map[string]peoplesweep.ProviderConfig, len(configured.Providers)+1)
@@ -478,8 +508,55 @@ func validatePersonProviderCandidate(
 	providers[name] = candidate
 	configured.Providers = providers
 	configured.ApplyDefaults()
-	_, err := configured.Profile()
+	return configured
+}
+
+func validatePersonProviderProposal(
+	configured peoplesweep.Config,
+	name string,
+	candidate peoplesweep.ProviderConfig,
+	prices *peoplesweep.BudgetConfig,
+) error {
+	proposed := personProviderProposedConfig(configured, name, candidate)
+	if prices != nil {
+		proposed.Budgets = *prices
+	}
+	if err := peoplesweep.ValidateBudgetConfig(proposed.Budgets); err != nil {
+		return err
+	}
+	reservations := []peoplesweep.TokenUsage{
+		{InputTokens: proposed.Budgets.MaxInputTokensPerPerson, OutputTokens: proposed.Budgets.MaxOutputTokensPerPerson},
+		{InputTokens: proposed.Budgets.MaxInputTokensPerRun, OutputTokens: proposed.Budgets.MaxOutputTokensPerRun},
+		{InputTokens: proposed.Budgets.MaxInputTokensPerDay, OutputTokens: proposed.Budgets.MaxOutputTokensPerDay},
+	}
+	for _, reservation := range reservations {
+		if _, err := peoplesweep.EstimateCostMicroUSD(reservation, proposed.Budgets); err != nil {
+			return fmt.Errorf("people provider catalog prices overflow a configured token reservation: %w", err)
+		}
+	}
+	_, err := proposed.Profile()
 	return err
+}
+
+func personProviderAddEdits(
+	name string,
+	candidate peoplesweep.ProviderConfig,
+	prices *peoplesweep.BudgetConfig,
+) []config.TableEdit {
+	edits := []config.TableEdit{
+		{Path: []string{"people", "sweep"}, Values: map[string]any{"provider": name}},
+		{Path: []string{"people", "sweep", "providers", name}, Values: personProviderTableValues(candidate), InsertOnly: true},
+	}
+	if prices != nil {
+		edits = append(edits, config.TableEdit{
+			Path: []string{"people", "sweep", "budgets"},
+			Values: map[string]any{
+				"input_cost_microusd_per_million_tokens":  prices.InputCostMicroUSDPerMillionTokens,
+				"output_cost_microusd_per_million_tokens": prices.OutputCostMicroUSDPerMillionTokens,
+			},
+		})
+	}
+	return edits
 }
 
 func personProviderTableValues(provider peoplesweep.ProviderConfig) map[string]any {
@@ -648,35 +725,27 @@ func rollbackUncertainPersonProviderAdd(
 	cause error,
 	deps personProviderCommandDeps,
 	before, expected config.ConfigFile,
+	credentials peoplesweep.CredentialStore,
 	name string,
 	createdCredential bool,
 ) error {
-	current, err := deps.readConfigFile()
-	if err != nil {
-		cleanupErr := rollbackNewPersonProviderCredential(nil, deps.setup.credentials, name, createdCredential)
-		return errors.Join(cause, fmt.Errorf("inspect uncertain people provider config publication: %w", err), cleanupErr)
-	}
-	if config.SameConfigFileVersion(current, expected) {
-		return errors.Join(cause, rollbackPersonProviderAdd(deps, before, current, name, createdCredential))
-	}
-	cleanupErr := rollbackNewPersonProviderCredential(nil, deps.setup.credentials, name, createdCredential)
 	return errors.Join(cause,
-		errors.New("people provider config publication is uncertain and the current version was preserved"),
-		cleanupErr)
+		rollbackPersonProviderAdd(deps, before, expected, credentials, name, createdCredential))
 }
 
 func rollbackPersonProviderAdd(
 	deps personProviderCommandDeps,
 	before, after config.ConfigFile,
+	credentials peoplesweep.CredentialStore,
 	name string,
 	createdCredential bool,
 ) error {
 	var rollbackErr error
-	if _, err := deps.restoreConfigFile(after.ETag, before); err != nil {
+	if _, err := deps.restoreConfigFile(after, before); err != nil {
 		rollbackErr = fmt.Errorf("restore people provider config: %w", err)
 	}
-	if createdCredential && deps.setup.credentials != nil {
-		if err := deps.setup.credentials.Delete(name); err != nil {
+	if createdCredential && credentials != nil {
+		if err := credentials.Delete(name); err != nil {
 			rollbackErr = errors.Join(rollbackErr,
 				fmt.Errorf("delete newly created people provider credential: %w", err))
 		}

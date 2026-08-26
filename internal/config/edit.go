@@ -202,43 +202,108 @@ func EditConfigTables(path, ifMatch string, edits []TableEdit) (ConfigFile, erro
 	}, defaultConfigFileOps())
 }
 
-// RestoreConfigFile conditionally restores the exact bytes of a previously
-// retained snapshot through the normal validated atomic-edit machinery.
-func RestoreConfigFile(path, ifMatch string, before ConfigFile) (ConfigFile, error) {
+// ValidateConfigTableEdits applies and validates an exact table plan against
+// one retained snapshot without publishing it. Callers use this before an
+// irreversible side effect; EditConfigTables repeats the plan under ETag.
+func ValidateConfigTableEdits(snapshot ConfigFile, edits []TableEdit) error {
+	if snapshot.LogicalPath == "" || snapshot.Path == "" || snapshot.ETag != configETag(snapshot.Content) {
+		return errors.New("config edit snapshot is invalid")
+	}
+	candidate, err := applyTableEdits(snapshot.Content, edits)
+	if err != nil {
+		return err
+	}
+	mode := snapshot.Mode.Perm()
+	if !snapshot.Exists {
+		mode = 0o600
+	}
+	loaded, err := LoadConfigFile(ConfigFile{
+		LogicalPath: snapshot.LogicalPath,
+		Path:        snapshot.Path,
+		Content:     candidate,
+		ETag:        configETag(candidate),
+		Mode:        mode,
+		Exists:      true,
+	}, "")
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidConfigCandidate, err)
+	}
+	if err := validateEditableCandidate(loaded); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidConfigCandidate, err)
+	}
+	return nil
+}
+
+// RestoreConfigFile restores before only while the live target is the exact
+// filesystem object published by the transaction. The post-write snapshot is
+// an identity guard, not merely an ETag: byte-identical concurrent replacement
+// files are preserved.
+func RestoreConfigFile(path string, published, before ConfigFile) (ConfigFile, error) {
+	return restoreConfigFile(path, published, before, defaultConfigFileOps())
+}
+
+func restoreConfigFile(path string, published, before ConfigFile, ops configFileOps) (ConfigFile, error) {
+	if err := validatePublishedConfigSnapshot(published); err != nil {
+		return ConfigFile{}, err
+	}
 	if !before.Exists {
 		if before.ETag != configETag(nil) || before.Path == "" || before.parentIdentity == "" {
 			return ConfigFile{}, errors.New("config rollback snapshot is invalid")
 		}
-		return restoreMissingConfigFile(path, ifMatch, before)
+		return restoreMissingConfigFile(path, published, before, ops)
 	}
 	if before.ETag == "" || before.ETag != configETag(before.Content) {
 		return ConfigFile{}, errors.New("config rollback snapshot is invalid")
 	}
-	return editConfigWithTransform(path, ifMatch, true, func([]byte) ([]byte, error) {
+	return editConfigWithExpectedTransform(path, published, true, func([]byte) ([]byte, error) {
 		return append([]byte(nil), before.Content...), nil
-	}, defaultConfigFileOps())
+	}, ops)
 }
 
-func restoreMissingConfigFile(path, ifMatch string, before ConfigFile) (ConfigFile, error) {
+func validatePublishedConfigSnapshot(published ConfigFile) error {
+	if !published.Exists || published.LogicalPath == "" || published.Path == "" ||
+		published.identity == "" || published.ETag == "" ||
+		published.ETag != configETag(published.Content) {
+		return errors.New("published config rollback identity is invalid")
+	}
+	return nil
+}
+
+func restoreMissingConfigFile(
+	path string,
+	published, before ConfigFile,
+	ops configFileOps,
+) (ConfigFile, error) {
 	configEditMu.Lock()
 	defer configEditMu.Unlock()
-	current, err := readConfigFileForEdit(path)
+	readInitial := ops.initialRead
+	if readInitial == nil {
+		readInitial = ops.read
+	}
+	current, err := readInitial(path)
 	if err != nil {
 		return ConfigFile{}, err
 	}
 	if current.retained != nil {
 		defer func() { _ = current.retained.Close() }()
 	}
-	if !current.Exists || ifMatch == "" || current.ETag != ifMatch {
-		return ConfigFile{}, fmt.Errorf("%w: current ETag is %s", ErrConfigConflict, current.ETag)
+	if !SameConfigFileVersion(current, published) {
+		return ConfigFile{}, errors.Join(ErrConfigConflict,
+			errors.New("config rollback target is not the published transaction object"))
 	}
-	if current.Path != before.Path {
-		return ConfigFile{}, errors.Join(ErrConfigConflict, errors.New("config rollback target changed"))
+	if ops.beforeExchange != nil {
+		if err := ops.beforeExchange(); err != nil {
+			return ConfigFile{}, fmt.Errorf("before config rollback retirement: %w", err)
+		}
 	}
 	if err := retireExactConfigForMissingRestore(current, before); err != nil {
 		return ConfigFile{}, err
 	}
-	restored, err := ReadConfigFile(path)
+	read := ops.read
+	if read == nil {
+		read = ReadConfigFile
+	}
+	restored, err := read(path)
 	if err != nil {
 		return ConfigFile{}, errors.Join(ErrConfigChanged, fmt.Errorf("verify missing config rollback: %w", err))
 	}
@@ -250,6 +315,26 @@ func restoreMissingConfigFile(path, ifMatch string, before ConfigFile) (ConfigFi
 
 func editConfigWithTransform(
 	path, ifMatch string,
+	hasChanges bool,
+	transform func([]byte) ([]byte, error),
+	ops configFileOps,
+) (result ConfigFile, resultErr error) {
+	return editConfigWithMatch(path, ifMatch, nil, hasChanges, transform, ops)
+}
+
+func editConfigWithExpectedTransform(
+	path string,
+	published ConfigFile,
+	hasChanges bool,
+	transform func([]byte) ([]byte, error),
+	ops configFileOps,
+) (result ConfigFile, resultErr error) {
+	return editConfigWithMatch(path, "", &published, hasChanges, transform, ops)
+}
+
+func editConfigWithMatch(
+	path, ifMatch string,
+	published *ConfigFile,
 	hasChanges bool,
 	transform func([]byte) ([]byte, error),
 	ops configFileOps,
@@ -288,7 +373,11 @@ func editConfigWithTransform(
 	if before.retained != nil {
 		defer func() { _ = before.retained.Close() }()
 	}
-	if ifMatch == "" || ifMatch != before.ETag {
+	if published != nil && !SameConfigFileVersion(before, *published) {
+		return ConfigFile{}, errors.Join(ErrConfigConflict,
+			errors.New("config target is not the published transaction object"))
+	}
+	if published == nil && (ifMatch == "" || ifMatch != before.ETag) {
 		return ConfigFile{}, fmt.Errorf("%w: current ETag is %s", ErrConfigConflict, before.ETag)
 	}
 	if !hasChanges {
@@ -514,6 +603,12 @@ func editConfigWithTransform(
 		return ConfigFile{}, errors.Join(
 			fmt.Errorf("%w: committed config could not be read", ErrConfigChanged),
 			readErr,
+		)
+	}
+	if !SameConfigFileVersion(after, expected) {
+		return ConfigFile{}, errors.Join(
+			fmt.Errorf("%w: committed config identity changed before return", ErrConfigChanged),
+			ErrConfigConflict,
 		)
 	}
 	return after, nil
