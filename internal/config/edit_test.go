@@ -242,7 +242,7 @@ func TestRestoreMissingConfigPinsExpectedPublishedIdentityAtFinalBoundary(t *tes
 
 	_, err = restoreConfigFile(path, after, before, ops)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrConfigConflict)
+	require.ErrorIs(t, err, ErrConfigConflict)
 	assert.Equal(t, after.Content, mustReadFile(t, path))
 	operator, err := ReadConfigFile(path)
 	require.NoError(t, err)

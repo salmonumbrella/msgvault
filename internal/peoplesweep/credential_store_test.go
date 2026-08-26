@@ -297,7 +297,7 @@ func TestCredentialStorePreflightDeleteRejectsMissingStateWithoutCreatingIt(t *t
 		before := snapshotCredentialPaths(t, paths...)
 
 		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
-		assert.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
+		require.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
 		assertCredentialPathsUnchanged(t, before)
 	})
 
@@ -511,7 +511,7 @@ func TestCredentialStoreDeleteRejectsUnsafeTargetAfterPreflightWithoutChangingIt
 		)
 
 		err = store.Delete("profile", guard)
-		assert.ErrorContains(t, err, "changed")
+		require.ErrorContains(t, err, "changed")
 		if err != nil {
 			assert.NotContains(t, err.Error(), credentialCanary)
 		}
