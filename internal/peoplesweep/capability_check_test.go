@@ -242,8 +242,8 @@ func TestCapabilityErrorClassificationRequiresProtocolSpecificStructuredCode(t *
 	}{
 		{name: "openai chat", protocol: ProtocolOpenAIChat, body: `{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"response_format","message":"secret"}}`, want: ProviderCapabilityUnsupportedRepresentation},
 		{name: "openai responses", protocol: ProtocolOpenAIResponses, body: `{"error":{"type":"invalid_request_error","code":"unsupported_value","param":"text.format","message":"secret"}}`, want: ProviderCapabilityUnsupportedRepresentation},
-		{name: "anthropic", protocol: ProtocolAnthropicMessages, body: `{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter","message":"secret"}}`, want: ProviderCapabilityUnsupportedRepresentation},
-		{name: "google", protocol: ProtocolGoogleGenerateContent, body: `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"secret","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com"}]}}`, want: ProviderCapabilityUnsupportedRepresentation},
+		{name: "anthropic", protocol: ProtocolAnthropicMessages, body: `{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"tools","message":"secret"}}`, want: ProviderCapabilityUnsupportedRepresentation},
+		{name: "google", protocol: ProtocolGoogleGenerateContent, body: `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"secret","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com","metadata":{"parameter":"generationConfig.responseSchema"}}]}}`, want: ProviderCapabilityUnsupportedRepresentation},
 		{name: "openai generic", protocol: ProtocolOpenAIChat, body: `{"error":{"type":"invalid_request_error","message":"unsupported parameter secret"}}`},
 		{name: "openai wrong model parameter", protocol: ProtocolOpenAIChat, body: `{"error":{"type":"invalid_request_error","code":"unsupported_value","param":"model","message":"secret"}}`},
 		{name: "openai unknown parameter", protocol: ProtocolOpenAIChat, body: `{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"unknown","message":"secret"}}`},
@@ -260,6 +260,33 @@ func TestCapabilityErrorClassificationRequiresProtocolSpecificStructuredCode(t *
 			require.NoError(t, err)
 			assert.Equal(t, test.want, classifyProviderCapabilityError(profile, []byte(test.body)))
 		})
+	}
+}
+
+func TestCapabilityParameterMustBeExactlyEmittedByAttempt(t *testing.T) {
+	for _, test := range []struct {
+		protocol  Protocol
+		mode      OutputMode
+		reasoning string
+		parameter string
+		want      bool
+	}{
+		{ProtocolOpenAIChat, OutputModeNativeJSONSchema, "", "response_format.json_schema", true},
+		{ProtocolOpenAIChat, OutputModeJSONObject, "", "response_format.json_schema", false},
+		{ProtocolOpenAIChat, OutputModeJSONObject, "", "response_format.model", false},
+		{ProtocolOpenAIChat, OutputModePromptJSON, "", "response_format", false},
+		{ProtocolOpenAIResponses, OutputModeNativeJSONSchema, "", "reasoning.effort", false},
+		{ProtocolOpenAIResponses, OutputModeNativeJSONSchema, "high", "reasoning.effort", true},
+		{ProtocolOpenAIResponses, OutputModeJSONObject, "", "text.format.schema", false},
+		{ProtocolAnthropicMessages, OutputModeNativeJSONSchema, "", "tools.0", false},
+		{ProtocolGoogleGenerateContent, OutputModeNativeJSONSchema, "", "generationconfig.responseSchema", false},
+		{ProtocolGoogleGenerateContent, OutputModePromptJSON, "", "generationConfig.responseSchema", false},
+	} {
+		candidate := capabilityTestCandidate(test.protocol, "https://example.test")
+		candidate.ReasoningEffort = test.reasoning
+		profile, err := capabilityProfile(candidate, test.mode, map[bool]string{true: "max_tokens"}[test.protocol == ProtocolOpenAIChat], test.reasoning != "")
+		require.NoError(t, err)
+		assert.Equal(t, test.want, capabilityParameterMatchesProfile(profile, test.parameter))
 	}
 }
 
@@ -369,7 +396,11 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 			`{"error":{"type":"invalid_request_error","code":"unsupported_value","param":"model"}}`,
 			`{"error":{"type":"authentication_error","code":"invalid_api_key"}}`,
 			`{"error":{"type":"billing_error","code":"insufficient_quota"}}`,
-			`{"error":{"type":"policy_error","code":"content_policy_violation"}}`, `{"error":`,
+			`{"error":{"type":"policy_error","code":"content_policy_violation"}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter"}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"response_format.model"}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"Response_Format"}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"response_format","param":"model"}}`, `{"error":`,
 		}},
 		{ProtocolOpenAIResponses, AuthBearer, []string{
 			`{"error":{"type":"invalid_request_error","message":"unsupported parameter"}}`,
@@ -377,7 +408,11 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"model"}}`,
 			`{"error":{"type":"authentication_error","code":"invalid_api_key"}}`,
 			`{"error":{"type":"billing_error","code":"insufficient_quota"}}`,
-			`{"error":{"type":"policy_error","code":"content_policy_violation"}}`, `{"error":`,
+			`{"error":{"type":"policy_error","code":"content_policy_violation"}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter"}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"reasoning.effort"}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"text.format.model"}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"Text.Format"}}`, `{"error":`,
 		}},
 		{ProtocolAnthropicMessages, AuthXAPIKey, []string{
 			`{"type":"error","error":{"type":"invalid_request_error","message":"unsupported parameter"}}`,
@@ -385,7 +420,11 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 			`{"type":"error","error":{"type":"invalid_request_error","code":"model_not_found"}}`,
 			`{"type":"error","error":{"type":"authentication_error","code":"invalid_api_key"}}`,
 			`{"type":"error","error":{"type":"billing_error","code":"insufficient_quota"}}`,
-			`{"type":"error","error":{"type":"permission_error","code":"policy_violation"}}`, `{"error":`,
+			`{"type":"error","error":{"type":"permission_error","code":"policy_violation"}}`,
+			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter"}}`,
+			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"tools.0"}}`,
+			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"Tools"}}`,
+			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"tools","param":"model"}}`, `{"error":`,
 		}},
 		{ProtocolGoogleGenerateContent, AuthGoogleAPIKey, []string{
 			`{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"unsupported response format"}}`,
@@ -393,7 +432,11 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"MODEL_NOT_FOUND","domain":"generativelanguage.googleapis.com"}]}}`,
 			`{"error":{"code":400,"status":"UNAUTHENTICATED"}}`,
 			`{"error":{"code":400,"status":"RESOURCE_EXHAUSTED"}}`,
-			`{"error":{"code":400,"status":"PERMISSION_DENIED"}}`, `{"error":`,
+			`{"error":{"code":400,"status":"PERMISSION_DENIED"}}`,
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com"}]}}`,
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com","metadata":{"parameter":"generationConfig.responseSchema.model"}}]}}`,
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com","metadata":{"parameter":"generationconfig.responseSchema"}}]}}`,
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com","metadata":{"parameter":"generationConfig.responseSchema","parameter":"model"}}]}}`, `{"error":`,
 		}},
 	} {
 		t.Run(string(test.protocol), func(t *testing.T) {
@@ -415,7 +458,9 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 					require.Error(t, negotiationErr)
 					assert.Empty(t, got)
 					assert.Equal(t, int32(1), calls.Load())
-					assert.NotContains(t, negotiationErr.Error(), body)
+					for _, fragment := range []string{"unsupported", "parameter", "model", "endpoint", "billing", "policy", capabilityResponseCanary, capabilityCredentialValue} {
+						assert.NotContains(t, negotiationErr.Error(), fragment)
+					}
 				})
 			}
 		})

@@ -146,7 +146,7 @@ func classifyProviderCapabilityError(profile ProviderProfile, body []byte) Provi
 		errorObject, valid := decodeUniqueErrorObject(root["error"])
 		if rawJSONString(root["type"]) == "error" && valid &&
 			rawJSONString(errorObject["type"]) == "invalid_request_error" &&
-			unsupportedCapabilityCode(rawJSONString(errorObject["code"])) {
+			capabilityCodeMatchesProfile(profile, rawJSONString(errorObject["code"]), rawJSONString(errorObject["param"])) {
 			return ProviderCapabilityUnsupportedRepresentation
 		}
 	case ProtocolGoogleGenerateContent:
@@ -160,9 +160,15 @@ func classifyProviderCapabilityError(profile ProviderProfile, body []byte) Provi
 		}
 		for _, raw := range details {
 			detail, valid := decodeUniqueErrorObject(raw)
-			if valid && rawJSONString(detail["@type"]) == "type.googleapis.com/google.rpc.ErrorInfo" &&
-				rawJSONString(detail["domain"]) == "generativelanguage.googleapis.com" &&
-				unsupportedCapabilityCode(rawJSONString(detail["reason"])) {
+			if !valid || rawJSONString(detail["@type"]) != "type.googleapis.com/google.rpc.ErrorInfo" ||
+				rawJSONString(detail["domain"]) != "generativelanguage.googleapis.com" {
+				continue
+			}
+			parameter := ""
+			if metadata, metadataValid := decodeUniqueErrorObject(detail["metadata"]); metadataValid {
+				parameter = rawJSONString(metadata["parameter"])
+			}
+			if capabilityCodeMatchesProfile(profile, rawJSONString(detail["reason"]), parameter) {
 				return ProviderCapabilityUnsupportedRepresentation
 			}
 		}
@@ -182,41 +188,47 @@ func capabilityCodeMatchesProfile(profile ProviderProfile, code, parameter strin
 }
 
 func capabilityParameterMatchesProfile(profile ProviderProfile, parameter string) bool {
-	parameter = strings.ToLower(strings.TrimSpace(parameter))
+	parameter = strings.TrimSpace(parameter)
 	switch profile.Protocol {
 	case ProtocolOpenAIChat:
 		if parameter == profile.TokenLimitParameter {
 			return true
 		}
-		return profile.OutputMode != OutputModePromptJSON &&
-			(parameter == "response_format" || strings.HasPrefix(parameter, "response_format."))
+		switch profile.OutputMode {
+		case OutputModeNativeJSONSchema:
+			return parameter == "response_format" || parameter == "response_format.type" || parameter == "response_format.json_schema"
+		case OutputModeJSONObject:
+			return parameter == "response_format" || parameter == "response_format.type"
+		default:
+			return false
+		}
 	case ProtocolOpenAIResponses:
-		if parameter == "max_output_tokens" || parameter == "reasoning" || strings.HasPrefix(parameter, "reasoning.") {
+		if parameter == "max_output_tokens" {
 			return true
 		}
-		return profile.OutputMode != OutputModePromptJSON &&
-			(parameter == "text.format" || strings.HasPrefix(parameter, "text.format."))
+		if profile.ReasoningEffort != "" && (parameter == "reasoning" || parameter == "reasoning.effort") {
+			return true
+		}
+		switch profile.OutputMode {
+		case OutputModeNativeJSONSchema:
+			return parameter == "text.format" || parameter == "text.format.type" || parameter == "text.format.schema"
+		case OutputModeJSONObject:
+			return parameter == "text.format" || parameter == "text.format.type"
+		default:
+			return false
+		}
 	case ProtocolAnthropicMessages:
 		if parameter == "max_tokens" {
 			return true
 		}
 		return profile.OutputMode == OutputModeNativeJSONSchema &&
-			(parameter == "tools" || strings.HasPrefix(parameter, "tools.") || parameter == "tool_choice" || strings.HasPrefix(parameter, "tool_choice."))
+			(parameter == "tools" || parameter == "tool_choice")
 	case ProtocolGoogleGenerateContent:
-		if parameter == "generationconfig.maxoutputtokens" {
+		if parameter == "generationConfig.maxOutputTokens" {
 			return true
 		}
 		return profile.OutputMode == OutputModeNativeJSONSchema &&
-			(parameter == "generationconfig.responsemimetype" || parameter == "generationconfig.responseschema" || strings.HasPrefix(parameter, "generationconfig.responseschema."))
-	default:
-		return false
-	}
-}
-
-func unsupportedCapabilityCode(code string) bool {
-	switch strings.ToLower(code) {
-	case "unsupported_parameter", "unsupported_value", "unsupported_response_format", "unsupported_json_schema":
-		return true
+			(parameter == "generationConfig.responseMimeType" || parameter == "generationConfig.responseSchema")
 	default:
 		return false
 	}
