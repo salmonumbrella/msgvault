@@ -25,8 +25,10 @@ import (
 type inProcessPersonProviderDaemonStore struct {
 	*storeAPIAdapter
 
-	config     peoplesweep.Config
-	httpClient *http.Client
+	config      peoplesweep.Config
+	httpClient  *http.Client
+	credentials peoplesweep.CredentialStore
+	requests    chan<- api.CLIRunRequest
 }
 
 func (s *inProcessPersonProviderDaemonStore) RunCLICommand(
@@ -34,6 +36,9 @@ func (s *inProcessPersonProviderDaemonStore) RunCLICommand(
 	req api.CLIRunRequest,
 	emit func(api.CLIRunEvent) error,
 ) error {
+	if s.requests != nil {
+		s.requests <- req
+	}
 	deps := localPersonProviderDeps(s.config, s.store, nil)
 	deps.newChecker = func(
 		config peoplesweep.Config,
@@ -47,7 +52,7 @@ func (s *inProcessPersonProviderDaemonStore) RunCLICommand(
 			config,
 			consent,
 			registry,
-			peoplesweep.NewCredentialResolver(nil, func(name string) (string, bool) {
+			peoplesweep.NewCredentialResolver(s.credentials, func(name string) (string, bool) {
 				value, ok := req.Env[name]
 				return value, ok
 			}),
@@ -162,6 +167,64 @@ func TestPersonProviderRealDaemonSyntheticCheckAndRevoke(t *testing.T) {
 		"usage":{"input_tokens":9,"output_tokens":2}
 	}`, output)
 	assert.Equal(int64(2), requestCount.Load(), "synthetic checks bypass archive consent")
+}
+
+func TestPersonProviderStoredCheckKeepsSecretOutOfDaemonMetadata(t *testing.T) {
+	const secretCanary = "stored-daemon-secret-canary"
+	requests := make(chan api.CLIRunRequest, 1)
+	providerRequests := make(chan string, 1)
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerRequests <- r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"model":"test-model",
+			"choices":[{"message":{"content":"{\"ok\":true}"}}],
+			"usage":{"prompt_tokens":1,"completion_tokens":1}
+		}`)
+	}))
+	t.Cleanup(provider.Close)
+
+	peopleConfig := personProviderTestConfig()
+	stored := configuredPersonProvider(peopleConfig)
+	stored.Endpoint = provider.URL + "/v1"
+	stored.Credential = peoplesweep.CredentialStored
+	stored.CredentialEnv = ""
+	peopleConfig.Provider = peoplesweep.ProviderSelection{Name: "stored"}
+	peopleConfig.Providers = map[string]peoplesweep.ProviderConfig{"stored": stored}
+	credentialStore := peoplesweep.NewFileCredentialStore(t.TempDir())
+	require.NoError(t, credentialStore.Save("stored", peoplesweep.NewCredential(
+		peoplesweep.AuthBearer, secretCanary)))
+	st := testutil.NewSQLiteTestStore(t)
+	daemonConfig := &config.Config{People: peoplesweep.PeopleConfig{Sweep: peopleConfig}}
+	daemonStore := &inProcessPersonProviderDaemonStore{
+		storeAPIAdapter: &storeAPIAdapter{store: st},
+		config:          peopleConfig,
+		httpClient:      provider.Client(),
+		credentials:     credentialStore,
+		requests:        requests,
+	}
+	daemon := api.NewServerWithOptions(api.ServerOptions{
+		Config: daemonConfig, Store: daemonStore, Logger: slog.New(slog.DiscardHandler),
+		OperationGate: api.NewSerialOperationGate(),
+	})
+	daemonHTTP := httptest.NewServer(daemon.Router())
+	t.Cleanup(daemonHTTP.Close)
+
+	frontendConfig := *daemonConfig
+	frontendConfig.Remote = config.RemoteConfig{URL: daemonHTTP.URL, AllowInsecure: true}
+	withStoreResolverConfig(t, &frontendConfig)
+	deps := defaultPersonProviderCommandDeps()
+	output, err := executePersonProviderCommand(t, deps, "check", "stored", "--json")
+	require.NoError(t, err)
+	assert.NotContains(t, output, secretCanary)
+
+	req := <-requests
+	wire, err := json.Marshal(req)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"person", "provider", "check", "--json", "stored"}, req.Args)
+	assert.Empty(t, req.Env)
+	assert.NotContains(t, string(wire), secretCanary)
+	assert.Equal(t, "Bearer "+secretCanary, <-providerRequests)
 }
 
 func mustJSON(t *testing.T, value any) []byte {

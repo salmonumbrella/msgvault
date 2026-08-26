@@ -353,6 +353,140 @@ func TestEditConfigRejectsSemanticDuplicateSpellings(t *testing.T) {
 	assert.ErrorIs(t, err, ErrAmbiguousConfigTarget)
 }
 
+// TestConfigEditTablesPreservesUnrelatedBytesAndRemovesOneExactTable catches
+// provider management rewriting comments/unknown tables or deleting a sibling
+// profile while adding and removing a named provider table.
+func TestConfigEditTablesPreservesUnrelatedBytesAndRemovesOneExactTable(t *testing.T) {
+	requirements := require.New(t)
+	checks := assert.New(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	before := `# operator comment
+[people.sweep]
+enabled = false
+provider = "alpha" # selected profile
+
+[people.sweep.providers.alpha]
+protocol = "openai_chat"
+endpoint = "https://alpha.example.test/v1"
+model = "alpha-model"
+auth = "bearer"
+credential = "env"
+credential_env = "ALPHA_KEY"
+output_mode = "native_json_schema"
+token_limit_parameter = "max_completion_tokens"
+retention_posture = "zero_retention"
+training_posture = "no_training"
+allowed_sources = ["conversation_text"]
+source_since = "2025-01-01"
+
+[people.sweep.providers.old]
+protocol = "openai_chat"
+endpoint = "https://old.example.test/v1"
+model = "old-model"
+auth = "none"
+credential = "none"
+output_mode = "prompt_json"
+token_limit_parameter = "max_tokens"
+retention_posture = "local_only"
+training_posture = "local_only"
+allowed_sources = ["conversation_text"]
+source_since = "2025-01-01"
+
+# comment owned by the following unknown table
+[future.operator_extension] # unknown table must survive byte-for-byte
+answer = 42
+`
+	requirements.NoError(os.WriteFile(path, []byte(before), 0o640))
+	snapshot, err := ReadConfigFile(path)
+	requirements.NoError(err)
+
+	added, err := EditConfigTables(path, snapshot.ETag, []TableEdit{{
+		Path: []string{"people", "sweep", "providers", "beta"},
+		Values: map[string]any{
+			"protocol":              "openai_chat",
+			"endpoint":              "https://beta.example.test/v1",
+			"model":                 "beta-model",
+			"auth":                  "bearer",
+			"credential":            "stored",
+			"output_mode":           "json_object",
+			"token_limit_parameter": "max_tokens",
+			"retention_posture":     "zero_retention",
+			"training_posture":      "no_training",
+			"allowed_sources":       []string{"conversation_text"},
+			"source_since":          "2026-01-01",
+		},
+	}})
+	requirements.NoError(err)
+	checks.Contains(string(added.Content), before)
+	checks.Contains(string(added.Content), "[people.sweep.providers.beta]\n")
+	checks.Contains(string(added.Content), "credential = \"stored\"\n")
+	checks.Equal(fs.FileMode(0o640), added.Mode.Perm())
+
+	removed, err := EditConfigTables(path, added.ETag, []TableEdit{{
+		Path:   []string{"people", "sweep", "providers", "old"},
+		Remove: true,
+	}})
+	requirements.NoError(err)
+	checks.NotContains(string(removed.Content), "[people.sweep.providers.old]")
+	checks.Contains(string(removed.Content), "[people.sweep.providers.alpha]")
+	checks.Contains(string(removed.Content), "[people.sweep.providers.beta]")
+	checks.Contains(string(removed.Content), "# comment owned by the following unknown table\n[future.operator_extension] # unknown table must survive byte-for-byte\nanswer = 42\n")
+
+	_, err = EditConfigTables(path, snapshot.ETag, []TableEdit{{
+		Path: []string{"people", "sweep", "providers", "gamma"}, Values: map[string]any{"model": "gamma"},
+	}})
+	checks.ErrorIs(err, ErrConfigConflict)
+}
+
+// TestConfigEditTablesRejectsAmbiguousAndMixedProviderShapes catches a named
+// profile edit guessing between duplicate table spellings or being added next
+// to the legacy provider shape.
+func TestConfigEditTablesRejectsAmbiguousAndMixedProviderShapes(t *testing.T) {
+	tests := []struct {
+		name   string
+		before string
+		want   error
+	}{
+		{
+			name: "duplicate semantic table",
+			before: `[people.sweep.providers.alpha]
+model = "one"
+[people.sweep.providers."alpha"]
+model = "two"
+`,
+			want: ErrAmbiguousConfigTarget,
+		},
+		{
+			name: "legacy and named shapes",
+			before: `[people.sweep.provider]
+kind = "openai_compatible"
+`,
+			want: ErrInvalidConfigCandidate,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			require.NoError(t, os.WriteFile(path, []byte(test.before), 0o600))
+			snapshot, err := ReadConfigFile(path)
+			require.NoError(t, err)
+
+			_, err = EditConfigTables(path, snapshot.ETag, []TableEdit{{
+				Path: []string{"people", "sweep", "providers", "alpha"},
+				Values: map[string]any{
+					"protocol": "openai_chat", "model": "new", "auth": "none",
+					"credential": "none", "output_mode": "prompt_json",
+					"token_limit_parameter": "max_tokens", "retention_posture": "local_only",
+					"training_posture": "local_only", "allowed_sources": []string{"conversation_text"},
+					"source_since": "2025-01-01",
+				},
+			}})
+			assert.ErrorIs(t, err, test.want)
+			assert.Equal(t, test.before, string(mustReadFile(t, path)))
+		})
+	}
+}
+
 func TestEditConfigMissingKeyPreservesNoFinalNewline(t *testing.T) {
 	require := require.New(t)
 	path := filepath.Join(t.TempDir(), "config.toml")

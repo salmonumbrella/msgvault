@@ -1275,7 +1275,7 @@ func (s *Server) cliRunEnvAllowedForCommand(args []string, name string) bool {
 		if !providerCall && !sweepCall {
 			return false
 		}
-		keyEnv := s.configuredPeopleProviderKeyEnv()
+		keyEnv := s.configuredPeopleProviderKeyEnvForCommand(args)
 		return keyEnv != "" && keyEnv == name
 	}
 	if keyEnv := s.configuredPeopleProviderKeyEnv(); keyEnv != "" && keyEnv == name {
@@ -1467,10 +1467,7 @@ func cliRunCommandAllowed(args []string) bool {
 		}
 		switch args[1] {
 		case "provider":
-			switch args[2] {
-			case "status", "consent", "revoke", "check", "login", "models":
-				return true
-			}
+			return cliRunPersonProviderArgsAllowed(args[2], args[3:])
 		case "sweep":
 			switch args[2] {
 			case "run", "status", "history":
@@ -1537,6 +1534,77 @@ func cliRunCommandAllowed(args []string) bool {
 	}
 }
 
+func cliRunPersonProviderArgsAllowed(operation string, args []string) bool {
+	boolFlags := map[string]bool{}
+	valueFlags := map[string]bool{}
+	maxPositionals := 0
+	switch operation {
+	case "list":
+		boolFlags["json"] = true
+	case "status":
+		maxPositionals = 1
+		for _, name := range []string{"all", "json", "semantic-embeddings"} {
+			boolFlags[name] = true
+		}
+	case "consent":
+		maxPositionals = 1
+		for _, name := range []string{"yes", "json", "semantic-embeddings"} {
+			boolFlags[name] = true
+		}
+	case "revoke":
+		maxPositionals = 1
+		for _, name := range []string{"all", "json", "semantic-embeddings"} {
+			boolFlags[name] = true
+		}
+	case "history":
+		maxPositionals = 1
+		boolFlags["json"] = true
+		valueFlags["limit"] = true
+		valueFlags["person"] = true
+	case "check":
+		maxPositionals = 1
+		boolFlags["json"] = true
+	default:
+		return false
+	}
+
+	positionals := 0
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if !strings.HasPrefix(argument, "--") {
+			positionals++
+			if positionals > maxPositionals || argument == "" {
+				return false
+			}
+			continue
+		}
+		nameValue := strings.TrimPrefix(argument, "--")
+		name, value, hasValue := strings.Cut(nameValue, "=")
+		if boolFlags[name] {
+			if hasValue {
+				if _, err := strconv.ParseBool(value); err != nil {
+					return false
+				}
+			}
+			continue
+		}
+		if !valueFlags[name] {
+			return false
+		}
+		if hasValue {
+			if value == "" {
+				return false
+			}
+			continue
+		}
+		index++
+		if index >= len(args) || args[index] == "" || strings.HasPrefix(args[index], "-") {
+			return false
+		}
+	}
+	return true
+}
+
 // newCLINDJSONEventWriter streams events as NDJSON. Write deadlines are
 // handled once per request by timeoutMiddleware, which clears the server's
 // absolute WriteTimeout for long daemon requests; every NDJSON route is in
@@ -1580,14 +1648,54 @@ func (s *Server) cliRunEnvAllowed(name string) bool {
 }
 
 func (s *Server) configuredPeopleProviderKeyEnv() string {
-	if s.cfg == nil {
+	sweep, ok := s.currentPeopleSweepConfig()
+	if !ok {
 		return ""
 	}
-	_, provider, err := s.cfg.People.Sweep.ActiveProviderConfig()
+	_, provider, err := sweep.ActiveProviderConfig()
 	if err != nil || provider.Credential != peoplesweep.CredentialEnv {
 		return ""
 	}
 	return provider.CredentialEnv
+}
+
+func (s *Server) configuredPeopleProviderKeyEnvForCommand(args []string) string {
+	sweep, ok := s.currentPeopleSweepConfig()
+	if !ok {
+		return ""
+	}
+	name := sweep.Provider.Name
+	if len(args) >= 3 && args[0] == cliRunPersonCommand && args[1] == "provider" && args[2] == "check" {
+		for _, argument := range args[3:] {
+			if !strings.HasPrefix(argument, "--") {
+				name = argument
+				break
+			}
+		}
+	}
+	provider, exists := sweep.Providers[name]
+	if !exists || provider.Credential != peoplesweep.CredentialEnv {
+		return ""
+	}
+	return provider.CredentialEnv
+}
+
+func (s *Server) currentPeopleSweepConfig() (peoplesweep.Config, bool) {
+	if s.cfg == nil {
+		return peoplesweep.Config{}, false
+	}
+	snapshot, err := config.ReadConfigFile(s.cfg.ConfigFilePath())
+	if err != nil {
+		return peoplesweep.Config{}, false
+	}
+	if !snapshot.Exists {
+		return s.cfg.People.Sweep, true
+	}
+	loaded, err := config.LoadConfigFile(snapshot, s.cfg.HomeDir)
+	if err != nil {
+		return peoplesweep.Config{}, false
+	}
+	return loaded.People.Sweep, true
 }
 
 func (s *Server) cliDedupDeleteStore() (CLIDedupDeleteStore, *apiHTTPError) {

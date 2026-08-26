@@ -154,6 +154,44 @@ func TestPersonSweepHistoryContainsOnlySafeMetadata(t *testing.T) {
 	requirements.Error(err)
 }
 
+func TestPersonSweepHistoryFiltersExactProviderFingerprint(t *testing.T) {
+	f := newPersonSweepBudgetFixture(t, "provider-history-filter")
+	matching := strings.Repeat("a", 64)
+	other := strings.Repeat("b", 64)
+	_, err := f.store.DB().ExecContext(t.Context(), f.store.Rebind(`
+		UPDATE person_sweep_runs SET provider_fingerprint = ? WHERE id = ?`),
+		matching, f.runID)
+	require.NoError(t, err)
+	_, err = f.store.DB().ExecContext(t.Context(), f.store.Rebind(`
+		UPDATE person_sweep_attempts SET provider_fingerprint = ? WHERE id = ?`),
+		matching, f.attemptID)
+	require.NoError(t, err)
+
+	runs, err := f.store.ListPersonSweepRuns(t.Context(), peoplesweep.RunFilter{
+		ProviderFingerprint: matching, Limit: 1,
+	})
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	assert.Equal(t, matching, runs[0].ProviderFingerprint)
+	attempts, err := f.store.ListPersonSweepAttempts(t.Context(), peoplesweep.AttemptFilter{
+		ProviderFingerprint: matching, Limit: 1,
+	})
+	require.NoError(t, err)
+	require.Len(t, attempts, 1)
+	assert.Equal(t, matching, attempts[0].ProviderFingerprint)
+
+	runs, err = f.store.ListPersonSweepRuns(t.Context(), peoplesweep.RunFilter{
+		ProviderFingerprint: other, Limit: 1,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, runs)
+	attempts, err = f.store.ListPersonSweepAttempts(t.Context(), peoplesweep.AttemptFilter{
+		ProviderFingerprint: other, Limit: 1,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, attempts)
+}
+
 func TestPersonSweepOperationalStatusSelectsLatestSafeFailure(t *testing.T) {
 	for _, test := range []struct {
 		name        string

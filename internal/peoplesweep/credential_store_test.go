@@ -139,6 +139,38 @@ func TestCredentialStoreSerializesConcurrentSaves(t *testing.T) {
 	}
 }
 
+func TestCredentialStoreSaveNewNeverOverwritesConcurrentWinner(t *testing.T) {
+	store := peoplesweep.NewFileCredentialStore(t.TempDir())
+	start := make(chan struct{})
+	type result struct {
+		created bool
+		err     error
+	}
+	results := make(chan result, 2)
+	for _, value := range []string{credentialCanary + "-first", credentialCanary + "-second"} {
+		go func() {
+			<-start
+			created, err := store.SaveNew("new-profile", peoplesweep.NewCredential(
+				peoplesweep.AuthBearer, value,
+			))
+			results <- result{created: created, err: err}
+		}()
+	}
+	close(start)
+	created := 0
+	for range 2 {
+		result := <-results
+		require.NoError(t, result.err)
+		if result.created {
+			created++
+		}
+	}
+	assert.Equal(t, 1, created)
+	credential, err := store.Load("new-profile")
+	require.NoError(t, err)
+	assert.Contains(t, []string{credentialCanary + "-first", credentialCanary + "-second"}, credential.Value())
+}
+
 func TestCredentialStoreRejectsInvalidNamesAndMalformedJSON(t *testing.T) {
 	store := peoplesweep.NewFileCredentialStore(t.TempDir())
 	for _, name := range []string{"", ".hidden", "../escape", "slash/name", "space name", string(make([]byte, 65))} {

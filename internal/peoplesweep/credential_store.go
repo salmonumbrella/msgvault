@@ -122,6 +122,36 @@ func (s *FileCredentialStore) Save(profileName string, credential Credential) er
 	})
 }
 
+// SaveNew atomically publishes a credential only when the exact named record
+// is absent. The existence check and publication share the credential-root
+// lock so concurrent setup processes cannot overwrite the winner.
+func (s *FileCredentialStore) SaveNew(profileName string, credential Credential) (bool, error) {
+	if err := validateCredentialProfileName(profileName); err != nil {
+		return false, err
+	}
+	if err := validateStoredCredential(credential); err != nil {
+		return false, err
+	}
+	data, err := json.Marshal(credentialFile{Scheme: credential.Scheme, Value: credential.Value()}) //nolint:gosec // serialized only into the private 0600 store
+	if err != nil {
+		return false, errors.New("serialize people provider credential")
+	}
+	created := false
+	err = s.withCredentialRoot("save-new", func(root credentialStoreRoot) error {
+		if _, loadErr := root.load(profileName); loadErr == nil {
+			return nil
+		} else if !errors.Is(loadErr, ErrCredentialNotFound) {
+			return loadErr
+		}
+		if saveErr := root.save(profileName, data); saveErr != nil {
+			return saveErr
+		}
+		created = true
+		return nil
+	})
+	return created, err
+}
+
 // Load reads and validates one exact named credential.
 func (s *FileCredentialStore) Load(profileName string) (Credential, error) {
 	if err := validateCredentialProfileName(profileName); err != nil {

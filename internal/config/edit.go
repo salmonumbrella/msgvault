@@ -9,6 +9,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -43,6 +46,14 @@ var (
 type Edit struct {
 	Key   string
 	Value any
+}
+
+// TableEdit inserts or removes one exact TOML table. Insertions refuse an
+// existing semantic table instead of overwriting operator-owned content.
+type TableEdit struct {
+	Path   []string
+	Values map[string]any
+	Remove bool
 }
 
 // ConfigFile is an immutable snapshot of one resolved config target.
@@ -163,6 +174,37 @@ func EditConfigFile(path, ifMatch string, edits []Edit) (ConfigFile, error) {
 }
 
 func editConfigFile(path, ifMatch string, edits []Edit, ops configFileOps) (ConfigFile, error) {
+	return editConfigWithTransform(path, ifMatch, len(edits) > 0, func(content []byte) ([]byte, error) {
+		return applyTargetedEdits(content, edits)
+	}, ops)
+}
+
+// EditConfigTables applies exact table insertions/removals through the same
+// ownership, concurrency, validation, durability, rollback, and recovery path
+// used by EditConfigFile.
+func EditConfigTables(path, ifMatch string, edits []TableEdit) (ConfigFile, error) {
+	return editConfigWithTransform(path, ifMatch, len(edits) > 0, func(content []byte) ([]byte, error) {
+		return applyTableEdits(content, edits)
+	}, defaultConfigFileOps())
+}
+
+// RestoreConfigFile conditionally restores the exact bytes of a previously
+// retained snapshot through the normal validated atomic-edit machinery.
+func RestoreConfigFile(path, ifMatch string, before ConfigFile) (ConfigFile, error) {
+	if !before.Exists || before.ETag == "" || before.ETag != configETag(before.Content) {
+		return ConfigFile{}, errors.New("config rollback snapshot is invalid")
+	}
+	return editConfigWithTransform(path, ifMatch, true, func([]byte) ([]byte, error) {
+		return append([]byte(nil), before.Content...), nil
+	}, defaultConfigFileOps())
+}
+
+func editConfigWithTransform(
+	path, ifMatch string,
+	hasChanges bool,
+	transform func([]byte) ([]byte, error),
+	ops configFileOps,
+) (ConfigFile, error) {
 	configEditMu.Lock()
 	defer configEditMu.Unlock()
 
@@ -177,7 +219,7 @@ func editConfigFile(path, ifMatch string, edits []Edit, ops configFileOps) (Conf
 		if ifMatch == "" || ifMatch != configETag(nil) {
 			return ConfigFile{}, fmt.Errorf("%w: current ETag is %s", ErrConfigConflict, configETag(nil))
 		}
-		if len(edits) == 0 {
+		if !hasChanges {
 			return ConfigFile{}, err
 		}
 		if err := ensureConfigParentDirectories(path); err != nil {
@@ -194,7 +236,7 @@ func editConfigFile(path, ifMatch string, edits []Edit, ops configFileOps) (Conf
 	if ifMatch == "" || ifMatch != before.ETag {
 		return ConfigFile{}, fmt.Errorf("%w: current ETag is %s", ErrConfigConflict, before.ETag)
 	}
-	if len(edits) == 0 {
+	if !hasChanges {
 		return before, nil
 	}
 	if !before.Exists {
@@ -214,7 +256,7 @@ func editConfigFile(path, ifMatch string, edits []Edit, ops configFileOps) (Conf
 		before = refreshed
 	}
 
-	candidate, err := applyTargetedEdits(before.Content, edits)
+	candidate, err := transform(before.Content)
 	if err != nil {
 		return ConfigFile{}, err
 	}
@@ -800,6 +842,8 @@ type tomlLine struct {
 	eol  string
 }
 
+var bareTOMLTableSegment = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
 func applyTargetedEdits(content []byte, edits []Edit) ([]byte, error) {
 	lines := splitTOMLLines(string(content))
 	seenEdits := make(map[string]struct{}, len(edits))
@@ -825,6 +869,255 @@ func applyTargetedEdits(content []byte, edits []Edit) ([]byte, error) {
 		}
 	}
 	return joinTOMLLines(lines), nil
+}
+
+func applyTableEdits(content []byte, edits []TableEdit) ([]byte, error) {
+	lines := splitTOMLLines(string(content))
+	seen := make(map[string]struct{}, len(edits))
+	for _, edit := range edits {
+		path, encodedPath, err := validateTableEdit(edit)
+		if err != nil {
+			return nil, err
+		}
+		identity := strings.Join(path, "\x00")
+		if _, duplicate := seen[identity]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate requested table %s", ErrAmbiguousConfigTarget, encodedPath)
+		}
+		seen[identity] = struct{}{}
+
+		matches := exactTOMLTableHeaders(lines, path)
+		if len(matches) > 1 {
+			return nil, fmt.Errorf("%w: duplicate table %s", ErrAmbiguousConfigTarget, encodedPath)
+		}
+		if edit.Remove {
+			if len(matches) == 0 {
+				return nil, fmt.Errorf("config table %s does not exist", encodedPath)
+			}
+			lines = removeTOMLTable(lines, matches[0], path)
+			continue
+		}
+
+		if len(matches) == 0 {
+			if tomlPathHasSemanticContent(lines, path) {
+				return nil, fmt.Errorf("%w: table %s has a non-table representation", ErrAmbiguousConfigTarget, encodedPath)
+			}
+			lines, err = appendTOMLTable(lines, encodedPath, edit.Values)
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
+		keys := make([]string, 0, len(edit.Values))
+		for key := range edit.Values {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			lines, err = editExactTOMLTableValue(lines, matches[0], path, key, edit.Values[key])
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return joinTOMLLines(lines), nil
+}
+
+func validateTableEdit(edit TableEdit) ([]string, string, error) {
+	if len(edit.Path) == 0 {
+		return nil, "", errors.New("config table path is required")
+	}
+	path := append([]string(nil), edit.Path...)
+	encoded := make([]string, len(path))
+	for index, segment := range path {
+		if segment == "" || strings.TrimSpace(segment) != segment || strings.ContainsAny(segment, "\r\n\x00") {
+			return nil, "", errors.New("config table path contains an invalid segment")
+		}
+		if bareTOMLTableSegment.MatchString(segment) {
+			encoded[index] = segment
+		} else {
+			encoded[index] = strconv.Quote(segment)
+		}
+	}
+	encodedPath := strings.Join(encoded, ".")
+	if parsed, ok := parseTOMLKey(encodedPath); !ok || !equalPath(parsed, path) {
+		return nil, "", errors.New("config table path is not representable in TOML")
+	}
+	if edit.Remove {
+		if len(edit.Values) != 0 {
+			return nil, "", errors.New("removed config table cannot also contain values")
+		}
+		return path, encodedPath, nil
+	}
+	if len(edit.Values) == 0 {
+		return nil, "", errors.New("inserted config table requires values")
+	}
+	for key := range edit.Values {
+		parsed, ok := parseTOMLKey(key)
+		if !ok || len(parsed) != 1 || parsed[0] != key {
+			return nil, "", fmt.Errorf("invalid config table key %q", key)
+		}
+	}
+	return path, encodedPath, nil
+}
+
+func exactTOMLTableHeaders(lines []tomlLine, path []string) []int {
+	structural := tomlStructuralLines(lines)
+	var matches []int
+	for index, line := range lines {
+		if !structural[index] {
+			continue
+		}
+		parsed, array, ok := parseTOMLTable(line.body)
+		if ok && !array && equalPath(parsed, path) {
+			matches = append(matches, index)
+		}
+	}
+	return matches
+}
+
+func tomlPathHasSemanticContent(lines []tomlLine, target []string) bool {
+	structural := tomlStructuralLines(lines)
+	var table []string
+	for index, line := range lines {
+		if !structural[index] {
+			continue
+		}
+		if parsed, _, ok := parseTOMLTable(line.body); ok {
+			table = parsed
+			if pathPrefix(target, parsed) {
+				return true
+			}
+			continue
+		}
+		if assignment, ok := assignmentKey(line.body); ok &&
+			(pathPrefix(target, appendPath(table, assignment)) ||
+				pathPrefix(appendPath(table, assignment), target)) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendTOMLTable(lines []tomlLine, encodedPath string, values map[string]any) ([]tomlLine, error) {
+	eol := preferredEOL(lines)
+	hadFinalEOL := len(lines) == 0 || lines[len(lines)-1].eol != ""
+	if len(lines) > 0 {
+		if lines[len(lines)-1].eol == "" {
+			lines[len(lines)-1].eol = eol
+		}
+		if lines[len(lines)-1].body != "" {
+			lines = append(lines, tomlLine{eol: eol})
+		}
+	}
+	lines = append(lines, tomlLine{body: "[" + encodedPath + "]", eol: eol})
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for index, key := range keys {
+		value, err := encodeTOMLValue(values[key])
+		if err != nil {
+			return nil, fmt.Errorf("encode %s.%s: %w", encodedPath, key, err)
+		}
+		lineEOL := eol
+		if index == len(keys)-1 && !hadFinalEOL {
+			lineEOL = ""
+		}
+		lines = append(lines, tomlLine{body: key + " = " + value, eol: lineEOL})
+	}
+	return lines, nil
+}
+
+func editExactTOMLTableValue(
+	lines []tomlLine,
+	header int,
+	path []string,
+	key string,
+	value any,
+) ([]tomlLine, error) {
+	encoded, err := encodeTOMLValue(value)
+	if err != nil {
+		return nil, fmt.Errorf("encode %s.%s: %w", strings.Join(path, "."), key, err)
+	}
+	structural := tomlStructuralLines(lines)
+	end := len(lines)
+	var matches []int
+	for index := header + 1; index < len(lines); index++ {
+		if !structural[index] {
+			continue
+		}
+		if _, _, ok := parseTOMLTable(lines[index].body); ok {
+			end = index
+			break
+		}
+		assignment, ok := assignmentKey(lines[index].body)
+		if ok && len(assignment) == 1 && assignment[0] == key {
+			matches = append(matches, index)
+		}
+	}
+	if len(matches) > 1 {
+		return nil, fmt.Errorf("%w: %s.%s", ErrAmbiguousConfigTarget, strings.Join(path, "."), key)
+	}
+	if len(matches) == 1 {
+		index := matches[0]
+		spanEnd, suffix, multiline, spanErr := assignmentSpan(lines, index)
+		if spanErr != nil {
+			return nil, spanErr
+		}
+		replaced, replaceErr := replaceAssignmentValue(lines[index].body, encoded)
+		if replaceErr != nil {
+			return nil, replaceErr
+		}
+		if multiline {
+			replaced += suffix
+			lines[index].eol = lines[spanEnd].eol
+			lines = append(lines[:index+1], lines[spanEnd+1:]...)
+		}
+		lines[index].body = replaced
+		return lines, nil
+	}
+
+	eol := preferredEOL(lines)
+	insertAt := end
+	for insertAt > header+1 && strings.TrimSpace(lines[insertAt-1].body) == "" {
+		insertAt--
+	}
+	if insertAt > 0 && lines[insertAt-1].eol == "" {
+		lines[insertAt-1].eol = eol
+	}
+	lineEOL := eol
+	if insertAt == len(lines) && len(lines) > 0 && lines[len(lines)-1].eol == "" {
+		lineEOL = ""
+	}
+	lines = append(lines, tomlLine{})
+	copy(lines[insertAt+1:], lines[insertAt:])
+	lines[insertAt] = tomlLine{body: key + " = " + encoded, eol: lineEOL}
+	return lines, nil
+}
+
+func removeTOMLTable(lines []tomlLine, header int, path []string) []tomlLine {
+	structural := tomlStructuralLines(lines)
+	end := len(lines)
+	for index := header + 1; index < len(lines); index++ {
+		if !structural[index] {
+			continue
+		}
+		parsed, _, ok := parseTOMLTable(lines[index].body)
+		if ok && !pathPrefix(path, parsed) {
+			end = index
+			break
+		}
+	}
+	preserveFrom := end
+	for preserveFrom > header+1 {
+		line := strings.TrimSpace(lines[preserveFrom-1].body)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			break
+		}
+		preserveFrom--
+	}
+	return append(lines[:header], lines[preserveFrom:]...)
 }
 
 func splitTOMLLines(content string) []tomlLine {

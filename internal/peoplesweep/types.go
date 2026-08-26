@@ -285,14 +285,16 @@ type FailureFinalization struct {
 }
 
 type RunFilter struct {
-	PersonID int64
-	Limit    int
+	PersonID            int64
+	ProviderFingerprint string
+	Limit               int
 }
 
 type AttemptFilter struct {
-	RunID    string
-	PersonID int64
-	Limit    int
+	RunID               string
+	PersonID            int64
+	ProviderFingerprint string
+	Limit               int
 }
 
 type RunSummary struct {

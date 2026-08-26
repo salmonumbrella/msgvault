@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/peoplesweep"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
@@ -79,6 +80,9 @@ func localPersonProviderDeps(
 	return personProviderCommandDeps{
 		config: func() peoplesweep.Config { return config },
 		openStore: func() (personProviderStore, func(), error) {
+			return st, func() {}, nil
+		},
+		openReadStore: func() (personProviderStore, func(), error) {
 			return st, func() {}, nil
 		},
 		newChecker: func(peoplesweep.Config, personProviderStore) (personProviderChecker, error) {
@@ -448,6 +452,8 @@ func TestPersonProviderCheckOmitsProviderOutput(t *testing.T) {
 	checker := &fixedPersonProviderChecker{response: peoplesweep.StructuredResponse{
 		Output:            json.RawMessage(`{"ok":true,"secret":"provider-output"}`),
 		ProviderRequestID: "req-safe",
+		ProviderVersion:   peoplesweep.OpenAICompatibleProviderVersion,
+		ModelVersion:      "test-model-v1",
 		Usage:             peoplesweep.TokenUsage{InputTokens: 12, OutputTokens: 3},
 	}}
 	deps := localPersonProviderDeps(personProviderTestConfig(), st, checker)
@@ -462,6 +468,174 @@ func TestPersonProviderCheckOmitsProviderOutput(t *testing.T) {
 	}`, output)
 	assert.NotContains(output, "provider-output")
 	assert.Equal(int64(1), checker.calls.Load())
+	profile, profileErr := personProviderTestConfig().Profile()
+	require.NoError(t, profileErr)
+	check, checkErr := st.GetPersonInferenceCheck(t.Context(), profile.Fingerprint)
+	require.NoError(t, checkErr)
+	require.NotNil(t, check)
+	assert.Equal(profile.Fingerprint, check.ProfileFingerprint)
+	assert.Equal("test-model-v1", check.ModelVersion)
+}
+
+// TestPersonProviderCheckAcceptsAProfileName catches the command checking the
+// active provider when the operator explicitly named a different saved one.
+func TestPersonProviderCheckAcceptsAProfileName(t *testing.T) {
+	config := personProviderTestConfig()
+	beta := configuredPersonProvider(config)
+	beta.Endpoint = "https://beta.example.test/v1"
+	beta.Model = "beta-model"
+	config.Providers["beta"] = beta
+	selected := config
+	selected.Provider = peoplesweep.ProviderSelection{Name: "beta"}
+	betaProfile, err := selected.Profile()
+	require.NoError(t, err)
+	st := testutil.NewSQLiteTestStore(t)
+	checker := &fixedPersonProviderChecker{response: peoplesweep.StructuredResponse{
+		Output:            json.RawMessage(`{"ok":true}`),
+		ProviderRequestID: "req-beta",
+		ProviderVersion:   betaProfile.DriverVersion,
+		ModelVersion:      "beta-model-v1",
+	}}
+	deps := localPersonProviderDeps(config, st, checker)
+	deps.newChecker = func(got peoplesweep.Config, _ personProviderStore) (personProviderChecker, error) {
+		assert.Equal(t, "beta", got.Provider.Name)
+		return checker, nil
+	}
+
+	output, err := executePersonProviderCommand(t, deps, "check", "beta", "--json")
+	require.NoError(t, err)
+	assert.Contains(t, output, `"model":"beta-model"`)
+	checked, err := st.HasSuccessfulPersonInferenceCheck(t.Context(), betaProfile.Fingerprint)
+	require.NoError(t, err)
+	assert.True(t, checked)
+	activeProfile, err := config.Profile()
+	require.NoError(t, err)
+	activeChecked, err := st.HasSuccessfulPersonInferenceCheck(t.Context(), activeProfile.Fingerprint)
+	require.NoError(t, err)
+	assert.False(t, activeChecked)
+}
+
+// TestPersonProviderListAndUseRequireExactVerification catches list resolving
+// credentials or use selecting a profile whose immutable fingerprint has not
+// passed the saved synthetic check gate.
+func TestPersonProviderListAndUseRequireExactVerification(t *testing.T) {
+	checks := assert.New(t)
+	must := require.New(t)
+	configured := personProviderTestConfig()
+	beta := configuredPersonProvider(configured)
+	beta.Endpoint = "https://beta.example.test/v1"
+	beta.Model = "beta-model"
+	beta.Credential = peoplesweep.CredentialStored
+	beta.CredentialEnv = ""
+	configured.Providers["beta"] = beta
+	st := testutil.NewSQLiteTestStore(t)
+	var edits []config.TableEdit
+	deps := localPersonProviderDeps(configured, st, nil)
+	deps.openReadStore = deps.openStore
+	deps.openStore = func() (personProviderStore, func(), error) {
+		require.FailNow(t, "provider use must not acquire the direct-writer store")
+		return nil, nil, assert.AnError
+	}
+	deps.readConfigFile = func() (config.ConfigFile, error) {
+		return config.ConfigFile{ETag: `"sha256-known"`, Exists: true}, nil
+	}
+	deps.editConfigTables = func(ifMatch string, got []config.TableEdit) (config.ConfigFile, error) {
+		checks.Equal(`"sha256-known"`, ifMatch)
+		edits = append([]config.TableEdit(nil), got...)
+		return config.ConfigFile{ETag: `"sha256-new"`, Exists: true}, nil
+	}
+
+	listed, err := executePersonProviderCommand(t, deps, "list", "--json")
+	must.NoError(err)
+	checks.Contains(listed, `"name":"default"`)
+	checks.Contains(listed, `"name":"beta"`)
+	checks.Contains(listed, `"active":true`)
+	checks.NotContains(listed, "provider-secret-canary")
+
+	_, err = executePersonProviderCommand(t, deps, "use", "beta")
+	must.ErrorContains(err, "successful check")
+	checks.Empty(edits)
+
+	selected := configured
+	selected.Provider = peoplesweep.ProviderSelection{Name: "beta"}
+	profile, err := selected.Profile()
+	must.NoError(err)
+	_, err = st.EnsurePersonInferenceProfile(t.Context(), profile)
+	must.NoError(err)
+	must.NoError(st.RecordPersonInferenceCheck(t.Context(), store.PersonInferenceCheck{
+		ProfileFingerprint: profile.Fingerprint, CheckedAt: time.Now().UTC(),
+		DriverVersion: profile.DriverVersion, OutputMode: profile.OutputMode,
+		ModelVersion: "beta-model-v1",
+	}))
+
+	used, err := executePersonProviderCommand(t, deps, "use", "beta")
+	must.NoError(err)
+	checks.Contains(used, `beta`)
+	must.Len(edits, 1)
+	checks.Equal([]string{"people", "sweep"}, edits[0].Path)
+	checks.Equal(map[string]any{"provider": "beta"}, edits[0].Values)
+}
+
+// TestPersonProviderNamedConsentAndRevoke catches profile arguments being
+// accepted syntactically but still mutating consent for the active provider.
+func TestPersonProviderNamedConsentAndRevoke(t *testing.T) {
+	configured := personProviderTestConfig()
+	beta := configuredPersonProvider(configured)
+	beta.Endpoint = "https://beta.example.test/v1"
+	beta.Model = "beta-model"
+	configured.Providers["beta"] = beta
+	selected := configured
+	selected.Provider = peoplesweep.ProviderSelection{Name: "beta"}
+	betaProfile, err := selected.Profile()
+	require.NoError(t, err)
+	activeProfile, err := configured.Profile()
+	require.NoError(t, err)
+	st := testutil.NewSQLiteTestStore(t)
+	deps := localPersonProviderDeps(configured, st, nil)
+
+	_, err = executePersonProviderCommand(t, deps, "consent", "beta", "--yes")
+	require.NoError(t, err)
+	betaActive, err := st.HasActivePersonInferenceConsent(t.Context(), betaProfile.Fingerprint)
+	require.NoError(t, err)
+	assert.True(t, betaActive)
+	active, err := st.HasActivePersonInferenceConsent(t.Context(), activeProfile.Fingerprint)
+	require.NoError(t, err)
+	assert.False(t, active)
+
+	status, err := executePersonProviderCommand(t, deps, "status", "beta", "--json")
+	require.NoError(t, err)
+	assert.Contains(t, status, betaProfile.Fingerprint)
+	_, err = executePersonProviderCommand(t, deps, "revoke", "beta")
+	require.NoError(t, err)
+	betaActive, err = st.HasActivePersonInferenceConsent(t.Context(), betaProfile.Fingerprint)
+	require.NoError(t, err)
+	assert.False(t, betaActive)
+}
+
+func TestPersonProviderNamedStatusAndRevokeWorkWhileSweepDisabled(t *testing.T) {
+	configured := personProviderTestConfig()
+	configured.Enabled = false
+	selected := configured
+	selected.Enabled = true
+	profile, err := selected.Profile()
+	require.NoError(t, err)
+	st := testutil.NewSQLiteTestStore(t)
+	_, err = st.EnsurePersonInferenceProfile(t.Context(), profile)
+	require.NoError(t, err)
+	_, _, err = st.GrantPersonInferenceConsent(t.Context(), profile.Fingerprint, "cli")
+	require.NoError(t, err)
+	deps := localPersonProviderDeps(configured, st, nil)
+
+	status, err := executePersonProviderCommand(t, deps, "status", "default", "--json")
+	require.NoError(t, err)
+	assert.Contains(t, status, profile.Fingerprint)
+	_, err = executePersonProviderCommand(t, deps, "revoke", "default")
+	require.NoError(t, err)
+	active, err := st.HasActivePersonInferenceConsent(t.Context(), profile.Fingerprint)
+	require.NoError(t, err)
+	assert.False(t, active)
+	_, err = executePersonProviderCommand(t, deps, "consent", "default", "--yes")
+	assert.ErrorContains(t, err, "disabled")
 }
 
 func TestPersonProviderCommandsRejectInputAndDisabledConfigBeforeStore(t *testing.T) {
@@ -476,7 +650,7 @@ func TestPersonProviderCommandsRejectInputAndDisabledConfigBeforeStore(t *testin
 	for _, operation := range []string{"status", "consent", "revoke", "check"} {
 		t.Run(operation+" input", func(t *testing.T) {
 			_, err := executePersonProviderCommand(t, deps, operation, "archive.txt")
-			assert.ErrorContains(t, err, "unknown command")
+			assert.ErrorContains(t, err, "not configured")
 		})
 	}
 	assert.Zero(t, opens.Load())
