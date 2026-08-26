@@ -138,15 +138,18 @@ func classifyProviderCapabilityError(profile ProviderProfile, body []byte) Provi
 	switch profile.Protocol {
 	case ProtocolOpenAIChat, ProtocolOpenAIResponses:
 		errorObject, valid := decodeUniqueErrorObject(root["error"])
-		if valid && rawJSONString(errorObject["type"]) == "invalid_request_error" &&
-			capabilityCodeMatchesProfile(profile, rawJSONString(errorObject["code"]), rawJSONString(errorObject["param"])) {
+		parameter, parameterPresent, parameterValid := rawOptionalJSONString(errorObject, "param")
+		if valid && parameterValid && rawJSONString(errorObject["type"]) == "invalid_request_error" &&
+			capabilityCodeMatchesProfile(profile, rawJSONString(errorObject["code"]), parameter, parameterPresent) {
 			return ProviderCapabilityUnsupportedRepresentation
 		}
 	case ProtocolAnthropicMessages:
 		errorObject, valid := decodeUniqueErrorObject(root["error"])
+		parameter, parameterPresent, parameterValid := rawOptionalJSONString(errorObject, "param")
 		if rawJSONString(root["type"]) == "error" && valid &&
+			parameterValid &&
 			rawJSONString(errorObject["type"]) == "invalid_request_error" &&
-			capabilityCodeMatchesProfile(profile, rawJSONString(errorObject["code"]), rawJSONString(errorObject["param"])) {
+			capabilityCodeMatchesProfile(profile, rawJSONString(errorObject["code"]), parameter, parameterPresent) {
 			return ProviderCapabilityUnsupportedRepresentation
 		}
 	case ProtocolGoogleGenerateContent:
@@ -158,50 +161,87 @@ func classifyProviderCapabilityError(profile ProviderProfile, body []byte) Provi
 		if err := json.Unmarshal(errorObject["details"], &details); err != nil || len(details) > 32 {
 			return ""
 		}
+		relevantDetails := 0
+		matched := false
 		for _, raw := range details {
 			detail, valid := decodeUniqueErrorObject(raw)
-			if !valid || rawJSONString(detail["@type"]) != "type.googleapis.com/google.rpc.ErrorInfo" ||
+			if !valid {
+				return ""
+			}
+			if rawJSONString(detail["@type"]) != "type.googleapis.com/google.rpc.ErrorInfo" ||
 				rawJSONString(detail["domain"]) != "generativelanguage.googleapis.com" {
 				continue
 			}
+			relevantDetails++
 			parameter := ""
-			if metadata, metadataValid := decodeUniqueErrorObject(detail["metadata"]); metadataValid {
-				parameter = rawJSONString(metadata["parameter"])
+			parameterPresent := false
+			if rawMetadata, present := detail["metadata"]; present {
+				metadata, metadataValid := decodeUniqueErrorObject(rawMetadata)
+				if !metadataValid {
+					return ""
+				}
+				var parameterValid bool
+				parameter, parameterPresent, parameterValid = rawOptionalJSONString(metadata, "parameter")
+				if !parameterValid {
+					return ""
+				}
 			}
-			if capabilityCodeMatchesProfile(profile, rawJSONString(detail["reason"]), parameter) {
-				return ProviderCapabilityUnsupportedRepresentation
+			if capabilityCodeMatchesProfile(profile, rawJSONString(detail["reason"]), parameter, parameterPresent) {
+				matched = true
 			}
+		}
+		if relevantDetails == 1 && matched {
+			return ProviderCapabilityUnsupportedRepresentation
 		}
 	}
 	return ""
 }
 
-func capabilityCodeMatchesProfile(profile ProviderProfile, code, parameter string) bool {
-	switch strings.ToLower(code) {
-	case "unsupported_response_format", "unsupported_json_schema":
-		return true
-	case "unsupported_parameter", "unsupported_value":
+func capabilityCodeMatchesProfile(
+	profile ProviderProfile,
+	code string,
+	parameter string,
+	parameterPresent bool,
+) bool {
+	genericCode := false
+	representationCode := false
+	switch profile.Protocol {
+	case ProtocolOpenAIChat, ProtocolOpenAIResponses:
+		genericCode = code == "unsupported_parameter" || code == "unsupported_value"
+		representationCode = code == "unsupported_response_format" || code == "unsupported_json_schema"
+	case ProtocolAnthropicMessages:
+		genericCode = code == "unsupported_parameter" || code == "unsupported_value"
+		representationCode = code == "unsupported_json_schema"
+	case ProtocolGoogleGenerateContent:
+		genericCode = code == "UNSUPPORTED_PARAMETER" || code == "UNSUPPORTED_VALUE"
+		representationCode = code == "UNSUPPORTED_RESPONSE_FORMAT" || code == "UNSUPPORTED_JSON_SCHEMA"
+	}
+	if genericCode {
 		return capabilityParameterMatchesProfile(profile, parameter)
-	default:
+	}
+	if !representationCode || !capabilityRepresentationCodeMatchesProfile(profile, code) {
 		return false
 	}
+	if !parameterPresent {
+		return true
+	}
+	return capabilityRepresentationParameterMatchesProfile(profile, parameter)
 }
 
 func capabilityParameterMatchesProfile(profile ProviderProfile, parameter string) bool {
-	parameter = strings.TrimSpace(parameter)
 	switch profile.Protocol {
 	case ProtocolOpenAIChat:
-		if parameter == profile.TokenLimitParameter {
+		if profile.TokenLimitParameter != "" && parameter == profile.TokenLimitParameter {
 			return true
 		}
-		switch profile.OutputMode {
-		case OutputModeNativeJSONSchema:
-			return parameter == "response_format" || parameter == "response_format.type" || parameter == "response_format.json_schema"
-		case OutputModeJSONObject:
-			return parameter == "response_format" || parameter == "response_format.type"
-		default:
-			return false
+		if profile.ReasoningEffort != "" && parameter == "reasoning_effort" {
+			return true
 		}
+		if (profile.ReasoningMode == "enabled" || profile.ReasoningMode == "disabled") &&
+			(parameter == "reasoning" || parameter == "reasoning.enabled") {
+			return true
+		}
+		return capabilityRepresentationParameterMatchesProfile(profile, parameter)
 	case ProtocolOpenAIResponses:
 		if parameter == "max_output_tokens" {
 			return true
@@ -209,29 +249,64 @@ func capabilityParameterMatchesProfile(profile ProviderProfile, parameter string
 		if profile.ReasoningEffort != "" && (parameter == "reasoning" || parameter == "reasoning.effort") {
 			return true
 		}
+		return capabilityRepresentationParameterMatchesProfile(profile, parameter)
+	case ProtocolAnthropicMessages:
+		if parameter == "max_tokens" {
+			return true
+		}
+		return capabilityRepresentationParameterMatchesProfile(profile, parameter)
+	case ProtocolGoogleGenerateContent:
+		if parameter == "generationConfig.maxOutputTokens" {
+			return true
+		}
+		return capabilityRepresentationParameterMatchesProfile(profile, parameter)
+	default:
+		return false
+	}
+}
+
+func capabilityRepresentationCodeMatchesProfile(profile ProviderProfile, code string) bool {
+	switch profile.Protocol {
+	case ProtocolOpenAIChat, ProtocolOpenAIResponses:
+		switch profile.OutputMode {
+		case OutputModeNativeJSONSchema:
+			return code == "unsupported_response_format" || code == "unsupported_json_schema"
+		case OutputModeJSONObject:
+			return code == "unsupported_response_format"
+		}
+	case ProtocolAnthropicMessages:
+		return profile.OutputMode == OutputModeNativeJSONSchema && code == "unsupported_json_schema"
+	case ProtocolGoogleGenerateContent:
+		return profile.OutputMode == OutputModeNativeJSONSchema &&
+			(code == "UNSUPPORTED_RESPONSE_FORMAT" || code == "UNSUPPORTED_JSON_SCHEMA")
+	}
+	return false
+}
+
+func capabilityRepresentationParameterMatchesProfile(profile ProviderProfile, parameter string) bool {
+	switch profile.Protocol {
+	case ProtocolOpenAIChat:
+		switch profile.OutputMode {
+		case OutputModeNativeJSONSchema:
+			return parameter == "response_format" || parameter == "response_format.type" || parameter == "response_format.json_schema"
+		case OutputModeJSONObject:
+			return parameter == "response_format" || parameter == "response_format.type"
+		}
+	case ProtocolOpenAIResponses:
 		switch profile.OutputMode {
 		case OutputModeNativeJSONSchema:
 			return parameter == "text.format" || parameter == "text.format.type" || parameter == "text.format.schema"
 		case OutputModeJSONObject:
 			return parameter == "text.format" || parameter == "text.format.type"
-		default:
-			return false
 		}
 	case ProtocolAnthropicMessages:
-		if parameter == "max_tokens" {
-			return true
-		}
 		return profile.OutputMode == OutputModeNativeJSONSchema &&
 			(parameter == "tools" || parameter == "tool_choice")
 	case ProtocolGoogleGenerateContent:
-		if parameter == "generationConfig.maxOutputTokens" {
-			return true
-		}
 		return profile.OutputMode == OutputModeNativeJSONSchema &&
 			(parameter == "generationConfig.responseMimeType" || parameter == "generationConfig.responseSchema")
-	default:
-		return false
 	}
+	return false
 }
 
 func decodeUniqueErrorObject(raw []byte) (map[string]json.RawMessage, bool) {
@@ -270,6 +345,18 @@ func rawJSONString(raw json.RawMessage) string {
 		return ""
 	}
 	return value
+}
+
+func rawOptionalJSONString(object map[string]json.RawMessage, key string) (string, bool, bool) {
+	raw, present := object[key]
+	if !present {
+		return "", false, true
+	}
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return "", true, false
+	}
+	return value, true, true
 }
 
 func validateFixedHTTPHeaders(headers map[string]string) (map[string]string, error) {

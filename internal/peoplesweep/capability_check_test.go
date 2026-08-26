@@ -20,6 +20,13 @@ const (
 	capabilityArchiveCanary   = "archive-message-canary-never-send"
 	capabilityCredentialValue = "credential-canary-never-report"
 	capabilityResponseCanary  = "provider-body-canary-never-report"
+	capabilityMessageCanary   = "message-fragment-canary-never-report"
+	capabilityParamCanary     = "param-fragment-canary-never-report"
+	capabilityCodeCanary      = "code-fragment-canary-never-report"
+	capabilityAuthCanary      = "auth-fragment-canary-never-report"
+	capabilityStatusCanary    = "status-fragment-canary-never-report"
+	capabilityDomainCanary    = "domain-fragment-canary-never-report"
+	capabilityBodyCanary      = "body-fragment-canary-never-report"
 )
 
 type capabilityAttempt struct {
@@ -265,28 +272,132 @@ func TestCapabilityErrorClassificationRequiresProtocolSpecificStructuredCode(t *
 
 func TestCapabilityParameterMustBeExactlyEmittedByAttempt(t *testing.T) {
 	for _, test := range []struct {
-		protocol  Protocol
-		mode      OutputMode
-		reasoning string
-		parameter string
-		want      bool
+		name            string
+		protocol        Protocol
+		mode            OutputMode
+		tokenParameter  string
+		reasoningEffort string
+		reasoningMode   string
+		parameter       string
+		want            bool
 	}{
-		{ProtocolOpenAIChat, OutputModeNativeJSONSchema, "", "response_format.json_schema", true},
-		{ProtocolOpenAIChat, OutputModeJSONObject, "", "response_format.json_schema", false},
-		{ProtocolOpenAIChat, OutputModeJSONObject, "", "response_format.model", false},
-		{ProtocolOpenAIChat, OutputModePromptJSON, "", "response_format", false},
-		{ProtocolOpenAIResponses, OutputModeNativeJSONSchema, "", "reasoning.effort", false},
-		{ProtocolOpenAIResponses, OutputModeNativeJSONSchema, "high", "reasoning.effort", true},
-		{ProtocolOpenAIResponses, OutputModeJSONObject, "", "text.format.schema", false},
-		{ProtocolAnthropicMessages, OutputModeNativeJSONSchema, "", "tools.0", false},
-		{ProtocolGoogleGenerateContent, OutputModeNativeJSONSchema, "", "generationconfig.responseSchema", false},
-		{ProtocolGoogleGenerateContent, OutputModePromptJSON, "", "generationConfig.responseSchema", false},
+		{name: "chat native field", protocol: ProtocolOpenAIChat, mode: OutputModeNativeJSONSchema, tokenParameter: "max_tokens", parameter: "response_format.json_schema", want: true},
+		{name: "chat selected token field", protocol: ProtocolOpenAIChat, mode: OutputModePromptJSON, tokenParameter: "max_completion_tokens", parameter: "max_completion_tokens", want: true},
+		{name: "chat other token field", protocol: ProtocolOpenAIChat, mode: OutputModePromptJSON, tokenParameter: "max_completion_tokens", parameter: "max_tokens"},
+		{name: "chat wrong mode", protocol: ProtocolOpenAIChat, mode: OutputModeJSONObject, tokenParameter: "max_tokens", parameter: "response_format.json_schema"},
+		{name: "chat fake descendant", protocol: ProtocolOpenAIChat, mode: OutputModeJSONObject, tokenParameter: "max_tokens", parameter: "response_format.model"},
+		{name: "chat prompt field", protocol: ProtocolOpenAIChat, mode: OutputModePromptJSON, tokenParameter: "max_tokens", parameter: "response_format"},
+		{name: "chat effort omitted", protocol: ProtocolOpenAIChat, mode: OutputModePromptJSON, tokenParameter: "max_tokens", parameter: "reasoning_effort"},
+		{name: "chat effort emitted", protocol: ProtocolOpenAIChat, mode: OutputModePromptJSON, tokenParameter: "max_tokens", reasoningEffort: "high", parameter: "reasoning_effort", want: true},
+		{name: "chat reasoning object emitted", protocol: ProtocolOpenAIChat, mode: OutputModePromptJSON, tokenParameter: "max_tokens", reasoningMode: "enabled", parameter: "reasoning", want: true},
+		{name: "chat reasoning enabled emitted", protocol: ProtocolOpenAIChat, mode: OutputModePromptJSON, tokenParameter: "max_tokens", reasoningMode: "disabled", parameter: "reasoning.enabled", want: true},
+		{name: "chat reasoning wrong descendant", protocol: ProtocolOpenAIChat, mode: OutputModePromptJSON, tokenParameter: "max_tokens", reasoningMode: "enabled", parameter: "reasoning.effort"},
+		{name: "responses reasoning omitted", protocol: ProtocolOpenAIResponses, mode: OutputModeNativeJSONSchema, parameter: "reasoning.effort"},
+		{name: "responses reasoning emitted", protocol: ProtocolOpenAIResponses, mode: OutputModeNativeJSONSchema, reasoningEffort: "high", parameter: "reasoning.effort", want: true},
+		{name: "responses wrong mode", protocol: ProtocolOpenAIResponses, mode: OutputModeJSONObject, parameter: "text.format.schema"},
+		{name: "anthropic fake descendant", protocol: ProtocolAnthropicMessages, mode: OutputModeNativeJSONSchema, parameter: "tools.0"},
+		{name: "google casing alias", protocol: ProtocolGoogleGenerateContent, mode: OutputModeNativeJSONSchema, parameter: "generationconfig.responseSchema"},
+		{name: "google wrong mode", protocol: ProtocolGoogleGenerateContent, mode: OutputModePromptJSON, parameter: "generationConfig.responseSchema"},
+		{name: "leading whitespace alias", protocol: ProtocolAnthropicMessages, mode: OutputModeNativeJSONSchema, parameter: " tools"},
+		{name: "trailing whitespace alias", protocol: ProtocolGoogleGenerateContent, mode: OutputModeNativeJSONSchema, parameter: "generationConfig.responseSchema "},
 	} {
-		candidate := capabilityTestCandidate(test.protocol, "https://example.test")
-		candidate.ReasoningEffort = test.reasoning
-		profile, err := capabilityProfile(candidate, test.mode, map[bool]string{true: "max_tokens"}[test.protocol == ProtocolOpenAIChat], test.reasoning != "")
-		require.NoError(t, err)
-		assert.Equal(t, test.want, capabilityParameterMatchesProfile(profile, test.parameter))
+		t.Run(test.name, func(t *testing.T) {
+			candidate := capabilityTestCandidate(test.protocol, "https://example.test")
+			candidate.ReasoningEffort = test.reasoningEffort
+			candidate.ReasoningMode = test.reasoningMode
+			profile, err := capabilityProfile(candidate, test.mode, test.tokenParameter,
+				test.reasoningEffort != "" || test.reasoningMode != "")
+			require.NoError(t, err)
+			assert.Equal(t, test.want, capabilityParameterMatchesProfile(profile, test.parameter))
+		})
+	}
+}
+
+func TestCapabilityRepresentationCodeMustMatchProtocolAndActiveMode(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		protocol Protocol
+		mode     OutputMode
+		code     string
+		want     bool
+	}{
+		{name: "chat native schema", protocol: ProtocolOpenAIChat, mode: OutputModeNativeJSONSchema, code: "unsupported_json_schema", want: true},
+		{name: "chat JSON object", protocol: ProtocolOpenAIChat, mode: OutputModeJSONObject, code: "unsupported_response_format", want: true},
+		{name: "chat prompt", protocol: ProtocolOpenAIChat, mode: OutputModePromptJSON, code: "unsupported_json_schema"},
+		{name: "chat casing alias", protocol: ProtocolOpenAIChat, mode: OutputModeNativeJSONSchema, code: "UNSUPPORTED_JSON_SCHEMA"},
+		{name: "responses native schema", protocol: ProtocolOpenAIResponses, mode: OutputModeNativeJSONSchema, code: "unsupported_json_schema", want: true},
+		{name: "responses prompt", protocol: ProtocolOpenAIResponses, mode: OutputModePromptJSON, code: "unsupported_response_format"},
+		{name: "anthropic native schema", protocol: ProtocolAnthropicMessages, mode: OutputModeNativeJSONSchema, code: "unsupported_json_schema", want: true},
+		{name: "anthropic wrong protocol", protocol: ProtocolAnthropicMessages, mode: OutputModeNativeJSONSchema, code: "unsupported_response_format"},
+		{name: "anthropic prompt", protocol: ProtocolAnthropicMessages, mode: OutputModePromptJSON, code: "unsupported_json_schema"},
+		{name: "google native schema", protocol: ProtocolGoogleGenerateContent, mode: OutputModeNativeJSONSchema, code: "UNSUPPORTED_JSON_SCHEMA", want: true},
+		{name: "google native response format", protocol: ProtocolGoogleGenerateContent, mode: OutputModeNativeJSONSchema, code: "UNSUPPORTED_RESPONSE_FORMAT", want: true},
+		{name: "google prompt", protocol: ProtocolGoogleGenerateContent, mode: OutputModePromptJSON, code: "UNSUPPORTED_RESPONSE_FORMAT"},
+		{name: "google casing alias", protocol: ProtocolGoogleGenerateContent, mode: OutputModeNativeJSONSchema, code: "unsupported_json_schema"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := capabilityTestCandidate(test.protocol, "https://example.test")
+			profile, err := capabilityProfile(candidate, test.mode,
+				map[bool]string{true: "max_tokens"}[test.protocol == ProtocolOpenAIChat], false)
+			require.NoError(t, err)
+			assert.Equal(t, test.want, capabilityCodeMatchesProfile(profile, test.code, "", false))
+		})
+	}
+}
+
+func TestCapabilityDriversRejectRepresentationCodesForPromptOnlyAttempts(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		protocol  Protocol
+		auth      AuthScheme
+		path      string
+		errorBody string
+	}{
+		{name: "openai chat", protocol: ProtocolOpenAIChat, auth: AuthBearer, path: "/chat/completions",
+			errorBody: `{"error":{"type":"invalid_request_error","code":"unsupported_json_schema"}}`},
+		{name: "openai responses", protocol: ProtocolOpenAIResponses, auth: AuthBearer, path: "/responses",
+			errorBody: `{"error":{"type":"invalid_request_error","code":"unsupported_response_format"}}`},
+		{name: "anthropic", protocol: ProtocolAnthropicMessages, auth: AuthXAPIKey, path: "/v1/messages",
+			errorBody: `{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_json_schema"}}`},
+		{name: "google", protocol: ProtocolGoogleGenerateContent, auth: AuthGoogleAPIKey, path: "/models/synthetic-model:generateContent",
+			errorBody: `{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_RESPONSE_FORMAT","domain":"generativelanguage.googleapis.com"}]}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				assert.Equal(t, test.path, r.URL.Path)
+				var body map[string]any
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				if test.protocol == ProtocolGoogleGenerateContent {
+					assert.NotContains(t, body, "model")
+				} else {
+					assert.Equal(t, "synthetic-model", body["model"])
+				}
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(test.errorBody))
+			}))
+			t.Cleanup(server.Close)
+			registry, err := NewDriverRegistry(server.Client(), nil, nil)
+			require.NoError(t, err)
+			candidate := capabilityTestCandidate(test.protocol, server.URL)
+			candidate.Auth = test.auth
+			profile, err := capabilityProfile(candidate, OutputModePromptJSON,
+				map[bool]string{true: "max_tokens"}[test.protocol == ProtocolOpenAIChat], false)
+			require.NoError(t, err)
+			driver, err := registry.capabilityDriver(test.protocol)
+			require.NoError(t, err)
+			prepared, err := driver.Prepare(profile, capabilitySyntheticRequest())
+			require.NoError(t, err)
+
+			_, callErr := driver.GeneratePrepared(t.Context(), profile,
+				NewCredential(test.auth, capabilityCredentialValue), prepared)
+			require.Error(t, callErr)
+			var providerErr *ProviderError
+			require.ErrorAs(t, callErr, &providerErr)
+			assert.Empty(t, providerErr.Capability)
+			assert.Equal(t, int32(1), calls.Load())
+		})
 	}
 }
 
@@ -353,10 +464,10 @@ func TestCapabilityNegotiationRetriesClassifiedErrorsForEachProtocolFamily(t *te
 			errorBody:   `{"error":{"type":"invalid_request_error","code":"unsupported_value","param":"text.format"}}`,
 			successBody: `{"model":"synthetic-model-version","output":[{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"}]}]}`},
 		{name: "anthropic", protocol: ProtocolAnthropicMessages, auth: AuthXAPIKey,
-			errorBody:   `{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_json_schema"}}`,
+			errorBody:   `{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"tools"}}`,
 			successBody: `{"id":"msg_safe","type":"message","role":"assistant","model":"synthetic-model-version","content":[{"type":"text","text":"{\"ok\":true}"}],"stop_reason":"end_turn"}`},
 		{name: "google", protocol: ProtocolGoogleGenerateContent, auth: AuthGoogleAPIKey,
-			errorBody:   `{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_RESPONSE_FORMAT","domain":"generativelanguage.googleapis.com"}]}}`,
+			errorBody:   `{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com","metadata":{"parameter":"generationConfig.responseSchema"}}]}}`,
 			successBody: `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"synthetic-model-version"}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -388,9 +499,10 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 	for _, test := range []struct {
 		protocol Protocol
 		auth     AuthScheme
+		path     string
 		bodies   []string
 	}{
-		{ProtocolOpenAIChat, AuthBearer, []string{
+		{ProtocolOpenAIChat, AuthBearer, "/chat/completions", []string{
 			`{"error":{"type":"invalid_request_error","message":"unsupported parameter"}}`,
 			`{"error":{"type":"not_found_error","code":"endpoint_not_found"}}`,
 			`{"error":{"type":"invalid_request_error","code":"unsupported_value","param":"model"}}`,
@@ -400,9 +512,16 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter"}}`,
 			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"response_format.model"}}`,
 			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"Response_Format"}}`,
-			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"response_format","param":"model"}}`, `{"error":`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":" response_format"}}`,
+			`{"error":{"type":"invalid_request_error","code":"UNSUPPORTED_JSON_SCHEMA"}}`,
+			`{"error":{"type":"invalid_request_error","code":{"value":"unsupported_json_schema"}}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_json_schema","param":{"value":"response_format"}}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_json_schema","param":""}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_json_schema","code":"` + capabilityCodeCanary + `"}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"response_format","param":"model"}}`,
+			`{"error":{"type":"invalid_request_error","code":"` + capabilityCodeCanary + `","param":"` + capabilityParamCanary + `","message":"` + capabilityMessageCanary + `","auth":"` + capabilityAuthCanary + `","status":"` + capabilityStatusCanary + `","domain":"` + capabilityDomainCanary + `","body":"` + capabilityBodyCanary + `"}}`, `{"error":`,
 		}},
-		{ProtocolOpenAIResponses, AuthBearer, []string{
+		{ProtocolOpenAIResponses, AuthBearer, "/responses", []string{
 			`{"error":{"type":"invalid_request_error","message":"unsupported parameter"}}`,
 			`{"error":{"type":"not_found_error","code":"endpoint_not_found"}}`,
 			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"model"}}`,
@@ -412,9 +531,17 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter"}}`,
 			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"reasoning.effort"}}`,
 			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"text.format.model"}}`,
-			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"Text.Format"}}`, `{"error":`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"Text.Format"}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":" text.format"}}`,
+			`{"error":{"type":"invalid_request_error","code":"UNSUPPORTED_JSON_SCHEMA"}}`,
+			`{"error":{"type":"invalid_request_error","code":{"value":"unsupported_json_schema"}}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_json_schema","param":{"value":"text.format"}}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_json_schema","param":""}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_json_schema","code":"` + capabilityCodeCanary + `"}}`,
+			`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"text.format","param":"` + capabilityParamCanary + `"}}`,
+			`{"error":{"type":"invalid_request_error","code":"` + capabilityCodeCanary + `","param":"` + capabilityParamCanary + `","message":"` + capabilityMessageCanary + `","auth":"` + capabilityAuthCanary + `","status":"` + capabilityStatusCanary + `","domain":"` + capabilityDomainCanary + `","body":"` + capabilityBodyCanary + `"}}`, `{"error":`,
 		}},
-		{ProtocolAnthropicMessages, AuthXAPIKey, []string{
+		{ProtocolAnthropicMessages, AuthXAPIKey, "/v1/messages", []string{
 			`{"type":"error","error":{"type":"invalid_request_error","message":"unsupported parameter"}}`,
 			`{"type":"error","error":{"type":"not_found_error","code":"endpoint_not_found"}}`,
 			`{"type":"error","error":{"type":"invalid_request_error","code":"model_not_found"}}`,
@@ -424,9 +551,17 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter"}}`,
 			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"tools.0"}}`,
 			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"Tools"}}`,
-			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"tools","param":"model"}}`, `{"error":`,
+			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter","param":" tools"}}`,
+			`{"type":"error","error":{"type":"invalid_request_error","code":"UNSUPPORTED_JSON_SCHEMA"}}`,
+			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_response_format"}}`,
+			`{"type":"error","error":{"type":"invalid_request_error","code":{"value":"unsupported_json_schema"}}}`,
+			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_json_schema","param":{"value":"tools"}}}`,
+			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_json_schema","param":""}}`,
+			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_json_schema","code":"` + capabilityCodeCanary + `"}}`,
+			`{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"tools","param":"model"}}`,
+			`{"type":"error","error":{"type":"invalid_request_error","code":"` + capabilityCodeCanary + `","param":"` + capabilityParamCanary + `","message":"` + capabilityMessageCanary + `","auth":"` + capabilityAuthCanary + `","status":"` + capabilityStatusCanary + `","domain":"` + capabilityDomainCanary + `","body":"` + capabilityBodyCanary + `"}}`, `{"error":`,
 		}},
-		{ProtocolGoogleGenerateContent, AuthGoogleAPIKey, []string{
+		{ProtocolGoogleGenerateContent, AuthGoogleAPIKey, "/models/synthetic-model:generateContent", []string{
 			`{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"unsupported response format"}}`,
 			`{"error":{"code":400,"status":"NOT_FOUND","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"ENDPOINT_NOT_FOUND","domain":"generativelanguage.googleapis.com"}]}}`,
 			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"MODEL_NOT_FOUND","domain":"generativelanguage.googleapis.com"}]}}`,
@@ -436,15 +571,32 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com"}]}}`,
 			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com","metadata":{"parameter":"generationConfig.responseSchema.model"}}]}}`,
 			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com","metadata":{"parameter":"generationconfig.responseSchema"}}]}}`,
-			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com","metadata":{"parameter":"generationConfig.responseSchema","parameter":"model"}}]}}`, `{"error":`,
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com","metadata":{"parameter":" generationConfig.responseSchema"}}]}}`,
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"unsupported_json_schema","domain":"generativelanguage.googleapis.com"}]}}`,
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":{"value":"UNSUPPORTED_JSON_SCHEMA"},"domain":"generativelanguage.googleapis.com"}]}}`,
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_JSON_SCHEMA","domain":"generativelanguage.googleapis.com","metadata":{"parameter":{"value":"generationConfig.responseSchema"}}}]}}`,
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_JSON_SCHEMA","domain":"generativelanguage.googleapis.com","metadata":{"parameter":""}}]}}`,
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_JSON_SCHEMA","reason":"` + capabilityCodeCanary + `","domain":"generativelanguage.googleapis.com"}]}}`,
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com","metadata":{"parameter":"generationConfig.responseSchema","parameter":"model"}}]}}`,
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_JSON_SCHEMA","domain":"generativelanguage.googleapis.com"},{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"MODEL_NOT_FOUND","domain":"generativelanguage.googleapis.com"}]}}`,
+			`{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_JSON_SCHEMA","domain":"generativelanguage.googleapis.com"},{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_JSON_SCHEMA","domain":"generativelanguage.googleapis.com"}]}}`,
+			`{"error":{"code":400,"status":"` + capabilityStatusCanary + `","message":"` + capabilityMessageCanary + `","auth":"` + capabilityAuthCanary + `","body":"` + capabilityBodyCanary + `","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"` + capabilityCodeCanary + `","domain":"` + capabilityDomainCanary + `","metadata":{"parameter":"` + capabilityParamCanary + `"}}]}}`, `{"error":`,
 		}},
 	} {
 		t.Run(string(test.protocol), func(t *testing.T) {
 			for index, body := range test.bodies {
 				t.Run(fmt.Sprintf("case-%d", index), func(t *testing.T) {
 					var calls atomic.Int32
-					server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						calls.Add(1)
+						assert.Equal(t, test.path, r.URL.Path)
+						var requestBody map[string]any
+						require.NoError(t, json.NewDecoder(r.Body).Decode(&requestBody))
+						if test.protocol == ProtocolGoogleGenerateContent {
+							assert.NotContains(t, requestBody, "model")
+						} else {
+							assert.Equal(t, "synthetic-model", requestBody["model"])
+						}
 						w.WriteHeader(http.StatusBadRequest)
 						_, _ = w.Write([]byte(body))
 					}))
@@ -458,7 +610,12 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 					require.Error(t, negotiationErr)
 					assert.Empty(t, got)
 					assert.Equal(t, int32(1), calls.Load())
-					for _, fragment := range []string{"unsupported", "parameter", "model", "endpoint", "billing", "policy", capabilityResponseCanary, capabilityCredentialValue} {
+					for _, fragment := range []string{
+						"unsupported", "parameter", "model", "endpoint", "billing", "policy",
+						capabilityResponseCanary, capabilityCredentialValue, capabilityMessageCanary,
+						capabilityParamCanary, capabilityCodeCanary, capabilityAuthCanary,
+						capabilityStatusCanary, capabilityDomainCanary, capabilityBodyCanary,
+					} {
 						assert.NotContains(t, negotiationErr.Error(), fragment)
 					}
 				})
@@ -474,8 +631,12 @@ func TestCapabilityNegotiationNeverSwitchesProtocolEndpointOrModel(t *testing.T)
 		var body map[string]any
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 		assert.Equal(t, "synthetic-model", body["model"])
+		parameter := "max_completion_tokens"
+		if _, present := body["max_tokens"]; present {
+			parameter = "max_tokens"
+		}
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","code":"unsupported_json_schema"}}`))
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"` + parameter + `"}}`))
 	}))
 	t.Cleanup(server.Close)
 	registry, err := NewDriverRegistry(server.Client(), nil, nil)
