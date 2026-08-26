@@ -223,6 +223,41 @@ source_since = "2026-01-01"
 	assert.Equal(t, "max", provider.ReasoningEffort)
 }
 
+func TestSaveReloadsNamedPeopleProviderSelection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+[people.sweep]
+enabled = true
+provider = "glm"
+
+[people.sweep.providers.glm]
+protocol = "openai_chat"
+endpoint = "https://api.z.ai/api/paas/v4"
+model = "glm-5.3"
+auth = "bearer"
+credential = "env"
+credential_env = "ZAI_API_KEY"
+output_mode = "json_object"
+token_limit_parameter = "max_tokens"
+retention_posture = "provider-declared"
+training_posture = "provider-declared"
+allowed_sources = ["conversation_text"]
+source_since = "2026-01-01"
+`), 0o600))
+
+	loaded, err := Load(path, "")
+	require.NoError(t, err)
+	require.NoError(t, loaded.Save())
+
+	saved, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(saved), `provider = "glm"`)
+
+	reloaded, err := Load(path, "")
+	require.NoError(t, err)
+	assert.Equal(t, "glm", reloaded.People.Sweep.Provider.Name)
+}
+
 func TestConfigMigratesLegacyProviderTable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	require.NoError(t, os.WriteFile(path, []byte(`
