@@ -1,10 +1,11 @@
 package peoplesweep
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"net/http"
+	"io"
 	"slices"
 	"time"
 )
@@ -207,16 +208,46 @@ func validateCapabilityResponse(driverResponse DriverResponse) (StructuredRespon
 		(response.ProviderRequestID != "" && !safeProviderMetadata(response.ProviderRequestID)) {
 		return StructuredResponse{}, errors.New("provider capability response metadata is invalid")
 	}
-	var output map[string]any
-	if err := decodeSingleJSONUseNumber(response.Output, &output); err != nil || len(output) != 1 {
+	output, valid := decodeUniqueCapabilityObject(response.Output)
+	if !valid || len(output) != 1 {
 		return StructuredResponse{}, errors.New("provider capability response is invalid")
 	}
-	ok, exists := output["ok"].(bool)
-	if !exists || !ok {
+	var okValue bool
+	if err := json.Unmarshal(output["ok"], &okValue); err != nil || !okValue {
 		return StructuredResponse{}, errors.New("provider capability response is invalid")
 	}
 	response.Output = append(json.RawMessage(nil), response.Output...)
 	return response, nil
+}
+
+func decodeUniqueCapabilityObject(raw []byte) (map[string]json.RawMessage, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('{') {
+		return nil, false
+	}
+	result := make(map[string]json.RawMessage)
+	for decoder.More() {
+		token, tokenErr := decoder.Token()
+		key, valid := token.(string)
+		if tokenErr != nil || !valid {
+			return nil, false
+		}
+		if _, duplicate := result[key]; duplicate {
+			return nil, false
+		}
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return nil, false
+		}
+		result[key] = value
+	}
+	end, err := decoder.Token()
+	if err != nil || end != json.Delim('}') {
+		return nil, false
+	}
+	var trailing any
+	return result, errors.Is(decoder.Decode(&trailing), io.EOF)
 }
 
 func capabilityMiss(err error) bool {
@@ -224,7 +255,5 @@ func capabilityMiss(err error) bool {
 	if !errors.As(err, &providerErr) {
 		return false
 	}
-	return providerErr.StatusCode == http.StatusBadRequest ||
-		providerErr.StatusCode == http.StatusNotFound ||
-		providerErr.StatusCode == http.StatusUnprocessableEntity
+	return providerErr.Capability == ProviderCapabilityUnsupportedRepresentation
 }

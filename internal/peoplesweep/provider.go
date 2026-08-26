@@ -116,12 +116,20 @@ type StructuredRunner interface {
 	RunStructured(ctx context.Context, request StructuredRequest) (StructuredResponse, error)
 }
 
-// ProviderError exposes only response status and a safe provider request ID.
-// Provider response bodies are intentionally discarded.
+// ProviderCapabilityError is a bounded classification derived only from a
+// protocol's structured error envelope. It never contains provider text.
+type ProviderCapabilityError string
+
+const ProviderCapabilityUnsupportedRepresentation ProviderCapabilityError = "unsupported_representation"
+
+// ProviderError exposes only response status, safe request metadata, and an
+// optional bounded capability classification. Provider response bodies are
+// intentionally discarded.
 type ProviderError struct {
 	StatusCode int
 	RequestID  string
 	RetryAfter time.Duration
+	Capability ProviderCapabilityError
 }
 
 func (e *ProviderError) Error() string {

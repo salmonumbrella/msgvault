@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -51,14 +52,8 @@ func TestModelsDevFetchParsesCurrentFixtureDeterministicallyByAPIShape(t *testin
 		_, _ = w.Write(fixture)
 	}))
 	t.Cleanup(server.Close)
-	jar, err := cookiejar.New(nil)
-	require.NoError(t, err)
-	catalogURL, err := url.Parse(modelsDevURL)
-	require.NoError(t, err)
-	jar.SetCookies(catalogURL, []*http.Cookie{{Name: "session", Value: modelsDevRequestCanary}})
-	client.Jar = jar
 
-	got, err := NewModelsDevClient(client).Fetch(t.Context())
+	got, err := client.Fetch(t.Context())
 	require.NoError(t, err)
 	require.Len(t, got, 4)
 	assert.Equal(t, []string{"alpha", "anthropic-label", "openai-label", "template"},
@@ -96,7 +91,7 @@ func TestModelsDevFetchRejectsRedirectWithoutFollowing(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	got, err := NewModelsDevClient(client).Fetch(t.Context())
+	got, err := client.Fetch(t.Context())
 	require.Error(t, err)
 	assert.Nil(t, got)
 	assert.Equal(t, int32(1), calls.Load())
@@ -115,26 +110,41 @@ func TestModelsDevFetchHonorsCallerTimeoutWithSafeError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Millisecond)
 	defer cancel()
 
-	got, err := NewModelsDevClient(client).Fetch(ctx)
+	got, err := client.Fetch(ctx)
 	close(release)
 	require.Error(t, err)
 	assert.Nil(t, got)
 	assert.NotContains(t, err.Error(), modelsDevBodyCanary)
 }
 
-func TestModelsDevFetchAppliesFixedTotalTimeout(t *testing.T) {
-	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		deadline, ok := r.Context().Deadline()
-		require.True(t, ok)
-		remaining := time.Until(deadline)
-		assert.Greater(t, remaining, 14*time.Second)
-		assert.LessOrEqual(t, remaining, 15*time.Second)
-		return nil, errors.New(modelsDevBodyCanary)
-	})}
+func TestNewModelsDevClientDoesNotInheritCallerHTTPConfiguration(t *testing.T) {
+	called := &atomic.Bool{}
+	callerTransport := &http.Transport{
+		Proxy:           func(*http.Request) (*url.URL, error) { return url.Parse("https://user:secret@proxy.invalid") },
+		TLSClientConfig: &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{[]byte(modelsDevRequestCanary)}}}},
+	}
+	caller := &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			called.Store(true)
+			return nil, errors.New(modelsDevBodyCanary)
+		}),
+		Jar:           cookieJarWithCanary(t),
+		CheckRedirect: func(*http.Request, []*http.Request) error { return nil },
+	}
+	client := NewModelsDevClient(caller)
+	transport, ok := client.client.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.Nil(t, transport.Proxy)
+	assert.Empty(t, transport.TLSClientConfig.Certificates)
+	assert.Nil(t, client.client.Jar)
+	assert.Equal(t, modelsDevTotalTimeout, client.client.Timeout)
 
-	_, err := NewModelsDevClient(client).Fetch(t.Context())
-	require.Error(t, err)
-	assert.NotContains(t, err.Error(), modelsDevBodyCanary)
+	caller.Transport = callerTransport
+	caller.Jar = cookieJarWithCanary(t)
+	callerTransport.TLSClientConfig.Certificates = append(callerTransport.TLSClientConfig.Certificates, tls.Certificate{})
+	assert.NotEqual(t, callerTransport, transport)
+	assert.Empty(t, transport.TLSClientConfig.Certificates)
+	assert.False(t, called.Load())
 }
 
 func TestModelsDevFetchRejectsSizeOverflowByOneAndClosesBody(t *testing.T) {
@@ -142,8 +152,8 @@ func TestModelsDevFetchRejectsSizeOverflowByOneAndClosesBody(t *testing.T) {
 	client, server := modelsDevTLSFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.CopyN(w, zeroReader{}, modelsDevMaxBodyBytes+1)
 	}))
-	serverClientTransport := client.Transport
-	client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	serverClientTransport := client.client.Transport
+	client.client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		response, err := serverClientTransport.RoundTrip(r)
 		if err != nil {
 			return nil, err
@@ -153,7 +163,7 @@ func TestModelsDevFetchRejectsSizeOverflowByOneAndClosesBody(t *testing.T) {
 	})
 	t.Cleanup(server.Close)
 
-	got, err := NewModelsDevClient(client).Fetch(t.Context())
+	got, err := client.Fetch(t.Context())
 	require.Error(t, err)
 	assert.Nil(t, got)
 	assert.True(t, closed.Load())
@@ -167,8 +177,8 @@ func TestModelsDevFetchDrainsAndClosesStatusErrorWithoutBodyDisclosure(t *testin
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, body)
 	}))
-	base := client.Transport
-	client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+	base := client.client.Transport
+	client.client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		response, err := base.RoundTrip(r)
 		if err != nil {
 			return nil, err
@@ -178,7 +188,7 @@ func TestModelsDevFetchDrainsAndClosesStatusErrorWithoutBodyDisclosure(t *testin
 	})
 	t.Cleanup(server.Close)
 
-	got, err := NewModelsDevClient(client).Fetch(t.Context())
+	got, err := client.Fetch(t.Context())
 	require.Error(t, err)
 	assert.Nil(t, got)
 	assert.True(t, closed.Load())
@@ -212,7 +222,7 @@ func TestModelsDevFetchRejectsDuplicateAndUnsafeCatalogData(t *testing.T) {
 			}))
 			t.Cleanup(server.Close)
 
-			got, err := NewModelsDevClient(client).Fetch(t.Context())
+			got, err := client.Fetch(t.Context())
 			require.Error(t, err)
 			assert.Nil(t, got)
 			assert.NotContains(t, err.Error(), "secret")
@@ -220,34 +230,53 @@ func TestModelsDevFetchRejectsDuplicateAndUnsafeCatalogData(t *testing.T) {
 	}
 }
 
-func TestModelsDevFetchFailureLeavesCustomSetupRecoverable(t *testing.T) {
+func TestModelsDevFetchReturnsStableErrorWithoutPartialSuggestions(t *testing.T) {
 	client, server := modelsDevTLSFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = io.WriteString(w, modelsDevBodyCanary)
 	}))
 	t.Cleanup(server.Close)
-	candidate := capabilityTestCandidate(ProtocolOpenAIChat, "https://custom.example.test/v1")
-	wantCandidate := candidate
-
-	suggestions, err := NewModelsDevClient(client).Fetch(t.Context())
-	require.Error(t, err)
+	suggestions, err := client.Fetch(t.Context())
+	require.ErrorIs(t, err, ErrModelsDevUnavailable)
 	assert.Nil(t, suggestions)
-	assert.Equal(t, wantCandidate, candidate)
 	assert.NotContains(t, err.Error(), modelsDevBodyCanary)
 }
 
-func modelsDevTLSFixture(t *testing.T, handler http.Handler) (*http.Client, *httptest.Server) {
+func TestModelsDevFetchCancelsDuringTransformationWithoutPartialSuggestions(t *testing.T) {
+	body := `{"a":{"id":"a","name":"A","models":{}},"b":{"id":"b","name":"B","models":{}}}`
+	client, server := modelsDevTLSFixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithCancel(t.Context())
+	client.hooks = &modelsDevHooks{afterProvider: cancel}
+
+	suggestions, err := client.Fetch(ctx)
+	require.ErrorIs(t, err, ErrModelsDevTimeout)
+	assert.Nil(t, suggestions)
+}
+
+func modelsDevTLSFixture(t *testing.T, handler http.Handler) (*ModelsDevClient, *httptest.Server) {
 	t.Helper()
 	server := httptest.NewTLSServer(handler)
-	baseTransport, ok := server.Client().Transport.(*http.Transport)
-	require.True(t, ok)
-	transport := baseTransport.Clone()
-	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // local httptest TLS certificate
+	certificate := server.Certificate()
+	pool := x509.NewCertPool()
+	pool.AddCert(certificate)
 	target := server.Listener.Addr().String()
-	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+	dial := func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, target)
 	}
-	return &http.Client{Transport: transport}, server
+	return newModelsDevClientForTest(dial, pool, certificate.DNSNames[0]), server
+}
+
+func cookieJarWithCanary(t *testing.T) http.CookieJar {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	catalogURL, err := url.Parse(modelsDevURL)
+	require.NoError(t, err)
+	jar.SetCookies(catalogURL, []*http.Cookie{{Name: "session", Value: modelsDevRequestCanary}})
+	return jar
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

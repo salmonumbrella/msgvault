@@ -50,7 +50,7 @@ func TestCapabilityNegotiationUsesFixedOutputAndTokenOrderWithoutArchiveContext(
 			_, _ = w.Write([]byte(`{"model":"synthetic-model-version","choices":[{"message":{"content":"{\"ok\":true}"}}]}`))
 			return
 		}
-		_, _ = w.Write([]byte(capabilityResponseCanary))
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","code":"unsupported_parameter","message":"` + capabilityResponseCanary + `"}}`))
 	}))
 	t.Cleanup(server.Close)
 
@@ -167,6 +167,9 @@ func TestCapabilityNegotiationStopsOnNonCapabilityFailuresAndInvalidOutput(t *te
 		{name: "locally invalid output", status: http.StatusOK,
 			response:   `{"model":"synthetic-model-version","choices":[{"message":{"content":"{\"ok\":false}"}}]}`,
 			credential: NewCredential(AuthBearer, capabilityCredentialValue)},
+		{name: "duplicate output members", status: http.StatusOK,
+			response:   `{"model":"synthetic-model-version","choices":[{"message":{"content":"{\"ok\":true,\"ok\":false}"}}]}`,
+			credential: NewCredential(AuthBearer, capabilityCredentialValue)},
 		{name: "transport timeout", wait: true,
 			credential: NewCredential(AuthBearer, capabilityCredentialValue)},
 		{name: "credential validation", status: http.StatusOK,
@@ -213,6 +216,126 @@ func TestCapabilityNegotiationStopsOnNonCapabilityFailuresAndInvalidOutput(t *te
 	}
 }
 
+func TestCapabilityNegotiationRejectsAmbiguousSyntheticJSON(t *testing.T) {
+	for _, output := range []string{
+		`{"ok":true,"ok":false}`, `{"ok":false,"ok":true}`, `{"ok":true,"extra":true}`,
+		`{"ok":true} {"ok":true}`, `{"ok":null}`, `{"ok":"true"}`,
+	} {
+		t.Run(output, func(t *testing.T) {
+			got, err := validateCapabilityResponse(DriverResponse{
+				CandidateJSON: []byte(output), ModelVersion: "synthetic-model-version",
+			})
+			require.Error(t, err)
+			assert.Empty(t, got)
+			assert.NotContains(t, err.Error(), output)
+		})
+	}
+}
+
+func TestCapabilityErrorClassificationRequiresProtocolSpecificStructuredCode(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		protocol Protocol
+		body     string
+		want     ProviderCapabilityError
+	}{
+		{name: "openai chat", protocol: ProtocolOpenAIChat, body: `{"error":{"type":"invalid_request_error","code":"unsupported_parameter","message":"secret"}}`, want: ProviderCapabilityUnsupportedRepresentation},
+		{name: "openai responses", protocol: ProtocolOpenAIResponses, body: `{"error":{"type":"invalid_request_error","code":"unsupported_value","message":"secret"}}`, want: ProviderCapabilityUnsupportedRepresentation},
+		{name: "anthropic", protocol: ProtocolAnthropicMessages, body: `{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_parameter","message":"secret"}}`, want: ProviderCapabilityUnsupportedRepresentation},
+		{name: "google", protocol: ProtocolGoogleGenerateContent, body: `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"secret","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com"}]}}`, want: ProviderCapabilityUnsupportedRepresentation},
+		{name: "openai generic", protocol: ProtocolOpenAIChat, body: `{"error":{"type":"invalid_request_error","message":"unsupported parameter secret"}}`},
+		{name: "anthropic generic", protocol: ProtocolAnthropicMessages, body: `{"type":"error","error":{"type":"invalid_request_error","message":"unsupported parameter secret"}}`},
+		{name: "google generic", protocol: ProtocolGoogleGenerateContent, body: `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"unsupported parameter secret"}}`},
+		{name: "malformed", protocol: ProtocolOpenAIChat, body: `{"error":`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, classifyProviderCapabilityError(test.protocol, []byte(test.body)))
+		})
+	}
+}
+
+func TestCapabilityNegotiationStopsAfterUnclassified400404And422(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "generic aggregator", status: http.StatusBadRequest, body: `{"error":{"type":"invalid_request_error","message":"unsupported parameter ` + capabilityResponseCanary + `"}}`},
+		{name: "wrong endpoint", status: http.StatusNotFound, body: `{"error":{"type":"not_found_error","code":"endpoint_not_found"}}`},
+		{name: "wrong model", status: http.StatusNotFound, body: `{"error":{"type":"invalid_request_error","code":"model_not_found"}}`},
+		{name: "authentication", status: http.StatusUnprocessableEntity, body: `{"error":{"type":"authentication_error","code":"invalid_api_key"}}`},
+		{name: "billing", status: http.StatusBadRequest, body: `{"error":{"type":"billing_error","code":"insufficient_quota"}}`},
+		{name: "policy", status: http.StatusUnprocessableEntity, body: `{"error":{"type":"policy_error","code":"content_policy_violation"}}`},
+		{name: "malformed", status: http.StatusBadRequest, body: `{"error":`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			t.Cleanup(server.Close)
+			registry, err := NewDriverRegistry(server.Client(), nil, nil)
+			require.NoError(t, err)
+
+			got, negotiationErr := NewCapabilityChecker(registry).Negotiate(t.Context(),
+				capabilityTestCandidate(ProtocolOpenAIChat, server.URL),
+				NewCredential(AuthBearer, capabilityCredentialValue))
+			require.Error(t, negotiationErr)
+			assert.Empty(t, got)
+			assert.Equal(t, int32(1), calls.Load())
+			assert.NotContains(t, negotiationErr.Error(), capabilityResponseCanary)
+		})
+	}
+}
+
+func TestCapabilityNegotiationRetriesClassifiedErrorsForEachProtocolFamily(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		protocol    Protocol
+		auth        AuthScheme
+		errorBody   string
+		successBody string
+	}{
+		{name: "openai chat", protocol: ProtocolOpenAIChat, auth: AuthBearer,
+			errorBody:   `{"error":{"type":"invalid_request_error","code":"unsupported_parameter"}}`,
+			successBody: `{"model":"synthetic-model-version","choices":[{"message":{"content":"{\"ok\":true}"}}]}`},
+		{name: "openai responses", protocol: ProtocolOpenAIResponses, auth: AuthBearer,
+			errorBody:   `{"error":{"type":"invalid_request_error","code":"unsupported_value"}}`,
+			successBody: `{"model":"synthetic-model-version","output":[{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"}]}]}`},
+		{name: "anthropic", protocol: ProtocolAnthropicMessages, auth: AuthXAPIKey,
+			errorBody:   `{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_json_schema"}}`,
+			successBody: `{"id":"msg_safe","type":"message","role":"assistant","model":"synthetic-model-version","content":[{"type":"text","text":"{\"ok\":true}"}],"stop_reason":"end_turn"}`},
+		{name: "google", protocol: ProtocolGoogleGenerateContent, auth: AuthGoogleAPIKey,
+			errorBody:   `{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_RESPONSE_FORMAT","domain":"generativelanguage.googleapis.com"}]}}`,
+			successBody: `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"synthetic-model-version"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if calls.Add(1) == 1 {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(test.errorBody))
+					return
+				}
+				_, _ = w.Write([]byte(test.successBody))
+			}))
+			t.Cleanup(server.Close)
+			registry, err := NewDriverRegistry(server.Client(), nil, nil)
+			require.NoError(t, err)
+			candidate := capabilityTestCandidate(test.protocol, server.URL)
+			candidate.Auth = test.auth
+
+			got, negotiationErr := NewCapabilityChecker(registry).Negotiate(t.Context(), candidate,
+				NewCredential(test.auth, capabilityCredentialValue))
+			require.NoError(t, negotiationErr)
+			assert.Equal(t, int32(2), calls.Load())
+			assert.JSONEq(t, `{"ok":true}`, string(got.Response.Output))
+		})
+	}
+}
+
 func TestCapabilityNegotiationNeverSwitchesProtocolEndpointOrModel(t *testing.T) {
 	var paths []string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -221,7 +344,7 @@ func TestCapabilityNegotiationNeverSwitchesProtocolEndpointOrModel(t *testing.T)
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 		assert.Equal(t, "synthetic-model", body["model"])
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		_, _ = w.Write([]byte(capabilityResponseCanary))
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","code":"unsupported_parameter"}}`))
 	}))
 	t.Cleanup(server.Close)
 	registry, err := NewDriverRegistry(server.Client(), nil, nil)

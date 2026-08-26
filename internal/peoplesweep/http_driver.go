@@ -3,6 +3,7 @@ package peoplesweep
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -88,12 +89,21 @@ func (d *httpDriver) postWithHeaders(
 	defer disposeHTTPResponse(response.Body)
 	requestID := safeRequestID(response.Header)
 	if response.StatusCode != http.StatusOK {
+		capability := ProviderCapabilityError("")
+		if response.StatusCode == http.StatusBadRequest || response.StatusCode == http.StatusNotFound ||
+			response.StatusCode == http.StatusUnprocessableEntity {
+			errorBody, readErr := io.ReadAll(io.LimitReader(response.Body, (32<<10)+1))
+			if readErr == nil && len(errorBody) <= 32<<10 {
+				capability = classifyProviderCapabilityError(profile.Protocol, errorBody)
+			}
+		}
 		retryAfter := time.Duration(0)
 		if retryableProviderStatus(response.StatusCode) {
 			retryAfter = parseRetryAfter(response.Header.Get("Retry-After"), time.Now())
 		}
 		return httpDriverResponse{}, &ProviderError{
 			StatusCode: response.StatusCode, RequestID: requestID, RetryAfter: retryAfter,
+			Capability: capability,
 		}
 	}
 
@@ -118,6 +128,93 @@ func (d *httpDriver) postWithHeaders(
 			ErrInvalidStructuredOutput, errors.New("provider response is too large"))
 	}
 	return httpDriverResponse{body: responseBody, requestID: requestID}, nil
+}
+
+func classifyProviderCapabilityError(protocol Protocol, body []byte) ProviderCapabilityError {
+	root, ok := decodeUniqueErrorObject(body)
+	if !ok {
+		return ""
+	}
+	switch protocol {
+	case ProtocolOpenAIChat, ProtocolOpenAIResponses:
+		errorObject, valid := decodeUniqueErrorObject(root["error"])
+		if valid && rawJSONString(errorObject["type"]) == "invalid_request_error" &&
+			unsupportedCapabilityCode(rawJSONString(errorObject["code"])) {
+			return ProviderCapabilityUnsupportedRepresentation
+		}
+	case ProtocolAnthropicMessages:
+		errorObject, valid := decodeUniqueErrorObject(root["error"])
+		if rawJSONString(root["type"]) == "error" && valid &&
+			rawJSONString(errorObject["type"]) == "invalid_request_error" &&
+			unsupportedCapabilityCode(rawJSONString(errorObject["code"])) {
+			return ProviderCapabilityUnsupportedRepresentation
+		}
+	case ProtocolGoogleGenerateContent:
+		errorObject, valid := decodeUniqueErrorObject(root["error"])
+		if !valid || rawJSONString(errorObject["status"]) != "INVALID_ARGUMENT" {
+			return ""
+		}
+		var details []json.RawMessage
+		if err := json.Unmarshal(errorObject["details"], &details); err != nil || len(details) > 32 {
+			return ""
+		}
+		for _, raw := range details {
+			detail, valid := decodeUniqueErrorObject(raw)
+			if valid && rawJSONString(detail["@type"]) == "type.googleapis.com/google.rpc.ErrorInfo" &&
+				rawJSONString(detail["domain"]) == "generativelanguage.googleapis.com" &&
+				unsupportedCapabilityCode(rawJSONString(detail["reason"])) {
+				return ProviderCapabilityUnsupportedRepresentation
+			}
+		}
+	}
+	return ""
+}
+
+func unsupportedCapabilityCode(code string) bool {
+	switch strings.ToLower(code) {
+	case "unsupported_parameter", "unsupported_value", "unsupported_response_format", "unsupported_json_schema":
+		return true
+	default:
+		return false
+	}
+}
+
+func decodeUniqueErrorObject(raw []byte) (map[string]json.RawMessage, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('{') {
+		return nil, false
+	}
+	result := make(map[string]json.RawMessage)
+	for decoder.More() {
+		token, tokenErr := decoder.Token()
+		key, valid := token.(string)
+		if tokenErr != nil || !valid {
+			return nil, false
+		}
+		if _, duplicate := result[key]; duplicate {
+			return nil, false
+		}
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return nil, false
+		}
+		result[key] = value
+	}
+	end, err := decoder.Token()
+	if err != nil || end != json.Delim('}') {
+		return nil, false
+	}
+	var trailing any
+	return result, errors.Is(decoder.Decode(&trailing), io.EOF)
+}
+
+func rawJSONString(raw json.RawMessage) string {
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	return value
 }
 
 func validateFixedHTTPHeaders(headers map[string]string) (map[string]string, error) {

@@ -3,10 +3,13 @@ package peoplesweep
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"regexp"
 	"slices"
@@ -31,6 +34,7 @@ var (
 	ErrModelsDevUnavailable = errors.New("models.dev catalog is unavailable")
 	ErrModelsDevTooLarge    = errors.New("models.dev catalog exceeds the size limit")
 	ErrModelsDevInvalid     = errors.New("models.dev catalog is invalid")
+	ErrModelsDevTimeout     = errors.New("models.dev catalog request timed out")
 
 	modelsDevIDPattern          = regexp.MustCompile(`^[A-Za-z0-9@~][A-Za-z0-9._:/+@~-]{0,255}$`)
 	modelsDevEnvironmentPattern = regexp.MustCompile(`^[A-Za-z0-9_]{1,128}$`)
@@ -63,21 +67,42 @@ type ModelSuggestion struct {
 // It owns no config, credential, archive, store, or persistence dependency.
 type ModelsDevClient struct {
 	client *http.Client
+	hooks  *modelsDevHooks
 }
 
-// NewModelsDevClient copies the supplied transport configuration while pinning
-// catalog redirects and total duration. It performs no I/O.
-func NewModelsDevClient(client *http.Client) *ModelsDevClient {
-	if client == nil {
-		client = http.DefaultClient
+type modelsDevHooks struct {
+	afterProvider func()
+}
+
+type modelsDevDialContext func(context.Context, string, string) (net.Conn, error)
+
+// NewModelsDevClient constructs a fresh transport. The argument is retained
+// for source compatibility but intentionally ignored so caller credentials,
+// proxies, cookies, TLS identities, and later mutations cannot cross into the
+// fixed public-catalog request.
+func NewModelsDevClient(_ *http.Client) *ModelsDevClient {
+	return newModelsDevClient(nil, nil, "")
+}
+
+func newModelsDevClientForTest(dial modelsDevDialContext, roots *x509.CertPool, serverName string) *ModelsDevClient {
+	return newModelsDevClient(dial, roots, serverName)
+}
+
+func newModelsDevClient(dial modelsDevDialContext, roots *x509.CertPool, serverName string) *ModelsDevClient {
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	}
-	isolated := *client
-	isolated.Timeout = modelsDevTotalTimeout
-	isolated.Jar = nil
-	isolated.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+	transport := &http.Transport{
+		DialContext: dial, ForceAttemptHTTP2: true,
+		MaxIdleConns: 2, MaxIdleConnsPerHost: 2, IdleConnTimeout: 30 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second, ExpectContinueTimeout: time.Second,
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: serverName},
+	}
+	client := &http.Client{Transport: transport, Timeout: modelsDevTotalTimeout}
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
-	return &ModelsDevClient{client: &isolated}
+	return &ModelsDevClient{client: client}
 }
 
 // Fetch returns caller-owned discovery suggestions without caching or changing
@@ -95,6 +120,9 @@ func (c *ModelsDevClient) Fetch(ctx context.Context) ([]ProviderSuggestion, erro
 	request.Header.Set("User-Agent", modelsDevCatalogUserAgent)
 	response, err := c.client.Do(request)
 	if err != nil {
+		if requestCtx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, ErrModelsDevTimeout
+		}
 		return nil, ErrModelsDevUnavailable
 	}
 	defer disposeHTTPResponse(response.Body)
@@ -102,21 +130,27 @@ func (c *ModelsDevClient) Fetch(ctx context.Context) ([]ProviderSuggestion, erro
 		return nil, ErrModelsDevUnavailable
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, modelsDevMaxBodyBytes+1))
-	if err != nil || requestCtx.Err() != nil {
+	if requestCtx.Err() != nil {
+		return nil, ErrModelsDevTimeout
+	}
+	if err != nil {
 		return nil, ErrModelsDevUnavailable
 	}
 	if len(body) > modelsDevMaxBodyBytes {
 		return nil, ErrModelsDevTooLarge
 	}
-	suggestions, err := parseModelsDevCatalog(body)
+	suggestions, err := parseModelsDevCatalog(requestCtx, body, c.hooks)
 	if err != nil {
+		if requestCtx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, ErrModelsDevTimeout
+		}
 		return nil, ErrModelsDevInvalid
 	}
 	return suggestions, nil
 }
 
-func parseModelsDevCatalog(body []byte) ([]ProviderSuggestion, error) {
-	providers, err := decodeModelsDevObject(body)
+func parseModelsDevCatalog(ctx context.Context, body []byte, hooks *modelsDevHooks) ([]ProviderSuggestion, error) {
+	providers, err := decodeModelsDevObject(ctx, body)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +158,10 @@ func parseModelsDevCatalog(body []byte) ([]ProviderSuggestion, error) {
 	result := make([]ProviderSuggestion, 0, len(keys))
 	seenIDs := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
-		fields, fieldErr := decodeModelsDevObject(providers[key])
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		fields, fieldErr := decodeModelsDevObject(ctx, providers[key])
 		if fieldErr != nil {
 			return nil, fieldErr
 		}
@@ -149,7 +186,7 @@ func parseModelsDevCatalog(body []byte) ([]ProviderSuggestion, error) {
 		if fieldErr != nil {
 			return nil, fieldErr
 		}
-		models, fieldErr := modelsDevModels(fields["models"])
+		models, fieldErr := modelsDevModels(ctx, fields["models"])
 		if fieldErr != nil {
 			return nil, fieldErr
 		}
@@ -161,16 +198,25 @@ func parseModelsDevCatalog(body []byte) ([]ProviderSuggestion, error) {
 			ID: id, Name: name, Endpoint: endpoint, EnvironmentNames: environment,
 			Models: models, ProtocolCandidates: protocolsForModelsDevShape(shape),
 		})
+		if hooks != nil && hooks.afterProvider != nil {
+			hooks.afterProvider()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left].ID < result[right].ID })
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
-func modelsDevModels(raw json.RawMessage) ([]ModelSuggestion, error) {
+func modelsDevModels(ctx context.Context, raw json.RawMessage) ([]ModelSuggestion, error) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, nil
 	}
-	models, err := decodeModelsDevObject(raw)
+	models, err := decodeModelsDevObject(ctx, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +224,10 @@ func modelsDevModels(raw json.RawMessage) ([]ModelSuggestion, error) {
 	result := make([]ModelSuggestion, 0, len(keys))
 	seenIDs := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
-		fields, fieldErr := decodeModelsDevObject(models[key])
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		fields, fieldErr := decodeModelsDevObject(ctx, models[key])
 		if fieldErr != nil {
 			return nil, fieldErr
 		}
@@ -203,7 +252,7 @@ func modelsDevModels(raw json.RawMessage) ([]ModelSuggestion, error) {
 		if fieldErr != nil {
 			return nil, fieldErr
 		}
-		inputPrice, outputPrice, fieldErr := modelsDevPrices(fields["cost"])
+		inputPrice, outputPrice, fieldErr := modelsDevPrices(ctx, fields["cost"])
 		if fieldErr != nil {
 			return nil, fieldErr
 		}
@@ -214,14 +263,17 @@ func modelsDevModels(raw json.RawMessage) ([]ModelSuggestion, error) {
 		})
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left].ID < result[right].ID })
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
-func modelsDevPrices(raw json.RawMessage) (*int64, *int64, error) {
+func modelsDevPrices(ctx context.Context, raw json.RawMessage) (*int64, *int64, error) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, nil, nil
 	}
-	fields, err := decodeModelsDevObject(raw)
+	fields, err := decodeModelsDevObject(ctx, raw)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -294,7 +346,10 @@ func protocolsForModelsDevShape(shape string) []Protocol {
 	}
 }
 
-func decodeModelsDevObject(raw []byte) (map[string]json.RawMessage, error) {
+func decodeModelsDevObject(ctx context.Context, raw []byte) (map[string]json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	start, err := decoder.Token()
@@ -303,6 +358,9 @@ func decodeModelsDevObject(raw []byte) (map[string]json.RawMessage, error) {
 	}
 	result := make(map[string]json.RawMessage)
 	for decoder.More() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		token, tokenErr := decoder.Token()
 		key, ok := token.(string)
 		if tokenErr != nil || !ok {
