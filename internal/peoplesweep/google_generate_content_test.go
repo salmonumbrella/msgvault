@@ -64,9 +64,9 @@ func TestGoogleGenerateContentEmitsNativeSchemaRequestExactly(t *testing.T) {
 		assert.Empty(t, r.Header.Get("X-Api-Key"))
 		var err error
 		received, err = io.ReadAll(r.Body)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		_, err = io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":"},{"text":"true}"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":17,"candidatesTokenCount":5},"modelVersion":"gemini-test-001","responseId":"resp-google-1"}`)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}))
 	defer server.Close()
 
@@ -97,9 +97,9 @@ func TestGoogleGenerateContentPromptModeUsesSchemaInstruction(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		received, err = io.ReadAll(r.Body)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		_, err = io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001"}`)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}))
 	defer server.Close()
 
@@ -269,7 +269,7 @@ func TestGoogleGenerateContentRejectsBlockedMissingAndAmbiguousCandidates(t *tes
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, test.body)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -301,7 +301,7 @@ func TestGoogleGenerateContentRejectsMalformedAndMixedPartsInEitherOrder(t *test
 			body := `{"candidates":[{"content":{"role":"model","parts":[` + test.parts + `]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001","secret":"provider-body-secret"}`
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, body)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -330,7 +330,7 @@ func TestGoogleGenerateContentDistinguishesCompleteUsagePresence(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001"`+test.usage+`}`)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -362,7 +362,7 @@ func TestGoogleGenerateContentRejectsPartialNegativeAndOverflowUsage(t *testing.
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001","usageMetadata":{`+test.usage+`},"secret":"provider-body-secret"}`)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -381,7 +381,7 @@ func TestGoogleGenerateContentRejectsMalformedEnvelopeAndUnsafeMetadata(t *testi
 	} {
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, err := io.WriteString(w, body)
-			require.NoError(t, err)
+			assert.NoError(t, err)
 		}))
 		_, err := generateGoogleContent(t, server,
 			googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
@@ -403,7 +403,7 @@ func TestGoogleGenerateContentRejectsMalformedEnvelopeAndUnsafeMetadata(t *testi
 		require.NoError(t, err)
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, writeErr := w.Write(encoded)
-			require.NoError(t, writeErr)
+			assert.NoError(t, writeErr)
 		}))
 		response, callErr := generateGoogleContent(t, server,
 			googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
@@ -425,7 +425,7 @@ func TestGoogleGenerateContentSanitizesHTTPFailureAndMakesOneAttempt(t *testing.
 		w.Header().Set("Request-Id", "req-safe")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, err := io.WriteString(w, `{"error":{"message":"provider-body-secret"}}`)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}))
 	defer server.Close()
 
@@ -444,7 +444,7 @@ func TestGoogleGenerateContentSanitizesHTTPFailureAndMakesOneAttempt(t *testing.
 func TestGoogleGenerateContentRejectsOversizeResponse(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, err := io.Copy(w, bytes.NewReader(bytes.Repeat([]byte("x"), (1<<20)+1)))
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}))
 	defer server.Close()
 
