@@ -247,3 +247,54 @@ git diff --check
 ```
 
 Open concern unchanged: compatible implementations lacking exact structured parameter metadata fail closed to manual/custom selection.
+
+## Review fix round 4: 2026-08-26
+
+- Code commit: `27b2688a0244d63ff9f1f1c03f6f523bb0f40864` (`fix: fail closed on ambiguous capability errors`).
+- Parameterless representation codes now use exact case-sensitive protocol and active-output-mode allowlists. Prompt-only attempts, wrong-family spellings, casing aliases, and representation codes paired with present empty, nested, or unrelated parameters stop.
+- Generic parameter matching no longer trims input. It matches only exact capability fields emitted by the current encoder, including the selected Chat token field and emitted `reasoning_effort`, `reasoning`, and `reasoning.enabled` fields.
+- Gemini scans all 32 bounded details before classifying. It requires exactly one duplicate-safe same-domain `ErrorInfo`; conflicting or repeated details and malformed or duplicate metadata fail closed.
+- Four-family real TLS regressions prove exact one-call stops with the selected path/model, no protocol switching, exact generic-parameter retries, duplicate code/parameter rejection, and individual message/parameter/code/auth/status/domain/body/credential redaction.
+
+Round-4 RED:
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'TestCapability(Parameter|Representation|DriversReject|NegotiationRetries|NegotiationStopsAfterUnclassifiedErrorForEvery)' -count=1
+--- FAIL: TestCapabilityParameterMustBeExactlyEmittedByAttempt
+--- FAIL: TestCapabilityRepresentationCodeMustMatchProtocolAndActiveMode
+--- FAIL: TestCapabilityDriversRejectRepresentationCodesForPromptOnlyAttempts
+--- FAIL: TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol
+FAIL  go.kenn.io/msgvault/internal/peoplesweep  0.303s
+
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol' -count=1
+--- FAIL: TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol
+    --- FAIL: TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol/openai_chat/case-12
+    --- FAIL: TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol/openai_chat/case-13
+    --- FAIL: TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol/openai_responses/case-13
+    --- FAIL: TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol/openai_responses/case-14
+    --- FAIL: TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol/anthropic_messages/case-13
+    --- FAIL: TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol/anthropic_messages/case-14
+    --- FAIL: TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol/google_generate_content/case-12
+    --- FAIL: TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol/google_generate_content/case-13
+FAIL  go.kenn.io/msgvault/internal/peoplesweep  0.526s
+```
+
+Round-4 GREEN:
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'Test(OpenAIChat|OpenAIResponses|AnthropicMessages|GoogleGenerateContent|DriverRegistry|Capability|ModelsDev)' -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  12.229s
+
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  43.055s
+
+go test -race -tags "fts5 sqlite_vec" ./internal/peoplesweep -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  49.966s
+
+go fmt ./...
+go vet -tags "fts5 sqlite_vec" ./...
+git diff --check
+[exit 0]
+```
+
+Open concern unchanged: compatible implementations that do not return the exact structured code and parameter contract fail closed to manual/custom selection.
