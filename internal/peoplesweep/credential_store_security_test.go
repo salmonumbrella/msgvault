@@ -3,6 +3,7 @@
 package peoplesweep
 
 import (
+	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
@@ -18,6 +19,63 @@ import (
 )
 
 const credentialSecurityTestValue = "credential-security-test-value"
+
+type credentialSecurityPathSnapshot struct {
+	info          os.FileInfo
+	entries       []string
+	contentDigest [sha256.Size]byte
+}
+
+func snapshotCredentialSecurityPath(t *testing.T, path string) credentialSecurityPathSnapshot {
+	t.Helper()
+	info, err := os.Lstat(path)
+	require.NoError(t, err)
+	snapshot := credentialSecurityPathSnapshot{info: info}
+	if info.IsDir() {
+		entries, readErr := os.ReadDir(path)
+		require.NoError(t, readErr)
+		for _, entry := range entries {
+			snapshot.entries = append(snapshot.entries, entry.Name())
+		}
+	} else if info.Mode().IsRegular() {
+		contents, readErr := os.ReadFile(path)
+		require.NoError(t, readErr)
+		snapshot.contentDigest = sha256.Sum256(contents)
+	}
+	return snapshot
+}
+
+func assertCredentialSecurityPathMatches(
+	t *testing.T,
+	want credentialSecurityPathSnapshot,
+	path string,
+) {
+	t.Helper()
+	got, err := os.Lstat(path)
+	if !assert.NoError(t, err, path) {
+		return
+	}
+	assert.True(t, os.SameFile(want.info, got), "%s inode changed", path)
+	assert.Equal(t, want.info.Mode(), got.Mode(), "%s mode changed", path)
+	assert.Equal(t, want.info.Size(), got.Size(), "%s size changed", path)
+	if want.info.IsDir() {
+		entries, readErr := os.ReadDir(path)
+		if !assert.NoError(t, readErr, path) {
+			return
+		}
+		gotEntries := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			gotEntries = append(gotEntries, entry.Name())
+		}
+		assert.Equal(t, want.entries, gotEntries, "%s entries changed", path)
+	} else if want.info.Mode().IsRegular() {
+		contents, readErr := os.ReadFile(path)
+		if !assert.NoError(t, readErr, path) {
+			return
+		}
+		assert.Equal(t, want.contentDigest, sha256.Sum256(contents), "%s contents changed", path)
+	}
+}
 
 func TestCredentialStoreSaveUsesPinnedNamespaceAfterPathSwap(t *testing.T) {
 	tokensDir := t.TempDir()
@@ -98,6 +156,122 @@ func TestCredentialStorePreflightDeleteRejectsEntrySwapAfterOpen(t *testing.T) {
 	externalContents, readErr := os.ReadFile(external)
 	require.NoError(t, readErr)
 	assert.Equal(t, "replacement-test-value", string(externalContents))
+}
+
+func TestCredentialStoreDeleteRejectsTokensRootSwapAfterCredentialOpen(t *testing.T) {
+	parent := t.TempDir()
+	tokensDir := filepath.Join(parent, "tokens")
+	retainedTokensDir := filepath.Join(parent, "tokens-retained")
+	replacementTokensDir := filepath.Join(parent, "tokens-replacement")
+	store := NewFileCredentialStore(tokensDir)
+	replacementStore := NewFileCredentialStore(replacementTokensDir)
+	require.NoError(t, store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue)))
+	require.NoError(t, replacementStore.Save("profile", NewCredential(
+		AuthBearer, "replacement-credential-test-value",
+	)))
+	require.NoError(t, store.PreflightDelete("profile"))
+
+	root := filepath.Join(tokensDir, credentialNamespace)
+	replacementRoot := filepath.Join(replacementTokensDir, credentialNamespace)
+	staleSnapshots := []credentialSecurityPathSnapshot{
+		snapshotCredentialSecurityPath(t, tokensDir),
+		snapshotCredentialSecurityPath(t, root),
+		snapshotCredentialSecurityPath(t, filepath.Join(root, ".credentials.lock")),
+		snapshotCredentialSecurityPath(t, filepath.Join(root, "profile.json")),
+	}
+	replacementSnapshots := []credentialSecurityPathSnapshot{
+		snapshotCredentialSecurityPath(t, replacementTokensDir),
+		snapshotCredentialSecurityPath(t, replacementRoot),
+		snapshotCredentialSecurityPath(t, filepath.Join(replacementRoot, ".credentials.lock")),
+		snapshotCredentialSecurityPath(t, filepath.Join(replacementRoot, "profile.json")),
+	}
+	var swapped atomic.Bool
+	store.hooks = &credentialStoreHooks{afterCredentialOpen: func(operation string) {
+		if operation != "delete" {
+			return
+		}
+		require.NoError(t, os.Rename(tokensDir, retainedTokensDir))
+		require.NoError(t, os.Rename(replacementTokensDir, tokensDir))
+		swapped.Store(true)
+	}}
+
+	err := store.Delete("profile")
+	require.ErrorContains(t, err, "tokens directory changed during deletion")
+	assert.True(t, swapped.Load(), "deletion did not reach the root-swap boundary")
+	assert.NotContains(t, err.Error(), credentialSecurityTestValue)
+	stalePaths := []string{
+		retainedTokensDir,
+		filepath.Join(retainedTokensDir, credentialNamespace),
+		filepath.Join(retainedTokensDir, credentialNamespace, ".credentials.lock"),
+		filepath.Join(retainedTokensDir, credentialNamespace, "profile.json"),
+	}
+	livePaths := []string{
+		tokensDir,
+		filepath.Join(tokensDir, credentialNamespace),
+		filepath.Join(tokensDir, credentialNamespace, ".credentials.lock"),
+		filepath.Join(tokensDir, credentialNamespace, "profile.json"),
+	}
+	for index := range stalePaths {
+		assertCredentialSecurityPathMatches(t, staleSnapshots[index], stalePaths[index])
+		assertCredentialSecurityPathMatches(t, replacementSnapshots[index], livePaths[index])
+	}
+}
+
+func TestCredentialStoreDeleteRejectsNamespaceSwapAfterCredentialOpen(t *testing.T) {
+	parent := t.TempDir()
+	tokensDir := filepath.Join(parent, "tokens")
+	replacementTokensDir := filepath.Join(parent, "replacement-tokens")
+	store := NewFileCredentialStore(tokensDir)
+	replacementStore := NewFileCredentialStore(replacementTokensDir)
+	require.NoError(t, store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue)))
+	require.NoError(t, replacementStore.Save("profile", NewCredential(
+		AuthBearer, "replacement-credential-test-value",
+	)))
+
+	root := filepath.Join(tokensDir, credentialNamespace)
+	retainedRoot := filepath.Join(tokensDir, credentialNamespace+"-retained")
+	replacementRoot := filepath.Join(tokensDir, credentialNamespace+"-replacement")
+	require.NoError(t, os.Rename(filepath.Join(replacementTokensDir, credentialNamespace), replacementRoot))
+	require.NoError(t, os.Remove(replacementTokensDir))
+	require.NoError(t, store.PreflightDelete("profile"))
+	staleSnapshots := []credentialSecurityPathSnapshot{
+		snapshotCredentialSecurityPath(t, root),
+		snapshotCredentialSecurityPath(t, filepath.Join(root, ".credentials.lock")),
+		snapshotCredentialSecurityPath(t, filepath.Join(root, "profile.json")),
+	}
+	replacementSnapshots := []credentialSecurityPathSnapshot{
+		snapshotCredentialSecurityPath(t, replacementRoot),
+		snapshotCredentialSecurityPath(t, filepath.Join(replacementRoot, ".credentials.lock")),
+		snapshotCredentialSecurityPath(t, filepath.Join(replacementRoot, "profile.json")),
+	}
+	var swapped atomic.Bool
+	store.hooks = &credentialStoreHooks{afterCredentialOpen: func(operation string) {
+		if operation != "delete" {
+			return
+		}
+		require.NoError(t, os.Rename(root, retainedRoot))
+		require.NoError(t, os.Rename(replacementRoot, root))
+		swapped.Store(true)
+	}}
+
+	err := store.Delete("profile")
+	require.ErrorContains(t, err, "credential directory changed during deletion")
+	assert.True(t, swapped.Load(), "deletion did not reach the namespace-swap boundary")
+	assert.NotContains(t, err.Error(), credentialSecurityTestValue)
+	stalePaths := []string{
+		retainedRoot,
+		filepath.Join(retainedRoot, ".credentials.lock"),
+		filepath.Join(retainedRoot, "profile.json"),
+	}
+	livePaths := []string{
+		root,
+		filepath.Join(root, ".credentials.lock"),
+		filepath.Join(root, "profile.json"),
+	}
+	for index := range stalePaths {
+		assertCredentialSecurityPathMatches(t, staleSnapshots[index], stalePaths[index])
+		assertCredentialSecurityPathMatches(t, replacementSnapshots[index], livePaths[index])
+	}
 }
 
 func TestCredentialStoreSaveRefusesSwappedCandidate(t *testing.T) {
@@ -274,6 +448,7 @@ func TestCredentialStoreDeleteDetectsSwapAtRemovalBoundary(t *testing.T) {
 	original := filepath.Join(root, "profile.original")
 	external := filepath.Join(t.TempDir(), "must-remain")
 	require.NoError(t, os.WriteFile(external, []byte("unchanged"), 0o600))
+	targetBefore := snapshotCredentialSecurityPath(t, filepath.Join(root, "profile.json"))
 	store.hooks = &credentialStoreHooks{beforeCredentialRetire: func() {
 		require.NoError(t, os.Rename(filepath.Join(root, "profile.json"), original))
 		require.NoError(t, os.Symlink(external, filepath.Join(root, "profile.json")))
@@ -284,9 +459,7 @@ func TestCredentialStoreDeleteDetectsSwapAtRemovalBoundary(t *testing.T) {
 	contents, readErr := os.ReadFile(external)
 	require.NoError(t, readErr)
 	assert.Equal(t, "unchanged", string(contents))
-	originalInfo, statErr := os.Stat(original)
-	require.NoError(t, statErr)
-	assert.Zero(t, originalInfo.Size(), "the pinned credential was not wiped after the deletion race")
+	assertCredentialSecurityPathMatches(t, targetBefore, original)
 }
 
 func TestCredentialStoreDeleteDetectsZeroTombstoneSwap(t *testing.T) {

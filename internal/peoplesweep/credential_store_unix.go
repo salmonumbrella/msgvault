@@ -137,7 +137,52 @@ func ensureUnixCredentialLockMarker(rootFD int) error {
 	return nil
 }
 
-func (s *FileCredentialStore) preflightExistingCredentialDelete(profileName string) (retErr error) {
+type unixExistingCredentialDelete struct {
+	tokensFD           int
+	rootFD             int
+	credentialFD       int
+	tokensIdentity     unix.Stat_t
+	rootIdentity       unix.Stat_t
+	lockIdentity       unix.Stat_t
+	credentialIdentity unix.Stat_t
+	credentialName     string
+	profileName        string
+}
+
+func (s *FileCredentialStore) preflightExistingCredentialDelete(profileName string) error {
+	return s.withExistingCredentialDelete(
+		profileName,
+		"preflight-delete",
+		"deletion preflight",
+		func(*unixExistingCredentialDelete) error { return nil },
+	)
+}
+
+func (s *FileCredentialStore) deleteExistingCredential(profileName string) error {
+	return s.withExistingCredentialDelete(
+		profileName,
+		"delete",
+		"deletion",
+		func(target *unixExistingCredentialDelete) error {
+			if s.hooks != nil && s.hooks.beforeCredentialRetire != nil {
+				s.hooks.beforeCredentialRetire()
+			}
+			if err := target.validateLive(s.tokensDir, "deletion", true); err != nil {
+				return err
+			}
+			wipeErr := wipeUnixCredentialFD(target.credentialFD)
+			if err := target.validateLive(s.tokensDir, "deletion", false); err != nil {
+				return err
+			}
+			return wipeErr
+		},
+	)
+}
+
+func (s *FileCredentialStore) withExistingCredentialDelete(
+	profileName, operation, phase string,
+	callback func(*unixExistingCredentialDelete) error,
+) (retErr error) {
 	if s == nil || filepath.Clean(s.tokensDir) == "." || s.tokensDir == "" {
 		return errors.New("people provider credential tokens directory is required")
 	}
@@ -151,8 +196,12 @@ func (s *FileCredentialStore) preflightExistingCredentialDelete(profileName stri
 			retErr = fmt.Errorf("close existing people provider tokens directory: %w", err)
 		}
 	}()
-	if _, err := validateUnixPrivateDirectoryFD(tokensFD, "tokens"); err != nil {
+	tokensIdentity, err := validateUnixPrivateDirectoryFD(tokensFD, "tokens")
+	if err != nil {
 		return err
+	}
+	if !unixPrivateDirectoryPathMatches(s.tokensDir, tokensIdentity) {
+		return fmt.Errorf("people provider tokens directory changed during %s", phase)
 	}
 
 	rootFD, err := unix.Openat(tokensFD, credentialNamespace,
@@ -170,12 +219,11 @@ func (s *FileCredentialStore) preflightExistingCredentialDelete(profileName stri
 		return err
 	}
 	if !unixPrivateDirectoryEntryMatches(tokensFD, credentialNamespace, rootIdentity) {
-		return errors.New("people provider credential directory changed during deletion preflight")
+		return fmt.Errorf("people provider credential directory changed during %s", phase)
 	}
 
-	// Store writers already serialize on this pinned directory descriptor.
-	// Flock changes kernel lock state only; it does not modify filesystem data
-	// or metadata. The existing marker below is opened without O_CREAT.
+	// Existing store operations serialize on the pinned namespace descriptor.
+	// This path intentionally does not create or repair directories or markers.
 	if err := unix.Flock(rootFD, unix.LOCK_EX); err != nil {
 		return fmt.Errorf("lock existing people provider credential directory: %w", err)
 	}
@@ -184,11 +232,8 @@ func (s *FileCredentialStore) preflightExistingCredentialDelete(profileName stri
 			retErr = fmt.Errorf("unlock existing people provider credential directory: %w", err)
 		}
 	}()
-	if !unixPrivateDirectoryEntryMatches(tokensFD, credentialNamespace, rootIdentity) {
-		return errors.New("people provider credential directory changed during deletion preflight")
-	}
 
-	lockFD, lockIdentity, err := openExistingUnixCredentialPreflightFile(
+	lockFD, lockIdentity, err := openExistingUnixCredentialDeleteFile(
 		rootFD, ".credentials.lock", "lock",
 	)
 	if err != nil {
@@ -199,19 +244,31 @@ func (s *FileCredentialStore) preflightExistingCredentialDelete(profileName stri
 			retErr = fmt.Errorf("close existing people provider credential lock: %w", err)
 		}
 	}()
-	if !unixCredentialEntryMatches(rootFD, ".credentials.lock", lockIdentity) {
-		return errors.New("people provider credential lock changed during deletion preflight")
+	target := &unixExistingCredentialDelete{
+		tokensFD:       tokensFD,
+		rootFD:         rootFD,
+		credentialFD:   -1,
+		tokensIdentity: tokensIdentity,
+		rootIdentity:   rootIdentity,
+		lockIdentity:   lockIdentity,
+		profileName:    profileName,
+	}
+	if err := target.validateInfrastructure(s.tokensDir, phase); err != nil {
+		return err
 	}
 	if s.hooks != nil && s.hooks.afterLockAcquired != nil {
 		s.hooks.afterLockAcquired()
 	}
 	if s.hooks != nil && s.hooks.beforeOperation != nil {
-		s.hooks.beforeOperation("preflight-delete")
+		s.hooks.beforeOperation(operation)
+	}
+	if err := target.validateInfrastructure(s.tokensDir, phase); err != nil {
+		return err
 	}
 
-	name := profileName + ".json"
-	credentialFD, credentialIdentity, err := openExistingUnixCredentialPreflightFile(
-		rootFD, name, "file",
+	target.credentialName = profileName + ".json"
+	target.credentialFD, target.credentialIdentity, err = openExistingUnixCredentialDeleteFile(
+		rootFD, target.credentialName, "file",
 	)
 	if errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("%w for profile %q", ErrCredentialNotFound, profileName)
@@ -220,29 +277,56 @@ func (s *FileCredentialStore) preflightExistingCredentialDelete(profileName stri
 		return err
 	}
 	defer func() {
-		if err := unix.Close(credentialFD); err != nil && retErr == nil {
+		if err := unix.Close(target.credentialFD); err != nil && retErr == nil {
 			retErr = fmt.Errorf("close existing people provider credential: %w", err)
 		}
 	}()
 	if s.hooks != nil && s.hooks.afterCredentialOpen != nil {
-		s.hooks.afterCredentialOpen("preflight-delete")
+		s.hooks.afterCredentialOpen(operation)
 	}
-	if !unixCredentialEntryMatches(rootFD, name, credentialIdentity) {
-		return errors.New("people provider credential changed during deletion preflight")
+	if err := target.validateLive(s.tokensDir, phase, true); err != nil {
+		return err
 	}
-	if credentialIdentity.Size == 0 {
-		return fmt.Errorf("%w for profile %q", ErrCredentialNotFound, profileName)
+	return callback(target)
+}
+
+func (target *unixExistingCredentialDelete) validateInfrastructure(tokensDir, phase string) error {
+	if !unixPrivateDirectoryPathMatches(tokensDir, target.tokensIdentity) {
+		return fmt.Errorf("people provider tokens directory changed during %s", phase)
 	}
-	if !unixCredentialEntryMatches(rootFD, ".credentials.lock", lockIdentity) {
-		return errors.New("people provider credential lock changed during deletion preflight")
+	if !unixPrivateDirectoryEntryMatches(target.tokensFD, credentialNamespace, target.rootIdentity) {
+		return fmt.Errorf("people provider credential directory changed during %s", phase)
 	}
-	if !unixPrivateDirectoryEntryMatches(tokensFD, credentialNamespace, rootIdentity) {
-		return errors.New("people provider credential directory changed during deletion preflight")
+	if !unixCredentialEntryMatches(target.rootFD, ".credentials.lock", target.lockIdentity) {
+		return fmt.Errorf("people provider credential lock changed during %s", phase)
 	}
 	return nil
 }
 
-func openExistingUnixCredentialPreflightFile(
+func (target *unixExistingCredentialDelete) validateLive(
+	tokensDir, phase string,
+	requireNonEmpty bool,
+) error {
+	if err := target.validateInfrastructure(tokensDir, phase); err != nil {
+		return err
+	}
+	var current unix.Stat_t
+	if err := unix.Fstat(target.credentialFD, &current); err != nil {
+		return fmt.Errorf("identify existing people provider credential during %s: %w", phase, err)
+	}
+	if target.credentialIdentity.Dev != current.Dev ||
+		target.credentialIdentity.Ino != current.Ino ||
+		validateUnixCredentialStat(current, "file") != nil ||
+		!unixCredentialEntryMatches(target.rootFD, target.credentialName, target.credentialIdentity) {
+		return fmt.Errorf("people provider credential changed during %s", phase)
+	}
+	if requireNonEmpty && current.Size == 0 {
+		return fmt.Errorf("%w for profile %q", ErrCredentialNotFound, target.profileName)
+	}
+	return nil
+}
+
+func openExistingUnixCredentialDeleteFile(
 	rootFD int,
 	name, kind string,
 ) (int, unix.Stat_t, error) {
@@ -276,7 +360,7 @@ func openExistingUnixCredentialPreflightFile(
 	}
 	if entry.Dev != identity.Dev || entry.Ino != identity.Ino {
 		_ = unix.Close(fd)
-		return -1, unix.Stat_t{}, fmt.Errorf("people provider credential %s changed during deletion preflight", kind)
+		return -1, unix.Stat_t{}, fmt.Errorf("people provider credential %s changed while opening for deletion", kind)
 	}
 	return fd, identity, nil
 }
@@ -303,6 +387,18 @@ func unixPrivateDirectoryEntryMatches(parentFD int, name string, opened unix.Sta
 	if err := unix.Fstatat(parentFD, name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		return false
 	}
+	return unixPrivateDirectoryStatMatches(opened, current)
+}
+
+func unixPrivateDirectoryPathMatches(path string, opened unix.Stat_t) bool {
+	var current unix.Stat_t
+	if err := unix.Lstat(path, &current); err != nil {
+		return false
+	}
+	return unixPrivateDirectoryStatMatches(opened, current)
+}
+
+func unixPrivateDirectoryStatMatches(opened, current unix.Stat_t) bool {
 	return opened.Dev == current.Dev && opened.Ino == current.Ino &&
 		current.Mode&unix.S_IFMT == unix.S_IFDIR &&
 		current.Mode&0o777 == 0o700 && current.Uid == uint32(os.Geteuid())
@@ -442,53 +538,6 @@ func (r *unixCredentialStoreRoot) load(profileName string) ([]byte, error) {
 		return nil, fmt.Errorf("%w for profile %q", ErrCredentialNotFound, profileName)
 	}
 	return data, nil
-}
-
-func (r *unixCredentialStoreRoot) delete(profileName string) error {
-	name := profileName + ".json"
-	fd, err := unix.Openat(r.fd, name,
-		unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	if err == unix.ENOENT {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("open people provider credential for deletion without following symlinks: %w", err)
-	}
-	defer unix.Close(fd)
-	var opened unix.Stat_t
-	if err := unix.Fstat(fd, &opened); err != nil {
-		return fmt.Errorf("identify opened people provider credential for deletion: %w", err)
-	}
-	if err := validateUnixCredentialStat(opened, "file"); err != nil {
-		return err
-	}
-	if r.hooks != nil && r.hooks.afterCredentialOpen != nil {
-		r.hooks.afterCredentialOpen("delete")
-	}
-	if opened.Size == 0 {
-		// A zero-length record is the bounded, idempotent deletion tombstone.
-		if !unixCredentialEntryMatches(r.fd, name, opened) {
-			return errors.New("people provider credential changed during deletion")
-		}
-		return nil
-	}
-	if !unixCredentialEntryMatches(r.fd, name, opened) {
-		return errors.New("people provider credential changed before deletion")
-	}
-	if r.hooks != nil && r.hooks.beforeCredentialRetire != nil {
-		r.hooks.beforeCredentialRetire()
-	}
-	if err := validateUnixCredentialFD(fd, "file"); err != nil {
-		return errors.New("people provider credential changed before deletion")
-	}
-	wipeErr := wipeUnixCredentialFD(fd)
-	if !unixCredentialEntryMatches(r.fd, name, opened) {
-		return errors.New("people provider credential changed during deletion")
-	}
-	if wipeErr != nil {
-		return wipeErr
-	}
-	return nil
 }
 
 func inspectUnixCredentialEntry(rootFD int, name string, allowMissing bool) error {

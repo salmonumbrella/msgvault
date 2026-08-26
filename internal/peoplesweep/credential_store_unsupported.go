@@ -14,6 +14,12 @@ func (s *FileCredentialStore) preflightExistingCredentialDelete(profileName stri
 	return errCredentialStoreUnsupported
 }
 
+func (s *FileCredentialStore) deleteExistingCredential(profileName string) error {
+	_ = s
+	_ = profileName
+	return errCredentialStoreUnsupported
+}
+
 func (s *FileCredentialStore) withCredentialRoot(
 	operation string,
 	callback func(credentialStoreRoot) error,

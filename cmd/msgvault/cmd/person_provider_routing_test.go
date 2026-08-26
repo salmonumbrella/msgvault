@@ -27,6 +27,21 @@ func (s *deleteCountingCredentialStore) Delete(profileName string) error {
 	return s.CredentialStore.Delete(profileName)
 }
 
+type postPreflightRaceCredentialStore struct {
+	peoplesweep.CredentialStore
+	beforeDelete func() error
+}
+
+func (s *postPreflightRaceCredentialStore) Delete(profileName string) error {
+	if s.beforeDelete != nil {
+		if err := s.beforeDelete(); err != nil {
+			return err
+		}
+		s.beforeDelete = nil
+	}
+	return s.CredentialStore.Delete(profileName)
+}
+
 func TestPersonProviderFrontendRoutesExactCommandsAndCredential(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -384,6 +399,79 @@ func TestPersonProviderDaemonRemoveMissingCredentialRootHasZeroSideEffects(t *te
 	afterEntries, readErr := os.ReadDir(tokensParent)
 	require.NoError(t, readErr)
 	assert.Equal(t, beforeEntries, afterEntries)
+	finalConfig, loadErr := config.Load(path, "")
+	require.NoError(t, loadErr)
+	assert.Contains(t, finalConfig.People.Sweep.Providers, "beta")
+}
+
+func TestPersonProviderDaemonRemovePostPreflightCredentialRaceRollsBackConfig(t *testing.T) {
+	configured := personProviderTestConfig()
+	beta := configuredPersonProvider(configured)
+	beta.Model = "beta-model"
+	beta.Credential = peoplesweep.CredentialStored
+	beta.CredentialEnv = ""
+	configured.Providers["beta"] = beta
+	path, _ := retainedPersonProviderTestConfig(t, configured)
+
+	tokensDir := t.TempDir()
+	fileCredentials := peoplesweep.NewFileCredentialStore(tokensDir)
+	require.NoError(t, fileCredentials.Save("beta", peoplesweep.NewCredential(
+		peoplesweep.AuthBearer, providerSetupSecretCanary,
+	)))
+	credentialPath := filepath.Join(tokensDir, "people-providers", "beta.json")
+	retainedPath := credentialPath + ".post-preflight"
+	credentialBefore, statErr := os.Stat(credentialPath)
+	require.NoError(t, statErr)
+	contentsBefore, readErr := os.ReadFile(credentialPath)
+	require.NoError(t, readErr)
+	credentials := &postPreflightRaceCredentialStore{
+		CredentialStore: fileCredentials,
+		beforeDelete: func() error {
+			return os.Rename(credentialPath, retainedPath)
+		},
+	}
+
+	revokes := 0
+	edits := 0
+	restores := 0
+	deps := personProviderCommandDeps{
+		config:                     func() peoplesweep.Config { return configured },
+		isDaemonSubprocess:         func() bool { return false },
+		providerStoreOwnedByDaemon: func(context.Context) (bool, error) { return true, nil },
+		proxy: func(*cobra.Command, []string, map[string]string) error {
+			revokes++
+			return nil
+		},
+		readConfigFile: func() (config.ConfigFile, error) { return config.ReadConfigFile(path) },
+		editConfigTables: func(etag string, planned []config.TableEdit) (config.ConfigFile, error) {
+			edits++
+			return config.EditConfigTables(path, etag, planned)
+		},
+		restoreConfigFile: func(published, before config.ConfigFile) (config.ConfigFile, error) {
+			restores++
+			return config.RestoreConfigFile(path, published, before)
+		},
+		setup: personProviderSetupDeps{credentials: credentials},
+	}
+
+	output, err := executePersonProviderCommand(t, deps, "remove", "beta")
+	assert.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
+	assert.Equal(t, 1, revokes)
+	assert.Equal(t, 1, edits)
+	assert.Equal(t, 1, restores)
+	assert.NotContains(t, output, providerSetupSecretCanary)
+	if err != nil {
+		assert.NotContains(t, err.Error(), providerSetupSecretCanary)
+	}
+	assert.NoFileExists(t, credentialPath)
+	credentialAfter, statErr := os.Stat(retainedPath)
+	require.NoError(t, statErr)
+	assert.True(t, os.SameFile(credentialBefore, credentialAfter))
+	assert.Equal(t, credentialBefore.Mode(), credentialAfter.Mode())
+	assert.Equal(t, credentialBefore.Size(), credentialAfter.Size())
+	contentsAfter, readErr := os.ReadFile(retainedPath)
+	require.NoError(t, readErr)
+	assert.True(t, bytes.Equal(contentsBefore, contentsAfter), "retained credential changed")
 	finalConfig, loadErr := config.Load(path, "")
 	require.NoError(t, loadErr)
 	assert.Contains(t, finalConfig.People.Sweep.Providers, "beta")

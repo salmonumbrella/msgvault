@@ -92,7 +92,6 @@ type credentialStoreHooks struct {
 type credentialStoreRoot interface {
 	save(profileName string, data []byte) error
 	load(profileName string) ([]byte, error)
-	delete(profileName string) error
 }
 
 type credentialFile struct {
@@ -192,14 +191,14 @@ func (s *FileCredentialStore) PreflightDelete(profileName string) error {
 	return s.preflightExistingCredentialDelete(profileName)
 }
 
-// Delete removes only the exact named record and is idempotent when absent.
+// Delete securely retires only an existing exact named record. It never
+// bootstraps or repairs credential-store infrastructure, and absence fails
+// closed so a post-preflight race cannot be mistaken for successful deletion.
 func (s *FileCredentialStore) Delete(profileName string) error {
 	if err := validateCredentialProfileName(profileName); err != nil {
 		return err
 	}
-	return s.withCredentialRoot("delete", func(root credentialStoreRoot) error {
-		return root.delete(profileName)
-	})
+	return s.deleteExistingCredential(profileName)
 }
 
 // ValidateProviderProfileName applies the single grammar used by provider

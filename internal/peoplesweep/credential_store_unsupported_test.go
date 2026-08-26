@@ -18,5 +18,7 @@ func TestCredentialStoreFailsClosedOnUnsupportedPlatform(t *testing.T) {
 	require.ErrorIs(t, err, errCredentialStoreUnsupported)
 	err = store.PreflightDelete("profile")
 	require.ErrorIs(t, err, errCredentialStoreUnsupported)
+	err = store.Delete("profile")
+	require.ErrorIs(t, err, errCredentialStoreUnsupported)
 	assert.NoDirExists(t, filepath.Join(tokensDir, credentialNamespace))
 }
