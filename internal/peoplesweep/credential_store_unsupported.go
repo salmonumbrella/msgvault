@@ -24,6 +24,16 @@ func (s *FileCredentialStore) deleteExistingCredential(
 	return errCredentialStoreUnsupported
 }
 
+func (s *FileCredentialStore) cleanupNewCredential(
+	profileName string,
+	guard CredentialCleanupGuard,
+) error {
+	_ = s
+	_ = profileName
+	_ = guard
+	return errCredentialStoreUnsupported
+}
+
 func (s *FileCredentialStore) withCredentialRoot(
 	operation string,
 	callback func(credentialStoreRoot) error,

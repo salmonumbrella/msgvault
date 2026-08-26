@@ -18,8 +18,11 @@ import (
 const unixCredentialCandidateName = ".credential-candidate"
 
 type unixCredentialStoreRoot struct {
-	fd    int
-	hooks *credentialStoreHooks
+	fd                int
+	tokensFD          int
+	hooks             *credentialStoreHooks
+	publishedName     string
+	publishedIdentity unix.Stat_t
 }
 
 func (s *FileCredentialStore) withCredentialRoot(
@@ -82,7 +85,7 @@ func (s *FileCredentialStore) withCredentialRoot(
 	if s.hooks != nil && s.hooks.beforeOperation != nil {
 		s.hooks.beforeOperation(operation)
 	}
-	return callback(&unixCredentialStoreRoot{fd: rootFD, hooks: s.hooks})
+	return callback(&unixCredentialStoreRoot{fd: rootFD, tokensFD: tokensFD, hooks: s.hooks})
 }
 
 func openUnixCredentialNamespace(tokensFD int) (int, bool, error) {
@@ -159,6 +162,10 @@ type unixCredentialDeleteGuard struct {
 	state  credentialDeleteGuardState
 }
 
+type unixCredentialCleanupGuard struct {
+	deletion *unixCredentialDeleteGuard
+}
+
 type credentialDeleteGuardState uint8
 
 const (
@@ -168,6 +175,8 @@ const (
 )
 
 func (*unixCredentialDeleteGuard) credentialDeleteGuard() {}
+
+func (*unixCredentialCleanupGuard) credentialCleanupGuard() {}
 
 func (*unixCredentialDeleteGuard) String() string {
 	return "people provider credential deletion guard (opaque)"
@@ -203,6 +212,31 @@ func (g *unixCredentialDeleteGuard) Close() error {
 		return nil
 	}
 	return g.target.close()
+}
+
+func (*unixCredentialCleanupGuard) String() string {
+	return "people provider credential cleanup guard (opaque)"
+}
+
+func (g *unixCredentialCleanupGuard) GoString() string { return g.String() }
+
+func (g *unixCredentialCleanupGuard) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, g.String())
+}
+
+func (*unixCredentialCleanupGuard) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("people provider credential cleanup guard cannot serialize")
+}
+
+func (*unixCredentialCleanupGuard) MarshalText() ([]byte, error) {
+	return nil, errors.New("people provider credential cleanup guard cannot serialize")
+}
+
+func (g *unixCredentialCleanupGuard) Close() error {
+	if g == nil || g.deletion == nil {
+		return errors.New("people provider credential cleanup guard is invalid")
+	}
+	return g.deletion.Close()
 }
 
 func (s *FileCredentialStore) preflightExistingCredentialDelete(
@@ -242,6 +276,12 @@ func (s *FileCredentialStore) deleteExistingCredential(
 	if guard.target == nil || guard.target.profileName != profileName {
 		return errors.New("people provider credential deletion guard belongs to a different profile")
 	}
+	if !guard.target.locked {
+		if err := unix.Flock(guard.target.rootFD, unix.LOCK_EX); err != nil {
+			return fmt.Errorf("lock pinned people provider credential directory for guarded deletion: %w", err)
+		}
+		guard.target.locked = true
+	}
 	if s.hooks != nil && s.hooks.beforeCredentialRetire != nil {
 		s.hooks.beforeCredentialRetire()
 	}
@@ -253,6 +293,17 @@ func (s *FileCredentialStore) deleteExistingCredential(
 		return err
 	}
 	return wipeErr
+}
+
+func (s *FileCredentialStore) cleanupNewCredential(
+	profileName string,
+	opaque CredentialCleanupGuard,
+) error {
+	guard, ok := opaque.(*unixCredentialCleanupGuard)
+	if !ok || guard == nil || guard.deletion == nil {
+		return errors.New("people provider credential cleanup guard is invalid")
+	}
+	return s.deleteExistingCredential(profileName, guard.deletion)
 }
 
 func (s *FileCredentialStore) openExistingCredentialDelete(
@@ -339,6 +390,68 @@ func (s *FileCredentialStore) openExistingCredentialDelete(
 		return nil, err
 	}
 	return target, nil
+}
+
+func (r *unixCredentialStoreRoot) pinCleanup(
+	owner *FileCredentialStore,
+	profileName string,
+) (_ CredentialCleanupGuard, retErr error) {
+	if r.publishedName != profileName || r.publishedIdentity.Dev == 0 || r.publishedIdentity.Ino == 0 {
+		return nil, errors.New("new people provider credential publication identity is unavailable")
+	}
+	target := &unixExistingCredentialDelete{
+		tokensFD: -1, rootFD: -1, lockFD: -1, credentialFD: -1,
+		profileName: profileName,
+	}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, target.close())
+		}
+	}()
+
+	// Open new file descriptions through the exact directories used by SaveNew.
+	// Unlike dup, these do not retain the namespace flock after SaveNew returns.
+	target.tokensFD, retErr = unix.Openat(r.tokensFD, ".",
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if retErr != nil {
+		return nil, fmt.Errorf("pin new people provider tokens directory for cleanup: %w", retErr)
+	}
+	target.tokensIdentity, retErr = validateUnixPrivateDirectoryFD(target.tokensFD, "tokens")
+	if retErr != nil {
+		return nil, retErr
+	}
+	target.rootFD, retErr = unix.Openat(r.fd, ".",
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if retErr != nil {
+		return nil, fmt.Errorf("pin new people provider credential directory for cleanup: %w", retErr)
+	}
+	target.rootIdentity, retErr = validateUnixPrivateDirectoryFD(target.rootFD, "credential")
+	if retErr != nil {
+		return nil, retErr
+	}
+	target.lockFD, target.lockIdentity, retErr = openExistingUnixCredentialDeleteFile(
+		target.rootFD, ".credentials.lock", "lock",
+	)
+	if retErr != nil {
+		return nil, retErr
+	}
+	target.credentialName = profileName + ".json"
+	target.credentialFD, target.credentialIdentity, retErr = openExistingUnixCredentialDeleteFile(
+		target.rootFD, target.credentialName, "file",
+	)
+	if retErr != nil {
+		return nil, retErr
+	}
+	if target.credentialIdentity.Dev != r.publishedIdentity.Dev ||
+		target.credentialIdentity.Ino != r.publishedIdentity.Ino {
+		return nil, errors.New("new people provider credential changed before cleanup identity was pinned")
+	}
+	if err := target.validateLive(owner.tokensDir, "new credential cleanup preflight", true); err != nil {
+		return nil, err
+	}
+	return &unixCredentialCleanupGuard{deletion: &unixCredentialDeleteGuard{
+		owner: owner, target: target,
+	}}, nil
 }
 
 func (target *unixExistingCredentialDelete) close() error {
@@ -564,6 +677,8 @@ func (r *unixCredentialStoreRoot) save(profileName string, data []byte) (retErr 
 	if err := unix.Fsync(r.fd); err != nil {
 		return fmt.Errorf("sync pinned people provider credential directory: %w", err)
 	}
+	r.publishedName = profileName
+	r.publishedIdentity = publishedIdentity
 	committed = true
 	return nil
 }

@@ -977,6 +977,151 @@ func TestPersonProviderAddRollsBackExactConfigAndNewCredential(t *testing.T) {
 	assert.Equal(t, fs.FileMode(0o640), info.Mode().Perm())
 }
 
+type replacingSaveNewCredentialStore struct {
+	*peoplesweep.FileCredentialStore
+
+	afterSaveNew func()
+}
+
+func (s *replacingSaveNewCredentialStore) SaveNew(
+	profileName string,
+	credential peoplesweep.Credential,
+) (peoplesweep.CredentialCleanupGuard, bool, error) {
+	guard, created, err := s.FileCredentialStore.SaveNew(profileName, credential)
+	if err == nil && created && s.afterSaveNew != nil {
+		s.afterSaveNew()
+	}
+	return guard, created, err
+}
+
+type callbackPersonProviderChecker func(context.Context) (peoplesweep.StructuredResponse, error)
+
+func (check callbackPersonProviderChecker) Check(
+	ctx context.Context,
+) (peoplesweep.StructuredResponse, error) {
+	return check(ctx)
+}
+
+func replaceNewPersonProviderCredential(
+	t *testing.T,
+	store *peoplesweep.FileCredentialStore,
+	tokensDir, profileName string,
+) (string, string, []byte, []byte) {
+	t.Helper()
+	credentialPath := filepath.Join(tokensDir, "people-providers", profileName+".json")
+	retainedPath := credentialPath + ".retained"
+	require.NoError(t, os.Rename(credentialPath, retainedPath))
+	require.NoError(t, store.Save(profileName, peoplesweep.NewCredential(
+		peoplesweep.AuthBearer, providerSetupSecretCanary+"-replacement",
+	)))
+	original, err := os.ReadFile(retainedPath)
+	require.NoError(t, err)
+	replacement, err := os.ReadFile(credentialPath)
+	require.NoError(t, err)
+	return retainedPath, credentialPath, original, replacement
+}
+
+func assertNewPersonProviderCredentialReplacementUntouched(
+	t *testing.T,
+	retainedPath, credentialPath string,
+	wantOriginal, wantReplacement []byte,
+) {
+	t.Helper()
+	gotOriginal, err := os.ReadFile(retainedPath)
+	require.NoError(t, err)
+	gotReplacement, err := os.ReadFile(credentialPath)
+	require.NoError(t, err)
+	assert.Equal(t, wantOriginal, gotOriginal)
+	assert.Equal(t, wantReplacement, gotReplacement)
+}
+
+func TestPersonProviderAddConfigFailureRejectsReplacementCredentialCleanup(t *testing.T) {
+	path, loaded := providerSetupConfigFile(t)
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+	st := testutil.NewSQLiteTestStore(t)
+	baseStore := peoplesweep.NewFileCredentialStore(loaded.TokensDir())
+	var retainedPath, credentialPath string
+	var original, replacement []byte
+	credentialStore := &replacingSaveNewCredentialStore{FileCredentialStore: baseStore}
+	credentialStore.afterSaveNew = func() {
+		retainedPath, credentialPath, original, replacement = replaceNewPersonProviderCredential(
+			t, baseStore, loaded.TokensDir(), "config-race",
+		)
+	}
+	deps := providerSetupCommandDeps(t, path, loaded, &fixedPersonProviderChecker{})
+	deps.setup.credentials = credentialStore
+	deps.openStore = func() (personProviderStore, func(), error) { return st, func() {}, nil }
+	deps.editConfigTables = func(string, []config.TableEdit) (config.ConfigFile, error) {
+		return config.ConfigFile{}, errors.New("injected config publication failure")
+	}
+
+	_, err = executePersonProviderCommandWithInput(t, deps,
+		bytes.NewBufferString(providerSetupSecretCanary+"\n"),
+		"add", "config-race", "--custom", "--protocol", "openai_chat",
+		"--endpoint", "https://config-race.example.test/v1", "--model", "config-race-model",
+		"--auth", "bearer", "--api-key-stdin", "--retention-posture", "zero_retention",
+		"--training-posture", "no_training", "--source", "conversation_text",
+		"--source-since", "2025-01-01", "--yes")
+	require.ErrorContains(t, err, "injected config publication failure")
+	require.ErrorContains(t, err, "credential cleanup conflict")
+	after, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, before, after)
+	assertNewPersonProviderCredentialReplacementUntouched(
+		t, retainedPath, credentialPath, original, replacement,
+	)
+	credential, loadErr := baseStore.Load("config-race")
+	require.NoError(t, loadErr)
+	assert.Equal(t, providerSetupSecretCanary+"-replacement", credential.Value())
+	var consentCount int
+	require.NoError(t, st.DB().QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM person_inference_consents`).Scan(&consentCount))
+	assert.Zero(t, consentCount)
+}
+
+func TestPersonProviderAddFinalCheckFailureRejectsReplacementCredentialCleanup(t *testing.T) {
+	path, loaded := providerSetupConfigFile(t)
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+	st := testutil.NewSQLiteTestStore(t)
+	credentialStore := peoplesweep.NewFileCredentialStore(loaded.TokensDir())
+	var retainedPath, credentialPath string
+	var original, replacement []byte
+	checker := callbackPersonProviderChecker(func(context.Context) (peoplesweep.StructuredResponse, error) {
+		retainedPath, credentialPath, original, replacement = replaceNewPersonProviderCredential(
+			t, credentialStore, loaded.TokensDir(), "check-race",
+		)
+		return peoplesweep.StructuredResponse{}, errors.New("synthetic final check failed")
+	})
+	deps := providerSetupCommandDeps(t, path, loaded, checker)
+	deps.setup.credentials = credentialStore
+	deps.openStore = func() (personProviderStore, func(), error) { return st, func() {}, nil }
+
+	_, err = executePersonProviderCommandWithInput(t, deps,
+		bytes.NewBufferString(providerSetupSecretCanary+"\n"),
+		"add", "check-race", "--custom", "--protocol", "openai_chat",
+		"--endpoint", "https://check-race.example.test/v1", "--model", "check-race-model",
+		"--auth", "bearer", "--api-key-stdin", "--retention-posture", "zero_retention",
+		"--training-posture", "no_training", "--source", "conversation_text",
+		"--source-since", "2025-01-01", "--yes")
+	require.ErrorContains(t, err, "synthetic final check failed")
+	require.ErrorContains(t, err, "credential cleanup conflict")
+	after, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, before, after)
+	assertNewPersonProviderCredentialReplacementUntouched(
+		t, retainedPath, credentialPath, original, replacement,
+	)
+	credential, loadErr := credentialStore.Load("check-race")
+	require.NoError(t, loadErr)
+	assert.Equal(t, providerSetupSecretCanary+"-replacement", credential.Value())
+	var consentCount int
+	require.NoError(t, st.DB().QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM person_inference_consents`).Scan(&consentCount))
+	assert.Zero(t, consentCount)
+}
+
 func TestPersonProviderAddConfigConflictKeepsConcurrentEditAndDeletesOnlyNewCredential(t *testing.T) {
 	path, loaded := providerSetupConfigFile(t)
 	checker := &fixedPersonProviderChecker{response: peoplesweep.StructuredResponse{

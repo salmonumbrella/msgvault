@@ -74,6 +74,14 @@ type CredentialDeleteGuard interface {
 	credentialDeleteGuard()
 }
 
+// CredentialCleanupGuard is an opaque, single-use authorization to retire
+// only the exact credential object published by one successful SaveNew call.
+// Close releases its pinned identity without deleting the credential.
+type CredentialCleanupGuard interface {
+	io.Closer
+	credentialCleanupGuard()
+}
+
 // CredentialResolver resolves only the source fingerprinted into a profile.
 type CredentialResolver interface {
 	Resolve(profileName string, profile ProviderProfile) (Credential, error)
@@ -100,6 +108,7 @@ type credentialStoreHooks struct {
 type credentialStoreRoot interface {
 	save(profileName string, data []byte) error
 	load(profileName string) ([]byte, error)
+	pinCleanup(owner *FileCredentialStore, profileName string) (CredentialCleanupGuard, error)
 }
 
 type credentialFile struct {
@@ -133,18 +142,21 @@ func (s *FileCredentialStore) Save(profileName string, credential Credential) er
 // SaveNew atomically publishes a credential only when the exact named record
 // is absent. The existence check and publication share the credential-root
 // lock so concurrent setup processes cannot overwrite the winner.
-func (s *FileCredentialStore) SaveNew(profileName string, credential Credential) (bool, error) {
+func (s *FileCredentialStore) SaveNew(
+	profileName string, credential Credential,
+) (CredentialCleanupGuard, bool, error) {
 	if err := validateCredentialProfileName(profileName); err != nil {
-		return false, err
+		return nil, false, err
 	}
 	if err := validateStoredCredential(credential); err != nil {
-		return false, err
+		return nil, false, err
 	}
 	data, err := json.Marshal(credentialFile{Scheme: credential.Scheme, Value: credential.Value()}) //nolint:gosec // serialized only into the private 0600 store
 	if err != nil {
-		return false, errors.New("serialize people provider credential")
+		return nil, false, errors.New("serialize people provider credential")
 	}
 	created := false
+	var cleanup CredentialCleanupGuard
 	err = s.withCredentialRoot("save-new", func(root credentialStoreRoot) error {
 		if _, loadErr := root.load(profileName); loadErr == nil {
 			return nil
@@ -154,10 +166,19 @@ func (s *FileCredentialStore) SaveNew(profileName string, credential Credential)
 		if saveErr := root.save(profileName, data); saveErr != nil {
 			return saveErr
 		}
+		var pinErr error
+		cleanup, pinErr = root.pinCleanup(s, profileName)
+		if pinErr != nil {
+			return pinErr
+		}
 		created = true
 		return nil
 	})
-	return created, err
+	if err != nil && cleanup != nil {
+		err = errors.Join(err, cleanup.Close())
+		cleanup = nil
+	}
+	return cleanup, created, err
 }
 
 // Load reads and validates one exact named credential.
@@ -207,6 +228,15 @@ func (s *FileCredentialStore) Delete(profileName string, guard CredentialDeleteG
 		return err
 	}
 	return s.deleteExistingCredential(profileName, guard)
+}
+
+// CleanupNew retires only the exact credential published by the SaveNew call
+// that returned guard. It never discovers a cleanup target by path.
+func (s *FileCredentialStore) CleanupNew(profileName string, guard CredentialCleanupGuard) error {
+	if err := validateCredentialProfileName(profileName); err != nil {
+		return err
+	}
+	return s.cleanupNewCredential(profileName, guard)
 }
 
 // ValidateProviderProfileName applies the single grammar used by provider

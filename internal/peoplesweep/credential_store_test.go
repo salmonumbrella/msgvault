@@ -97,11 +97,8 @@ func assertCredentialPathsUnchanged(
 	}
 }
 
-func validateCredentialDeletePreflight(
-	store peoplesweep.CredentialStore,
-	profileName string,
-) error {
-	guard, err := store.PreflightDelete(profileName)
+func validateCredentialDeletePreflight(store peoplesweep.CredentialStore) error {
+	guard, err := store.PreflightDelete("profile")
 	if err != nil {
 		return err
 	}
@@ -233,7 +230,7 @@ func TestCredentialStoreDeleteRetiresOnlyExactPinnedTargetAsBoundedTombstone(t *
 	assert.Zero(t, len(tombstone), "credential tombstone retained bytes")
 	assertCredentialPathsUnchanged(t, stableBefore)
 	require.NoError(t, guard.Close())
-	assert.ErrorIs(t, validateCredentialDeletePreflight(store, "profile"), peoplesweep.ErrCredentialNotFound)
+	assert.ErrorIs(t, validateCredentialDeletePreflight(store), peoplesweep.ErrCredentialNotFound)
 }
 
 func TestCredentialStorePreflightDeleteValidatesWithoutReadingOrChangingSecret(t *testing.T) {
@@ -244,7 +241,7 @@ func TestCredentialStorePreflightDeleteValidatesWithoutReadingOrChangingSecret(t
 	require.NoError(t, err)
 	before := snapshotCredentialPaths(t, paths...)
 
-	err = validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir), "profile")
+	err = validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
 	require.NoError(t, err)
 	afterContents, err := os.ReadFile(credentialPath)
 	require.NoError(t, err)
@@ -258,7 +255,7 @@ func TestCredentialStorePreflightDeleteRejectsMissingStateWithoutCreatingIt(t *t
 		tokensDir := filepath.Join(parent, "tokens")
 		before := snapshotCredentialPaths(t, parent, tokensDir)
 
-		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir), "profile")
+		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
 		assert.Error(t, err)
 		assertCredentialPathsUnchanged(t, before)
 	})
@@ -269,7 +266,7 @@ func TestCredentialStorePreflightDeleteRejectsMissingStateWithoutCreatingIt(t *t
 		root := filepath.Join(tokensDir, "people-providers")
 		before := snapshotCredentialPaths(t, tokensDir, root)
 
-		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir), "profile")
+		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
 		assert.Error(t, err)
 		assertCredentialPathsUnchanged(t, before)
 	})
@@ -284,7 +281,7 @@ func TestCredentialStorePreflightDeleteRejectsMissingStateWithoutCreatingIt(t *t
 		paths := []string{tokensDir, root, filepath.Join(root, ".credentials.lock"), credentialPath}
 		before := snapshotCredentialPaths(t, paths...)
 
-		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir), "profile")
+		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
 		assert.Error(t, err)
 		assertCredentialPathsUnchanged(t, before)
 	})
@@ -299,7 +296,7 @@ func TestCredentialStorePreflightDeleteRejectsMissingStateWithoutCreatingIt(t *t
 		paths := []string{tokensDir, root, filepath.Join(root, ".credentials.lock"), credentialPath}
 		before := snapshotCredentialPaths(t, paths...)
 
-		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir), "profile")
+		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
 		assert.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
 		assertCredentialPathsUnchanged(t, before)
 	})
@@ -310,7 +307,7 @@ func TestCredentialStorePreflightDeleteRejectsMissingStateWithoutCreatingIt(t *t
 		require.NoError(t, os.Truncate(paths[len(paths)-1], 0))
 		before := snapshotCredentialPaths(t, paths...)
 
-		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir), "profile")
+		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
 		assert.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
 		assertCredentialPathsUnchanged(t, before)
 	})
@@ -408,7 +405,7 @@ func TestCredentialStoreDeleteRejectsMissingStateAfterPreflightWithoutRecreating
 		before := snapshotCredentialPaths(t, paths[0], paths[1], paths[2], credentialPath, retained)
 
 		err = store.Delete("profile", guard)
-		assert.ErrorContains(t, err, "credential changed")
+		require.ErrorContains(t, err, "credential changed")
 		if err != nil {
 			assert.NotContains(t, err.Error(), credentialCanary)
 		}
@@ -452,7 +449,7 @@ func TestCredentialStorePreflightDeleteRejectsWrongModesWithoutRepair(t *testing
 			require.NoError(t, os.Chmod(paths[test.index], test.mode))
 			before := snapshotCredentialPaths(t, paths...)
 
-			err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir), "profile")
+			err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
 			assert.ErrorContains(t, err, "permissions")
 			if err != nil {
 				assert.NotContains(t, err.Error(), credentialCanary)
@@ -485,7 +482,7 @@ func TestCredentialStoreDeleteRejectsWrongModesAfterPreflightWithoutRepair(t *te
 			before := snapshotCredentialPaths(t, paths...)
 
 			err = store.Delete("profile", guard)
-			assert.ErrorContains(t, err, "changed")
+			require.ErrorContains(t, err, "changed")
 			if err != nil {
 				assert.NotContains(t, err.Error(), credentialCanary)
 			}
@@ -579,7 +576,7 @@ func TestCredentialStorePreflightDeleteRejectsUnsafeObjectsWithoutChangingThem(t
 		require.NoError(t, os.Symlink(target, tokensDir))
 		before := snapshotCredentialPaths(t, parent, target, tokensDir)
 
-		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir), "profile")
+		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
 		assert.Error(t, err)
 		assertCredentialPathsUnchanged(t, before)
 	})
@@ -592,7 +589,7 @@ func TestCredentialStorePreflightDeleteRejectsUnsafeObjectsWithoutChangingThem(t
 		require.NoError(t, os.Symlink(target, root))
 		before := snapshotCredentialPaths(t, tokensDir, target, root)
 
-		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir), "profile")
+		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
 		assert.Error(t, err)
 		assertCredentialPathsUnchanged(t, before)
 	})
@@ -608,7 +605,7 @@ func TestCredentialStorePreflightDeleteRejectsUnsafeObjectsWithoutChangingThem(t
 		require.NoError(t, os.Symlink(external, lockPath))
 		before := snapshotCredentialPaths(t, tokensDir, root, lockPath, external)
 
-		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir), "profile")
+		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
 		assert.Error(t, err)
 		assertCredentialPathsUnchanged(t, before)
 	})
@@ -624,7 +621,7 @@ func TestCredentialStorePreflightDeleteRejectsUnsafeObjectsWithoutChangingThem(t
 		paths = append(paths, external)
 		before := snapshotCredentialPaths(t, paths...)
 
-		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir), "profile")
+		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
 		assert.Error(t, err)
 		assert.NotContains(t, err.Error(), credentialCanary)
 		assertCredentialPathsUnchanged(t, before)
@@ -639,7 +636,7 @@ func TestCredentialStorePreflightDeleteRejectsUnsafeObjectsWithoutChangingThem(t
 		paths = append(paths, linkPath)
 		before := snapshotCredentialPaths(t, paths...)
 
-		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir), "profile")
+		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
 		assert.ErrorContains(t, err, "links")
 		assert.NotContains(t, err.Error(), credentialCanary)
 		assertCredentialPathsUnchanged(t, before)
@@ -653,7 +650,7 @@ func TestCredentialStorePreflightDeleteRejectsUnsafeObjectsWithoutChangingThem(t
 		require.NoError(t, os.Mkdir(credentialPath, 0o700))
 		before := snapshotCredentialPaths(t, paths...)
 
-		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir), "profile")
+		err := validateCredentialDeletePreflight(peoplesweep.NewFileCredentialStore(tokensDir))
 		assert.ErrorContains(t, err, "not a regular file")
 		assert.NotContains(t, err.Error(), credentialCanary)
 		assertCredentialPathsUnchanged(t, before)
@@ -738,9 +735,12 @@ func TestCredentialStoreSaveNewNeverOverwritesConcurrentWinner(t *testing.T) {
 	for _, value := range []string{credentialCanary + "-first", credentialCanary + "-second"} {
 		go func() {
 			<-start
-			created, err := store.SaveNew("new-profile", peoplesweep.NewCredential(
+			guard, created, err := store.SaveNew("new-profile", peoplesweep.NewCredential(
 				peoplesweep.AuthBearer, value,
 			))
+			if guard != nil {
+				err = errors.Join(err, guard.Close())
+			}
 			results <- result{created: created, err: err}
 		}()
 	}

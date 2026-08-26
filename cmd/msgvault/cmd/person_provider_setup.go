@@ -29,7 +29,11 @@ type personProviderSetupDeps struct {
 }
 
 type personProviderCreateCredentialStore interface {
-	SaveNew(profileName string, credential peoplesweep.Credential) (bool, error)
+	SaveNew(
+		profileName string,
+		credential peoplesweep.Credential,
+	) (peoplesweep.CredentialCleanupGuard, bool, error)
+	CleanupNew(profileName string, guard peoplesweep.CredentialCleanupGuard) error
 }
 
 type personProviderAddOptions struct {
@@ -228,13 +232,14 @@ func runPersonProviderAdd(
 		return err
 	}
 
-	createdCredential := false
+	var credentialCleanup peoplesweep.CredentialCleanupGuard
 	if stored {
 		createStore, ok := credentialStore.(personProviderCreateCredentialStore)
 		if !ok {
 			return errors.New("people provider credential store does not support create-only publication")
 		}
-		createdCredential, err = createStore.SaveNew(name, credential)
+		var createdCredential bool
+		credentialCleanup, createdCredential, err = createStore.SaveNew(name, credential)
 		if err != nil {
 			return err
 		}
@@ -246,9 +251,9 @@ func runPersonProviderAdd(
 	after, err := deps.editConfigTables(before.ETag, plannedEdits)
 	if err != nil {
 		if errors.Is(err, config.ErrConfigChanged) {
-			return rollbackUncertainPersonProviderAdd(err, deps, before, after, credentialStore, name, createdCredential)
+			return rollbackUncertainPersonProviderAdd(err, deps, before, after, credentialStore, name, credentialCleanup)
 		}
-		return rollbackNewPersonProviderCredential(err, credentialStore, name, createdCredential)
+		return rollbackNewPersonProviderCredential(err, credentialStore, name, credentialCleanup)
 	}
 	checkedConfig, err := personProviderConfigFromSnapshot(deps, after)
 	if err == nil {
@@ -257,8 +262,13 @@ func runPersonProviderAdd(
 		err = executeSavedPersonProviderCheck(command, checkedDeps, name)
 	}
 	if err != nil {
-		rollbackErr := rollbackPersonProviderAdd(deps, before, after, credentialStore, name, createdCredential)
+		rollbackErr := rollbackPersonProviderAdd(deps, before, after, credentialStore, name, credentialCleanup)
 		return errors.Join(err, rollbackErr)
+	}
+	if credentialCleanup != nil {
+		if err := credentialCleanup.Close(); err != nil {
+			return fmt.Errorf("close newly created people provider credential cleanup guard: %w", err)
+		}
 	}
 	_, _ = fmt.Fprintf(command.OutOrStdout(), "Added and checked people provider profile %q.\n", name)
 	return nil
@@ -710,13 +720,13 @@ func rollbackNewPersonProviderCredential(
 	cause error,
 	credentials peoplesweep.CredentialStore,
 	name string,
-	created bool,
+	cleanup peoplesweep.CredentialCleanupGuard,
 ) error {
-	if !created || credentials == nil {
+	if cleanup == nil || credentials == nil {
 		return cause
 	}
-	if err := deletePersonProviderCredential(credentials, name); err != nil {
-		return errors.Join(cause, fmt.Errorf("delete newly created people provider credential: %w", err))
+	if err := cleanupNewPersonProviderCredential(credentials, name, cleanup); err != nil {
+		return errors.Join(cause, err)
 	}
 	return cause
 }
@@ -727,10 +737,10 @@ func rollbackUncertainPersonProviderAdd(
 	before, expected config.ConfigFile,
 	credentials peoplesweep.CredentialStore,
 	name string,
-	createdCredential bool,
+	cleanup peoplesweep.CredentialCleanupGuard,
 ) error {
 	return errors.Join(cause,
-		rollbackPersonProviderAdd(deps, before, expected, credentials, name, createdCredential))
+		rollbackPersonProviderAdd(deps, before, expected, credentials, name, cleanup))
 }
 
 func rollbackPersonProviderAdd(
@@ -738,34 +748,37 @@ func rollbackPersonProviderAdd(
 	before, after config.ConfigFile,
 	credentials peoplesweep.CredentialStore,
 	name string,
-	createdCredential bool,
+	cleanup peoplesweep.CredentialCleanupGuard,
 ) error {
 	var rollbackErr error
 	if _, err := deps.restoreConfigFile(after, before); err != nil {
 		rollbackErr = fmt.Errorf("restore people provider config: %w", err)
 	}
-	if createdCredential && credentials != nil {
-		if err := deletePersonProviderCredential(credentials, name); err != nil {
-			rollbackErr = errors.Join(rollbackErr,
-				fmt.Errorf("delete newly created people provider credential: %w", err))
+	if cleanup != nil && credentials != nil {
+		if err := cleanupNewPersonProviderCredential(credentials, name, cleanup); err != nil {
+			rollbackErr = errors.Join(rollbackErr, err)
 		}
 	}
 	return rollbackErr
 }
 
-func deletePersonProviderCredential(
+func cleanupNewPersonProviderCredential(
 	credentials peoplesweep.CredentialStore,
 	name string,
+	guard peoplesweep.CredentialCleanupGuard,
 ) (retErr error) {
-	guard, err := credentials.PreflightDelete(name)
-	if err != nil {
-		return err
-	}
 	defer func() {
 		if closeErr := guard.Close(); closeErr != nil {
 			retErr = errors.Join(retErr,
-				fmt.Errorf("close people provider credential deletion guard: %w", closeErr))
+				fmt.Errorf("close new people provider credential cleanup guard: %w", closeErr))
 		}
 	}()
-	return credentials.Delete(name, guard)
+	createStore, ok := credentials.(personProviderCreateCredentialStore)
+	if !ok {
+		return errors.New("new people provider credential cleanup conflict: store does not support bound cleanup")
+	}
+	if err := createStore.CleanupNew(name, guard); err != nil {
+		return fmt.Errorf("new people provider credential cleanup conflict: %w", err)
+	}
+	return nil
 }

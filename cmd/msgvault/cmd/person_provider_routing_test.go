@@ -467,7 +467,7 @@ func TestPersonProviderDaemonRemoveValidReplacementRaceRollsBackExactConfig(t *t
 
 	output, err := executePersonProviderCommand(t, deps, "remove", "beta")
 	require.ErrorContains(t, err, "credential changed during guarded deletion")
-	assert.ErrorContains(t, err, "exact people provider consent remains revoked")
+	require.ErrorContains(t, err, "exact people provider consent remains revoked")
 	assert.Equal(t, 1, revokes)
 	assert.Equal(t, 1, edits)
 	assert.Equal(t, 1, restores)
