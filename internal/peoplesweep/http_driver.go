@@ -222,10 +222,7 @@ func capabilityCodeMatchesProfile(
 	if !representationCode || !capabilityRepresentationCodeMatchesProfile(profile, code) {
 		return false
 	}
-	if !parameterPresent {
-		return true
-	}
-	return capabilityRepresentationParameterMatchesProfile(profile, parameter)
+	return !parameterPresent
 }
 
 func capabilityParameterMatchesProfile(profile ProviderProfile, parameter string) bool {

@@ -345,6 +345,168 @@ func TestCapabilityRepresentationCodeMustMatchProtocolAndActiveMode(t *testing.T
 	}
 }
 
+func TestCapabilityRepresentationCodesRequireAbsentParameter(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		protocol       Protocol
+		mode           OutputMode
+		tokenParameter string
+		code           string
+		parameter      string
+	}{
+		{name: "chat native schema", protocol: ProtocolOpenAIChat, mode: OutputModeNativeJSONSchema,
+			tokenParameter: "max_tokens", code: "unsupported_json_schema", parameter: "response_format"},
+		{name: "chat JSON object", protocol: ProtocolOpenAIChat, mode: OutputModeJSONObject,
+			tokenParameter: "max_tokens", code: "unsupported_response_format", parameter: "response_format"},
+		{name: "responses native schema", protocol: ProtocolOpenAIResponses, mode: OutputModeNativeJSONSchema,
+			code: "unsupported_json_schema", parameter: "text.format"},
+		{name: "responses JSON object", protocol: ProtocolOpenAIResponses, mode: OutputModeJSONObject,
+			code: "unsupported_response_format", parameter: "text.format"},
+		{name: "anthropic native schema", protocol: ProtocolAnthropicMessages, mode: OutputModeNativeJSONSchema,
+			code: "unsupported_json_schema", parameter: "tools"},
+		{name: "google native schema", protocol: ProtocolGoogleGenerateContent, mode: OutputModeNativeJSONSchema,
+			code: "UNSUPPORTED_JSON_SCHEMA", parameter: "generationConfig.responseSchema"},
+		{name: "google native response format", protocol: ProtocolGoogleGenerateContent, mode: OutputModeNativeJSONSchema,
+			code: "UNSUPPORTED_RESPONSE_FORMAT", parameter: "generationConfig.responseMimeType"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			profile, err := capabilityProfile(capabilityTestCandidate(test.protocol, "https://example.test"),
+				test.mode, test.tokenParameter, false)
+			require.NoError(t, err)
+
+			assert.True(t, capabilityCodeMatchesProfile(profile, test.code, "", false))
+			assert.False(t, capabilityCodeMatchesProfile(profile, test.code, test.parameter, true))
+		})
+	}
+}
+
+func TestCapabilityDriversRejectParameterizedRepresentationCodesForEveryActiveMode(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		protocol       Protocol
+		auth           AuthScheme
+		mode           OutputMode
+		tokenParameter string
+		path           string
+		code           string
+		parameter      string
+		errorBody      string
+	}{
+		{name: "openai chat native schema", protocol: ProtocolOpenAIChat, auth: AuthBearer,
+			mode: OutputModeNativeJSONSchema, tokenParameter: "max_tokens", path: "/chat/completions",
+			code: "unsupported_json_schema", parameter: "response_format",
+			errorBody: `{"error":{"type":"invalid_request_error","code":"unsupported_json_schema","param":"response_format","message":"` + capabilityMessageCanary + `"}}`},
+		{name: "openai chat JSON object", protocol: ProtocolOpenAIChat, auth: AuthBearer,
+			mode: OutputModeJSONObject, tokenParameter: "max_tokens", path: "/chat/completions",
+			code: "unsupported_response_format", parameter: "response_format",
+			errorBody: `{"error":{"type":"invalid_request_error","code":"unsupported_response_format","param":"response_format","message":"` + capabilityMessageCanary + `"}}`},
+		{name: "openai responses native schema", protocol: ProtocolOpenAIResponses, auth: AuthBearer,
+			mode: OutputModeNativeJSONSchema, path: "/responses", code: "unsupported_json_schema", parameter: "text.format",
+			errorBody: `{"error":{"type":"invalid_request_error","code":"unsupported_json_schema","param":"text.format","message":"` + capabilityMessageCanary + `"}}`},
+		{name: "openai responses JSON object", protocol: ProtocolOpenAIResponses, auth: AuthBearer,
+			mode: OutputModeJSONObject, path: "/responses", code: "unsupported_response_format", parameter: "text.format",
+			errorBody: `{"error":{"type":"invalid_request_error","code":"unsupported_response_format","param":"text.format","message":"` + capabilityMessageCanary + `"}}`},
+		{name: "anthropic native schema", protocol: ProtocolAnthropicMessages, auth: AuthXAPIKey,
+			mode: OutputModeNativeJSONSchema, path: "/v1/messages", code: "unsupported_json_schema", parameter: "tools",
+			errorBody: `{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_json_schema","param":"tools","message":"` + capabilityMessageCanary + `"}}`},
+		{name: "google native schema", protocol: ProtocolGoogleGenerateContent, auth: AuthGoogleAPIKey,
+			mode: OutputModeNativeJSONSchema, path: "/models/synthetic-model:generateContent",
+			code: "UNSUPPORTED_JSON_SCHEMA", parameter: "generationConfig.responseSchema",
+			errorBody: `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"` + capabilityMessageCanary + `","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_JSON_SCHEMA","domain":"generativelanguage.googleapis.com","metadata":{"parameter":"generationConfig.responseSchema"}}]}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				assert.Equal(t, test.path, r.URL.Path)
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(test.errorBody))
+			}))
+			t.Cleanup(server.Close)
+			registry, err := NewDriverRegistry(server.Client(), nil, nil)
+			require.NoError(t, err)
+			candidate := capabilityTestCandidate(test.protocol, server.URL)
+			candidate.Auth = test.auth
+			profile, err := capabilityProfile(candidate, test.mode, test.tokenParameter, false)
+			require.NoError(t, err)
+			driver, err := registry.capabilityDriver(test.protocol)
+			require.NoError(t, err)
+			prepared, err := driver.Prepare(profile, capabilitySyntheticRequest())
+			require.NoError(t, err)
+
+			_, callErr := driver.GeneratePrepared(t.Context(), profile,
+				NewCredential(test.auth, capabilityCredentialValue), prepared)
+			require.Error(t, callErr)
+			var providerErr *ProviderError
+			require.ErrorAs(t, callErr, &providerErr)
+			assert.Empty(t, providerErr.Capability)
+			assert.Equal(t, int32(1), calls.Load())
+			for _, fragment := range []string{test.code, test.parameter, capabilityMessageCanary,
+				capabilityCredentialValue, test.errorBody} {
+				assert.NotContains(t, callErr.Error(), fragment)
+			}
+		})
+	}
+}
+
+func TestCapabilityNegotiationStopsOnParameterizedRepresentationCodeForEveryProtocol(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		protocol  Protocol
+		auth      AuthScheme
+		path      string
+		code      string
+		parameter string
+		errorBody string
+	}{
+		{name: "openai chat", protocol: ProtocolOpenAIChat, auth: AuthBearer, path: "/chat/completions",
+			code: "unsupported_json_schema", parameter: "response_format",
+			errorBody: `{"error":{"type":"invalid_request_error","code":"unsupported_json_schema","param":"response_format","message":"` + capabilityMessageCanary + `"}}`},
+		{name: "openai responses", protocol: ProtocolOpenAIResponses, auth: AuthBearer, path: "/responses",
+			code: "unsupported_json_schema", parameter: "text.format",
+			errorBody: `{"error":{"type":"invalid_request_error","code":"unsupported_json_schema","param":"text.format","message":"` + capabilityMessageCanary + `"}}`},
+		{name: "anthropic", protocol: ProtocolAnthropicMessages, auth: AuthXAPIKey, path: "/v1/messages",
+			code: "unsupported_json_schema", parameter: "tools",
+			errorBody: `{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_json_schema","param":"tools","message":"` + capabilityMessageCanary + `"}}`},
+		{name: "google", protocol: ProtocolGoogleGenerateContent, auth: AuthGoogleAPIKey,
+			path: "/models/synthetic-model:generateContent", code: "UNSUPPORTED_JSON_SCHEMA",
+			parameter: "generationConfig.responseSchema",
+			errorBody: `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"` + capabilityMessageCanary + `","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_JSON_SCHEMA","domain":"generativelanguage.googleapis.com","metadata":{"parameter":"generationConfig.responseSchema"}}]}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				assert.Equal(t, test.path, r.URL.Path)
+				var body map[string]any
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				if test.protocol == ProtocolGoogleGenerateContent {
+					assert.NotContains(t, body, "model")
+				} else {
+					assert.Equal(t, "synthetic-model", body["model"])
+				}
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(test.errorBody))
+			}))
+			t.Cleanup(server.Close)
+			registry, err := NewDriverRegistry(server.Client(), nil, nil)
+			require.NoError(t, err)
+			candidate := capabilityTestCandidate(test.protocol, server.URL)
+			candidate.Auth = test.auth
+
+			got, negotiationErr := NewCapabilityChecker(registry).Negotiate(t.Context(), candidate,
+				NewCredential(test.auth, capabilityCredentialValue))
+			require.Error(t, negotiationErr)
+			assert.Empty(t, got)
+			assert.Equal(t, int32(1), calls.Load())
+			for _, fragment := range []string{test.code, test.parameter, capabilityMessageCanary,
+				capabilityCredentialValue, test.errorBody} {
+				assert.NotContains(t, negotiationErr.Error(), fragment)
+			}
+		})
+	}
+}
+
 func TestCapabilityDriversRejectRepresentationCodesForPromptOnlyAttempts(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -468,6 +630,18 @@ func TestCapabilityNegotiationRetriesClassifiedErrorsForEachProtocolFamily(t *te
 			successBody: `{"id":"msg_safe","type":"message","role":"assistant","model":"synthetic-model-version","content":[{"type":"text","text":"{\"ok\":true}"}],"stop_reason":"end_turn"}`},
 		{name: "google", protocol: ProtocolGoogleGenerateContent, auth: AuthGoogleAPIKey,
 			errorBody:   `{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_PARAMETER","domain":"generativelanguage.googleapis.com","metadata":{"parameter":"generationConfig.responseSchema"}}]}}`,
+			successBody: `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"synthetic-model-version"}`},
+		{name: "openai chat parameterless representation", protocol: ProtocolOpenAIChat, auth: AuthBearer,
+			errorBody:   `{"error":{"type":"invalid_request_error","code":"unsupported_json_schema"}}`,
+			successBody: `{"model":"synthetic-model-version","choices":[{"message":{"content":"{\"ok\":true}"}}]}`},
+		{name: "openai responses parameterless representation", protocol: ProtocolOpenAIResponses, auth: AuthBearer,
+			errorBody:   `{"error":{"type":"invalid_request_error","code":"unsupported_json_schema"}}`,
+			successBody: `{"model":"synthetic-model-version","output":[{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"}]}]}`},
+		{name: "anthropic parameterless representation", protocol: ProtocolAnthropicMessages, auth: AuthXAPIKey,
+			errorBody:   `{"type":"error","error":{"type":"invalid_request_error","code":"unsupported_json_schema"}}`,
+			successBody: `{"id":"msg_safe","type":"message","role":"assistant","model":"synthetic-model-version","content":[{"type":"text","text":"{\"ok\":true}"}],"stop_reason":"end_turn"}`},
+		{name: "google parameterless representation", protocol: ProtocolGoogleGenerateContent, auth: AuthGoogleAPIKey,
+			errorBody:   `{"error":{"code":400,"status":"INVALID_ARGUMENT","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"UNSUPPORTED_JSON_SCHEMA","domain":"generativelanguage.googleapis.com"}]}}`,
 			successBody: `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"synthetic-model-version"}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
