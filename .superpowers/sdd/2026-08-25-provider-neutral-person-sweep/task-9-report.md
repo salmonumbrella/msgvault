@@ -177,3 +177,38 @@ git diff --check
 ```
 
 Open concern: structured capability codes vary across compatible aggregators. Unknown or merely message-shaped errors intentionally fail closed so onboarding can fall back to explicit manual/custom selection without changing state.
+
+## Review fix round 2: 2026-08-26
+
+- Code commit: `e30ad5b52062ba201e85007618394c31e77cc8ff` (`fix: scope capability negotiation retries`).
+- `capabilityMiss` now requires both an exact 400/404/422 status and the bounded unsupported-representation classification. Forged classifications on 401, 403, 408, 409, 429, and 500 stop.
+- Generic `unsupported_parameter` and `unsupported_value` codes now require a bounded structured `param` that matches a field present in the active protocol profile: its structured-output field, token-limit field, or represented reasoning field. `model`, endpoint, auth, billing, policy, unknown parameters, and free-form messages never classify.
+- Real TLS tests cover generic, wrong-endpoint, wrong-model, auth, billing, policy, and malformed failures for Chat, Responses, Anthropic, and Gemini. Every case returns a redacted error after exactly one request with no protocol switching.
+
+Round-2 RED:
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'TestCapability(MissRequires|ErrorClassification|NegotiationStopsAfterUnclassifiedErrorForEvery)' -count=1
+internal/peoplesweep/capability_check_test.go:256:63: cannot use profile (variable of struct type ProviderProfile) as Protocol value in argument to classifyProviderCapabilityError
+FAIL  go.kenn.io/msgvault/internal/peoplesweep [build failed]
+```
+
+Round-2 GREEN:
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'Test(OpenAIChat|OpenAIResponses|AnthropicMessages|GoogleGenerateContent|DriverRegistry|Capability|ModelsDev)' -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  7.876s
+
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  31.521s
+
+go test -race -tags "fts5 sqlite_vec" ./internal/peoplesweep -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  50.622s
+
+go fmt ./...
+go vet -tags "fts5 sqlite_vec" ./internal/peoplesweep/...
+git diff --check
+[exit 0]
+```
+
+Open concern unchanged: compatible providers may omit structured parameter metadata. Those errors deliberately fail closed and require explicit manual/custom selection.
