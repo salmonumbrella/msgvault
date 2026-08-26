@@ -15,8 +15,10 @@ last_edited: 2026-08-26
 - `internal/peoplesweep/capability_check.go`
 - `internal/peoplesweep/capability_check_test.go`
 - `internal/peoplesweep/driver_registry.go`
+- `internal/peoplesweep/http_driver.go`
 - `internal/peoplesweep/modelsdev.go`
 - `internal/peoplesweep/modelsdev_test.go`
+- `internal/peoplesweep/provider.go`
 - `internal/peoplesweep/testdata/modelsdev/catalog.json`
 
 ## Negotiation analysis
@@ -26,13 +28,15 @@ last_edited: 2026-08-26
 - The only prompt and schema ask for `{"ok":true}`. Local validation requires that exact single-key object plus safe provider metadata before returning a result.
 - OpenAI output attempts are ordered native JSON Schema, JSON object, then prompt JSON. Each mode tries `max_completion_tokens` before `max_tokens`. Anthropic and Google preserve the same output order while omitting the JSON-object representation their registered drivers cannot encode.
 - Requested reasoning is tested only after a reasoning-free representation succeeds. Rejection is terminal; the checker never silently drops the requested setting or tries a different representation/provider.
-- Only HTTP 400, 404, and 422 advance to another capability representation. Authentication failures, 408, 429, 5xx, transport/timeout failures, unsafe metadata, invalid output, and local validation/security failures stop immediately.
+- HTTP 400, 404, and 422 advance only when the selected protocol's bounded structured error envelope carries an exact allowlisted unsupported-representation code. Status alone, free-form messages, generic aggregator errors, wrong endpoint/model, authentication, billing, policy, malformed envelopes, 408, 429, 5xx, transport/timeout, unsafe metadata, and local validation/security failures stop immediately.
+- Synthetic output is parsed with duplicate-member detection. Exactly one `ok` member containing boolean `true` is accepted; duplicates in either order, extra members, trailing values, null, and non-boolean values return no response.
 - The checker resolves one registered driver before the loop and never changes protocol, endpoint, model, provider, or credential. It has no repair or runtime fallback path.
 
 ## Catalog analysis
 
 - `ModelsDevClient.Fetch` is caller-invoked only and always requests `https://models.dev/api.json` with `OpenAI File Downloader, XaiImageApiFetch/1.0`.
-- The isolated client removes cookie-jar state, disables redirects, enforces a total 15-second timeout, reads at most 8 MiB plus one overflow byte, and always bounded-drains/closes the response.
+- The client constructs a fresh direct transport and never inherits a caller RoundTripper, proxy, cookie jar, TLS client identity, headers, redirect policy, or subsequent mutation. Redirects remain disabled, the total deadline is 15 seconds, the body read is bounded to 8 MiB plus one overflow byte, and every response is bounded-drained/closed.
+- The same deadline covers JSON duplicate scanning, provider/model transformation, and deterministic sorting. Context checks abort transformation with the fixed timeout sentinel and return no partial suggestions.
 - Requests carry no credential, config, archive, host-identity, query, or body data. Returned errors are fixed sentinels and never include transport text, response bodies, catalog values, or credentials.
 - Parsing detects duplicate JSON members and duplicate semantic provider/model IDs, validates key/ID identity, bounds display fields, validates fixed and documented environment-template endpoints, and rejects credentialed, queried, fragmented, unsafe, or remote-plaintext URLs.
 - Provider/model/environment output is sorted; environment values are deduplicated. Display names are trimmed before bounded control/format-character validation.
@@ -123,3 +127,53 @@ git diff --check
 
 - models.dev is mutable external input. The parser accepts the current documented shape and fails closed on unknown unsafe representations; Task 10 must keep catalog failure recoverable and preserve the custom setup path.
 - Catalog prices are advisory snapshots only. Task 10 must require explicit operator confirmation before copying them into budget configuration and must never refresh saved runtime prices automatically.
+
+## Review fix: 2026-08-26
+
+- Code commit: `a69b1d86286dc07e0ec3b96fa3488212b8c760fd` (`fix: harden provider capability negotiation`).
+- Transport isolation now uses a fresh direct `http.Transport`; the only TLS fixture seam accepts a dial function, root pool, and server name, and cannot inject headers, proxy credentials, cookies, or a client certificate.
+- Every registered HTTP protocol now derives the same safe `unsupported_representation` classification only from protocol-specific structured fields and exact bounded codes. Provider errors expose no response text. TLS tests prove two attempts for classified errors in all four families and one attempt for generic/wrong-endpoint/wrong-model/auth/billing/policy/malformed 400/404/422 failures.
+- Duplicate-aware synthetic-output validation returns an empty result for ambiguous JSON, including through the real driver/TLS path.
+- Catalog parsing now receives the fetch context throughout object scans and provider/model loops, checks before and after sorting, and has a deterministic cancellation hook regression proving timeout after body read returns the fixed error with no partial suggestions.
+- The tautological custom-candidate assertion was removed. Production behavior is covered by stable catalog error/no-partial-result assertions; custom-setup continuation remains Task 10 scope.
+
+Review RED commands:
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'TestCapability(ErrorClassification|NegotiationRejectsAmbiguous|NegotiationStopsAfterGeneric)' -count=1
+internal/peoplesweep/capability_check_test.go:223:5: unknown field Output in struct literal of type DriverResponse
+internal/peoplesweep/capability_check_test.go:237:12: undefined: ProviderCapabilityError
+internal/peoplesweep/capability_check_test.go:239:163: undefined: ProviderCapabilityUnsupportedRepresentation
+internal/peoplesweep/capability_check_test.go:240:169: undefined: ProviderCapabilityUnsupportedRepresentation
+internal/peoplesweep/capability_check_test.go:241:183: undefined: ProviderCapabilityUnsupportedRepresentation
+internal/peoplesweep/capability_check_test.go:242: undefined: ProviderCapabilityUnsupportedRepresentation
+internal/peoplesweep/capability_check_test.go:249:31: undefined: classifyProviderCapabilityError
+FAIL  go.kenn.io/msgvault/internal/peoplesweep [build failed]
+
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'Test(NewModelsDevClient|ModelsDevFetchCancelsDuring|ModelsDevFetchParsesCurrent)' -count=1
+internal/peoplesweep/modelsdev_test.go:60:9: client.Jar undefined (type *ModelsDevClient has no field or method Jar)
+internal/peoplesweep/modelsdev_test.go:259:18: undefined: modelsDevHooks
+internal/peoplesweep/modelsdev_test.go:262:26: undefined: ErrModelsDevTimeout
+internal/peoplesweep/modelsdev_test.go:276:9: undefined: newModelsDevClientForTest
+FAIL  go.kenn.io/msgvault/internal/peoplesweep [build failed]
+```
+
+Review GREEN commands:
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'Test(OpenAIChat|OpenAIResponses|AnthropicMessages|GoogleGenerateContent|DriverRegistry|Capability|ModelsDev)' -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  9.460s
+
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  33.101s
+
+go test -race -tags "fts5 sqlite_vec" ./internal/peoplesweep -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  41.330s
+
+go fmt ./...
+go vet -tags "fts5 sqlite_vec" ./internal/peoplesweep/...
+git diff --check
+[exit 0]
+```
+
+Open concern: structured capability codes vary across compatible aggregators. Unknown or merely message-shaped errors intentionally fail closed so onboarding can fall back to explicit manual/custom selection without changing state.
