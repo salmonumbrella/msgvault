@@ -380,9 +380,12 @@ func (c Config) ActiveProviderConfig() (string, ProviderConfig, error) {
 		}
 		return "", ProviderConfig{}, errors.New("legacy [people.sweep.provider] must be normalized with ApplyDefaults")
 	}
-	name := strings.TrimSpace(c.Provider.Name)
+	name := c.Provider.Name
 	if name == "" {
 		return "", ProviderConfig{}, errors.New("[people.sweep] provider profile name is required")
+	}
+	if err := ValidateProviderProfileName(name); err != nil {
+		return "", ProviderConfig{}, err
 	}
 	provider, ok := c.Providers[name]
 	if !ok {
@@ -396,6 +399,18 @@ func (c Config) ActiveProviderConfig() (string, ProviderConfig, error) {
 // disabled policy is permitted, but any configured structural value must be
 // well formed.
 func (c Config) Validate() error {
+	if c.Provider.legacy == nil {
+		if c.Provider.Name != "" {
+			if err := ValidateProviderProfileName(c.Provider.Name); err != nil {
+				return err
+			}
+		}
+		for name := range c.Providers {
+			if err := ValidateProviderProfileName(name); err != nil {
+				return err
+			}
+		}
+	}
 	if err := c.validateOperationalConfig(); err != nil {
 		return err
 	}

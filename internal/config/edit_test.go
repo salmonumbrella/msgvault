@@ -136,6 +136,40 @@ func TestEditConfigCreatesMissingParentDirectories(t *testing.T) {
 	assert.Contains(t, string(after.Content), `theme = "dark"`)
 }
 
+func TestRestoreConfigFileRestoresOriginallyMissingSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	before, err := ReadConfigFile(path)
+	require.NoError(t, err)
+	require.False(t, before.Exists)
+	after, err := EditConfigFile(path, before.ETag, []Edit{{Key: "web.theme", Value: "dark"}})
+	require.NoError(t, err)
+
+	restored, err := RestoreConfigFile(path, after.ETag, before)
+	require.NoError(t, err)
+	assert.False(t, restored.Exists)
+	_, statErr := os.Stat(path)
+	assert.ErrorIs(t, statErr, fs.ErrNotExist)
+	recoveries, err := filepath.Glob(filepath.Join(dir, configRetiredPrefix+"*"))
+	require.NoError(t, err)
+	require.Len(t, recoveries, 1)
+	assert.Equal(t, after.Content, mustReadFile(t, recoveries[0]))
+}
+
+func TestRestoreMissingConfigRefusesConcurrentReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	before, err := ReadConfigFile(path)
+	require.NoError(t, err)
+	after, err := EditConfigFile(path, before.ETag, []Edit{{Key: "web.theme", Value: "dark"}})
+	require.NoError(t, err)
+	operator := []byte("[web]\ntheme = \"light\"\n")
+	require.NoError(t, os.WriteFile(path, operator, 0o600))
+
+	_, err = RestoreConfigFile(path, after.ETag, before)
+	assert.ErrorIs(t, err, ErrConfigConflict)
+	assert.Equal(t, operator, mustReadFile(t, path))
+}
+
 func TestEditConfigDoesNotCreateDirectoriesBeforeConcurrencyCheck(t *testing.T) {
 	require := require.New(t)
 	root := t.TempDir()
@@ -485,6 +519,54 @@ kind = "openai_compatible"
 			assert.Equal(t, test.before, string(mustReadFile(t, path)))
 		})
 	}
+}
+
+func TestConfigEditTablesInsertOnlyRefusesExistingExactTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	before := "[web]\ntheme = \"system\" # operator value\n"
+	require.NoError(t, os.WriteFile(path, []byte(before), 0o600))
+	snapshot, err := ReadConfigFile(path)
+	require.NoError(t, err)
+
+	_, err = EditConfigTables(path, snapshot.ETag, []TableEdit{{
+		Path: []string{"web"}, Values: map[string]any{"theme": "dark"}, InsertOnly: true,
+	}})
+	assert.ErrorIs(t, err, ErrAmbiguousConfigTarget)
+	assert.Equal(t, before, string(mustReadFile(t, path)))
+}
+
+func TestConfigEditTablesRemovalRejectsDescendantExtensions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	before := `[people.sweep]
+enabled = false
+provider = "old"
+
+[people.sweep.providers.old]
+protocol = "openai_chat"
+endpoint = "https://old.example.test/v1"
+model = "old-model"
+auth = "none"
+credential = "none"
+output_mode = "prompt_json"
+token_limit_parameter = "max_tokens"
+retention_posture = "local_only"
+training_posture = "local_only"
+allowed_sources = ["conversation_text"]
+source_since = "2025-01-01"
+
+# operator-owned provider extension
+[people.sweep.providers.old.future_extension]
+answer = 42
+`
+	require.NoError(t, os.WriteFile(path, []byte(before), 0o600))
+	snapshot, err := ReadConfigFile(path)
+	require.NoError(t, err)
+
+	_, err = EditConfigTables(path, snapshot.ETag, []TableEdit{{
+		Path: []string{"people", "sweep", "providers", "old"}, Remove: true,
+	}})
+	assert.ErrorIs(t, err, ErrAmbiguousConfigTarget)
+	assert.Equal(t, before, string(mustReadFile(t, path)))
 }
 
 func TestEditConfigMissingKeyPreservesNoFinalNewline(t *testing.T) {
@@ -882,11 +964,31 @@ func TestEditConfigReportsChangedWhenRollbackDirectorySyncFails(t *testing.T) {
 	ops.openDirectory = opener.open
 	overridePinnedReplacementSync(&ops, opener.open)
 
-	_, err = editConfigFile(path, snapshot.ETag, []Edit{{Key: "web.theme", Value: "dark"}}, ops)
+	after, err := editConfigFile(path, snapshot.ETag, []Edit{{Key: "web.theme", Value: "dark"}}, ops)
 	require.ErrorIs(err, ErrConfigChanged)
+	assert.Equal(t, "[web]\ntheme = \"dark\"\n", string(after.Content))
+	assert.Equal(t, configETag(after.Content), after.ETag)
+	assert.True(t, after.Exists)
+	assert.NotEmpty(t, after.identity)
 	got, readErr := os.ReadFile(path)
 	require.NoError(readErr)
 	assert.Equal(t, beforeText, string(got))
+}
+
+func TestSameConfigFileVersionRejectsByteIdenticalReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := []byte("[web]\ntheme = \"dark\"\n")
+	require.NoError(t, os.WriteFile(path, content, 0o600))
+	transaction, err := ReadConfigFile(path)
+	require.NoError(t, err)
+	assert.True(t, SameConfigFileVersion(transaction, transaction))
+
+	replacementPath := filepath.Join(filepath.Dir(path), "replacement.toml")
+	require.NoError(t, os.WriteFile(replacementPath, content, 0o600))
+	require.NoError(t, os.Rename(replacementPath, path))
+	concurrent, err := ReadConfigFile(path)
+	require.NoError(t, err)
+	assert.False(t, SameConfigFileVersion(transaction, concurrent))
 }
 
 func TestEditConfigPreservesDisplacedArtifactWhenConflictRollbackFails(t *testing.T) {

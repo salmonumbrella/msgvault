@@ -95,6 +95,33 @@ func TestConfigDefaultsStayDisabled(t *testing.T) {
 	require.ErrorContains(err, "disabled")
 }
 
+func TestConfigRejectsUnsafeActiveAndInactiveProviderProfileNames(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*peoplesweep.Config)
+	}{
+		{name: "active", mutate: func(config *peoplesweep.Config) {
+			provider := config.Providers[config.Provider.Name]
+			delete(config.Providers, config.Provider.Name)
+			config.Provider.Name = "bad\nname"
+			config.Providers[config.Provider.Name] = provider
+		}},
+		{name: "inactive", mutate: func(config *peoplesweep.Config) {
+			config.Providers["--help"] = config.Providers[config.Provider.Name]
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			configured := validConfig()
+			test.mutate(&configured)
+
+			err := configured.Validate()
+			require.ErrorContains(t, err, "invalid people provider profile name")
+			assert.NotContains(t, err.Error(), "bad\nname")
+			assert.NotContains(t, err.Error(), "--help")
+		})
+	}
+}
+
 func TestCodexProviderFingerprintIncludesExecutionBoundaryAndEffort(t *testing.T) {
 	base := validConfig()
 	setActiveProvider(&base, peoplesweep.ProviderConfig{

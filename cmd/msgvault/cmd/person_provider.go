@@ -56,19 +56,21 @@ type personProviderCodexClient interface {
 }
 
 type personProviderCommandDeps struct {
-	config             func() peoplesweep.Config
-	vectorConfig       func() vector.Config
-	openStore          func() (personProviderStore, func(), error)
-	openReadStore      func() (personProviderStore, func(), error)
-	newChecker         func(peoplesweep.Config, personProviderStore) (personProviderChecker, error)
-	newCodexClient     func(peoplesweep.Config) (personProviderCodexClient, error)
-	isDaemonSubprocess func() bool
-	lookupEnv          peoplesweep.CredentialLookup
-	proxy              func(*cobra.Command, []string, map[string]string) error
-	readConfigFile     func() (config.ConfigFile, error)
-	editConfigTables   func(string, []config.TableEdit) (config.ConfigFile, error)
-	restoreConfigFile  func(string, config.ConfigFile) (config.ConfigFile, error)
-	setup              personProviderSetupDeps
+	config                     func() peoplesweep.Config
+	vectorConfig               func() vector.Config
+	openStore                  func() (personProviderStore, func(), error)
+	openReadStore              func() (personProviderStore, func(), error)
+	newChecker                 func(peoplesweep.Config, personProviderStore) (personProviderChecker, error)
+	newCodexClient             func(peoplesweep.Config) (personProviderCodexClient, error)
+	isDaemonSubprocess         func() bool
+	providerStoreOwnedByDaemon func(context.Context) (bool, error)
+	lookupEnv                  peoplesweep.CredentialLookup
+	proxy                      func(*cobra.Command, []string, map[string]string) error
+	readConfigFile             func() (config.ConfigFile, error)
+	configHomeDir              func() string
+	editConfigTables           func(string, []config.TableEdit) (config.ConfigFile, error)
+	restoreConfigFile          func(string, config.ConfigFile) (config.ConfigFile, error)
+	setup                      personProviderSetupDeps
 }
 
 type personProviderStatusOutput struct {
@@ -207,7 +209,17 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 			return codex, nil
 		},
 		isDaemonSubprocess: isDaemonCLISubprocess,
-		lookupEnv:          os.LookupEnv,
+		providerStoreOwnedByDaemon: func(ctx context.Context) (bool, error) {
+			if IsRemoteMode() {
+				return true, nil
+			}
+			if cfg == nil {
+				return false, errors.New("configuration is unavailable")
+			}
+			runtime, err := findCompatibleDaemonRuntimeContext(ctx, cfg.Data.DataDir)
+			return runtime != nil, err
+		},
+		lookupEnv: os.LookupEnv,
 		proxy: func(command *cobra.Command, args []string, env map[string]string) error {
 			if len(env) == 0 {
 				return runDaemonCLICommandHTTPFromCobra(command, args)
@@ -219,6 +231,12 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 				return config.ConfigFile{}, errors.New("configuration is unavailable")
 			}
 			return config.ReadConfigFile(cfg.ConfigFilePath())
+		},
+		configHomeDir: func() string {
+			if cfg == nil {
+				return ""
+			}
+			return cfg.HomeDir
 		},
 		editConfigTables: func(ifMatch string, edits []config.TableEdit) (config.ConfigFile, error) {
 			if cfg == nil {
@@ -257,6 +275,23 @@ func newPersonProviderCommand(deps personProviderCommandDeps) *cobra.Command {
 	return provider
 }
 
+func exactPersonProviderNameArgs(command *cobra.Command, args []string) error {
+	if err := cobra.ExactArgs(1)(command, args); err != nil {
+		return err
+	}
+	return peoplesweep.ValidateProviderProfileName(args[0])
+}
+
+func optionalPersonProviderNameArgs(command *cobra.Command, args []string) error {
+	if err := cobra.MaximumNArgs(1)(command, args); err != nil {
+		return err
+	}
+	if len(args) == 1 {
+		return peoplesweep.ValidateProviderProfileName(args[0])
+	}
+	return nil
+}
+
 func newPersonProviderStatusCommand(deps personProviderCommandDeps) *cobra.Command {
 	var all bool
 	var jsonOutput bool
@@ -264,7 +299,7 @@ func newPersonProviderStatusCommand(deps personProviderCommandDeps) *cobra.Comma
 	command := &cobra.Command{
 		Use:   "status [name]",
 		Short: "Show the exact people inference policy and consent state",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  optionalPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
 			if !deps.isDaemonSubprocess() {
 				return deps.proxy(command, args, nil)
@@ -311,7 +346,7 @@ func newPersonProviderUseCommand(deps personProviderCommandDeps) *cobra.Command 
 	return &cobra.Command{
 		Use:   "use <name>",
 		Short: "Select an exactly checked people inference provider profile",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
 			return runPersonProviderUse(command, deps, args[0])
 		},
@@ -322,7 +357,7 @@ func newPersonProviderRemoveCommand(deps personProviderCommandDeps) *cobra.Comma
 	return &cobra.Command{
 		Use:   "remove <name>",
 		Short: "Remove a named people inference provider profile",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
 			return runPersonProviderRemove(command, deps, args[0])
 		},
@@ -369,7 +404,18 @@ func runPersonProviderUse(
 	deps personProviderCommandDeps,
 	name string,
 ) error {
-	selected, err := selectPersonProviderConfig(deps.config(), name)
+	if deps.readConfigFile == nil || deps.editConfigTables == nil {
+		return errors.New("people provider config editing is unavailable")
+	}
+	before, err := deps.readConfigFile()
+	if err != nil {
+		return err
+	}
+	configured, err := personProviderConfigFromSnapshot(deps, before)
+	if err != nil {
+		return err
+	}
+	selected, err := selectPersonProviderConfig(configured, name)
 	if err != nil {
 		return err
 	}
@@ -393,14 +439,7 @@ func runPersonProviderUse(
 	if !checked {
 		return fmt.Errorf("people provider profile %q requires an exact successful check before selection", name)
 	}
-	if deps.readConfigFile == nil || deps.editConfigTables == nil {
-		return errors.New("people provider config editing is unavailable")
-	}
-	snapshot, err := deps.readConfigFile()
-	if err != nil {
-		return err
-	}
-	if _, err := deps.editConfigTables(snapshot.ETag, []config.TableEdit{{
+	if _, err := deps.editConfigTables(before.ETag, []config.TableEdit{{
 		Path: []string{"people", "sweep"}, Values: map[string]any{"provider": name},
 	}}); err != nil {
 		return err
@@ -414,8 +453,20 @@ func runPersonProviderRemove(
 	deps personProviderCommandDeps,
 	name string,
 ) error {
-	configured := deps.config()
-	name = strings.TrimSpace(name)
+	if err := peoplesweep.ValidateProviderProfileName(name); err != nil {
+		return err
+	}
+	if deps.readConfigFile == nil || deps.editConfigTables == nil || deps.restoreConfigFile == nil {
+		return errors.New("people provider config editing is unavailable")
+	}
+	before, err := deps.readConfigFile()
+	if err != nil {
+		return err
+	}
+	configured, err := personProviderConfigFromSnapshot(deps, before)
+	if err != nil {
+		return err
+	}
 	provider, exists := configured.Providers[name]
 	if !exists {
 		return fmt.Errorf("people provider profile %q is not configured", name)
@@ -424,32 +475,10 @@ func runPersonProviderRemove(
 	if active && configured.Enabled {
 		return fmt.Errorf("cannot remove active people provider profile %q while people sweep is enabled", name)
 	}
-	if deps.readConfigFile == nil || deps.editConfigTables == nil || deps.restoreConfigFile == nil {
-		return errors.New("people provider config editing is unavailable")
-	}
 	profileConfig := configured
 	profileConfig.Enabled = true
 	profileConfig.Provider = peoplesweep.ProviderSelection{Name: name}
 	profile, err := profileConfig.Profile()
-	if err != nil {
-		return err
-	}
-	if deps.isDaemonSubprocess != nil && deps.isDaemonSubprocess() {
-		st, cleanup, openErr := deps.openStore()
-		if openErr != nil {
-			return openErr
-		}
-		defer cleanup()
-		if _, err := st.RevokePersonInferenceConsent(
-			command.Context(), profile.Fingerprint, personProviderConsentActor,
-		); err != nil {
-			return err
-		}
-	} else if err := executeSavedPersonProviderRevoke(command, deps, name); err != nil {
-		return err
-	}
-
-	before, err := deps.readConfigFile()
 	if err != nil {
 		return err
 	}
@@ -475,6 +504,32 @@ func runPersonProviderRemove(
 	after, err := deps.editConfigTables(before.ETag, edits)
 	if err != nil {
 		return err
+	}
+	rollback := func(cause error) error {
+		return errors.Join(cause, restoreRemovedPersonProviderConfig(deps, after, before))
+	}
+
+	directStore := deps.isDaemonSubprocess != nil && deps.isDaemonSubprocess()
+	if !directStore && deps.providerStoreOwnedByDaemon != nil {
+		owned, ownershipErr := deps.providerStoreOwnedByDaemon(command.Context())
+		if ownershipErr != nil {
+			return rollback(ownershipErr)
+		}
+		directStore = !owned
+	}
+	if directStore {
+		st, cleanup, openErr := deps.openStore()
+		if openErr != nil {
+			return rollback(openErr)
+		}
+		defer cleanup()
+		if _, err := st.RevokePersonInferenceConsent(
+			command.Context(), profile.Fingerprint, personProviderConsentActor,
+		); err != nil {
+			return rollback(err)
+		}
+	} else if err := proxySavedPersonProviderRevoke(command, deps, name); err != nil {
+		return rollback(err)
 	}
 	if provider.Credential == peoplesweep.CredentialStored {
 		if deps.setup.credentials == nil {
@@ -507,7 +562,7 @@ func newPersonProviderConsentCommand(deps personProviderCommandDeps) *cobra.Comm
 	command := &cobra.Command{
 		Use:   "consent [name]",
 		Short: "Consent to the exact people inference policy",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  optionalPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
 			if !deps.isDaemonSubprocess() {
 				return deps.proxy(command, args, nil)
@@ -540,7 +595,7 @@ func newPersonProviderRevokeCommand(deps personProviderCommandDeps) *cobra.Comma
 	command := &cobra.Command{
 		Use:   "revoke [name]",
 		Short: "Revoke consent for the exact people inference policy",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  optionalPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
 			if !deps.isDaemonSubprocess() {
 				return deps.proxy(command, args, nil)
@@ -573,7 +628,7 @@ func newPersonProviderHistoryCommand(deps personProviderCommandDeps) *cobra.Comm
 	command := &cobra.Command{
 		Use:   "history [name]",
 		Short: "Show redacted sweep history for an optional provider profile",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  optionalPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
 			if !deps.isDaemonSubprocess() {
 				return deps.proxy(command, args, nil)
@@ -625,18 +680,23 @@ func newPersonProviderCheckCommand(deps personProviderCommandDeps) *cobra.Comman
 	command := &cobra.Command{
 		Use:   "check [name]",
 		Short: "Run a fixed synthetic request through the people inference provider",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  optionalPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
 			if !deps.isDaemonSubprocess() {
-				config := deps.config()
-				if len(args) == 1 {
-					var err error
-					config, err = selectPersonProviderConfig(config, args[0])
+				if deps.providerStoreOwnedByDaemon != nil {
+					owned, err := deps.providerStoreOwnedByDaemon(command.Context())
 					if err != nil {
 						return err
 					}
+					if !owned {
+						name := ""
+						if len(args) == 1 {
+							name = args[0]
+						}
+						return runPersonProviderCheck(command, deps, name, jsonOutput)
+					}
 				}
-				return deps.proxy(command, args, personProviderForwardEnv(config, deps.lookupEnv))
+				return deps.proxy(command, args, nil)
 			}
 			name := ""
 			if len(args) == 1 {
@@ -1041,9 +1101,8 @@ func runPersonProviderCheck(
 }
 
 func selectPersonProviderConfig(config peoplesweep.Config, name string) (peoplesweep.Config, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return peoplesweep.Config{}, errors.New("people provider profile name is required")
+	if err := peoplesweep.ValidateProviderProfileName(name); err != nil {
+		return peoplesweep.Config{}, err
 	}
 	if _, ok := config.Providers[name]; !ok {
 		return peoplesweep.Config{}, fmt.Errorf("people provider profile %q is not configured", name)
@@ -1424,23 +1483,4 @@ func printPersonSemanticProviderDisclosure(
 	_, _ = fmt.Fprintf(w, "Corpus scope: %s\n", profile.CorpusScope)
 	_, _ = fmt.Fprintln(w,
 		"Scope note: [vector.embed.scope] does not filter curated people; this policy covers every durable person.")
-}
-
-func personProviderForwardEnv(
-	config peoplesweep.Config,
-	lookup peoplesweep.CredentialLookup,
-) map[string]string {
-	_, provider, err := config.ActiveProviderConfig()
-	if err != nil || provider.Credential != peoplesweep.CredentialEnv {
-		return nil
-	}
-	name := provider.CredentialEnv
-	if name == "" || lookup == nil {
-		return nil
-	}
-	value, ok := lookup(name)
-	if !ok || value == "" {
-		return nil
-	}
-	return map[string]string{name: value}
 }

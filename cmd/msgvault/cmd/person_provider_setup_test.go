@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -22,6 +23,28 @@ const providerSetupSecretCanary = "provider-setup-secret-canary"
 
 type providerCredentialChunkReader struct {
 	chunks [][]byte
+}
+
+type countingProviderReader struct {
+	reads int
+	data  *bytes.Reader
+}
+
+type observedProviderReader struct {
+	data           *bytes.Reader
+	maxDestination int
+}
+
+func (r *countingProviderReader) Read(destination []byte) (int, error) {
+	r.reads++
+	return r.data.Read(destination)
+}
+
+func (r *observedProviderReader) Read(destination []byte) (int, error) {
+	if len(destination) > r.maxDestination {
+		r.maxDestination = len(destination)
+	}
+	return r.data.Read(destination)
 }
 
 func (r *providerCredentialChunkReader) Read(destination []byte) (int, error) {
@@ -50,6 +73,65 @@ func TestReadProviderCredentialLineRejectsTrailingChunk(t *testing.T) {
 	assert.NotContains(t, err.Error(), providerSetupSecretCanary)
 }
 
+func TestReadBoundedMaskedCredentialInputRejectsBeforeGrowingPastLimit(t *testing.T) {
+	reader := &observedProviderReader{data: bytes.NewReader([]byte("123456789-discarded\n"))}
+
+	credential, err := readBoundedMaskedCredentialInput(reader, 8)
+	require.ErrorContains(t, err, "too large")
+	assert.Empty(t, credential)
+	assert.Equal(t, 1, reader.maxDestination)
+}
+
+func TestReadBoundedMaskedCredentialInputHandlesEditingAndCancel(t *testing.T) {
+	credential, err := readBoundedMaskedCredentialInput(bytes.NewBuffer([]byte{'a', 'b', 0x7f, 'c', '\r'}), 8)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("ac"), credential)
+
+	credential, err = readBoundedMaskedCredentialInput(bytes.NewBuffer([]byte{'a', 0x03}), 8)
+	require.ErrorContains(t, err, "canceled")
+	assert.Empty(t, credential)
+}
+
+func TestReadBoundedMaskedCredentialRestoresTerminalOnEveryReadResult(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		input      []byte
+		restoreErr error
+	}{
+		{name: "success", input: []byte("safe\n")},
+		{name: "cancel", input: []byte{'x', 0x03}},
+		{name: "too large", input: []byte("123456789\n")},
+		{name: "restore error", input: []byte("safe\n"), restoreErr: errors.New("restore failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := &term.State{}
+			makeCalls := 0
+			restoreCalls := 0
+
+			credential, err := readBoundedMaskedCredentialWithTerminal(
+				bytes.NewReader(test.input), 17, 8,
+				func(fd uintptr) (*term.State, error) {
+					makeCalls++
+					assert.Equal(t, uintptr(17), fd)
+					return state, nil
+				},
+				func(fd uintptr, restored *term.State) error {
+					restoreCalls++
+					assert.Equal(t, uintptr(17), fd)
+					assert.Same(t, state, restored)
+					return test.restoreErr
+				},
+			)
+			assert.Equal(t, 1, makeCalls)
+			assert.Equal(t, 1, restoreCalls)
+			if test.restoreErr != nil {
+				require.ErrorContains(t, err, "restore credential terminal")
+				assert.Empty(t, credential)
+			}
+		})
+	}
+}
+
 func TestPersonProviderAddValidatesPolicyBeforeReadingCredentialOrNegotiating(t *testing.T) {
 	path, loaded := providerSetupConfigFile(t)
 	deps := providerSetupCommandDeps(t, path, loaded, nil)
@@ -76,6 +158,89 @@ func TestPersonProviderAddValidatesPolicyBeforeReadingCredentialOrNegotiating(t 
 	assert.Zero(t, lookups)
 	assert.Zero(t, negotiations)
 	assert.NotContains(t, output, providerSetupSecretCanary)
+}
+
+func TestPersonProviderAddRejectsLocalOptionConflictsBeforeCatalogOrState(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags []string
+	}{
+		{name: "custom catalog prices", flags: []string{"--custom", "--accept-catalog-prices", "--yes"}},
+		{name: "missing confirmation", flags: []string{"--custom"}},
+		{name: "mixed credential inputs", flags: []string{"--custom", "--api-key-stdin", "--credential-env", "EXACT_KEY", "--yes"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			deps := personProviderCommandDeps{
+				config:         func() peoplesweep.Config { calls++; return personProviderTestConfig() },
+				readConfigFile: func() (config.ConfigFile, error) { calls++; return config.ConfigFile{}, assert.AnError },
+				editConfigTables: func(string, []config.TableEdit) (config.ConfigFile, error) {
+					calls++
+					return config.ConfigFile{}, assert.AnError
+				},
+				restoreConfigFile: func(string, config.ConfigFile) (config.ConfigFile, error) {
+					calls++
+					return config.ConfigFile{}, assert.AnError
+				},
+				setup: personProviderSetupDeps{
+					catalog:   func(context.Context) ([]peoplesweep.ProviderSuggestion, error) { calls++; return nil, nil },
+					lookupEnv: func(string) (string, bool) { calls++; return providerSetupSecretCanary, true },
+					negotiate: func(context.Context, peoplesweep.ProviderConfig, peoplesweep.Credential) (peoplesweep.NegotiatedCapabilities, error) {
+						calls++
+						return peoplesweep.NegotiatedCapabilities{}, nil
+					},
+				},
+			}
+			args := []string{
+				"add", "local-options", "--protocol", "openai_chat",
+				"--endpoint", "https://options.example.test/v1", "--model", "options-model",
+				"--auth", "bearer", "--retention-posture", "zero_retention",
+				"--training-posture", "no_training", "--source", "conversation_text",
+				"--source-since", "2025-01-01",
+			}
+			args = append(args, test.flags...)
+
+			_, err := executePersonProviderCommand(t, deps, args...)
+			require.Error(t, err)
+			assert.Zero(t, calls)
+		})
+	}
+}
+
+func TestPersonProviderAcceptedCatalogPriceMustResolveBeforeSecretOrProviderCall(t *testing.T) {
+	path, loaded := providerSetupConfigFile(t)
+	deps := providerSetupCommandDeps(t, path, loaded, nil)
+	catalogCalls, lookups, negotiations := 0, 0, 0
+	deps.setup.catalog = func(context.Context) ([]peoplesweep.ProviderSuggestion, error) {
+		catalogCalls++
+		return []peoplesweep.ProviderSuggestion{{
+			ID: "incomplete", Name: "Incomplete", Endpoint: "https://prices.example.test/v1",
+			Models: []peoplesweep.ModelSuggestion{{ID: "prices-model", Name: "Prices Model"}},
+		}}, nil
+	}
+	deps.setup.lookupEnv = func(string) (string, bool) {
+		lookups++
+		return providerSetupSecretCanary, true
+	}
+	deps.setup.negotiate = func(
+		context.Context, peoplesweep.ProviderConfig, peoplesweep.Credential,
+	) (peoplesweep.NegotiatedCapabilities, error) {
+		negotiations++
+		return peoplesweep.NegotiatedCapabilities{}, nil
+	}
+
+	_, err := executePersonProviderCommand(t, deps,
+		"add", "prices", "--protocol", "openai_chat",
+		"--endpoint", "https://prices.example.test/v1", "--model", "prices-model",
+		"--auth", "bearer", "--credential-env", "EXACT_PRICES_KEY",
+		"--retention-posture", "zero_retention", "--training-posture", "no_training",
+		"--source", "conversation_text", "--source-since", "2025-01-01",
+		"--accept-catalog-prices", "--yes")
+	require.ErrorContains(t, err, "catalog price")
+	assert.Equal(t, 1, catalogCalls)
+	assert.Zero(t, lookups)
+	assert.Zero(t, negotiations)
 }
 
 func providerSetupConfigFile(t *testing.T) (string, *config.Config) {
@@ -260,13 +425,15 @@ func TestPersonProviderAddReadsOnlyExactEnvironmentOrMaskedTerminal(t *testing.T
 			ModelVersion: "masked-model-v1",
 		}}
 		deps := providerSetupCommandDeps(t, path, loaded, checker)
-		deps.setup.isTerminal = func(uintptr) bool { return true }
-		deps.setup.readMasked = func(uintptr) ([]byte, error) {
-			return []byte(providerSetupSecretCanary), nil
-		}
 		input, err := os.Open(os.DevNull)
 		require.NoError(t, err)
 		defer func() { _ = input.Close() }()
+		deps.setup.isTerminal = func(uintptr) bool { return true }
+		deps.setup.readMasked = func(file *os.File, limit int) ([]byte, error) {
+			assert.Same(t, input, file)
+			assert.Equal(t, maxProviderCredentialBytes, limit)
+			return []byte(providerSetupSecretCanary), nil
+		}
 
 		output, err := executePersonProviderCommandWithInput(t, deps, input,
 			"add", "masked-provider", "--custom", "--protocol", "openai_chat",
@@ -409,11 +576,153 @@ func TestPersonProviderRemoveRevokesAndDeletesOnlyExactCredential(t *testing.T) 
 	require.NoError(t, err)
 	assert.Len(t, profiles, 1, "immutable audit profile must remain")
 
-	enabled := loaded.People.Sweep
-	enabled.Enabled = true
-	activeDeps := localPersonProviderDeps(enabled, st, nil)
+	activePath, activeLoaded := providerSetupConfigFile(t)
+	activeSnapshot, err := config.ReadConfigFile(activePath)
+	require.NoError(t, err)
+	_, err = config.EditConfigFile(activePath, activeSnapshot.ETag, []config.Edit{{
+		Key: "people.sweep.enabled", Value: true,
+	}})
+	require.NoError(t, err)
+	activeDeps := localPersonProviderDeps(activeLoaded.People.Sweep, st, nil)
+	activeDeps.readConfigFile = func() (config.ConfigFile, error) { return config.ReadConfigFile(activePath) }
+	activeDeps.editConfigTables = func(etag string, edits []config.TableEdit) (config.ConfigFile, error) {
+		return config.EditConfigTables(activePath, etag, edits)
+	}
+	activeDeps.restoreConfigFile = func(etag string, before config.ConfigFile) (config.ConfigFile, error) {
+		return config.RestoreConfigFile(activePath, etag, before)
+	}
 	_, err = executePersonProviderCommand(t, activeDeps, "remove", "default")
 	require.ErrorContains(t, err, "active")
+}
+
+func TestPersonProviderRemoveUsesOneFreshConfigSnapshotForAllSideEffects(t *testing.T) {
+	path, loaded := providerSetupConfigFile(t)
+	initial, err := config.ReadConfigFile(path)
+	require.NoError(t, err)
+	old := configuredPersonProvider(loaded.People.Sweep)
+	old.Endpoint = "https://old-snapshot.example.test/v1"
+	old.Model = "startup-old-model"
+	old.Credential = peoplesweep.CredentialStored
+	old.CredentialEnv = ""
+	withOld, err := config.EditConfigTables(path, initial.ETag, []config.TableEdit{{
+		Path:   []string{"people", "sweep", "providers", "old"},
+		Values: personProviderTableValues(old), InsertOnly: true,
+	}})
+	require.NoError(t, err)
+	startupLoaded, err := config.LoadConfigFile(withOld, "")
+	require.NoError(t, err)
+	startup := startupLoaded.People.Sweep
+	credentialStore := peoplesweep.NewFileCredentialStore(startupLoaded.TokensDir())
+	require.NoError(t, credentialStore.Save("old", peoplesweep.NewCredential(
+		peoplesweep.AuthBearer, providerSetupSecretCanary)))
+	staleSelection := startup
+	staleSelection.Enabled = true
+	staleSelection.Provider = peoplesweep.ProviderSelection{Name: "old"}
+	staleProfile, err := staleSelection.Profile()
+	require.NoError(t, err)
+	st := testutil.NewSQLiteTestStore(t)
+	_, err = st.EnsurePersonInferenceProfile(t.Context(), staleProfile)
+	require.NoError(t, err)
+	_, _, err = st.GrantPersonInferenceConsent(t.Context(), staleProfile.Fingerprint, "cli")
+	require.NoError(t, err)
+
+	current := old
+	current.Model = "operator-current-model"
+	current.Credential = peoplesweep.CredentialEnv
+	current.CredentialEnv = "OPERATOR_CURRENT_KEY"
+	currentSnapshot, err := config.ReadConfigFile(path)
+	require.NoError(t, err)
+	_, err = config.EditConfigTables(path, currentSnapshot.ETag, []config.TableEdit{{
+		Path:   []string{"people", "sweep", "providers", "old"},
+		Values: personProviderTableValues(current),
+	}})
+	require.NoError(t, err)
+
+	deps := localPersonProviderDeps(startup, st, nil)
+	deps.config = func() peoplesweep.Config { return startup }
+	deps.readConfigFile = func() (config.ConfigFile, error) { return config.ReadConfigFile(path) }
+	deps.editConfigTables = func(etag string, edits []config.TableEdit) (config.ConfigFile, error) {
+		return config.EditConfigTables(path, etag, edits)
+	}
+	deps.restoreConfigFile = func(etag string, before config.ConfigFile) (config.ConfigFile, error) {
+		return config.RestoreConfigFile(path, etag, before)
+	}
+	deps.setup.credentials = credentialStore
+
+	_, err = executePersonProviderCommand(t, deps, "remove", "old")
+	require.NoError(t, err)
+	stillActive, err := st.HasActivePersonInferenceConsent(t.Context(), staleProfile.Fingerprint)
+	require.NoError(t, err)
+	assert.True(t, stillActive, "stale startup fingerprint must not be revoked")
+	credential, err := credentialStore.Load("old")
+	require.NoError(t, err)
+	assert.Equal(t, providerSetupSecretCanary, credential.Value())
+	finalConfig, err := config.Load(path, "")
+	require.NoError(t, err)
+	_, exists := finalConfig.People.Sweep.Providers["old"]
+	assert.False(t, exists)
+}
+
+func TestPersonProviderRemoveConfigConflictHasNoConsentOrCredentialSideEffects(t *testing.T) {
+	path, loaded := providerSetupConfigFile(t)
+	initial, err := config.ReadConfigFile(path)
+	require.NoError(t, err)
+	old := configuredPersonProvider(loaded.People.Sweep)
+	old.Model = "conflict-old-model"
+	old.Credential = peoplesweep.CredentialStored
+	old.CredentialEnv = ""
+	withOld, err := config.EditConfigTables(path, initial.ETag, []config.TableEdit{{
+		Path:   []string{"people", "sweep", "providers", "old"},
+		Values: personProviderTableValues(old), InsertOnly: true,
+	}})
+	require.NoError(t, err)
+	current, err := config.LoadConfigFile(withOld, "")
+	require.NoError(t, err)
+	credentialStore := peoplesweep.NewFileCredentialStore(current.TokensDir())
+	require.NoError(t, credentialStore.Save("old", peoplesweep.NewCredential(
+		peoplesweep.AuthBearer, providerSetupSecretCanary)))
+	selected := current.People.Sweep
+	selected.Enabled = true
+	selected.Provider = peoplesweep.ProviderSelection{Name: "old"}
+	profile, err := selected.Profile()
+	require.NoError(t, err)
+	st := testutil.NewSQLiteTestStore(t)
+	_, err = st.EnsurePersonInferenceProfile(t.Context(), profile)
+	require.NoError(t, err)
+	_, _, err = st.GrantPersonInferenceConsent(t.Context(), profile.Fingerprint, "cli")
+	require.NoError(t, err)
+
+	deps := localPersonProviderDeps(current.People.Sweep, st, nil)
+	deps.readConfigFile = func() (config.ConfigFile, error) { return config.ReadConfigFile(path) }
+	deps.editConfigTables = func(etag string, edits []config.TableEdit) (config.ConfigFile, error) {
+		operator, readErr := config.ReadConfigFile(path)
+		if readErr != nil {
+			return config.ConfigFile{}, readErr
+		}
+		if _, editErr := config.EditConfigFile(path, operator.ETag, []config.Edit{{
+			Key: "web.theme", Value: "dark",
+		}}); editErr != nil {
+			return config.ConfigFile{}, editErr
+		}
+		return config.EditConfigTables(path, etag, edits)
+	}
+	deps.restoreConfigFile = func(etag string, before config.ConfigFile) (config.ConfigFile, error) {
+		return config.RestoreConfigFile(path, etag, before)
+	}
+	deps.setup.credentials = credentialStore
+
+	_, err = executePersonProviderCommand(t, deps, "remove", "old")
+	require.ErrorIs(t, err, config.ErrConfigConflict)
+	active, err := st.HasActivePersonInferenceConsent(t.Context(), profile.Fingerprint)
+	require.NoError(t, err)
+	assert.True(t, active)
+	credential, err := credentialStore.Load("old")
+	require.NoError(t, err)
+	assert.Equal(t, providerSetupSecretCanary, credential.Value())
+	finalConfig, err := config.Load(path, "")
+	require.NoError(t, err)
+	assert.Equal(t, "conflict-old-model", finalConfig.People.Sweep.Providers["old"].Model)
+	assert.Equal(t, "dark", finalConfig.Web.Theme)
 }
 
 // TestPersonProviderAddRollsBackExactConfigAndNewCredential catches a failed
@@ -488,6 +797,163 @@ func TestPersonProviderAddConfigConflictKeepsConcurrentEditAndDeletesOnlyNewCred
 	assert.NotContains(t, output, providerSetupSecretCanary)
 	_, err = deps.setup.credentials.Load("conflicted")
 	assert.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
+}
+
+func TestPersonProviderAddRollsBackExactUncertainPublication(t *testing.T) {
+	path, loaded := providerSetupConfigFile(t)
+	beforeBytes, err := os.ReadFile(path)
+	require.NoError(t, err)
+	checker := &fixedPersonProviderChecker{response: peoplesweep.StructuredResponse{
+		Output: []byte(`{"ok":true}`), ProviderVersion: peoplesweep.OpenAICompatibleProviderVersion,
+		ModelVersion: "uncertain-model-v1",
+	}}
+	deps := providerSetupCommandDeps(t, path, loaded, checker)
+	deps.editConfigTables = func(etag string, edits []config.TableEdit) (config.ConfigFile, error) {
+		after, editErr := config.EditConfigTables(path, etag, edits)
+		if editErr != nil {
+			return after, editErr
+		}
+		return after, errors.Join(config.ErrConfigChanged, errors.New("injected cleanup uncertainty"))
+	}
+
+	_, err = executePersonProviderCommandWithInput(t, deps,
+		bytes.NewBufferString(providerSetupSecretCanary+"\n"),
+		"add", "uncertain", "--custom", "--protocol", "openai_chat",
+		"--endpoint", "https://uncertain.example.test/v1", "--model", "uncertain-model",
+		"--auth", "bearer", "--api-key-stdin", "--retention-posture", "zero_retention",
+		"--training-posture", "no_training", "--source", "conversation_text",
+		"--source-since", "2025-01-01", "--yes")
+	require.ErrorIs(t, err, config.ErrConfigChanged)
+	afterBytes, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, beforeBytes, afterBytes)
+	_, err = deps.setup.credentials.Load("uncertain")
+	assert.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
+}
+
+func TestPersonProviderAddFailedCheckRestoresOriginallyMissingConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	startup := config.NewDefaultConfig()
+	startup.HomeDir = dir
+	st := testutil.NewSQLiteTestStore(t)
+	deps := localPersonProviderDeps(startup.People.Sweep, st,
+		&fixedPersonProviderChecker{err: errors.New("synthetic final check failed")})
+	deps.config = func() peoplesweep.Config { return startup.People.Sweep }
+	deps.configHomeDir = func() string { return dir }
+	deps.readConfigFile = func() (config.ConfigFile, error) { return config.ReadConfigFile(path) }
+	deps.editConfigTables = func(etag string, edits []config.TableEdit) (config.ConfigFile, error) {
+		return config.EditConfigTables(path, etag, edits)
+	}
+	deps.restoreConfigFile = func(etag string, before config.ConfigFile) (config.ConfigFile, error) {
+		return config.RestoreConfigFile(path, etag, before)
+	}
+	deps.setup = personProviderSetupDeps{
+		negotiate: func(context.Context, peoplesweep.ProviderConfig, peoplesweep.Credential) (peoplesweep.NegotiatedCapabilities, error) {
+			return peoplesweep.NegotiatedCapabilities{
+				OutputMode: peoplesweep.OutputModeJSONObject, TokenLimitParameter: "max_tokens",
+				DriverVersion: peoplesweep.OpenAICompatibleProviderVersion,
+			}, nil
+		},
+		credentials: peoplesweep.NewFileCredentialStore(filepath.Join(dir, "tokens")),
+	}
+
+	_, err := executePersonProviderCommandWithInput(t, deps,
+		bytes.NewBufferString(providerSetupSecretCanary+"\n"),
+		"add", "first", "--custom", "--protocol", "openai_chat",
+		"--endpoint", "https://first.example.test/v1", "--model", "first-model",
+		"--auth", "bearer", "--api-key-stdin", "--retention-posture", "zero_retention",
+		"--training-posture", "no_training", "--source", "conversation_text",
+		"--source-since", "2025-01-01", "--yes")
+	require.ErrorContains(t, err, "synthetic final check failed")
+	_, statErr := os.Stat(path)
+	assert.ErrorIs(t, statErr, fs.ErrNotExist)
+	_, credentialErr := deps.setup.credentials.Load("first")
+	assert.ErrorIs(t, credentialErr, peoplesweep.ErrCredentialNotFound)
+	recoveries, globErr := filepath.Glob(filepath.Join(dir, ".config-retired-*"))
+	require.NoError(t, globErr)
+	require.Len(t, recoveries, 1)
+	recovered, readErr := os.ReadFile(recoveries[0])
+	require.NoError(t, readErr)
+	assert.NotContains(t, string(recovered), providerSetupSecretCanary)
+}
+
+func TestPersonProviderConcurrentExactAddNeverReadsSecretOrOverwrites(t *testing.T) {
+	tests := []struct {
+		name       string
+		auth       string
+		endpoint   string
+		credential []string
+	}{
+		{name: "stored", auth: "bearer", endpoint: "https://candidate.example.test/v1",
+			credential: []string{"--api-key-stdin"}},
+		{name: "environment", auth: "bearer", endpoint: "https://candidate.example.test/v1",
+			credential: []string{"--credential-env", "EXACT_RACE_KEY"}},
+		{name: "anonymous", auth: "none", endpoint: "http://127.0.0.1:11434/v1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path, loaded := providerSetupConfigFile(t)
+			deps := providerSetupCommandDeps(t, path, loaded, &fixedPersonProviderChecker{})
+			startup := loaded.People.Sweep
+			deps.config = func() peoplesweep.Config { return startup }
+			concurrent := configuredPersonProvider(startup)
+			concurrent.Model = "operator-raced-model"
+			concurrent.Credential = peoplesweep.CredentialEnv
+			concurrent.CredentialEnv = "OPERATOR_RACED_KEY"
+			installed := false
+			deps.readConfigFile = func() (config.ConfigFile, error) {
+				if !installed {
+					installed = true
+					before, err := config.ReadConfigFile(path)
+					if err != nil {
+						return config.ConfigFile{}, err
+					}
+					if _, err := config.EditConfigTables(path, before.ETag, []config.TableEdit{{
+						Path:   []string{"people", "sweep", "providers", "raced"},
+						Values: personProviderTableValues(concurrent), InsertOnly: true,
+					}}); err != nil {
+						return config.ConfigFile{}, err
+					}
+				}
+				return config.ReadConfigFile(path)
+			}
+			lookups := 0
+			deps.setup.lookupEnv = func(string) (string, bool) {
+				lookups++
+				return providerSetupSecretCanary, true
+			}
+			negotiations := 0
+			deps.setup.negotiate = func(
+				context.Context, peoplesweep.ProviderConfig, peoplesweep.Credential,
+			) (peoplesweep.NegotiatedCapabilities, error) {
+				negotiations++
+				return peoplesweep.NegotiatedCapabilities{
+					OutputMode: peoplesweep.OutputModeJSONObject, TokenLimitParameter: "max_tokens",
+					DriverVersion: peoplesweep.OpenAICompatibleProviderVersion,
+				}, nil
+			}
+			input := &countingProviderReader{data: bytes.NewReader([]byte(providerSetupSecretCanary + "\n"))}
+			args := []string{
+				"add", "raced", "--custom", "--protocol", "openai_chat", "--endpoint", test.endpoint,
+				"--model", "candidate-model", "--auth", test.auth,
+				"--retention-posture", "local_only", "--training-posture", "local_only",
+				"--source", "conversation_text", "--source-since", "2025-01-01", "--yes",
+			}
+			args = append(args, test.credential...)
+
+			_, err := executePersonProviderCommandWithInput(t, deps, input, args...)
+			assert.ErrorContains(t, err, "already exists")
+			assert.Zero(t, input.reads)
+			assert.Zero(t, lookups)
+			assert.Zero(t, negotiations)
+			current, loadErr := config.Load(path, "")
+			require.NoError(t, loadErr)
+			assert.Equal(t, "operator-raced-model", current.People.Sweep.Providers["raced"].Model)
+			_, credentialErr := deps.setup.credentials.Load("raced")
+			assert.ErrorIs(t, credentialErr, peoplesweep.ErrCredentialNotFound)
+		})
+	}
 }
 
 func TestPersonProviderAddRefusesToOverwriteExactCredential(t *testing.T) {

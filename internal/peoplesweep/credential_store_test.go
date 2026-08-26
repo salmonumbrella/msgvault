@@ -20,6 +20,19 @@ import (
 
 const credentialCanary = "test-credential-canary"
 
+func TestValidateProviderProfileNameUsesOneSafeGrammar(t *testing.T) {
+	for _, name := range []string{"a", "Alpha_1", "profile.with-dots", strings.Repeat("z", 64)} {
+		assert.NoError(t, peoplesweep.ValidateProviderProfileName(name), name)
+	}
+	for _, name := range []string{"", "--help", "--json", " leading", "trailing ", "bad\nname", strings.Repeat("z", 65)} {
+		err := peoplesweep.ValidateProviderProfileName(name)
+		assert.Error(t, err, name)
+		if name != "" {
+			assert.NotContains(t, err.Error(), name, "unsafe input must not be reflected")
+		}
+	}
+}
+
 func TestCredentialNeverFormatsSecret(t *testing.T) {
 	credential := peoplesweep.NewCredential(peoplesweep.AuthBearer, credentialCanary)
 	formatted := fmt.Sprintf("%v %#v %s %q %x %p", credential, credential, credential, credential, credential, credential)

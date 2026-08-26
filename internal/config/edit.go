@@ -54,6 +54,9 @@ type TableEdit struct {
 	Path   []string
 	Values map[string]any
 	Remove bool
+	// InsertOnly refuses an exact preexisting table. It is used for named
+	// records whose identity must never be overwritten by a concurrent add.
+	InsertOnly bool
 }
 
 // ConfigFile is an immutable snapshot of one resolved config target.
@@ -73,6 +76,17 @@ type ConfigFile struct {
 	retained *os.File
 	// parentIdentity pins the resolved containing directory for a missing file.
 	parentIdentity string
+}
+
+// SameConfigFileVersion reports whether two snapshots identify the same exact
+// retained file version, including its bytes, mode, resolved path, and inode
+// identity. Matching ETags alone are insufficient because a concurrent writer
+// can replace a file with byte-identical content.
+func SameConfigFileVersion(left, right ConfigFile) bool {
+	return left.Exists && right.Exists && left.LogicalPath == right.LogicalPath &&
+		left.Path == right.Path && left.ETag == right.ETag &&
+		left.Mode.Perm() == right.Mode.Perm() && bytes.Equal(left.Content, right.Content) &&
+		left.identity != "" && left.identity == right.identity
 }
 
 var configEditMu sync.Mutex
@@ -191,7 +205,13 @@ func EditConfigTables(path, ifMatch string, edits []TableEdit) (ConfigFile, erro
 // RestoreConfigFile conditionally restores the exact bytes of a previously
 // retained snapshot through the normal validated atomic-edit machinery.
 func RestoreConfigFile(path, ifMatch string, before ConfigFile) (ConfigFile, error) {
-	if !before.Exists || before.ETag == "" || before.ETag != configETag(before.Content) {
+	if !before.Exists {
+		if before.ETag != configETag(nil) || before.Path == "" || before.parentIdentity == "" {
+			return ConfigFile{}, errors.New("config rollback snapshot is invalid")
+		}
+		return restoreMissingConfigFile(path, ifMatch, before)
+	}
+	if before.ETag == "" || before.ETag != configETag(before.Content) {
 		return ConfigFile{}, errors.New("config rollback snapshot is invalid")
 	}
 	return editConfigWithTransform(path, ifMatch, true, func([]byte) ([]byte, error) {
@@ -199,12 +219,47 @@ func RestoreConfigFile(path, ifMatch string, before ConfigFile) (ConfigFile, err
 	}, defaultConfigFileOps())
 }
 
+func restoreMissingConfigFile(path, ifMatch string, before ConfigFile) (ConfigFile, error) {
+	configEditMu.Lock()
+	defer configEditMu.Unlock()
+	current, err := readConfigFileForEdit(path)
+	if err != nil {
+		return ConfigFile{}, err
+	}
+	if current.retained != nil {
+		defer func() { _ = current.retained.Close() }()
+	}
+	if !current.Exists || ifMatch == "" || current.ETag != ifMatch {
+		return ConfigFile{}, fmt.Errorf("%w: current ETag is %s", ErrConfigConflict, current.ETag)
+	}
+	if current.Path != before.Path {
+		return ConfigFile{}, errors.Join(ErrConfigConflict, errors.New("config rollback target changed"))
+	}
+	if err := retireExactConfigForMissingRestore(current, before); err != nil {
+		return ConfigFile{}, err
+	}
+	restored, err := ReadConfigFile(path)
+	if err != nil {
+		return ConfigFile{}, errors.Join(ErrConfigChanged, fmt.Errorf("verify missing config rollback: %w", err))
+	}
+	if restored.Exists || restored.ETag != before.ETag || restored.Path != before.Path {
+		return ConfigFile{}, errors.Join(ErrConfigChanged, errors.New("missing config rollback could not be verified"))
+	}
+	return restored, nil
+}
+
 func editConfigWithTransform(
 	path, ifMatch string,
 	hasChanges bool,
 	transform func([]byte) ([]byte, error),
 	ops configFileOps,
-) (ConfigFile, error) {
+) (result ConfigFile, resultErr error) {
+	var expected ConfigFile
+	defer func() {
+		if errors.Is(resultErr, ErrConfigChanged) && expected.Exists {
+			result = expected
+		}
+	}()
 	configEditMu.Lock()
 	defer configEditMu.Unlock()
 
@@ -281,6 +336,11 @@ func editConfigWithTransform(
 	if !before.Exists {
 		mode = 0o600
 	}
+	expected = ConfigFile{
+		LogicalPath: before.LogicalPath, Path: before.Path,
+		Content: append([]byte(nil), candidate...), ETag: configETag(candidate),
+		Mode: mode, Exists: true,
+	}
 	if err := secureConfigCandidate(tmp, tmpPath, mode); err != nil {
 		return ConfigFile{}, fmt.Errorf("set config candidate permissions: %w", err)
 	}
@@ -316,6 +376,7 @@ func editConfigWithTransform(
 	}
 	if before.Exists {
 		replacement, replaceErr := conditionalReplace(path, tmpPath, before, ops.replace, ops.read)
+		capturePublishedConfigVersion(&expected, replacement.published, "")
 		if replacement.release != nil {
 			defer func() { _ = replacement.release() }()
 		}
@@ -385,6 +446,7 @@ func editConfigWithTransform(
 		if publication.release != nil {
 			defer func() { _ = publication.release() }()
 		}
+		capturePublishedConfigVersion(&expected, publication.published, before.Path)
 		syncPublication := func() error {
 			if publication.syncDirectory != nil {
 				return publication.syncDirectory()
@@ -455,6 +517,18 @@ func editConfigWithTransform(
 		)
 	}
 	return after, nil
+}
+
+func capturePublishedConfigVersion(expected *ConfigFile, published ConfigFile, pathOverride string) {
+	if pathOverride != "" {
+		published.Path = pathOverride
+	}
+	published.LogicalPath = expected.LogicalPath
+	if published.Exists && published.Path == expected.Path && published.ETag == expected.ETag &&
+		published.Mode.Perm() == expected.Mode.Perm() && bytes.Equal(published.Content, expected.Content) &&
+		published.identity != "" {
+		*expected = published
+	}
 }
 
 func configParentIsMissing(path string) bool {
@@ -893,6 +967,9 @@ func applyTableEdits(content []byte, edits []TableEdit) ([]byte, error) {
 			if len(matches) == 0 {
 				return nil, fmt.Errorf("config table %s does not exist", encodedPath)
 			}
+			if tomlPathHasDescendantContent(lines, path) {
+				return nil, fmt.Errorf("%w: table %s has descendant content", ErrAmbiguousConfigTarget, encodedPath)
+			}
 			lines = removeTOMLTable(lines, matches[0], path)
 			continue
 		}
@@ -906,6 +983,9 @@ func applyTableEdits(content []byte, edits []TableEdit) ([]byte, error) {
 				return nil, err
 			}
 			continue
+		}
+		if edit.InsertOnly {
+			return nil, fmt.Errorf("%w: table %s already exists", ErrAmbiguousConfigTarget, encodedPath)
 		}
 		keys := make([]string, 0, len(edit.Values))
 		for key := range edit.Values {
@@ -943,6 +1023,9 @@ func validateTableEdit(edit TableEdit) ([]string, string, error) {
 		return nil, "", errors.New("config table path is not representable in TOML")
 	}
 	if edit.Remove {
+		if edit.InsertOnly {
+			return nil, "", errors.New("removed config table cannot be insert-only")
+		}
 		if len(edit.Values) != 0 {
 			return nil, "", errors.New("removed config table cannot also contain values")
 		}
@@ -958,6 +1041,32 @@ func validateTableEdit(edit TableEdit) ([]string, string, error) {
 		}
 	}
 	return path, encodedPath, nil
+}
+
+func tomlPathHasDescendantContent(lines []tomlLine, target []string) bool {
+	structural := tomlStructuralLines(lines)
+	var table []string
+	for index, line := range lines {
+		if !structural[index] {
+			continue
+		}
+		if parsed, _, ok := parseTOMLTable(line.body); ok {
+			table = parsed
+			if len(parsed) > len(target) && pathPrefix(target, parsed) {
+				return true
+			}
+			continue
+		}
+		assignment, ok := assignmentKey(line.body)
+		if !ok {
+			continue
+		}
+		fullPath := appendPath(table, assignment)
+		if len(fullPath) > len(target)+1 && pathPrefix(target, fullPath) {
+			return true
+		}
+	}
+	return false
 }
 
 func exactTOMLTableHeaders(lines []tomlLine, path []string) []int {

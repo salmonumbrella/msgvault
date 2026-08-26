@@ -1272,10 +1272,10 @@ func (s *Server) cliRunEnvAllowedForCommand(args []string, name string) bool {
 	if len(args) >= 3 && args[0] == cliRunPersonCommand {
 		providerCall := args[1] == "provider" && args[2] == "check"
 		sweepCall := args[1] == "sweep" && args[2] == "run"
-		if !providerCall && !sweepCall {
+		if providerCall || !sweepCall {
 			return false
 		}
-		keyEnv := s.configuredPeopleProviderKeyEnvForCommand(args)
+		keyEnv := s.configuredPeopleProviderKeyEnv()
 		return keyEnv != "" && keyEnv == name
 	}
 	if keyEnv := s.configuredPeopleProviderKeyEnv(); keyEnv != "" && keyEnv == name {
@@ -1573,7 +1573,7 @@ func cliRunPersonProviderArgsAllowed(operation string, args []string) bool {
 		argument := args[index]
 		if !strings.HasPrefix(argument, "--") {
 			positionals++
-			if positionals > maxPositionals || argument == "" {
+			if positionals > maxPositionals || peoplesweep.ValidateProviderProfileName(argument) != nil {
 				return false
 			}
 			continue
@@ -1625,9 +1625,9 @@ func newCLINDJSONEventWriter[T any](w http.ResponseWriter) func(T) error {
 	}
 }
 
-// cliRunEnvAllowed permits the static forwarding allowlist plus config-named
-// provider API key variables, which the frontend CLI forwards so a key
-// exported in the caller's shell reaches the daemon subprocess.
+// cliRunEnvAllowed permits the static forwarding allowlist plus configured
+// provider variables used by non-check commands. Provider checks always use
+// the daemon process's own environment and reject request-carried values.
 func (s *Server) cliRunEnvAllowed(name string) bool {
 	if clirun.EnvAllowed(name) {
 		return true
@@ -1654,27 +1654,6 @@ func (s *Server) configuredPeopleProviderKeyEnv() string {
 	}
 	_, provider, err := sweep.ActiveProviderConfig()
 	if err != nil || provider.Credential != peoplesweep.CredentialEnv {
-		return ""
-	}
-	return provider.CredentialEnv
-}
-
-func (s *Server) configuredPeopleProviderKeyEnvForCommand(args []string) string {
-	sweep, ok := s.currentPeopleSweepConfig()
-	if !ok {
-		return ""
-	}
-	name := sweep.Provider.Name
-	if len(args) >= 3 && args[0] == cliRunPersonCommand && args[1] == "provider" && args[2] == "check" {
-		for _, argument := range args[3:] {
-			if !strings.HasPrefix(argument, "--") {
-				name = argument
-				break
-			}
-		}
-	}
-	provider, exists := sweep.Providers[name]
-	if !exists || provider.Credential != peoplesweep.CredentialEnv {
 		return ""
 	}
 	return provider.CredentialEnv

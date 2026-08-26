@@ -191,9 +191,18 @@ func (s *FileCredentialStore) Delete(profileName string) error {
 	})
 }
 
-func validateCredentialProfileName(profileName string) error {
+// ValidateProviderProfileName applies the single grammar used by provider
+// config, commands, and the private credential namespace.
+func ValidateProviderProfileName(profileName string) error {
 	if !credentialProfileNamePattern.MatchString(profileName) {
-		return fmt.Errorf("invalid people provider credential profile name %q", profileName)
+		return errors.New("invalid people provider profile name")
+	}
+	return nil
+}
+
+func validateCredentialProfileName(profileName string) error {
+	if err := ValidateProviderProfileName(profileName); err != nil {
+		return fmt.Errorf("invalid people provider credential profile name: %w", err)
 	}
 	return nil
 }

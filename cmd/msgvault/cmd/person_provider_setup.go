@@ -24,7 +24,7 @@ type personProviderSetupDeps struct {
 	credentials peoplesweep.CredentialStore
 	lookupEnv   peoplesweep.CredentialLookup
 	isTerminal  func(uintptr) bool
-	readMasked  func(uintptr) ([]byte, error)
+	readMasked  func(*os.File, int) ([]byte, error)
 }
 
 type personProviderCreateCredentialStore interface {
@@ -74,7 +74,7 @@ func defaultPersonProviderSetupDeps() personProviderSetupDeps {
 		},
 		lookupEnv:  os.LookupEnv,
 		isTerminal: term.IsTerminal,
-		readMasked: term.ReadPassword,
+		readMasked: readBoundedMaskedCredential,
 	}
 }
 
@@ -83,7 +83,7 @@ func newPersonProviderAddCommand(deps personProviderCommandDeps) *cobra.Command 
 	command := &cobra.Command{
 		Use:   "add <name>",
 		Short: "Add and check a named people inference provider profile",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
 			return runPersonProviderAdd(command, deps, args[0], options)
 		},
@@ -117,17 +117,27 @@ func runPersonProviderAdd(
 	name string,
 	options personProviderAddOptions,
 ) error {
-	name = strings.TrimSpace(name)
-	configured := deps.config()
-	if name == "" {
-		return errors.New("people provider profile name is required")
-	}
-	if _, exists := configured.Providers[name]; exists {
-		return fmt.Errorf("people provider profile %q already exists", name)
+	if err := peoplesweep.ValidateProviderProfileName(name); err != nil {
+		return err
 	}
 	if deps.readConfigFile == nil || deps.editConfigTables == nil || deps.restoreConfigFile == nil {
 		return errors.New("people provider config editing is unavailable")
 	}
+	candidate, err := personProviderCandidate(options)
+	if err != nil {
+		return err
+	}
+	if err := validatePersonProviderAddOptions(candidate, options); err != nil {
+		return err
+	}
+	configured := deps.config()
+	if _, exists := configured.Providers[name]; exists {
+		return fmt.Errorf("people provider profile %q already exists", name)
+	}
+	if err := validatePersonProviderCandidate(configured, name, candidate); err != nil {
+		return err
+	}
+	printPersonProviderCandidate(command.OutOrStdout(), name, candidate)
 
 	var suggestions []peoplesweep.ProviderSuggestion
 	if !options.custom && deps.setup.catalog != nil {
@@ -140,16 +150,26 @@ func runPersonProviderAdd(
 			printPersonProviderSuggestions(command.OutOrStdout(), suggestions)
 		}
 	}
-	candidate, err := personProviderCandidate(options)
+	before, err := deps.readConfigFile()
 	if err != nil {
 		return err
 	}
-	printPersonProviderCandidate(command.OutOrStdout(), name, candidate)
-	if !options.confirmed {
-		return errors.New("people provider add requires --yes after reviewing the final values")
+	configured, err = personProviderConfigFromSnapshot(deps, before)
+	if err != nil {
+		return err
+	}
+	if _, exists := configured.Providers[name]; exists {
+		return fmt.Errorf("people provider profile %q already exists", name)
 	}
 	if err := validatePersonProviderCandidate(configured, name, candidate); err != nil {
 		return err
+	}
+	var catalogPrices *peoplesweep.BudgetConfig
+	if options.acceptCatalogPrices {
+		catalogPrices, err = acceptedPersonProviderCatalogPrices(configured.Budgets, suggestions, candidate)
+		if err != nil {
+			return err
+		}
 	}
 
 	credential, stored, err := readPersonProviderCredential(command, deps.setup, name, candidate, options)
@@ -172,17 +192,6 @@ func runPersonProviderAdd(
 		return err
 	}
 
-	before, err := deps.readConfigFile()
-	if err != nil {
-		return err
-	}
-	var catalogPrices *peoplesweep.BudgetConfig
-	if options.acceptCatalogPrices {
-		catalogPrices, err = acceptedPersonProviderCatalogPrices(configured.Budgets, suggestions, candidate)
-		if err != nil {
-			return err
-		}
-	}
 	createdCredential := false
 	if stored {
 		if deps.setup.credentials == nil {
@@ -203,7 +212,7 @@ func runPersonProviderAdd(
 
 	edits := []config.TableEdit{
 		{Path: []string{"people", "sweep"}, Values: map[string]any{"provider": name}},
-		{Path: []string{"people", "sweep", "providers", name}, Values: personProviderTableValues(candidate)},
+		{Path: []string{"people", "sweep", "providers", name}, Values: personProviderTableValues(candidate), InsertOnly: true},
 	}
 	if catalogPrices != nil {
 		edits = append(edits, config.TableEdit{
@@ -216,12 +225,15 @@ func runPersonProviderAdd(
 	}
 	after, err := deps.editConfigTables(before.ETag, edits)
 	if err != nil {
+		if errors.Is(err, config.ErrConfigChanged) {
+			return rollbackUncertainPersonProviderAdd(err, deps, before, after, name, createdCredential)
+		}
 		return rollbackNewPersonProviderCredential(err, deps.setup.credentials, name, createdCredential)
 	}
-	loaded, err := config.LoadConfigFile(after, "")
+	checkedConfig, err := personProviderConfigFromSnapshot(deps, after)
 	if err == nil {
 		checkedDeps := deps
-		checkedDeps.config = func() peoplesweep.Config { return loaded.People.Sweep }
+		checkedDeps.config = func() peoplesweep.Config { return checkedConfig }
 		err = executeSavedPersonProviderCheck(command, checkedDeps, name)
 	}
 	if err != nil {
@@ -266,6 +278,41 @@ func personProviderCandidate(options personProviderAddOptions) (peoplesweep.Prov
 	return candidate, nil
 }
 
+func validatePersonProviderAddOptions(
+	candidate peoplesweep.ProviderConfig,
+	options personProviderAddOptions,
+) error {
+	if !options.confirmed {
+		return errors.New("people provider add requires --yes after reviewing the final values")
+	}
+	if options.custom && options.acceptCatalogPrices {
+		return errors.New("--custom cannot be combined with --accept-catalog-prices")
+	}
+	if options.apiKeyStdin && options.credentialEnv != "" {
+		return errors.New("--api-key-stdin and --credential-env are mutually exclusive")
+	}
+	if candidate.Credential == peoplesweep.CredentialNone &&
+		(options.apiKeyStdin || options.credentialEnv != "") {
+		return errors.New("auth=none cannot accept a credential")
+	}
+	return nil
+}
+
+func personProviderConfigFromSnapshot(
+	deps personProviderCommandDeps,
+	snapshot config.ConfigFile,
+) (peoplesweep.Config, error) {
+	homeDir := ""
+	if deps.configHomeDir != nil {
+		homeDir = deps.configHomeDir()
+	}
+	loaded, err := config.LoadConfigFile(snapshot, homeDir)
+	if err != nil {
+		return peoplesweep.Config{}, err
+	}
+	return loaded.People.Sweep, nil
+}
+
 func readPersonProviderCredential(
 	command *cobra.Command,
 	setup personProviderSetupDeps,
@@ -304,7 +351,7 @@ func readPersonProviderCredential(
 				errors.New("a masked terminal is required; use --api-key-stdin for non-interactive setup")
 		}
 		_, _ = fmt.Fprintf(command.ErrOrStderr(), "API key for %s: ", name)
-		raw, err = setup.readMasked(file.Fd())
+		raw, err = setup.readMasked(file, maxProviderCredentialBytes)
 		_, _ = fmt.Fprintln(command.ErrOrStderr())
 	}
 	if err != nil {
@@ -314,6 +361,82 @@ func readPersonProviderCredential(
 		return peoplesweep.Credential{}, false, errors.New("people provider credential is empty or too large")
 	}
 	return peoplesweep.NewCredential(candidate.Auth, string(raw)), true, nil
+}
+
+func readBoundedMaskedCredential(file *os.File, limit int) ([]byte, error) {
+	return readBoundedMaskedCredentialWithTerminal(
+		file, file.Fd(), limit, term.MakeRaw, term.Restore,
+	)
+}
+
+func readBoundedMaskedCredentialWithTerminal(
+	reader io.Reader,
+	fd uintptr,
+	limit int,
+	makeRaw func(uintptr) (*term.State, error),
+	restore func(uintptr, *term.State) error,
+) (credential []byte, resultErr error) {
+	state, err := makeRaw(fd)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := restore(fd, state); err != nil {
+			clear(credential)
+			credential = nil
+			resultErr = errors.Join(resultErr, fmt.Errorf("restore credential terminal: %w", err))
+		}
+	}()
+	return readBoundedMaskedCredentialInput(reader, limit)
+}
+
+func readBoundedMaskedCredentialInput(reader io.Reader, limit int) ([]byte, error) {
+	if limit <= 0 {
+		return nil, errors.New("credential input limit is invalid")
+	}
+	credential := make([]byte, 0, min(limit, 128))
+	tooLarge := false
+	var input [1]byte
+	for {
+		read, err := reader.Read(input[:])
+		if read > 0 {
+			switch input[0] {
+			case '\r', '\n', 0x04:
+				if tooLarge {
+					clear(credential)
+					return nil, errors.New("credential is too large")
+				}
+				return credential, nil
+			case 0x03:
+				clear(credential)
+				return nil, errors.New("credential entry canceled")
+			case 0x08, 0x7f:
+				if !tooLarge && len(credential) > 0 {
+					credential = credential[:len(credential)-1]
+				}
+			default:
+				if len(credential) == limit {
+					tooLarge = true
+				} else if !tooLarge {
+					credential = append(credential, input[0])
+				}
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) && !tooLarge {
+				return credential, nil
+			}
+			clear(credential)
+			if tooLarge {
+				return nil, errors.New("credential is too large")
+			}
+			return nil, err
+		}
+		if read == 0 {
+			clear(credential)
+			return nil, io.ErrNoProgress
+		}
+	}
 }
 
 func readProviderCredentialLine(reader io.Reader) ([]byte, error) {
@@ -443,30 +566,53 @@ func executeSavedPersonProviderCheck(
 	deps personProviderCommandDeps,
 	name string,
 ) error {
-	root := &cobra.Command{Use: "msgvault", SilenceErrors: true, SilenceUsage: true}
-	person := &cobra.Command{Use: "person"}
-	person.AddCommand(newPersonProviderCommand(deps))
-	root.AddCommand(person)
-	root.SetArgs([]string{"person", "provider", "check", name})
-	root.SetOut(command.OutOrStdout())
-	root.SetErr(command.ErrOrStderr())
-	root.SetIn(command.InOrStdin())
-	return root.ExecuteContext(command.Context())
+	if err := peoplesweep.ValidateProviderProfileName(name); err != nil {
+		return err
+	}
+	directStore := deps.isDaemonSubprocess != nil && deps.isDaemonSubprocess()
+	if !directStore && deps.providerStoreOwnedByDaemon != nil {
+		owned, err := deps.providerStoreOwnedByDaemon(command.Context())
+		if err != nil {
+			return err
+		}
+		directStore = !owned
+	}
+	if directStore {
+		return runPersonProviderCheck(command, deps, name, false)
+	}
+	return proxySavedPersonProviderOperation(command, deps, "check", name)
 }
 
-func executeSavedPersonProviderRevoke(
+func proxySavedPersonProviderRevoke(
 	command *cobra.Command,
 	deps personProviderCommandDeps,
 	name string,
 ) error {
-	root := &cobra.Command{Use: "msgvault", SilenceErrors: true, SilenceUsage: true}
+	return proxySavedPersonProviderOperation(command, deps, "revoke", name)
+}
+
+func proxySavedPersonProviderOperation(
+	command *cobra.Command,
+	deps personProviderCommandDeps,
+	operation string,
+	name string,
+) error {
+	if err := peoplesweep.ValidateProviderProfileName(name); err != nil {
+		return err
+	}
+	if deps.proxy == nil {
+		return errors.New("people provider daemon proxy is unavailable")
+	}
+	root := &cobra.Command{Use: "msgvault"}
 	person := &cobra.Command{Use: "person"}
-	person.AddCommand(newPersonProviderCommand(deps))
+	provider := &cobra.Command{Use: "provider"}
+	leaf := &cobra.Command{Use: operation}
+	provider.AddCommand(leaf)
+	person.AddCommand(provider)
 	root.AddCommand(person)
-	root.SetArgs([]string{"person", "provider", "revoke", name})
-	root.SetOut(command.OutOrStdout())
-	root.SetErr(command.ErrOrStderr())
-	return root.ExecuteContext(command.Context())
+	leaf.SetOut(command.OutOrStdout())
+	leaf.SetErr(command.ErrOrStderr())
+	return deps.proxy(leaf, []string{name}, nil)
 }
 
 func rollbackNewPersonProviderCredential(
@@ -482,6 +628,27 @@ func rollbackNewPersonProviderCredential(
 		return errors.Join(cause, fmt.Errorf("delete newly created people provider credential: %w", err))
 	}
 	return cause
+}
+
+func rollbackUncertainPersonProviderAdd(
+	cause error,
+	deps personProviderCommandDeps,
+	before, expected config.ConfigFile,
+	name string,
+	createdCredential bool,
+) error {
+	current, err := deps.readConfigFile()
+	if err != nil {
+		cleanupErr := rollbackNewPersonProviderCredential(nil, deps.setup.credentials, name, createdCredential)
+		return errors.Join(cause, fmt.Errorf("inspect uncertain people provider config publication: %w", err), cleanupErr)
+	}
+	if config.SameConfigFileVersion(current, expected) {
+		return errors.Join(cause, rollbackPersonProviderAdd(deps, before, current, name, createdCredential))
+	}
+	cleanupErr := rollbackNewPersonProviderCredential(nil, deps.setup.credentials, name, createdCredential)
+	return errors.Join(cause,
+		errors.New("people provider config publication is uncertain and the current version was preserved"),
+		cleanupErr)
 }
 
 func rollbackPersonProviderAdd(

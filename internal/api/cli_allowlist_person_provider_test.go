@@ -1,6 +1,7 @@
 package api
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,8 @@ func TestCLIRunCommandAllowedPermitsExactPersonProviderCommands(t *testing.T) {
 		{name: "login is local", args: []string{"person", "provider", "login"}},
 		{name: "models are local", args: []string{"person", "provider", "models"}},
 		{name: "secret flag smuggling", args: []string{"person", "provider", "check", "--api-key=secret-canary"}},
+		{name: "control profile name", args: []string{"person", "provider", "check", "bad\nname"}},
+		{name: "oversize profile name", args: []string{"person", "provider", "history", strings.Repeat("x", 65)}},
 		{name: "extra positional smuggling", args: []string{"person", "provider", "check", "alpha", "beta"}},
 		{name: "list positional smuggling", args: []string{"person", "provider", "list", "alpha"}},
 		{name: "missing operation", args: []string{"person", "provider"}},
@@ -101,7 +104,7 @@ func TestCLIAllowlistPermitsExactPersonSweepCommands(t *testing.T) {
 	}
 }
 
-func TestCLIAllowlistReloadsSavedNamedProviderEnvironment(t *testing.T) {
+func TestCLIAllowlistRejectsProviderCredentialValuesInDaemonRequest(t *testing.T) {
 	cfg := config.NewDefaultConfig()
 	cfg.HomeDir = t.TempDir()
 	cfg.People.Sweep.Enabled = true
@@ -118,7 +121,7 @@ func TestCLIAllowlistReloadsSavedNamedProviderEnvironment(t *testing.T) {
 
 	srv := &Server{cfg: cfg}
 	args := []string{"person", "provider", "check", "named", "--json"}
-	assert.True(t, srv.cliRunEnvAllowedForCommand(args, "EXACT_NAMED_KEY"))
+	assert.False(t, srv.cliRunEnvAllowedForCommand(args, "EXACT_NAMED_KEY"))
 	assert.False(t, srv.cliRunEnvAllowedForCommand(args, "STALE_ACTIVE_KEY"))
 	assert.False(t, srv.cliRunEnvAllowedForCommand(args, "OPENAI_API_KEY"))
 }

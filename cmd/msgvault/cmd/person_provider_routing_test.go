@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -8,16 +11,14 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/peoplesweep"
+	"go.kenn.io/msgvault/internal/testutil"
 )
 
 func TestPersonProviderFrontendRoutesExactCommandsAndCredential(t *testing.T) {
 	tests := []struct {
-		name        string
-		args        []string
-		keyValue    string
-		wantArgs    []string
-		wantEnv     map[string]string
-		wantLookups int
+		name     string
+		args     []string
+		wantArgs []string
 	}{
 		{name: "status", args: []string{"status", "--json"},
 			wantArgs: []string{"person", "provider", "status", "--json"}},
@@ -31,11 +32,8 @@ func TestPersonProviderFrontendRoutesExactCommandsAndCredential(t *testing.T) {
 			wantArgs: []string{"person", "provider", "history", "--json", "default"}},
 		{name: "semantic consent", args: []string{"consent", "--semantic-embeddings", "--yes"},
 			wantArgs: []string{"person", "provider", "consent", "--semantic-embeddings", "--yes"}},
-		{name: "check without key", args: []string{"check", "--json"},
-			wantArgs: []string{"person", "provider", "check", "--json"}, wantLookups: 1},
-		{name: "check with key", args: []string{"check"}, keyValue: "caller-key",
-			wantArgs: []string{"person", "provider", "check"},
-			wantEnv:  map[string]string{"TEST_PROVIDER_KEY": "caller-key"}, wantLookups: 1},
+		{name: "check", args: []string{"check", "--json"},
+			wantArgs: []string{"person", "provider", "check", "--json"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -49,7 +47,7 @@ func TestPersonProviderFrontendRoutesExactCommandsAndCredential(t *testing.T) {
 				lookupEnv: func(name string) (string, bool) {
 					lookups++
 					assert.Equal("TEST_PROVIDER_KEY", name)
-					return test.keyValue, test.keyValue != ""
+					return "caller-secret-canary", true
 				},
 				proxy: func(command *cobra.Command, args []string, env map[string]string) error {
 					var err error
@@ -63,13 +61,13 @@ func TestPersonProviderFrontendRoutesExactCommandsAndCredential(t *testing.T) {
 			_, err := executePersonProviderCommand(t, deps, test.args...)
 			require.NoError(t, err)
 			assert.Equal(test.wantArgs, gotArgs)
-			assert.Equal(test.wantEnv, gotEnv)
-			assert.Equal(test.wantLookups, lookups)
+			assert.Nil(gotEnv)
+			assert.Zero(lookups)
 		})
 	}
 }
 
-func TestPersonProviderFrontendNamedCheckForwardsOnlySelectedExactEnvironment(t *testing.T) {
+func TestPersonProviderFrontendNamedCheckSendsOnlyProfileName(t *testing.T) {
 	config := personProviderTestConfig()
 	secondary := configuredPersonProvider(config)
 	secondary.Model = "secondary-model"
@@ -100,8 +98,8 @@ func TestPersonProviderFrontendNamedCheckForwardsOnlySelectedExactEnvironment(t 
 	_, err := executePersonProviderCommand(t, deps, "check", "secondary", "--json")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"person", "provider", "check", "--json", "secondary"}, gotArgs)
-	assert.Equal(t, []string{"SECONDARY_PROVIDER_KEY"}, lookups)
-	assert.Equal(t, map[string]string{"SECONDARY_PROVIDER_KEY": "selected-key-canary"}, gotEnv)
+	assert.Empty(t, lookups)
+	assert.Nil(t, gotEnv)
 }
 
 func TestPersonProviderLoginAndModelsNeverProxy(t *testing.T) {
@@ -132,6 +130,7 @@ func TestPersonProviderFrontendRemoveProxiesOnlyNamedRevoke(t *testing.T) {
 	beta := configuredPersonProvider(configured)
 	beta.Model = "beta-model"
 	configured.Providers["beta"] = beta
+	path, _ := retainedPersonProviderTestConfig(t, configured)
 	var gotArgs []string
 	deps := personProviderCommandDeps{
 		config:             func() peoplesweep.Config { return configured },
@@ -146,14 +145,15 @@ func TestPersonProviderFrontendRemoveProxiesOnlyNamedRevoke(t *testing.T) {
 			return nil, nil, assert.AnError
 		},
 		readConfigFile: func() (config.ConfigFile, error) {
-			return config.ConfigFile{ETag: `"sha256-before"`, Exists: true}, nil
+			return config.ReadConfigFile(path)
 		},
-		editConfigTables: func(string, []config.TableEdit) (config.ConfigFile, error) {
-			return config.ConfigFile{ETag: `"sha256-after"`, Exists: true}, nil
+		editConfigTables: func(etag string, edits []config.TableEdit) (config.ConfigFile, error) {
+			return config.EditConfigTables(path, etag, edits)
 		},
-		restoreConfigFile: func(string, config.ConfigFile) (config.ConfigFile, error) {
-			return config.ConfigFile{}, assert.AnError
+		restoreConfigFile: func(etag string, before config.ConfigFile) (config.ConfigFile, error) {
+			return config.RestoreConfigFile(path, etag, before)
 		},
+		configHomeDir: func() string { return filepath.Dir(path) },
 	}
 
 	_, err := executePersonProviderCommand(t, deps, "remove", "beta")
@@ -186,4 +186,67 @@ func TestPersonProviderAnonymousCheckForwardsNoCredential(t *testing.T) {
 	_, err := executePersonProviderCommand(t, deps, "check")
 	require.NoError(t, err)
 	assert.Nil(t, gotEnv)
+}
+
+// TestPersonProviderFrontendCheckUsesDirectStoreWithoutDaemon catches the
+// final add check auto-starting a daemon instead of using the available local
+// writer when no daemon owns the database.
+func TestPersonProviderFrontendCheckUsesDirectStoreWithoutDaemon(t *testing.T) {
+	configured := personProviderTestConfig()
+	checker := &fixedPersonProviderChecker{response: peoplesweep.StructuredResponse{
+		Output: []byte(`{"ok":true}`), ProviderVersion: peoplesweep.OpenAICompatibleProviderVersion,
+		ModelVersion: "direct-model-v1",
+	}}
+	st := testutil.NewSQLiteTestStore(t)
+	deps := localPersonProviderDeps(configured, st, checker)
+	deps.isDaemonSubprocess = func() bool { return false }
+	deps.providerStoreOwnedByDaemon = func(context.Context) (bool, error) { return false, nil }
+	deps.proxy = func(*cobra.Command, []string, map[string]string) error {
+		require.FailNow(t, "no-daemon check must not proxy or auto-start a daemon")
+		return assert.AnError
+	}
+
+	output, err := executePersonProviderCommand(t, deps, "check", "default", "--json")
+	require.NoError(t, err)
+	assert.Contains(t, output, `"ok":true`)
+}
+
+func TestPersonProviderCommandsRejectUnsafeNamesBeforeRoutingOrState(t *testing.T) {
+	tests := []struct {
+		operation string
+		name      string
+	}{
+		{operation: "add", name: "--json"},
+		{operation: "check", name: "bad\nname"},
+		{operation: "use", name: strings.Repeat("u", 65)},
+		{operation: "remove", name: "--help"},
+		{operation: "status", name: "bad\rname"},
+		{operation: "consent", name: " leading"},
+		{operation: "revoke", name: "trailing "},
+		{operation: "history", name: "--json"},
+	}
+	for _, test := range tests {
+		t.Run(test.operation, func(t *testing.T) {
+			stateCalls := 0
+			proxyCalls := 0
+			deps := personProviderCommandDeps{
+				config: func() peoplesweep.Config {
+					stateCalls++
+					return personProviderTestConfig()
+				},
+				isDaemonSubprocess: func() bool { return false },
+				proxy: func(*cobra.Command, []string, map[string]string) error {
+					proxyCalls++
+					return nil
+				},
+			}
+
+			_, err := executePersonProviderCommand(t, deps, test.operation, "--", test.name)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid people provider profile name")
+			assert.NotContains(t, err.Error(), test.name)
+			assert.Zero(t, stateCalls)
+			assert.Zero(t, proxyCalls)
+		})
+	}
 }

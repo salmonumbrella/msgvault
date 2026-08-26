@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 
@@ -52,10 +53,7 @@ func (s *inProcessPersonProviderDaemonStore) RunCLICommand(
 			config,
 			consent,
 			registry,
-			peoplesweep.NewCredentialResolver(s.credentials, func(name string) (string, bool) {
-				value, ok := req.Env[name]
-				return value, ok
-			}),
+			peoplesweep.NewCredentialResolver(s.credentials, os.LookupEnv),
 		)
 	}
 
@@ -113,24 +111,38 @@ func TestPersonProviderRealDaemonSyntheticCheckAndRevoke(t *testing.T) {
 		config.Endpoint = provider.URL + "/v1"
 	})
 	st := testutil.NewSQLiteTestStore(t)
+	requestsToDaemon := make(chan api.CLIRunRequest, 4)
 	daemonConfig := &config.Config{People: peoplesweep.PeopleConfig{Sweep: peopleConfig}}
 	daemonStore := &inProcessPersonProviderDaemonStore{
 		storeAPIAdapter: &storeAPIAdapter{store: st},
 		config:          peopleConfig,
 		httpClient:      provider.Client(),
+		requests:        requestsToDaemon,
 	}
-	logger := slog.New(slog.DiscardHandler)
+	var daemonLogs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&daemonLogs, nil))
 	daemon := api.NewServerWithOptions(api.ServerOptions{
 		Config: daemonConfig, Store: daemonStore, Logger: logger,
 		OperationGate: api.NewSerialOperationGate(),
 	})
-	daemonHTTP := httptest.NewServer(daemon.Router())
+	rawDaemonBodies := make(chan []byte, 4)
+	daemonRouter := daemon.Router()
+	daemonHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/cli/run" {
+			body, readErr := io.ReadAll(r.Body)
+			require.NoError(readErr)
+			rawDaemonBodies <- body
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		daemonRouter.ServeHTTP(w, r)
+	}))
 	t.Cleanup(daemonHTTP.Close)
 
 	frontendConfig := *daemonConfig
 	frontendConfig.Remote = config.RemoteConfig{URL: daemonHTTP.URL, AllowInsecure: true}
 	withStoreResolverConfig(t, &frontendConfig)
-	t.Setenv("TEST_PROVIDER_KEY", "caller-key")
+	const environmentSecretCanary = "caller-key-never-in-daemon-request"
+	t.Setenv("TEST_PROVIDER_KEY", environmentSecretCanary)
 	deps := defaultPersonProviderCommandDeps()
 
 	_, err := executePersonProviderCommand(t, deps, "consent", "--yes", "--json")
@@ -145,7 +157,7 @@ func TestPersonProviderRealDaemonSyntheticCheckAndRevoke(t *testing.T) {
 	}`, output)
 
 	captured := <-requests
-	assert.Equal("Bearer caller-key", captured.Authorization)
+	assert.Equal("Bearer "+environmentSecretCanary, captured.Authorization)
 	assert.Equal("/v1/chat/completions", captured.Path)
 	assert.Equal("test-model", captured.Body["model"])
 	messages, ok := captured.Body["messages"].([]any)
@@ -155,6 +167,15 @@ func TestPersonProviderRealDaemonSyntheticCheckAndRevoke(t *testing.T) {
 	require.True(ok)
 	assert.Equal("Return an object with ok set to true.", message["content"])
 	assert.NotContains(string(mustJSON(t, captured.Body)), "archive")
+	for range 2 {
+		req := <-requestsToDaemon
+		wire := mustJSON(t, req)
+		assert.Empty(req.Env)
+		assert.NotContains(string(wire), environmentSecretCanary)
+		assert.NotContains(string(<-rawDaemonBodies), environmentSecretCanary)
+	}
+	assert.NotContains(output, environmentSecretCanary)
+	assert.NotContains(daemonLogs.String(), environmentSecretCanary)
 
 	_, err = executePersonProviderCommand(t, deps, "revoke", "--json")
 	require.NoError(err)

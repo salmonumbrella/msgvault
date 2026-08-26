@@ -48,6 +48,29 @@ func personProviderTestConfig() peoplesweep.Config {
 	return config
 }
 
+func retainedPersonProviderTestConfig(
+	t *testing.T,
+	configured peoplesweep.Config,
+) (string, config.ConfigFile) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.toml")
+	before, err := config.ReadConfigFile(path)
+	require.NoError(t, err)
+	edits := []config.TableEdit{{
+		Path: []string{"people", "sweep"}, Values: map[string]any{
+			"enabled": configured.Enabled, "provider": configured.Provider.Name,
+		},
+	}}
+	for name, provider := range configured.Providers {
+		edits = append(edits, config.TableEdit{
+			Path: []string{"people", "sweep", "providers", name}, Values: personProviderTableValues(provider),
+		})
+	}
+	after, err := config.EditConfigTables(path, before.ETag, edits)
+	require.NoError(t, err)
+	return path, after
+}
+
 func configuredPersonProvider(config peoplesweep.Config) peoplesweep.ProviderConfig {
 	return config.Providers[config.Provider.Name]
 }
@@ -528,6 +551,7 @@ func TestPersonProviderListAndUseRequireExactVerification(t *testing.T) {
 	beta.Credential = peoplesweep.CredentialStored
 	beta.CredentialEnv = ""
 	configured.Providers["beta"] = beta
+	path, snapshot := retainedPersonProviderTestConfig(t, configured)
 	st := testutil.NewSQLiteTestStore(t)
 	var edits []config.TableEdit
 	deps := localPersonProviderDeps(configured, st, nil)
@@ -537,13 +561,14 @@ func TestPersonProviderListAndUseRequireExactVerification(t *testing.T) {
 		return nil, nil, assert.AnError
 	}
 	deps.readConfigFile = func() (config.ConfigFile, error) {
-		return config.ConfigFile{ETag: `"sha256-known"`, Exists: true}, nil
+		return snapshot, nil
 	}
 	deps.editConfigTables = func(ifMatch string, got []config.TableEdit) (config.ConfigFile, error) {
-		checks.Equal(`"sha256-known"`, ifMatch)
+		checks.Equal(snapshot.ETag, ifMatch)
 		edits = append([]config.TableEdit(nil), got...)
 		return config.ConfigFile{ETag: `"sha256-new"`, Exists: true}, nil
 	}
+	deps.configHomeDir = func() string { return filepath.Dir(path) }
 
 	listed, err := executePersonProviderCommand(t, deps, "list", "--json")
 	must.NoError(err)
@@ -574,6 +599,44 @@ func TestPersonProviderListAndUseRequireExactVerification(t *testing.T) {
 	must.Len(edits, 1)
 	checks.Equal([]string{"people", "sweep"}, edits[0].Path)
 	checks.Equal(map[string]any{"provider": "beta"}, edits[0].Values)
+}
+
+func TestPersonProviderUseVerifiesFingerprintFromSameConfigSnapshot(t *testing.T) {
+	path, loaded := providerSetupConfigFile(t)
+	startup := loaded.People.Sweep
+	startup.Enabled = true
+	startupProfile, err := startup.Profile()
+	require.NoError(t, err)
+	st := testutil.NewSQLiteTestStore(t)
+	_, err = st.EnsurePersonInferenceProfile(t.Context(), startupProfile)
+	require.NoError(t, err)
+	require.NoError(t, st.RecordPersonInferenceCheck(t.Context(), store.PersonInferenceCheck{
+		ProfileFingerprint: startupProfile.Fingerprint, CheckedAt: time.Now().UTC(),
+		DriverVersion: startupProfile.DriverVersion, OutputMode: startupProfile.OutputMode,
+		ModelVersion: "startup-model-v1",
+	}))
+	snapshot, err := config.ReadConfigFile(path)
+	require.NoError(t, err)
+	changed := configuredPersonProvider(startup)
+	changed.Model = "operator-changed-model"
+	_, err = config.EditConfigTables(path, snapshot.ETag, []config.TableEdit{{
+		Path:   []string{"people", "sweep", "providers", "default"},
+		Values: personProviderTableValues(changed),
+	}})
+	require.NoError(t, err)
+
+	deps := localPersonProviderDeps(startup, st, nil)
+	deps.config = func() peoplesweep.Config { return startup }
+	deps.readConfigFile = func() (config.ConfigFile, error) { return config.ReadConfigFile(path) }
+	editCalls := 0
+	deps.editConfigTables = func(string, []config.TableEdit) (config.ConfigFile, error) {
+		editCalls++
+		return config.ConfigFile{}, nil
+	}
+
+	_, err = executePersonProviderCommand(t, deps, "use", "default")
+	require.ErrorContains(t, err, "successful check")
+	assert.Zero(t, editCalls)
 }
 
 // TestPersonProviderNamedConsentAndRevoke catches profile arguments being
