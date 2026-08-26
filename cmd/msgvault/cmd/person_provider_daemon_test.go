@@ -130,7 +130,9 @@ func TestPersonProviderRealDaemonSyntheticCheckAndRevoke(t *testing.T) {
 	daemonHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/cli/run" {
 			body, readErr := io.ReadAll(r.Body)
-			require.NoError(readErr)
+			if !assert.NoError(t, readErr) {
+				return
+			}
 			rawDaemonBodies <- body
 			r.Body = io.NopCloser(bytes.NewReader(body))
 		}

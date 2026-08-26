@@ -1510,6 +1510,8 @@ func printPersonProviderDisclosure(w io.Writer, profile peoplesweep.ProviderProf
 		authentication = "environment variable " + profile.CredentialRef
 	case peoplesweep.CredentialStored:
 		authentication = "stored credential (" + string(profile.Auth) + ")"
+	case peoplesweep.CredentialNone:
+		authentication = "anonymous loopback"
 	}
 	sensitive := "denied"
 	if profile.AllowSensitive {

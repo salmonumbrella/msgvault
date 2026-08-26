@@ -77,7 +77,7 @@ func (d *AnthropicMessagesDriver) Prepare(
 	case OutputModePromptJSON:
 		body.System = promptJSONInstruction + string(request.JSONSchema)
 	default:
-		return PreparedStructuredRequest{}, errors.New("Anthropic Messages profile has unsupported output mode")
+		return PreparedStructuredRequest{}, errors.New("anthropic messages profile has unsupported output mode")
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {

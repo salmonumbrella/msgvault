@@ -108,7 +108,7 @@ func (s *ProviderSelection) UnmarshalTOML(value any) error {
 	}
 }
 
-func (s ProviderSelection) MarshalTOML() ([]byte, error) {
+func (s *ProviderSelection) MarshalTOML() ([]byte, error) {
 	return json.Marshal(s.Name)
 }
 

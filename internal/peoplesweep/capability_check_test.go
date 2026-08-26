@@ -118,8 +118,9 @@ func TestCapabilityNegotiationChecksRequestedReasoningSeparately(t *testing.T) {
 				} else {
 					assert.Equal(t, "high", body["reasoning_effort"])
 					reasoning, ok := body["reasoning"].(map[string]any)
-					require.True(t, ok)
-					assert.Equal(t, true, reasoning["enabled"])
+					if assert.True(t, ok) {
+						assert.Equal(t, true, reasoning["enabled"])
+					}
 				}
 				if call == 2 && test.reasonCode != http.StatusOK {
 					w.WriteHeader(test.reasonCode)
@@ -478,7 +479,7 @@ func TestCapabilityNegotiationStopsOnParameterizedRepresentationCodeForEveryProt
 				calls.Add(1)
 				assert.Equal(t, test.path, r.URL.Path)
 				var body map[string]any
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 				if test.protocol == ProtocolGoogleGenerateContent {
 					assert.NotContains(t, body, "model")
 				} else {

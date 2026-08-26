@@ -187,6 +187,7 @@ func TestRestoreConfigPinsExpectedPublishedIdentityAtFinalBoundary(t *testing.T)
 		{
 			name: "symlink to identical bytes",
 			swap: func(t *testing.T, path string, content []byte) {
+				t.Helper()
 				target := filepath.Join(filepath.Dir(path), "operator-target.toml")
 				require.NoError(t, os.WriteFile(target, content, 0o600))
 				require.NoError(t, os.Remove(path))
@@ -196,6 +197,7 @@ func TestRestoreConfigPinsExpectedPublishedIdentityAtFinalBoundary(t *testing.T)
 		{
 			name: "hardlink to identical bytes",
 			swap: func(t *testing.T, path string, content []byte) {
+				t.Helper()
 				target := filepath.Join(filepath.Dir(path), "operator-target.toml")
 				require.NoError(t, os.WriteFile(target, content, 0o600))
 				require.NoError(t, os.Remove(path))

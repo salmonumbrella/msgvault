@@ -252,6 +252,7 @@ func TestPersonProviderRemoveCompletesLocalPreflightBeforeRevoke(t *testing.T) {
 				return c
 			}(),
 			mutateFile: func(t *testing.T, path string) {
+				t.Helper()
 				content, err := os.ReadFile(path)
 				require.NoError(t, err)
 				header := []byte("[people.sweep.providers.beta]\n")

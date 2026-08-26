@@ -457,7 +457,7 @@ func TestCredentialStoreSaveUsesPinnedNamespaceAfterPathSwap(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(external, "profile.json"))
 	contents, err := os.ReadFile(filepath.Join(retained, "profile.json"))
 	require.NoError(t, err)
-	assert.Positive(t, len(contents), "credential was not published in the pinned namespace")
+	assert.NotEmpty(t, contents, "credential was not published in the pinned namespace")
 }
 
 func TestCredentialStoreLoadUsesPinnedEntryAfterSwap(t *testing.T) {

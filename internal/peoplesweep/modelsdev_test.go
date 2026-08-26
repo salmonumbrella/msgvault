@@ -67,11 +67,14 @@ func TestModelsDevFetchParsesCurrentFixtureDeterministicallyByAPIShape(t *testin
 	assert.Equal(t, "${CATALOG_BASE_URL}/v1", got[3].Endpoint)
 
 	require.Len(t, got[0].Models, 1)
-	assert.Equal(t, ModelSuggestion{
-		ID: "alpha-basic", Name: "Alpha Basic", Reasoning: false, StructuredOutput: true,
-		InputCostMicroUSDPerMillionTokens:  int64Pointer(1),
-		OutputCostMicroUSDPerMillionTokens: int64Pointer(2_500_000),
-	}, got[0].Models[0])
+	assert.Equal(t, "alpha-basic", got[0].Models[0].ID)
+	assert.Equal(t, "Alpha Basic", got[0].Models[0].Name)
+	assert.False(t, got[0].Models[0].Reasoning)
+	assert.True(t, got[0].Models[0].StructuredOutput)
+	require.NotNil(t, got[0].Models[0].InputCostMicroUSDPerMillionTokens)
+	assert.Equal(t, int64(1), *got[0].Models[0].InputCostMicroUSDPerMillionTokens)
+	require.NotNil(t, got[0].Models[0].OutputCostMicroUSDPerMillionTokens)
+	assert.Equal(t, int64(2_500_000), *got[0].Models[0].OutputCostMicroUSDPerMillionTokens)
 	require.Len(t, got[1].Models, 2)
 	assert.Equal(t, "@cf/shape-reasoner", got[1].Models[0].ID)
 	assert.Equal(t, int64(132_001), *got[1].Models[0].InputCostMicroUSDPerMillionTokens)
@@ -316,6 +319,3 @@ func oneModelCatalog(cost string) string {
 	}
 	return buffer.String()
 }
-
-//go:fix inline
-func int64Pointer(value int64) *int64 { return new(value) }
