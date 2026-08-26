@@ -234,6 +234,7 @@ git diff --check
 
 - Review base: `d0f9627d59685662fd7ae9e7df75e8e4cc576f11`
 - Code commit: `3ed6128fb1212e373b8bfcb44ad81e5175af0592`
+- Coverage commit: `47e8f5ce08e0ab37dd0c873fd5eb5180a5ecb360`
 - Subject: `fix: harden provider management transactions`
 
 ### Routing and secret handling
@@ -289,6 +290,9 @@ ok  go.kenn.io/msgvault/internal/peoplesweep  24.096s
 
 go test -tags "fts5 sqlite_vec" ./internal/store -run 'PersonInference|PersonSweep' -count=1 -timeout=10m
 ok  go.kenn.io/msgvault/internal/store  52.520s
+
+go test -tags "fts5 sqlite_vec" ./cmd/msgvault/cmd -run '^TestPersonProviderRemoveCompletesLocalPreflightBeforeRevoke$' -count=1 -timeout=3m
+ok  go.kenn.io/msgvault/cmd/msgvault/cmd  0.738s
 
 go test -race -tags "fts5 sqlite_vec" ./cmd/msgvault/cmd ./internal/api ./internal/config ./internal/peoplesweep -run 'PersonProvider|CLIRunCommandAllowed|CLIAllowlist|RestoreConfig|SameConfigFileVersion|ValidateConfigTableEdits|CredentialStore' -count=1 -timeout=15m
 ok  go.kenn.io/msgvault/cmd/msgvault/cmd  20.457s
