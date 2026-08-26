@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"slices"
 	"time"
 )
@@ -253,6 +254,10 @@ func decodeUniqueCapabilityObject(raw []byte) (map[string]json.RawMessage, bool)
 func capabilityMiss(err error) bool {
 	var providerErr *ProviderError
 	if !errors.As(err, &providerErr) {
+		return false
+	}
+	if providerErr.StatusCode != http.StatusBadRequest && providerErr.StatusCode != http.StatusNotFound &&
+		providerErr.StatusCode != http.StatusUnprocessableEntity {
 		return false
 	}
 	return providerErr.Capability == ProviderCapabilityUnsupportedRepresentation

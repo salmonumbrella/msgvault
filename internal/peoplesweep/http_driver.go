@@ -94,7 +94,7 @@ func (d *httpDriver) postWithHeaders(
 			response.StatusCode == http.StatusUnprocessableEntity {
 			errorBody, readErr := io.ReadAll(io.LimitReader(response.Body, (32<<10)+1))
 			if readErr == nil && len(errorBody) <= 32<<10 {
-				capability = classifyProviderCapabilityError(profile.Protocol, errorBody)
+				capability = classifyProviderCapabilityError(profile, errorBody)
 			}
 		}
 		retryAfter := time.Duration(0)
@@ -130,16 +130,16 @@ func (d *httpDriver) postWithHeaders(
 	return httpDriverResponse{body: responseBody, requestID: requestID}, nil
 }
 
-func classifyProviderCapabilityError(protocol Protocol, body []byte) ProviderCapabilityError {
+func classifyProviderCapabilityError(profile ProviderProfile, body []byte) ProviderCapabilityError {
 	root, ok := decodeUniqueErrorObject(body)
 	if !ok {
 		return ""
 	}
-	switch protocol {
+	switch profile.Protocol {
 	case ProtocolOpenAIChat, ProtocolOpenAIResponses:
 		errorObject, valid := decodeUniqueErrorObject(root["error"])
 		if valid && rawJSONString(errorObject["type"]) == "invalid_request_error" &&
-			unsupportedCapabilityCode(rawJSONString(errorObject["code"])) {
+			capabilityCodeMatchesProfile(profile, rawJSONString(errorObject["code"]), rawJSONString(errorObject["param"])) {
 			return ProviderCapabilityUnsupportedRepresentation
 		}
 	case ProtocolAnthropicMessages:
@@ -168,6 +168,49 @@ func classifyProviderCapabilityError(protocol Protocol, body []byte) ProviderCap
 		}
 	}
 	return ""
+}
+
+func capabilityCodeMatchesProfile(profile ProviderProfile, code, parameter string) bool {
+	switch strings.ToLower(code) {
+	case "unsupported_response_format", "unsupported_json_schema":
+		return true
+	case "unsupported_parameter", "unsupported_value":
+		return capabilityParameterMatchesProfile(profile, parameter)
+	default:
+		return false
+	}
+}
+
+func capabilityParameterMatchesProfile(profile ProviderProfile, parameter string) bool {
+	parameter = strings.ToLower(strings.TrimSpace(parameter))
+	switch profile.Protocol {
+	case ProtocolOpenAIChat:
+		if parameter == profile.TokenLimitParameter {
+			return true
+		}
+		return profile.OutputMode != OutputModePromptJSON &&
+			(parameter == "response_format" || strings.HasPrefix(parameter, "response_format."))
+	case ProtocolOpenAIResponses:
+		if parameter == "max_output_tokens" || parameter == "reasoning" || strings.HasPrefix(parameter, "reasoning.") {
+			return true
+		}
+		return profile.OutputMode != OutputModePromptJSON &&
+			(parameter == "text.format" || strings.HasPrefix(parameter, "text.format."))
+	case ProtocolAnthropicMessages:
+		if parameter == "max_tokens" {
+			return true
+		}
+		return profile.OutputMode == OutputModeNativeJSONSchema &&
+			(parameter == "tools" || strings.HasPrefix(parameter, "tools.") || parameter == "tool_choice" || strings.HasPrefix(parameter, "tool_choice."))
+	case ProtocolGoogleGenerateContent:
+		if parameter == "generationconfig.maxoutputtokens" {
+			return true
+		}
+		return profile.OutputMode == OutputModeNativeJSONSchema &&
+			(parameter == "generationconfig.responsemimetype" || parameter == "generationconfig.responseschema" || strings.HasPrefix(parameter, "generationconfig.responseschema."))
+	default:
+		return false
+	}
 }
 
 func unsupportedCapabilityCode(code string) bool {
