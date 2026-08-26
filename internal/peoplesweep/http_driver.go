@@ -62,16 +62,17 @@ func (d *httpDriver) postWithHeaders(
 	body []byte,
 	headers map[string]string,
 ) (httpDriverResponse, error) {
+	fixedHeaders, err := validateFixedHTTPHeaders(headers)
+	if err != nil {
+		return httpDriverResponse{}, err
+	}
 	request, err := http.NewRequestWithContext( // #nosec G704 -- the exact operator-configured endpoint is validated by ProviderProfile.
 		ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return httpDriverResponse{}, errors.New("create inference provider request")
 	}
 	request.Header.Set("Content-Type", "application/json")
-	for name, value := range headers {
-		if !httpguts.ValidHeaderFieldName(name) || !safeHTTPHeaderValue(value) {
-			return httpDriverResponse{}, errors.New("inference provider request header is invalid")
-		}
+	for name, value := range fixedHeaders {
 		request.Header.Set(name, value)
 	}
 	if err := applyHTTPCredential(request, profile.Auth, credential); err != nil {
@@ -117,6 +118,24 @@ func (d *httpDriver) postWithHeaders(
 			ErrInvalidStructuredOutput, errors.New("provider response is too large"))
 	}
 	return httpDriverResponse{body: responseBody, requestID: requestID}, nil
+}
+
+func validateFixedHTTPHeaders(headers map[string]string) (map[string]string, error) {
+	validated := make(map[string]string, len(headers))
+	for name, value := range headers {
+		if !httpguts.ValidHeaderFieldName(name) || !safeHTTPHeaderValue(value) {
+			return nil, errors.New("inference provider request header is invalid")
+		}
+		canonical := strings.ToLower(name)
+		if canonical != "anthropic-version" || value != defaultAnthropicVersion {
+			return nil, errors.New("inference provider request header is not allowed")
+		}
+		if _, duplicate := validated[canonical]; duplicate {
+			return nil, errors.New("inference provider request header is duplicated")
+		}
+		validated[canonical] = value
+	}
+	return validated, nil
 }
 
 func applyHTTPCredential(request *http.Request, scheme AuthScheme, credential Credential) error {
