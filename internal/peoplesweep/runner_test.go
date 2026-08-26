@@ -790,7 +790,7 @@ func TestRunnerPreparesOneBoundedSameProfileRepair(t *testing.T) {
 	primary, err := primaryCall.Execute(t.Context(), func(context.Context) error { return nil })
 	var failure *peoplesweep.ValidationFailure
 	require.ErrorAs(t, err, &failure)
-	assert.ErrorIs(t, err, peoplesweep.ErrInvalidStructuredOutput)
+	require.ErrorIs(t, err, peoplesweep.ErrInvalidStructuredOutput)
 	assert.NotContains(t, err.Error(), `{"ok":false}`)
 	assert.JSONEq(t, `{"ok":false}`, string(failure.Candidate))
 	require.Len(t, failure.Errors, 1)
@@ -937,7 +937,7 @@ func TestRunnerCheckRejectsSchemaInvalidProviderOutput(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = runner.Check(t.Context())
-	assert.ErrorContains(t, err, "does not match")
+	require.ErrorContains(t, err, "does not match")
 }
 
 type blockingTransport struct{}
@@ -1071,7 +1071,7 @@ func TestRunnerAppliesConfiguredRequestTimeout(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = runner.RunStructured(t.Context(), structuredTestRequest())
-	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func TestRunnerPreservesOnlyCompletedInvalidOutputMetadata(t *testing.T) {

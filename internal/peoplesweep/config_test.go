@@ -193,7 +193,7 @@ func TestPositiveCostBudgetRequiresPrices(t *testing.T) {
 	config.Budgets.InputCostMicroUSDPerMillionTokens = 0
 	config.Budgets.OutputCostMicroUSDPerMillionTokens = 0
 
-	assert.ErrorContains(t, config.Validate(), "cost prices are required")
+	require.ErrorContains(t, config.Validate(), "cost prices are required")
 }
 
 func TestOpenAIProviderProfileOperationalFieldsExcluded(t *testing.T) {
@@ -322,10 +322,10 @@ func TestProviderFingerprintIncludesProtocolCapabilities(t *testing.T) {
 	assert.Contains(t, string(want.PolicyJSON), peoplesweep.ProgramFingerprint())
 	mutated := want
 	mutated.PacketRendererPolicy = "other-renderer"
-	assert.Error(t, mutated.Validate())
+	require.Error(t, mutated.Validate())
 	mutated = want
 	mutated.ProgramFingerprint = "other-program"
-	assert.Error(t, mutated.Validate())
+	require.Error(t, mutated.Validate())
 }
 
 func TestPeopleSweepDefaults(t *testing.T) {
@@ -489,7 +489,7 @@ func TestProviderProfileValidateRejectsNonCanonicalPublicFields(t *testing.T) {
 			changed := profile
 			changed.AllowedSources = slices.Clone(profile.AllowedSources)
 			mutation.mutate(&changed)
-			assert.ErrorContains(t, changed.Validate(), "canonical")
+			require.ErrorContains(t, changed.Validate(), "canonical")
 		})
 	}
 }
@@ -548,7 +548,7 @@ func TestConfigValidationRejectsUnsafeOrAmbiguousPolicies(t *testing.T) {
 			config := validConfig()
 			test.mutate(&config)
 			_, err := config.Profile()
-			assert.ErrorContains(t, err, test.want)
+			require.ErrorContains(t, err, test.want)
 		})
 	}
 }
@@ -582,5 +582,5 @@ func TestConfigAllowsAuthenticatedLoopbackHTTP(t *testing.T) {
 		p.Endpoint = "http://127.0.0.1:11434/v1"
 	})
 
-	assert.NoError(t, config.Validate())
+	require.NoError(t, config.Validate())
 }

@@ -84,7 +84,7 @@ source_since = "2025-01-01"
 `), 0o600))
 
 	_, err := Load(path, "")
-	assert.ErrorContains(t, err, "allowed_sources")
+	require.ErrorContains(t, err, "allowed_sources")
 }
 
 func TestLoadDoesNotReplaceExplicitEmptyPeopleProviderKeyEnv(t *testing.T) {
@@ -103,7 +103,7 @@ source_since = "2025-01-01"
 `), 0o600))
 
 	_, err := Load(path, "")
-	assert.ErrorContains(t, err, "credential_env")
+	require.ErrorContains(t, err, "credential_env")
 }
 
 func TestLoadAllowsAnonymousLoopbackPeopleProviderWithoutKeyEnv(t *testing.T) {
@@ -266,7 +266,7 @@ protocol = "openai_chat"
 `), 0o600))
 
 	_, err := Load(path, "")
-	assert.ErrorContains(t, err, "legacy")
+	require.ErrorContains(t, err, "legacy")
 }
 
 func TestConfigRejectsMissingActiveProvider(t *testing.T) {
@@ -280,5 +280,5 @@ protocol = "openai_chat"
 `), 0o600))
 
 	_, err := Load(path, "")
-	assert.ErrorContains(t, err, "missing")
+	require.ErrorContains(t, err, "missing")
 }

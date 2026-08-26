@@ -64,10 +64,10 @@ func TestAnthropicMessagesEmitsForcedToolRequestExactly(t *testing.T) {
 		assert.Empty(t, r.Header.Get("Authorization"))
 		var err error
 		received, err = io.ReadAll(r.Body)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		w.Header().Set("Request-Id", "req-anthropic-1")
 		_, err = io.WriteString(w, `{"id":"msg_123","type":"message","role":"assistant","model":"claude-test-build","content":[{"type":"tool_use","id":"toolu_123","name":"person_facts","input":{"ok":true}}],"stop_reason":"tool_use","usage":{"input_tokens":17,"output_tokens":5}}`)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	}))
 	defer server.Close()
 
@@ -98,9 +98,9 @@ func TestAnthropicMessagesPromptModeUsesOneCompleteJSONText(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		received, err = io.ReadAll(r.Body)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		_, err = io.WriteString(w, `{"id":"msg_123","type":"message","role":"assistant","model":"claude-test-build","content":[{"type":"text","text":"{\"ok\":true}"}],"stop_reason":"end_turn","usage":{}}`)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	}))
 	defer server.Close()
 
@@ -121,9 +121,9 @@ func TestKimiAnthropicFixtureUsesGenericMessagesProtocol(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var readErr error
 		received, readErr = io.ReadAll(r.Body)
-		assert.NoError(t, readErr)
+		require.NoError(t, readErr)
 		_, readErr = io.WriteString(w, `{"id":"msg_compatible","type":"message","role":"assistant","model":"compatible-build","content":[{"type":"tool_use","id":"toolu_compatible","name":"person_facts","input":{"ok":true}}]}`)
-		assert.NoError(t, readErr)
+		require.NoError(t, readErr)
 	}))
 	defer server.Close()
 
@@ -212,7 +212,7 @@ func TestAnthropicMessagesRequiresExactlyOneMatchingToolBlock(t *testing.T) {
 			body := `{"id":"msg_123","type":"message","role":"assistant","model":"claude-test-build","content":[` + test.content + `],"secret":"provider-secret-body"}`
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, body)
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -248,7 +248,7 @@ func TestAnthropicMessagesPromptRequiresExactlyOneNonemptyCompleteJSONText(t *te
 			body := `{"id":"msg_123","type":"message","role":"assistant","model":"claude-test-build","content":[` + test.content + `],"secret":"provider-secret-body"}`
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, body)
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -274,7 +274,7 @@ func TestAnthropicMessagesRejectsMalformedEnvelopeWithoutEchoingBody(t *testing.
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, test.body)
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -300,7 +300,7 @@ func TestAnthropicMessagesDistinguishesUsagePresence(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, `{"type":"message","role":"assistant","model":"claude-test-build","content":[{"type":"text","text":"{\"ok\":true}"}]`+test.usage+`}`)
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -323,7 +323,7 @@ func TestAnthropicMessagesRejectsInvalidUsageAndUnsafeMetadata(t *testing.T) {
 		} {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, `{"type":"message","role":"assistant","model":"claude-test-build","content":[{"type":"text","text":"{\"ok\":true}"}],"usage":{`+usage+`},"secret":"provider-secret-body"}`)
-				assert.NoError(t, err)
+				require.NoError(t, err)
 			}))
 			_, err := generateAnthropicMessages(t, server,
 				anthropicTestProfile(t, server.URL, "claude-test", peoplesweep.OutputModePromptJSON))
@@ -342,7 +342,7 @@ func TestAnthropicMessagesRejectsInvalidUsageAndUnsafeMetadata(t *testing.T) {
 			require.NoError(t, err)
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, writeErr := w.Write(body)
-				assert.NoError(t, writeErr)
+				require.NoError(t, writeErr)
 			}))
 			defer server.Close()
 
@@ -357,7 +357,7 @@ func TestAnthropicMessagesRejectsInvalidUsageAndUnsafeMetadata(t *testing.T) {
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Request-Id", strings.Repeat("r", 129))
 			_, err := io.WriteString(w, `{"type":"message","role":"assistant","model":"claude-test-build","content":[{"type":"text","text":"{\"ok\":true}"}]}`)
-			assert.NoError(t, err)
+			require.NoError(t, err)
 		}))
 		defer server.Close()
 
@@ -375,7 +375,7 @@ func TestAnthropicMessagesSanitizesHTTPFailureAndMakesOneAttempt(t *testing.T) {
 		w.Header().Set("Request-Id", "req-safe")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, err := io.WriteString(w, `{"error":{"message":"provider-secret-body"}}`)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 	}))
 	defer server.Close()
 

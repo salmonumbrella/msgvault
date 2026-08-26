@@ -736,7 +736,7 @@ func TestPersonProviderCommandsRejectInputAndDisabledConfigBeforeStore(t *testin
 	for _, operation := range []string{"status", "consent", "revoke", "check"} {
 		t.Run(operation+" input", func(t *testing.T) {
 			_, err := executePersonProviderCommand(t, deps, operation, "archive.txt")
-			assert.ErrorContains(t, err, "not configured")
+			require.ErrorContains(t, err, "not configured")
 		})
 	}
 	assert.Zero(t, opens.Load())

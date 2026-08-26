@@ -124,7 +124,7 @@ func createExistingCredentialPreflightFixture(t *testing.T, tokensDir string) []
 
 func TestValidateProviderProfileNameUsesOneSafeGrammar(t *testing.T) {
 	for _, name := range []string{"a", "Alpha_1", "profile.with-dots", strings.Repeat("z", 64)} {
-		assert.NoError(t, peoplesweep.ValidateProviderProfileName(name), name)
+		require.NoError(t, peoplesweep.ValidateProviderProfileName(name), name)
 	}
 	for _, name := range []string{"", "--help", "--json", " leading", "trailing ", "bad\nname", strings.Repeat("z", 65)} {
 		err := peoplesweep.ValidateProviderProfileName(name)

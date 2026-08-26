@@ -118,7 +118,7 @@ func TestParseExtractionRequiresCitedAlignedEvidence(t *testing.T) {
 				test.mutate(&candidate.Packet)
 			}
 			_, parseErr := ParseExtraction(json.RawMessage(test.output), candidate, profile)
-			assert.Error(t, parseErr)
+			require.Error(t, parseErr)
 		})
 	}
 }

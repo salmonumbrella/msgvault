@@ -137,7 +137,7 @@ func TestCredentialDeleteGuardIsOpaqueSingleUseAndBound(t *testing.T) {
 		require.ErrorContains(t, err, "already consumed")
 		require.NoError(t, guard.Close())
 		_, loadErr := store.Load("profile")
-		assert.ErrorIs(t, loadErr, ErrCredentialNotFound)
+		require.ErrorIs(t, loadErr, ErrCredentialNotFound)
 	})
 }
 
@@ -827,7 +827,7 @@ func TestCredentialStoreRepeatedSaveDeleteKeepsArtifactsBounded(t *testing.T) {
 	assert.LessOrEqual(t, len(entries), 2, "save/delete cycles accumulated credential-store artifacts")
 
 	_, err = store.Load("profile")
-	assert.ErrorIs(t, err, ErrCredentialNotFound, "deleted credential did not remain logically absent")
+	require.ErrorIs(t, err, ErrCredentialNotFound, "deleted credential did not remain logically absent")
 }
 
 func TestCredentialStoreLockReplacementCannotSplitExclusion(t *testing.T) {
