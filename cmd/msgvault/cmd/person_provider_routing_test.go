@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -22,9 +23,12 @@ type deleteCountingCredentialStore struct {
 	deletes int
 }
 
-func (s *deleteCountingCredentialStore) Delete(profileName string) error {
+func (s *deleteCountingCredentialStore) Delete(
+	profileName string,
+	guard peoplesweep.CredentialDeleteGuard,
+) error {
 	s.deletes++
-	return s.CredentialStore.Delete(profileName)
+	return s.CredentialStore.Delete(profileName, guard)
 }
 
 type postPreflightRaceCredentialStore struct {
@@ -32,14 +36,17 @@ type postPreflightRaceCredentialStore struct {
 	beforeDelete func() error
 }
 
-func (s *postPreflightRaceCredentialStore) Delete(profileName string) error {
+func (s *postPreflightRaceCredentialStore) Delete(
+	profileName string,
+	guard peoplesweep.CredentialDeleteGuard,
+) error {
 	if s.beforeDelete != nil {
 		if err := s.beforeDelete(); err != nil {
 			return err
 		}
 		s.beforeDelete = nil
 	}
-	return s.CredentialStore.Delete(profileName)
+	return s.CredentialStore.Delete(profileName, guard)
 }
 
 func TestPersonProviderFrontendRoutesExactCommandsAndCredential(t *testing.T) {
@@ -404,14 +411,14 @@ func TestPersonProviderDaemonRemoveMissingCredentialRootHasZeroSideEffects(t *te
 	assert.Contains(t, finalConfig.People.Sweep.Providers, "beta")
 }
 
-func TestPersonProviderDaemonRemovePostPreflightCredentialRaceRollsBackConfig(t *testing.T) {
+func TestPersonProviderDaemonRemoveValidReplacementRaceRollsBackExactConfig(t *testing.T) {
 	configured := personProviderTestConfig()
 	beta := configuredPersonProvider(configured)
 	beta.Model = "beta-model"
 	beta.Credential = peoplesweep.CredentialStored
 	beta.CredentialEnv = ""
 	configured.Providers["beta"] = beta
-	path, _ := retainedPersonProviderTestConfig(t, configured)
+	path, configBefore := retainedPersonProviderTestConfig(t, configured)
 
 	tokensDir := t.TempDir()
 	fileCredentials := peoplesweep.NewFileCredentialStore(tokensDir)
@@ -424,10 +431,14 @@ func TestPersonProviderDaemonRemovePostPreflightCredentialRaceRollsBackConfig(t 
 	require.NoError(t, statErr)
 	contentsBefore, readErr := os.ReadFile(credentialPath)
 	require.NoError(t, readErr)
+	replacementContents := []byte(`{"scheme":"bearer","value":"valid-replacement-test-value"}`)
 	credentials := &postPreflightRaceCredentialStore{
 		CredentialStore: fileCredentials,
 		beforeDelete: func() error {
-			return os.Rename(credentialPath, retainedPath)
+			if err := os.Rename(credentialPath, retainedPath); err != nil {
+				return err
+			}
+			return os.WriteFile(credentialPath, replacementContents, 0o600)
 		},
 	}
 
@@ -455,7 +466,8 @@ func TestPersonProviderDaemonRemovePostPreflightCredentialRaceRollsBackConfig(t 
 	}
 
 	output, err := executePersonProviderCommand(t, deps, "remove", "beta")
-	assert.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
+	require.ErrorContains(t, err, "credential changed during guarded deletion")
+	assert.ErrorContains(t, err, "exact people provider consent remains revoked")
 	assert.Equal(t, 1, revokes)
 	assert.Equal(t, 1, edits)
 	assert.Equal(t, 1, restores)
@@ -463,7 +475,9 @@ func TestPersonProviderDaemonRemovePostPreflightCredentialRaceRollsBackConfig(t 
 	if err != nil {
 		assert.NotContains(t, err.Error(), providerSetupSecretCanary)
 	}
-	assert.NoFileExists(t, credentialPath)
+	replacementAfter, readErr := os.ReadFile(credentialPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, replacementContents, replacementAfter)
 	credentialAfter, statErr := os.Stat(retainedPath)
 	require.NoError(t, statErr)
 	assert.True(t, os.SameFile(credentialBefore, credentialAfter))
@@ -472,9 +486,31 @@ func TestPersonProviderDaemonRemovePostPreflightCredentialRaceRollsBackConfig(t 
 	contentsAfter, readErr := os.ReadFile(retainedPath)
 	require.NoError(t, readErr)
 	assert.True(t, bytes.Equal(contentsBefore, contentsAfter), "retained credential changed")
+	finalSnapshot, loadErr := config.ReadConfigFile(path)
+	require.NoError(t, loadErr)
+	assert.Equal(t, configBefore.Content, finalSnapshot.Content)
 	finalConfig, loadErr := config.Load(path, "")
 	require.NoError(t, loadErr)
 	assert.Contains(t, finalConfig.People.Sweep.Providers, "beta")
+
+	loaded := make(chan struct {
+		credential peoplesweep.Credential
+		err        error
+	}, 1)
+	go func() {
+		credential, loadCredentialErr := fileCredentials.Load("beta")
+		loaded <- struct {
+			credential peoplesweep.Credential
+			err        error
+		}{credential: credential, err: loadCredentialErr}
+	}()
+	select {
+	case result := <-loaded:
+		require.NoError(t, result.err)
+		assert.Equal(t, "valid-replacement-test-value", result.credential.Value())
+	case <-time.After(time.Second):
+		assert.Fail(t, "provider removal did not close the credential deletion guard")
+	}
 }
 
 func TestPersonProviderAnonymousCheckForwardsNoCredential(t *testing.T) {

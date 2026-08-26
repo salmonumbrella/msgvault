@@ -62,8 +62,16 @@ func (c Credential) Format(state fmt.State, _ rune) {
 type CredentialStore interface {
 	Save(profileName string, credential Credential) error
 	Load(profileName string) (Credential, error)
-	PreflightDelete(profileName string) error
-	Delete(profileName string) error
+	PreflightDelete(profileName string) (CredentialDeleteGuard, error)
+	Delete(profileName string, guard CredentialDeleteGuard) error
+}
+
+// CredentialDeleteGuard is an opaque, single-use authorization to retire the
+// exact credential-store objects pinned by PreflightDelete. Close releases the
+// pinned resources without deleting the credential.
+type CredentialDeleteGuard interface {
+	io.Closer
+	credentialDeleteGuard()
 }
 
 // CredentialResolver resolves only the source fingerprinted into a profile.
@@ -181,24 +189,24 @@ func (s *FileCredentialStore) Load(profileName string) (Credential, error) {
 	return credential, err
 }
 
-// PreflightDelete read-only validates an existing credential namespace and
-// exact target without reading credential contents. Delete reopens and repeats
-// its checks because this preflight is not atomic with daemon revocation.
-func (s *FileCredentialStore) PreflightDelete(profileName string) error {
+// PreflightDelete read-only validates and pins an existing credential
+// namespace and exact target without reading credential contents. The returned
+// guard must be closed on every path.
+func (s *FileCredentialStore) PreflightDelete(profileName string) (CredentialDeleteGuard, error) {
 	if err := validateCredentialProfileName(profileName); err != nil {
-		return err
+		return nil, err
 	}
 	return s.preflightExistingCredentialDelete(profileName)
 }
 
-// Delete securely retires only an existing exact named record. It never
-// bootstraps or repairs credential-store infrastructure, and absence fails
-// closed so a post-preflight race cannot be mistaken for successful deletion.
-func (s *FileCredentialStore) Delete(profileName string) error {
+// Delete securely retires only the exact named record pinned by guard. It
+// never bootstraps or repairs credential-store infrastructure. Every guarded
+// deletion attempt consumes guard, including a failed attempt.
+func (s *FileCredentialStore) Delete(profileName string, guard CredentialDeleteGuard) error {
 	if err := validateCredentialProfileName(profileName); err != nil {
 		return err
 	}
-	return s.deleteExistingCredential(profileName)
+	return s.deleteExistingCredential(profileName, guard)
 }
 
 // ValidateProviderProfileName applies the single grammar used by provider

@@ -8,15 +8,19 @@ var errCredentialStoreUnsupported = errors.New(
 	"people provider credential store is unsupported on this platform because secure no-follow atomic filesystem operations are unavailable",
 )
 
-func (s *FileCredentialStore) preflightExistingCredentialDelete(profileName string) error {
+func (s *FileCredentialStore) preflightExistingCredentialDelete(profileName string) (CredentialDeleteGuard, error) {
 	_ = s
 	_ = profileName
-	return errCredentialStoreUnsupported
+	return nil, errCredentialStoreUnsupported
 }
 
-func (s *FileCredentialStore) deleteExistingCredential(profileName string) error {
+func (s *FileCredentialStore) deleteExistingCredential(
+	profileName string,
+	guard CredentialDeleteGuard,
+) error {
 	_ = s
 	_ = profileName
+	_ = guard
 	return errCredentialStoreUnsupported
 }
 

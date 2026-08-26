@@ -715,7 +715,7 @@ func rollbackNewPersonProviderCredential(
 	if !created || credentials == nil {
 		return cause
 	}
-	if err := credentials.Delete(name); err != nil {
+	if err := deletePersonProviderCredential(credentials, name); err != nil {
 		return errors.Join(cause, fmt.Errorf("delete newly created people provider credential: %w", err))
 	}
 	return cause
@@ -745,10 +745,27 @@ func rollbackPersonProviderAdd(
 		rollbackErr = fmt.Errorf("restore people provider config: %w", err)
 	}
 	if createdCredential && credentials != nil {
-		if err := credentials.Delete(name); err != nil {
+		if err := deletePersonProviderCredential(credentials, name); err != nil {
 			rollbackErr = errors.Join(rollbackErr,
 				fmt.Errorf("delete newly created people provider credential: %w", err))
 		}
 	}
 	return rollbackErr
+}
+
+func deletePersonProviderCredential(
+	credentials peoplesweep.CredentialStore,
+	name string,
+) (retErr error) {
+	guard, err := credentials.PreflightDelete(name)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := guard.Close(); closeErr != nil {
+			retErr = errors.Join(retErr,
+				fmt.Errorf("close people provider credential deletion guard: %w", closeErr))
+		}
+	}()
+	return credentials.Delete(name, guard)
 }

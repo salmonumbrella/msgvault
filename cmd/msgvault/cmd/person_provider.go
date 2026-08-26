@@ -464,7 +464,7 @@ func runPersonProviderRemove(
 	command *cobra.Command,
 	deps personProviderCommandDeps,
 	name string,
-) error {
+) (retErr error) {
 	if err := peoplesweep.ValidateProviderProfileName(name); err != nil {
 		return err
 	}
@@ -517,14 +517,22 @@ func runPersonProviderRemove(
 		return err
 	}
 	var credentials peoplesweep.CredentialStore
+	var deletionGuard peoplesweep.CredentialDeleteGuard
 	if provider.Credential == peoplesweep.CredentialStored {
 		credentials, err = deps.setup.resolveCredentialStore()
 		if err != nil {
 			return err
 		}
-		if err := credentials.PreflightDelete(name); err != nil {
+		deletionGuard, err = credentials.PreflightDelete(name)
+		if err != nil {
 			return fmt.Errorf("preflight stored people provider credential deletion: %w", err)
 		}
+		defer func() {
+			if closeErr := deletionGuard.Close(); closeErr != nil {
+				retErr = errors.Join(retErr,
+					fmt.Errorf("close stored people provider credential deletion guard: %w", closeErr))
+			}
+		}()
 	}
 	directStore := deps.isDaemonSubprocess != nil && deps.isDaemonSubprocess()
 	if !directStore && deps.providerStoreOwnedByDaemon != nil {
@@ -566,9 +574,10 @@ func runPersonProviderRemove(
 		}
 	}
 	if provider.Credential == peoplesweep.CredentialStored {
-		if err := credentials.Delete(name); err != nil {
+		if err := credentials.Delete(name, deletionGuard); err != nil {
 			restoreErr := restoreRemovedPersonProviderConfig(deps, after, before)
-			return errors.Join(err, restoreErr)
+			return errors.Join(err, restoreErr,
+				errors.New("exact people provider consent remains revoked"))
 		}
 	}
 	_, _ = fmt.Fprintf(command.OutOrStdout(), "Removed people provider profile %q; audit history was retained.\n", name)

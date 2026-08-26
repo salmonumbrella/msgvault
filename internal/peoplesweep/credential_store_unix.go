@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"go.kenn.io/msgvault/internal/fileutil"
 	"golang.org/x/sys/unix"
@@ -140,6 +141,7 @@ func ensureUnixCredentialLockMarker(rootFD int) error {
 type unixExistingCredentialDelete struct {
 	tokensFD           int
 	rootFD             int
+	lockFD             int
 	credentialFD       int
 	tokensIdentity     unix.Stat_t
 	rootIdentity       unix.Stat_t
@@ -147,147 +149,238 @@ type unixExistingCredentialDelete struct {
 	credentialIdentity unix.Stat_t
 	credentialName     string
 	profileName        string
+	locked             bool
 }
 
-func (s *FileCredentialStore) preflightExistingCredentialDelete(profileName string) error {
-	return s.withExistingCredentialDelete(
-		profileName,
-		"preflight-delete",
-		"deletion preflight",
-		func(*unixExistingCredentialDelete) error { return nil },
-	)
+type unixCredentialDeleteGuard struct {
+	mu     sync.Mutex
+	owner  *FileCredentialStore
+	target *unixExistingCredentialDelete
+	state  credentialDeleteGuardState
 }
 
-func (s *FileCredentialStore) deleteExistingCredential(profileName string) error {
-	return s.withExistingCredentialDelete(
-		profileName,
-		"delete",
-		"deletion",
-		func(target *unixExistingCredentialDelete) error {
-			if s.hooks != nil && s.hooks.beforeCredentialRetire != nil {
-				s.hooks.beforeCredentialRetire()
-			}
-			if err := target.validateLive(s.tokensDir, "deletion", true); err != nil {
-				return err
-			}
-			wipeErr := wipeUnixCredentialFD(target.credentialFD)
-			if err := target.validateLive(s.tokensDir, "deletion", false); err != nil {
-				return err
-			}
-			return wipeErr
-		},
-	)
+type credentialDeleteGuardState uint8
+
+const (
+	credentialDeleteGuardReady credentialDeleteGuardState = iota
+	credentialDeleteGuardConsumed
+	credentialDeleteGuardClosed
+)
+
+func (*unixCredentialDeleteGuard) credentialDeleteGuard() {}
+
+func (*unixCredentialDeleteGuard) String() string {
+	return "people provider credential deletion guard (opaque)"
 }
 
-func (s *FileCredentialStore) withExistingCredentialDelete(
-	profileName, operation, phase string,
-	callback func(*unixExistingCredentialDelete) error,
-) (retErr error) {
+func (g *unixCredentialDeleteGuard) GoString() string {
+	return g.String()
+}
+
+func (g *unixCredentialDeleteGuard) Format(state fmt.State, _ rune) {
+	_, _ = io.WriteString(state, g.String())
+}
+
+func (*unixCredentialDeleteGuard) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("people provider credential deletion guard cannot serialize")
+}
+
+func (*unixCredentialDeleteGuard) MarshalText() ([]byte, error) {
+	return nil, errors.New("people provider credential deletion guard cannot serialize")
+}
+
+func (g *unixCredentialDeleteGuard) Close() error {
+	if g == nil {
+		return errors.New("people provider credential deletion guard is invalid")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.state == credentialDeleteGuardClosed {
+		return nil
+	}
+	g.state = credentialDeleteGuardClosed
+	if g.target == nil {
+		return nil
+	}
+	return g.target.close()
+}
+
+func (s *FileCredentialStore) preflightExistingCredentialDelete(
+	profileName string,
+) (CredentialDeleteGuard, error) {
+	target, err := s.openExistingCredentialDelete(profileName)
+	if err != nil {
+		return nil, err
+	}
+	return &unixCredentialDeleteGuard{owner: s, target: target}, nil
+}
+
+func (s *FileCredentialStore) deleteExistingCredential(
+	profileName string,
+	opaque CredentialDeleteGuard,
+) error {
+	guard, ok := opaque.(*unixCredentialDeleteGuard)
+	if !ok || guard == nil {
+		return errors.New("people provider credential deletion guard is invalid")
+	}
+	guard.mu.Lock()
+	defer guard.mu.Unlock()
+	switch guard.state {
+	case credentialDeleteGuardClosed:
+		return errors.New("people provider credential deletion guard is closed")
+	case credentialDeleteGuardConsumed:
+		return errors.New("people provider credential deletion guard was already consumed")
+	case credentialDeleteGuardReady:
+		guard.state = credentialDeleteGuardConsumed
+	default:
+		guard.state = credentialDeleteGuardConsumed
+		return errors.New("people provider credential deletion guard has invalid state")
+	}
+	if guard.owner != s {
+		return errors.New("people provider credential deletion guard belongs to a different store")
+	}
+	if guard.target == nil || guard.target.profileName != profileName {
+		return errors.New("people provider credential deletion guard belongs to a different profile")
+	}
+	if s.hooks != nil && s.hooks.beforeCredentialRetire != nil {
+		s.hooks.beforeCredentialRetire()
+	}
+	if err := guard.target.validateLive(s.tokensDir, "guarded deletion", true); err != nil {
+		return err
+	}
+	wipeErr := wipeUnixCredentialFD(guard.target.credentialFD)
+	if err := guard.target.validateLive(s.tokensDir, "guarded deletion", false); err != nil {
+		return err
+	}
+	return wipeErr
+}
+
+func (s *FileCredentialStore) openExistingCredentialDelete(
+	profileName string,
+) (_ *unixExistingCredentialDelete, retErr error) {
 	if s == nil || filepath.Clean(s.tokensDir) == "." || s.tokensDir == "" {
-		return errors.New("people provider credential tokens directory is required")
+		return nil, errors.New("people provider credential tokens directory is required")
 	}
-	tokensFD, err := unix.Open(s.tokensDir,
-		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return fmt.Errorf("open existing people provider tokens directory without following symlinks: %w", err)
-	}
-	defer func() {
-		if err := unix.Close(tokensFD); err != nil && retErr == nil {
-			retErr = fmt.Errorf("close existing people provider tokens directory: %w", err)
-		}
-	}()
-	tokensIdentity, err := validateUnixPrivateDirectoryFD(tokensFD, "tokens")
-	if err != nil {
-		return err
-	}
-	if !unixPrivateDirectoryPathMatches(s.tokensDir, tokensIdentity) {
-		return fmt.Errorf("people provider tokens directory changed during %s", phase)
-	}
-
-	rootFD, err := unix.Openat(tokensFD, credentialNamespace,
-		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return fmt.Errorf("open existing people provider credential directory without following symlinks: %w", err)
-	}
-	defer func() {
-		if err := unix.Close(rootFD); err != nil && retErr == nil {
-			retErr = fmt.Errorf("close existing people provider credential directory: %w", err)
-		}
-	}()
-	rootIdentity, err := validateUnixPrivateDirectoryFD(rootFD, "credential")
-	if err != nil {
-		return err
-	}
-	if !unixPrivateDirectoryEntryMatches(tokensFD, credentialNamespace, rootIdentity) {
-		return fmt.Errorf("people provider credential directory changed during %s", phase)
-	}
-
-	// Existing store operations serialize on the pinned namespace descriptor.
-	// This path intentionally does not create or repair directories or markers.
-	if err := unix.Flock(rootFD, unix.LOCK_EX); err != nil {
-		return fmt.Errorf("lock existing people provider credential directory: %w", err)
-	}
-	defer func() {
-		if err := unix.Flock(rootFD, unix.LOCK_UN); err != nil && retErr == nil {
-			retErr = fmt.Errorf("unlock existing people provider credential directory: %w", err)
-		}
-	}()
-
-	lockFD, lockIdentity, err := openExistingUnixCredentialDeleteFile(
-		rootFD, ".credentials.lock", "lock",
-	)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := unix.Close(lockFD); err != nil && retErr == nil {
-			retErr = fmt.Errorf("close existing people provider credential lock: %w", err)
-		}
-	}()
 	target := &unixExistingCredentialDelete{
-		tokensFD:       tokensFD,
-		rootFD:         rootFD,
-		credentialFD:   -1,
-		tokensIdentity: tokensIdentity,
-		rootIdentity:   rootIdentity,
-		lockIdentity:   lockIdentity,
-		profileName:    profileName,
+		tokensFD: -1, rootFD: -1, lockFD: -1, credentialFD: -1,
+		profileName: profileName,
 	}
-	if err := target.validateInfrastructure(s.tokensDir, phase); err != nil {
-		return err
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, target.close())
+		}
+	}()
+	target.tokensFD, retErr = unix.Open(s.tokensDir,
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if retErr != nil {
+		return nil, fmt.Errorf("open existing people provider tokens directory without following symlinks: %w", retErr)
+	}
+	target.tokensIdentity, retErr = validateUnixPrivateDirectoryFD(target.tokensFD, "tokens")
+	if retErr != nil {
+		return nil, retErr
+	}
+	if !unixPrivateDirectoryPathMatches(s.tokensDir, target.tokensIdentity) {
+		return nil, errors.New("people provider tokens directory changed during deletion preflight")
+	}
+
+	target.rootFD, retErr = unix.Openat(target.tokensFD, credentialNamespace,
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if retErr != nil {
+		return nil, fmt.Errorf("open existing people provider credential directory without following symlinks: %w", retErr)
+	}
+	target.rootIdentity, retErr = validateUnixPrivateDirectoryFD(target.rootFD, "credential")
+	if retErr != nil {
+		return nil, retErr
+	}
+	if !unixPrivateDirectoryEntryMatches(target.tokensFD, credentialNamespace, target.rootIdentity) {
+		return nil, errors.New("people provider credential directory changed during deletion preflight")
+	}
+
+	// Hold the pinned namespace lock until the guard is explicitly closed.
+	// This serializes ordinary store operations while external pathname swaps
+	// remain harmless because guarded deletion revalidates every identity.
+	if retErr = unix.Flock(target.rootFD, unix.LOCK_EX); retErr != nil {
+		return nil, fmt.Errorf("lock existing people provider credential directory: %w", retErr)
+	}
+	target.locked = true
+	target.lockFD, target.lockIdentity, retErr = openExistingUnixCredentialDeleteFile(
+		target.rootFD, ".credentials.lock", "lock",
+	)
+	if retErr != nil {
+		return nil, retErr
+	}
+	if err := target.validateInfrastructure(s.tokensDir, "deletion preflight"); err != nil {
+		return nil, err
 	}
 	if s.hooks != nil && s.hooks.afterLockAcquired != nil {
 		s.hooks.afterLockAcquired()
 	}
 	if s.hooks != nil && s.hooks.beforeOperation != nil {
-		s.hooks.beforeOperation(operation)
+		s.hooks.beforeOperation("preflight-delete")
 	}
-	if err := target.validateInfrastructure(s.tokensDir, phase); err != nil {
-		return err
+	if err := target.validateInfrastructure(s.tokensDir, "deletion preflight"); err != nil {
+		return nil, err
 	}
 
 	target.credentialName = profileName + ".json"
-	target.credentialFD, target.credentialIdentity, err = openExistingUnixCredentialDeleteFile(
-		rootFD, target.credentialName, "file",
+	target.credentialFD, target.credentialIdentity, retErr = openExistingUnixCredentialDeleteFile(
+		target.rootFD, target.credentialName, "file",
 	)
-	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("%w for profile %q", ErrCredentialNotFound, profileName)
+	if errors.Is(retErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("%w for profile %q", ErrCredentialNotFound, profileName)
 	}
-	if err != nil {
-		return err
+	if retErr != nil {
+		return nil, retErr
 	}
-	defer func() {
-		if err := unix.Close(target.credentialFD); err != nil && retErr == nil {
-			retErr = fmt.Errorf("close existing people provider credential: %w", err)
-		}
-	}()
 	if s.hooks != nil && s.hooks.afterCredentialOpen != nil {
-		s.hooks.afterCredentialOpen(operation)
+		s.hooks.afterCredentialOpen("preflight-delete")
 	}
-	if err := target.validateLive(s.tokensDir, phase, true); err != nil {
-		return err
+	if err := target.validateLive(s.tokensDir, "deletion preflight", true); err != nil {
+		return nil, err
 	}
-	return callback(target)
+	return target, nil
+}
+
+func (target *unixExistingCredentialDelete) close() error {
+	if target == nil {
+		return nil
+	}
+	var closeErrors []error
+	if target.credentialFD >= 0 {
+		fd := target.credentialFD
+		target.credentialFD = -1
+		if err := unix.Close(fd); err != nil {
+			closeErrors = append(closeErrors, errors.New("close pinned people provider credential failed"))
+		}
+	}
+	if target.lockFD >= 0 {
+		fd := target.lockFD
+		target.lockFD = -1
+		if err := unix.Close(fd); err != nil {
+			closeErrors = append(closeErrors, errors.New("close pinned people provider credential lock failed"))
+		}
+	}
+	if target.rootFD >= 0 {
+		fd := target.rootFD
+		target.rootFD = -1
+		if target.locked {
+			target.locked = false
+			if err := unix.Flock(fd, unix.LOCK_UN); err != nil {
+				closeErrors = append(closeErrors, errors.New("unlock pinned people provider credential directory failed"))
+			}
+		}
+		if err := unix.Close(fd); err != nil {
+			closeErrors = append(closeErrors, errors.New("close pinned people provider credential directory failed"))
+		}
+	}
+	if target.tokensFD >= 0 {
+		fd := target.tokensFD
+		target.tokensFD = -1
+		if err := unix.Close(fd); err != nil {
+			closeErrors = append(closeErrors, errors.New("close pinned people provider tokens directory failed"))
+		}
+	}
+	return errors.Join(closeErrors...)
 }
 
 func (target *unixExistingCredentialDelete) validateInfrastructure(tokensDir, phase string) error {
