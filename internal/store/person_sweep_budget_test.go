@@ -82,7 +82,8 @@ func sweepReservation(f personSweepBudgetFixture, ordinal int, input int64,
 ) peoplesweep.BudgetReservationRequest {
 	digest := sha256.Sum256([]byte(fmt.Sprintf("wire-%d-%s", ordinal, f.attemptID)))
 	return peoplesweep.BudgetReservationRequest{
-		RunID: f.runID, AttemptID: f.attemptID, BatchOrdinal: ordinal,
+		RunID: f.runID, AttemptID: f.attemptID, BatchOrdinal: ordinal, CallOrdinal: 0,
+		Purpose:  peoplesweep.ProviderCallPurposePrimary,
 		PersonID: f.personID, ProviderFingerprint: profile, UTCDate: testSweepUTCDate,
 		InputHash: hex.EncodeToString(digest[:]), ItemCount: 3,
 		EstimatedRequests: 1, EstimatedInputTokens: input, EstimatedOutputTokens: 100,
@@ -117,14 +118,14 @@ func TestPersonSweepBudgetRejectsConcurrentDailyOverrun(t *testing.T) {
 		store: f.store, personID: f.personID, runID: "run-concurrent-two",
 		attemptID: "attempt-concurrent-two",
 	}}
-	for ordinal, fixture := range requests {
-		go func(ordinal int, fixture personSweepBudgetFixture) {
+	for _, fixture := range requests {
+		go func(fixture personSweepBudgetFixture) {
 			ready.Done()
 			<-start
-			request := sweepReservation(fixture, ordinal, 800, "provider-fingerprint", budget)
+			request := sweepReservation(fixture, 0, 800, "provider-fingerprint", budget)
 			_, err := f.store.ReservePersonSweepBudget(t.Context(), request)
 			results <- err
-		}(ordinal, fixture)
+		}(fixture)
 	}
 	ready.Wait()
 	close(start)
@@ -270,12 +271,17 @@ func TestPersonSweepBudgetReconcilesActualUsage(t *testing.T) {
 	finalization := peoplesweep.FailureFinalization{Lease: sweepAttemptLease(f), AttemptID: f.attemptID,
 		Class: peoplesweep.FailureProviderHTTP, RetryAt: sweepBudgetNow().Add(time.Hour),
 		Reservations: []peoplesweep.BudgetReservation{reservation},
-		Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0,
+		Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0, CallOrdinal: 0,
+			Purpose: peoplesweep.ProviderCallPurposePrimary, UsageKnown: true,
 			ProviderRequestID: "safe-request-id", Usage: peoplesweep.TokenUsage{
 				InputTokens: 300, OutputTokens: 150}, Latency: 2 * time.Second}},
 		FinalizedAt: sweepBudgetNow().Add(time.Minute)}
 	requirements.NoError(f.store.FinalizePersonSweepFailure(t.Context(), finalization))
 	requirements.NoError(f.store.FinalizePersonSweepFailure(t.Context(), finalization))
+	mismatchedReplay := finalization
+	mismatchedReplay.Class = peoplesweep.FailureBudget
+	requirements.Error(f.store.FinalizePersonSweepFailure(t.Context(), mismatchedReplay),
+		"a terminal attempt must reject replay under a different failure class")
 
 	var reservedRequests, actualRequests int
 	var reservedInput, actualInput, actualOutput, actualCost int64
@@ -292,6 +298,163 @@ func TestPersonSweepBudgetReconcilesActualUsage(t *testing.T) {
 	checks.Equal(int64(450), actualCost)
 }
 
+func TestPersonSweepBudgetJournalsPrimaryAndRepairCalls(t *testing.T) {
+	f := newPersonSweepBudgetFixture(t, "call-ordinals")
+	primaryRequest := sweepReservation(f, 0, 250, "provider-fingerprint", generousSweepBudget())
+	primaryRequest.CallOrdinal = 0
+	primaryRequest.Purpose = peoplesweep.ProviderCallPurposePrimary
+	primary, err := f.store.ReservePersonSweepBudget(t.Context(), primaryRequest)
+	require.NoError(t, err)
+	require.NoError(t, f.store.MarkPersonSweepBudgetStarted(t.Context(), primary))
+
+	repairRequest := primaryRequest
+	repairRequest.CallOrdinal = 1
+	repairRequest.Purpose = peoplesweep.ProviderCallPurposeRepair
+	repairRequest.InputHash = strings.Repeat("d", 64)
+	repair, err := f.store.ReservePersonSweepBudget(t.Context(), repairRequest)
+	require.NoError(t, err)
+	assert.NotEqual(t, primary.ID, repair.ID)
+
+	rows, err := f.store.DB().QueryContext(t.Context(), f.store.Rebind(`
+		SELECT batch_ordinal, call_ordinal, purpose
+		FROM person_sweep_batches WHERE attempt_id = ?
+		ORDER BY batch_ordinal, call_ordinal`), f.attemptID)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, rows.Close()) }()
+	var got []peoplesweep.ProviderCallCoordinate
+	for rows.Next() {
+		var coordinate peoplesweep.ProviderCallCoordinate
+		require.NoError(t, rows.Scan(&coordinate.BatchOrdinal, &coordinate.CallOrdinal,
+			&coordinate.Purpose))
+		got = append(got, coordinate)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []peoplesweep.ProviderCallCoordinate{
+		{BatchOrdinal: 0, CallOrdinal: 0, Purpose: peoplesweep.ProviderCallPurposePrimary},
+		{BatchOrdinal: 0, CallOrdinal: 1, Purpose: peoplesweep.ProviderCallPurposeRepair},
+	}, got)
+}
+
+func TestPersonSweepBudgetConcurrentRepairReservationReplaysOneCall(t *testing.T) {
+	f := newPersonSweepBudgetFixture(t, "concurrent-repair")
+	primaryRequest := sweepReservation(f, 0, 250, "provider-fingerprint", generousSweepBudget())
+	primary, err := f.store.ReservePersonSweepBudget(t.Context(), primaryRequest)
+	require.NoError(t, err)
+	require.NoError(t, f.store.MarkPersonSweepBudgetStarted(t.Context(), primary))
+	repairRequest := primaryRequest
+	repairRequest.CallOrdinal = 1
+	repairRequest.Purpose = peoplesweep.ProviderCallPurposeRepair
+	repairRequest.InputHash = strings.Repeat("d", 64)
+
+	start := make(chan struct{})
+	results := make(chan peoplesweep.BudgetReservation, 2)
+	errs := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for range 2 {
+		go func() {
+			ready.Done()
+			<-start
+			reservation, reserveErr := f.store.ReservePersonSweepBudget(t.Context(), repairRequest)
+			results <- reservation
+			errs <- reserveErr
+		}()
+	}
+	ready.Wait()
+	close(start)
+	first, second := <-results, <-results
+	require.NoError(t, <-errs)
+	require.NoError(t, <-errs)
+	assert.Equal(t, first.ID, second.ID)
+	var rows int
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), f.store.Rebind(`
+		SELECT COUNT(*) FROM person_sweep_batches WHERE attempt_id = ?`),
+		f.attemptID).Scan(&rows))
+	assert.Equal(t, 2, rows)
+}
+
+func TestPersonSweepBudgetRejectsInvalidCallCoordinates(t *testing.T) {
+	tests := []struct {
+		name        string
+		callOrdinal int
+		purpose     string
+	}{
+		{name: "primary purpose mismatch", callOrdinal: 0, purpose: peoplesweep.ProviderCallPurposeRepair},
+		{name: "repair purpose mismatch", callOrdinal: 1, purpose: peoplesweep.ProviderCallPurposePrimary},
+		{name: "third call", callOrdinal: 2, purpose: peoplesweep.ProviderCallPurposeRepair},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newPersonSweepBudgetFixture(t, "invalid-call-"+strings.ReplaceAll(test.name, " ", "-"))
+			request := sweepReservation(f, 0, 250, "provider-fingerprint", generousSweepBudget())
+			request.CallOrdinal = test.callOrdinal
+			request.Purpose = test.purpose
+			_, err := f.store.ReservePersonSweepBudget(t.Context(), request)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestPersonSweepBudgetRejectsCallGaps(t *testing.T) {
+	t.Run("repair without primary", func(t *testing.T) {
+		f := newPersonSweepBudgetFixture(t, "repair-without-primary")
+		request := sweepReservation(f, 0, 250, "provider-fingerprint", generousSweepBudget())
+		request.CallOrdinal = 1
+		request.Purpose = peoplesweep.ProviderCallPurposeRepair
+		_, err := f.store.ReservePersonSweepBudget(t.Context(), request)
+		require.Error(t, err)
+	})
+	t.Run("repair before primary starts", func(t *testing.T) {
+		f := newPersonSweepBudgetFixture(t, "repair-before-primary")
+		primaryRequest := sweepReservation(f, 0, 250, "provider-fingerprint", generousSweepBudget())
+		_, err := f.store.ReservePersonSweepBudget(t.Context(), primaryRequest)
+		require.NoError(t, err)
+		repairRequest := primaryRequest
+		repairRequest.CallOrdinal = 1
+		repairRequest.Purpose = peoplesweep.ProviderCallPurposeRepair
+		repairRequest.InputHash = strings.Repeat("c", 64)
+		_, err = f.store.ReservePersonSweepBudget(t.Context(), repairRequest)
+		require.Error(t, err)
+	})
+	t.Run("primary batch gap", func(t *testing.T) {
+		f := newPersonSweepBudgetFixture(t, "primary-gap")
+		request := sweepReservation(f, 1, 250, "provider-fingerprint", generousSweepBudget())
+		_, err := f.store.ReservePersonSweepBudget(t.Context(), request)
+		require.Error(t, err)
+	})
+}
+
+func TestPersonSweepBudgetMissingUsageChargesFullReservation(t *testing.T) {
+	f := newPersonSweepBudgetFixture(t, "missing-usage")
+	request := sweepReservation(f, 0, 250, "provider-fingerprint", generousSweepBudget())
+	request.CallOrdinal = 0
+	request.Purpose = peoplesweep.ProviderCallPurposePrimary
+	reservation, err := f.store.ReservePersonSweepBudget(t.Context(), request)
+	require.NoError(t, err)
+	require.NoError(t, f.store.MarkPersonSweepBudgetStarted(t.Context(), reservation))
+	require.NoError(t, f.store.FinalizePersonSweepFailure(t.Context(), peoplesweep.FailureFinalization{
+		Lease: sweepAttemptLease(f), AttemptID: f.attemptID,
+		Class: peoplesweep.FailureInvalidOutput, RetryAt: sweepBudgetNow().Add(time.Hour),
+		Reservations: []peoplesweep.BudgetReservation{reservation},
+		Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0, CallOrdinal: 0,
+			Purpose:           peoplesweep.ProviderCallPurposePrimary,
+			ProviderRequestID: "request-without-usage", UsageKnown: false}},
+		FinalizedAt: sweepBudgetNow().Add(time.Minute),
+	}))
+
+	var requests int
+	var inputTokens, outputTokens, cost int64
+	require.NoError(t, f.store.DB().QueryRowContext(t.Context(), f.store.Rebind(`
+		SELECT actual_requests, actual_input_tokens, actual_output_tokens, actual_cost_micro_usd
+		FROM person_sweep_batches
+		WHERE attempt_id = ? AND batch_ordinal = 0 AND call_ordinal = 0`),
+		f.attemptID).Scan(&requests, &inputTokens, &outputTokens, &cost))
+	assert.Equal(t, request.EstimatedRequests, requests)
+	assert.Equal(t, request.EstimatedInputTokens, inputTokens)
+	assert.Equal(t, request.EstimatedOutputTokens, outputTokens)
+	assert.Equal(t, request.EstimatedCostMicroUSD, cost)
+}
+
 func TestPersonSweepBudgetDoesNotTrustProviderUnderreporting(t *testing.T) {
 	checks := assert.New(t)
 	requirements := require.New(t)
@@ -302,7 +465,8 @@ func TestPersonSweepBudgetDoesNotTrustProviderUnderreporting(t *testing.T) {
 	requirements.NoError(f.store.FinalizePersonSweepFailure(t.Context(), peoplesweep.FailureFinalization{
 		Lease: sweepAttemptLease(f), AttemptID: f.attemptID, Class: peoplesweep.FailureTimeout,
 		RetryAt: sweepBudgetNow().Add(time.Hour), Reservations: []peoplesweep.BudgetReservation{reservation},
-		Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0,
+		Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0, CallOrdinal: 0,
+			Purpose: peoplesweep.ProviderCallPurposePrimary, UsageKnown: true,
 			Usage: peoplesweep.TokenUsage{InputTokens: 1, OutputTokens: 1}}},
 		FinalizedAt: sweepBudgetNow().Add(time.Minute),
 	}))
@@ -455,7 +619,8 @@ func TestPersonSweepBudgetRejectsReservationPolicyReplay(t *testing.T) {
 				Lease: sweepAttemptLease(f), AttemptID: f.attemptID,
 				Class: peoplesweep.FailureProviderHTTP, RetryAt: sweepBudgetNow().Add(time.Hour),
 				Reservations: []peoplesweep.BudgetReservation{reservation},
-				Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0,
+				Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0, CallOrdinal: 0,
+					Purpose: peoplesweep.ProviderCallPurposePrimary, UsageKnown: true,
 					Usage: peoplesweep.TokenUsage{InputTokens: 500, OutputTokens: 200}}},
 				FinalizedAt: sweepBudgetNow().Add(time.Minute),
 			})
@@ -501,7 +666,8 @@ func TestPersonSweepBudgetReleaseFinalizeLockOrder(t *testing.T) {
 			Lease: sweepAttemptLease(secondFixture), AttemptID: secondFixture.attemptID,
 			Class: peoplesweep.FailureTimeout, RetryAt: sweepBudgetNow().Add(time.Hour),
 			Reservations: []peoplesweep.BudgetReservation{second},
-			Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0,
+			Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0, CallOrdinal: 0,
+				Purpose: peoplesweep.ProviderCallPurposePrimary, UsageKnown: true,
 				ProviderRequestID: "safe-request-id", Usage: peoplesweep.TokenUsage{
 					InputTokens: 100, OutputTokens: 100}}},
 			FinalizedAt: sweepBudgetNow().Add(time.Minute),

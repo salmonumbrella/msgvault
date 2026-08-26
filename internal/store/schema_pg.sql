@@ -521,6 +521,8 @@ CREATE INDEX IF NOT EXISTS idx_person_sweep_attempts_generation
 CREATE TABLE IF NOT EXISTS person_sweep_batches (
     attempt_id                  TEXT NOT NULL REFERENCES person_sweep_attempts(id) ON DELETE CASCADE,
     batch_ordinal               INTEGER NOT NULL CHECK (batch_ordinal >= 0),
+    call_ordinal                INTEGER NOT NULL DEFAULT 0 CHECK (call_ordinal IN (0, 1)),
+    purpose                     TEXT NOT NULL DEFAULT 'primary',
     utc_day                     TEXT NOT NULL,
     reservation_id              TEXT NOT NULL,
     budget_fingerprint          TEXT NOT NULL,
@@ -543,7 +545,11 @@ CREATE TABLE IF NOT EXISTS person_sweep_batches (
     )),
     created_at                  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at                TIMESTAMPTZ,
-    PRIMARY KEY (attempt_id, batch_ordinal)
+    CONSTRAINT person_sweep_batches_call_coordinate_check CHECK (
+        (call_ordinal = 0 AND purpose = 'primary') OR
+        (call_ordinal = 1 AND purpose = 'repair')
+    ),
+    PRIMARY KEY (attempt_id, batch_ordinal, call_ordinal)
 );
 
 CREATE TABLE IF NOT EXISTS person_sweep_daily_usage (

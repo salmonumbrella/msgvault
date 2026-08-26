@@ -215,7 +215,7 @@ func (s *Store) ReservePersonSweepBudget(
 		}
 		dayToLock := input.UTCDate
 		if coordinate, found, err := loadPersonSweepBatchCoordinateTx(ctx, tx,
-			input.AttemptID, input.BatchOrdinal); err != nil {
+			input.AttemptID, input.BatchOrdinal, input.CallOrdinal); err != nil {
 			return err
 		} else if found {
 			dayToLock = coordinate.day
@@ -231,13 +231,16 @@ func (s *Store) ReservePersonSweepBudget(
 			return err
 		}
 		if existing, found, err := loadPersonSweepBatchTx(ctx, tx, input.AttemptID,
-			input.BatchOrdinal, s.IsPostgreSQL()); err != nil {
+			input.BatchOrdinal, input.CallOrdinal, s.IsPostgreSQL()); err != nil {
 			return err
 		} else if found {
 			if existing.matches(input) && existing.status == "reserved" {
 				return nil
 			}
-			return errors.New("reserve person sweep budget: batch ordinal already has different metadata")
+			return errors.New("reserve person sweep budget: call coordinate already has different metadata")
+		}
+		if err := validatePersonSweepCallPredecessorTx(ctx, tx, input); err != nil {
+			return err
 		}
 		personUsage, err := personSweepBudgetUsageTx(ctx, tx,
 			`SELECT b.status, b.reserved_requests, b.reserved_input_tokens, b.reserved_output_tokens,
@@ -267,12 +270,14 @@ func (s *Store) ReservePersonSweepBudget(
 		}
 		_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO person_sweep_batches
-				(attempt_id, batch_ordinal, utc_day, reservation_id, budget_fingerprint,
+				(attempt_id, batch_ordinal, call_ordinal, purpose, utc_day,
+				 reservation_id, budget_fingerprint,
 				 input_hash, item_count, status,
 				 reserved_requests, reserved_input_tokens, reserved_output_tokens,
 				 reserved_cost_micro_usd, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, %s)`, s.dialect.Now()),
-			input.AttemptID, input.BatchOrdinal, input.UTCDate, reservation.ID,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, %s)`, s.dialect.Now()),
+			input.AttemptID, input.BatchOrdinal, input.CallOrdinal, input.Purpose,
+			input.UTCDate, reservation.ID,
 			personSweepBudgetFingerprint(input.Budget), input.InputHash,
 			input.ItemCount, input.EstimatedRequests, input.EstimatedInputTokens,
 			input.EstimatedOutputTokens, input.EstimatedCostMicroUSD)
@@ -462,9 +467,46 @@ func addPersonSweepUsage(left, right peoplesweep.Usage) (peoplesweep.Usage, erro
 		EstimatedCostMicroUSD: left.EstimatedCostMicroUSD + right.EstimatedCostMicroUSD}, nil
 }
 
+func validPersonSweepCallCoordinate(callOrdinal int, purpose string) bool {
+	return (callOrdinal == 0 && purpose == peoplesweep.ProviderCallPurposePrimary) ||
+		(callOrdinal == 1 && purpose == peoplesweep.ProviderCallPurposeRepair)
+}
+
+func validatePersonSweepCallPredecessorTx(
+	ctx context.Context,
+	tx *loggedTx,
+	input peoplesweep.BudgetReservationRequest,
+) error {
+	if input.CallOrdinal == 1 {
+		primary, found, err := loadPersonSweepBatchTx(
+			ctx, tx, input.AttemptID, input.BatchOrdinal, 0, false)
+		if err != nil {
+			return err
+		}
+		if !found || primary.purpose != peoplesweep.ProviderCallPurposePrimary ||
+			(primary.status != "running" && primary.status != "succeeded") {
+			return errors.New("reserve person sweep budget: repair call requires a started primary call")
+		}
+		return nil
+	}
+	if input.BatchOrdinal == 0 {
+		return nil
+	}
+	previous, found, err := loadPersonSweepBatchTx(
+		ctx, tx, input.AttemptID, input.BatchOrdinal-1, 0, false)
+	if err != nil {
+		return err
+	}
+	if !found || previous.purpose != peoplesweep.ProviderCallPurposePrimary {
+		return errors.New("reserve person sweep budget: primary batch ordinal has a gap")
+	}
+	return nil
+}
+
 func validatePersonSweepReservationRequest(input peoplesweep.BudgetReservationRequest) error {
 	if strings.TrimSpace(input.RunID) == "" || strings.TrimSpace(input.AttemptID) == "" ||
-		input.BatchOrdinal < 0 || input.PersonID <= 0 || strings.TrimSpace(input.ProviderFingerprint) == "" ||
+		input.BatchOrdinal < 0 || !validPersonSweepCallCoordinate(input.CallOrdinal, input.Purpose) ||
+		input.PersonID <= 0 || strings.TrimSpace(input.ProviderFingerprint) == "" ||
 		input.ItemCount < 0 || input.ItemCount > math.MaxInt32 || input.EstimatedRequests <= 0 ||
 		input.EstimatedRequests > math.MaxInt32 || input.EstimatedInputTokens <= 0 ||
 		input.EstimatedOutputTokens <= 0 || input.EstimatedCostMicroUSD < 0 {
@@ -504,6 +546,8 @@ func personSweepReservationID(input peoplesweep.BudgetReservationRequest) string
 	writeString(input.RunID)
 	writeString(input.AttemptID)
 	writePersonSweepIdentityInt(hash, int64(input.BatchOrdinal))
+	writePersonSweepIdentityInt(hash, int64(input.CallOrdinal))
+	writeString(input.Purpose)
 	writePersonSweepIdentityInt(hash, input.PersonID)
 	writeString(input.ProviderFingerprint)
 	writeString(input.UTCDate)
@@ -549,6 +593,7 @@ func writePersonSweepIdentityInt(digest hash.Hash, value int64) {
 
 type personSweepBatch struct {
 	day               string
+	purpose           string
 	reservationID     string
 	budgetFingerprint string
 	inputHash         string
@@ -562,21 +607,22 @@ type personSweepBatch struct {
 }
 
 func loadPersonSweepBatchTx(ctx context.Context, tx *loggedTx, attemptID string,
-	ordinal int, postgres bool,
+	ordinal, callOrdinal int, postgres bool,
 ) (personSweepBatch, bool, error) {
-	query := `SELECT utc_day, reservation_id, budget_fingerprint, input_hash,
+	query := `SELECT utc_day, purpose, reservation_id, budget_fingerprint, input_hash,
 	                 item_count, status, reserved_requests,
 	                 reserved_input_tokens, reserved_output_tokens, reserved_cost_micro_usd,
 	                 actual_requests, actual_input_tokens, actual_output_tokens,
 	                 actual_cost_micro_usd, provider_request_id, latency_milliseconds,
 	                 completed_at
-	          FROM person_sweep_batches WHERE attempt_id = ? AND batch_ordinal = ?`
+	          FROM person_sweep_batches
+	          WHERE attempt_id = ? AND batch_ordinal = ? AND call_ordinal = ?`
 	if postgres {
 		query += " FOR UPDATE"
 	}
 	var batch personSweepBatch
-	err := tx.QueryRowContext(ctx, query, attemptID, ordinal).Scan(&batch.day,
-		&batch.reservationID, &batch.budgetFingerprint, &batch.inputHash,
+	err := tx.QueryRowContext(ctx, query, attemptID, ordinal, callOrdinal).Scan(&batch.day,
+		&batch.purpose, &batch.reservationID, &batch.budgetFingerprint, &batch.inputHash,
 		&batch.itemCount, &batch.status, &batch.reserved.Requests,
 		&batch.reserved.InputTokens, &batch.reserved.OutputTokens,
 		&batch.reserved.EstimatedCostMicroUSD, &batch.actual.Requests,
@@ -594,6 +640,7 @@ func loadPersonSweepBatchTx(ctx context.Context, tx *loggedTx, attemptID string,
 
 func (batch personSweepBatch) matches(input peoplesweep.BudgetReservationRequest) bool {
 	return batch.day == input.UTCDate &&
+		batch.purpose == input.Purpose &&
 		batch.reservationID == personSweepReservationID(input) &&
 		batch.budgetFingerprint == personSweepBudgetFingerprint(input.Budget) &&
 		batch.inputHash == input.InputHash &&
@@ -623,7 +670,8 @@ func (s *Store) ReleasePersonSweepBudget(
 			return err
 		}
 		coordinate, found, err := loadPersonSweepBatchCoordinateTx(ctx, tx,
-			reservation.Request.AttemptID, reservation.Request.BatchOrdinal)
+			reservation.Request.AttemptID, reservation.Request.BatchOrdinal,
+			reservation.Request.CallOrdinal)
 		if err != nil {
 			return err
 		}
@@ -634,7 +682,7 @@ func (s *Store) ReleasePersonSweepBudget(
 			return err
 		}
 		batch, found, err := loadPersonSweepBatchTx(ctx, tx, reservation.Request.AttemptID,
-			reservation.Request.BatchOrdinal, s.IsPostgreSQL())
+			reservation.Request.BatchOrdinal, reservation.Request.CallOrdinal, s.IsPostgreSQL())
 		if err != nil {
 			return err
 		}
@@ -648,9 +696,10 @@ func (s *Store) ReleasePersonSweepBudget(
 			return errors.New("release person sweep budget: provider work already started")
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE person_sweep_batches
-			SET status = 'cancelled', completed_at = ? WHERE attempt_id = ? AND batch_ordinal = ?`,
+			SET status = 'cancelled', completed_at = ?
+			WHERE attempt_id = ? AND batch_ordinal = ? AND call_ordinal = ?`,
 			s.dialect.TimestampParam(time.Now().UTC()), reservation.Request.AttemptID,
-			reservation.Request.BatchOrdinal); err != nil {
+			reservation.Request.BatchOrdinal, reservation.Request.CallOrdinal); err != nil {
 			return err
 		}
 		return s.adjustPersonSweepDailyUsage(ctx, tx, batch.day, negatePersonSweepUsage(batch.reserved),
@@ -713,7 +762,8 @@ func (s *Store) MarkPersonSweepBudgetStarted(
 			return err
 		}
 		coordinate, found, err := loadPersonSweepBatchCoordinateTx(ctx, tx,
-			reservation.Request.AttemptID, reservation.Request.BatchOrdinal)
+			reservation.Request.AttemptID, reservation.Request.BatchOrdinal,
+			reservation.Request.CallOrdinal)
 		if err != nil {
 			return err
 		}
@@ -724,7 +774,8 @@ func (s *Store) MarkPersonSweepBudgetStarted(
 			return err
 		}
 		batch, found, err := loadPersonSweepBatchTx(ctx, tx,
-			reservation.Request.AttemptID, reservation.Request.BatchOrdinal, s.IsPostgreSQL())
+			reservation.Request.AttemptID, reservation.Request.BatchOrdinal,
+			reservation.Request.CallOrdinal, s.IsPostgreSQL())
 		if err != nil {
 			return err
 		}
@@ -738,8 +789,9 @@ func (s *Store) MarkPersonSweepBudgetStarted(
 			return errors.New("mark person sweep budget started: reservation is terminal")
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE person_sweep_batches SET status = 'running'
-			WHERE attempt_id = ? AND batch_ordinal = ?`, reservation.Request.AttemptID,
-			reservation.Request.BatchOrdinal)
+			WHERE attempt_id = ? AND batch_ordinal = ? AND call_ordinal = ?`,
+			reservation.Request.AttemptID, reservation.Request.BatchOrdinal,
+			reservation.Request.CallOrdinal)
 		return err
 	})
 	if err != nil {
@@ -757,36 +809,42 @@ func (s *Store) FinalizePersonSweepFailure(
 	}
 	reservations := append([]peoplesweep.BudgetReservation(nil), input.Reservations...)
 	slices.SortFunc(reservations, func(a, b peoplesweep.BudgetReservation) int {
-		return a.Request.BatchOrdinal - b.Request.BatchOrdinal
+		if a.Request.BatchOrdinal != b.Request.BatchOrdinal {
+			return a.Request.BatchOrdinal - b.Request.BatchOrdinal
+		}
+		return a.Request.CallOrdinal - b.Request.CallOrdinal
 	})
-	completed := make(map[int]peoplesweep.CompletedUsage, len(input.Completed))
+	completed := make(map[peoplesweep.ProviderCallCoordinate]peoplesweep.CompletedUsage, len(input.Completed))
 	for _, usage := range input.Completed {
-		if usage.BatchOrdinal < 0 || usage.Usage.InputTokens < 0 || usage.Usage.OutputTokens < 0 ||
+		coordinate := completedUsageCoordinate(usage)
+		if usage.BatchOrdinal < 0 || !validPersonSweepCallCoordinate(usage.CallOrdinal, usage.Purpose) ||
+			usage.Usage.InputTokens < 0 || usage.Usage.OutputTokens < 0 ||
 			usage.Latency < 0 {
 			return errors.New("finalize person sweep failure: invalid completed usage")
 		}
 		if !peoplesweep.IsSafeProviderMetadata(usage.ProviderRequestID) {
 			return errors.New("finalize person sweep failure: unsafe provider request ID")
 		}
-		if _, duplicate := completed[usage.BatchOrdinal]; duplicate {
-			return errors.New("finalize person sweep failure: duplicate completed batch")
+		if _, duplicate := completed[coordinate]; duplicate {
+			return errors.New("finalize person sweep failure: duplicate completed call")
 		}
-		completed[usage.BatchOrdinal] = usage
+		completed[coordinate] = usage
 	}
-	seen := make(map[int]struct{}, len(reservations))
+	seen := make(map[peoplesweep.ProviderCallCoordinate]struct{}, len(reservations))
 	for _, reservation := range reservations {
 		if reservation.Request.AttemptID != input.AttemptID ||
 			reservation.ID != personSweepReservationID(reservation.Request) {
 			return errors.New("finalize person sweep failure: reservation identity mismatch")
 		}
-		if _, duplicate := seen[reservation.Request.BatchOrdinal]; duplicate {
+		coordinate := reservationCoordinate(reservation.Request)
+		if _, duplicate := seen[coordinate]; duplicate {
 			return errors.New("finalize person sweep failure: duplicate reservation")
 		}
-		seen[reservation.Request.BatchOrdinal] = struct{}{}
+		seen[coordinate] = struct{}{}
 	}
-	for ordinal := range completed {
-		if _, ok := seen[ordinal]; !ok {
-			return errors.New("finalize person sweep failure: completed batch has no reservation")
+	for coordinate := range completed {
+		if _, ok := seen[coordinate]; !ok {
+			return errors.New("finalize person sweep failure: completed call has no reservation")
 		}
 	}
 
@@ -798,12 +856,16 @@ func (s *Store) FinalizePersonSweepFailure(
 		if attempt.status != peoplesweep.AttemptRunning && attempt.status != peoplesweep.AttemptFailed {
 			return errors.New("finalize person sweep failure: attempt is not failure-finalizable")
 		}
+		alreadyFinalized := attempt.status == peoplesweep.AttemptFailed
 		if input.Lease.PersonID != attempt.personID || input.Lease.Fence != attempt.leaseFence {
 			return errors.New("finalize person sweep failure: lease does not match durable attempt")
 		}
 		if attempt.status == peoplesweep.AttemptFailed &&
 			attempt.failureClass == peoplesweep.FailureLeaseLost {
 			return nil
+		}
+		if alreadyFinalized && attempt.failureClass != input.Class {
+			return errors.New("finalize person sweep failure: terminal failure class mismatch")
 		}
 		if err := s.lockPersonSweepBudgetRun(ctx, tx, attempt.runID); err != nil {
 			return err
@@ -820,11 +882,14 @@ func (s *Store) FinalizePersonSweepFailure(
 			return err
 		}
 		if len(durableBatches) != len(seen) {
-			return errors.New("finalize person sweep failure: reservations do not cover every durable batch")
+			return errors.New("finalize person sweep failure: reservations do not cover every durable call")
 		}
-		for _, batch := range durableBatches {
-			if _, covered := seen[batch.ordinal]; !covered {
-				return errors.New("finalize person sweep failure: reservations do not cover every durable batch")
+		if err := validatePersonSweepCallCoordinateSet(durableBatches); err != nil {
+			return fmt.Errorf("finalize person sweep failure: %w", err)
+		}
+		for _, call := range durableBatches {
+			if _, covered := seen[call.providerCoordinate()]; !covered {
+				return errors.New("finalize person sweep failure: reservations do not cover every durable call")
 			}
 		}
 		if _, err := s.lockPersonSweepUsageThenWorkTx(
@@ -833,15 +898,18 @@ func (s *Store) FinalizePersonSweepFailure(
 		}
 		for _, reservation := range reservations {
 			batch, found, err := loadPersonSweepBatchTx(ctx, tx, input.AttemptID,
-				reservation.Request.BatchOrdinal, s.IsPostgreSQL())
+				reservation.Request.BatchOrdinal, reservation.Request.CallOrdinal, s.IsPostgreSQL())
 			if err != nil {
 				return err
 			}
 			if !found || !batch.matches(reservation.Request) {
 				return errors.New("finalize person sweep failure: reservation is not authentic")
 			}
-			usage, didComplete := completed[reservation.Request.BatchOrdinal]
+			usage, didComplete := completed[reservationCoordinate(reservation.Request)]
 			if batch.status == "succeeded" {
+				if alreadyFinalized && !didComplete {
+					return errors.New("finalize person sweep failure: completed call replay is missing")
+				}
 				if didComplete {
 					actual, actualErr := completedPersonSweepUsage(batch.reserved, usage,
 						reservation.Request.Budget)
@@ -881,12 +949,12 @@ func (s *Store) FinalizePersonSweepFailure(
 					    actual_input_tokens = ?, actual_output_tokens = ?,
 					    actual_cost_micro_usd = ?, latency_milliseconds = ?,
 					    failure_class = ?, completed_at = ?
-					WHERE attempt_id = ? AND batch_ordinal = ?`, status,
+					WHERE attempt_id = ? AND batch_ordinal = ? AND call_ordinal = ?`, status,
 					usage.ProviderRequestID, actual.Requests, actual.InputTokens,
 					actual.OutputTokens, actual.EstimatedCostMicroUSD,
 					usage.Latency.Milliseconds(), input.Class,
 					s.dialect.TimestampParam(input.FinalizedAt), input.AttemptID,
-					reservation.Request.BatchOrdinal)
+					reservation.Request.BatchOrdinal, reservation.Request.CallOrdinal)
 				if err != nil {
 					return err
 				}
@@ -897,9 +965,9 @@ func (s *Store) FinalizePersonSweepFailure(
 			} else {
 				_, err = tx.ExecContext(ctx, `UPDATE person_sweep_batches
 					SET status = 'cancelled', failure_class = ?, completed_at = ?
-					WHERE attempt_id = ? AND batch_ordinal = ?`, input.Class,
+					WHERE attempt_id = ? AND batch_ordinal = ? AND call_ordinal = ?`, input.Class,
 					s.dialect.TimestampParam(input.FinalizedAt), input.AttemptID,
-					reservation.Request.BatchOrdinal)
+					reservation.Request.BatchOrdinal, reservation.Request.CallOrdinal)
 				if err != nil {
 					return err
 				}
@@ -908,6 +976,9 @@ func (s *Store) FinalizePersonSweepFailure(
 					return err
 				}
 			}
+		}
+		if alreadyFinalized {
+			return nil
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE person_sweep_attempts
 			SET status = 'failed', failure_class = ?, retry_at = ?, completed_at = ?
@@ -941,16 +1012,24 @@ func (s *Store) FinalizePersonSweepFailure(
 }
 
 type personSweepBatchCoordinate struct {
-	ordinal int
-	day     string
+	ordinal     int
+	callOrdinal int
+	purpose     string
+	day         string
+}
+
+func (coordinate personSweepBatchCoordinate) providerCoordinate() peoplesweep.ProviderCallCoordinate {
+	return peoplesweep.ProviderCallCoordinate{BatchOrdinal: coordinate.ordinal,
+		CallOrdinal: coordinate.callOrdinal, Purpose: coordinate.purpose}
 }
 
 func loadPersonSweepBatchCoordinateTx(
-	ctx context.Context, tx *loggedTx, attemptID string, ordinal int,
+	ctx context.Context, tx *loggedTx, attemptID string, ordinal, callOrdinal int,
 ) (personSweepBatchCoordinate, bool, error) {
-	coordinate := personSweepBatchCoordinate{ordinal: ordinal}
-	err := tx.QueryRowContext(ctx, `SELECT utc_day FROM person_sweep_batches
-		WHERE attempt_id = ? AND batch_ordinal = ?`, attemptID, ordinal).Scan(&coordinate.day)
+	coordinate := personSweepBatchCoordinate{ordinal: ordinal, callOrdinal: callOrdinal}
+	err := tx.QueryRowContext(ctx, `SELECT purpose, utc_day FROM person_sweep_batches
+		WHERE attempt_id = ? AND batch_ordinal = ? AND call_ordinal = ?`,
+		attemptID, ordinal, callOrdinal).Scan(&coordinate.purpose, &coordinate.day)
 	if errors.Is(err, sql.ErrNoRows) {
 		return personSweepBatchCoordinate{}, false, nil
 	}
@@ -964,8 +1043,9 @@ func loadPersonSweepBatchCoordinateTx(
 func listPersonSweepBatchCoordinatesTx(
 	ctx context.Context, tx *loggedTx, attemptID string,
 ) ([]personSweepBatchCoordinate, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT batch_ordinal, utc_day
-		FROM person_sweep_batches WHERE attempt_id = ? ORDER BY batch_ordinal`, attemptID)
+	rows, err := tx.QueryContext(ctx, `SELECT batch_ordinal, call_ordinal, purpose, utc_day
+		FROM person_sweep_batches WHERE attempt_id = ?
+		ORDER BY batch_ordinal, call_ordinal`, attemptID)
 	if err != nil {
 		return nil, fmt.Errorf("list person sweep batch coordinates: %w", err)
 	}
@@ -973,7 +1053,8 @@ func listPersonSweepBatchCoordinatesTx(
 	coordinates := make([]personSweepBatchCoordinate, 0)
 	for rows.Next() {
 		var coordinate personSweepBatchCoordinate
-		if err := rows.Scan(&coordinate.ordinal, &coordinate.day); err != nil {
+		if err := rows.Scan(&coordinate.ordinal, &coordinate.callOrdinal,
+			&coordinate.purpose, &coordinate.day); err != nil {
 			return nil, fmt.Errorf("scan person sweep batch coordinate: %w", err)
 		}
 		coordinates = append(coordinates, coordinate)
@@ -982,6 +1063,40 @@ func listPersonSweepBatchCoordinatesTx(
 		return nil, fmt.Errorf("iterate person sweep batch coordinates: %w", err)
 	}
 	return coordinates, nil
+}
+
+func reservationCoordinate(input peoplesweep.BudgetReservationRequest) peoplesweep.ProviderCallCoordinate {
+	return peoplesweep.ProviderCallCoordinate{BatchOrdinal: input.BatchOrdinal,
+		CallOrdinal: input.CallOrdinal, Purpose: input.Purpose}
+}
+
+func completedUsageCoordinate(input peoplesweep.CompletedUsage) peoplesweep.ProviderCallCoordinate {
+	return peoplesweep.ProviderCallCoordinate{BatchOrdinal: input.BatchOrdinal,
+		CallOrdinal: input.CallOrdinal, Purpose: input.Purpose}
+}
+
+func validatePersonSweepCallCoordinateSet(coordinates []personSweepBatchCoordinate) error {
+	expectedBatch := 0
+	for index := 0; index < len(coordinates); {
+		primary := coordinates[index]
+		if primary.ordinal != expectedBatch || primary.callOrdinal != 0 ||
+			primary.purpose != peoplesweep.ProviderCallPurposePrimary {
+			return errors.New("provider calls contain a gap or missing primary")
+		}
+		index++
+		if index < len(coordinates) && coordinates[index].ordinal == expectedBatch {
+			repair := coordinates[index]
+			if repair.callOrdinal != 1 || repair.purpose != peoplesweep.ProviderCallPurposeRepair {
+				return errors.New("provider calls contain a duplicate or mismatched repair")
+			}
+			index++
+			if index < len(coordinates) && coordinates[index].ordinal == expectedBatch {
+				return errors.New("provider calls contain more than one repair")
+			}
+		}
+		expectedBatch++
+	}
+	return nil
 }
 
 func validPersonSweepFailureClass(class peoplesweep.FailureClass) bool {
@@ -995,6 +1110,9 @@ func validPersonSweepFailureClass(class peoplesweep.FailureClass) bool {
 func completedPersonSweepUsage(reserved peoplesweep.Usage, completed peoplesweep.CompletedUsage,
 	budget peoplesweep.BudgetConfig,
 ) (peoplesweep.Usage, error) {
+	if !completed.UsageKnown {
+		return reserved, nil
+	}
 	actualTokens := peoplesweep.TokenUsage{InputTokens: max(reserved.InputTokens,
 		completed.Usage.InputTokens), OutputTokens: max(reserved.OutputTokens,
 		completed.Usage.OutputTokens)}
@@ -1017,7 +1135,8 @@ func (s *Store) refreshPersonSweepAttemptAndRunUsage(
 		estimated_cost_micro_usd = COALESCE((SELECT SUM(actual_cost_micro_usd) FROM person_sweep_batches WHERE attempt_id = ?), 0),
 		latency_milliseconds = COALESCE((SELECT SUM(latency_milliseconds) FROM person_sweep_batches WHERE attempt_id = ?), 0),
 		provider_request_id = COALESCE((SELECT provider_request_id FROM person_sweep_batches
-			WHERE attempt_id = ? AND provider_request_id <> '' ORDER BY batch_ordinal DESC LIMIT 1), '')
+			WHERE attempt_id = ? AND provider_request_id <> ''
+			ORDER BY batch_ordinal DESC, call_ordinal DESC LIMIT 1), '')
 		WHERE id = ?`, attemptID, attemptID, attemptID, attemptID, attemptID,
 		attemptID, attemptID); err != nil {
 		return fmt.Errorf("refresh person sweep attempt usage: %w", err)

@@ -3,6 +3,7 @@ package store_test
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -141,10 +142,17 @@ func TestPersonSweepExpiredLeaseReclaimFinalizesAbandonedAccounting(t *testing.T
 	must.NoError(err)
 	must.NoError(f.store.StartPersonSweepAttempt(t.Context(),
 		sweepStartAttempt(t, fixture.attemptID, fixture.runID, fixture.personID, first.Fence)))
-	reservation, err := f.store.ReservePersonSweepBudget(t.Context(),
-		sweepReservation(fixture, 0, 100, "provider-fingerprint", generousSweepBudget()))
+	primaryRequest := sweepReservation(fixture, 0, 100, "provider-fingerprint", generousSweepBudget())
+	reservation, err := f.store.ReservePersonSweepBudget(t.Context(), primaryRequest)
 	must.NoError(err)
 	must.NoError(f.store.MarkPersonSweepBudgetStarted(t.Context(), reservation))
+	repairRequest := primaryRequest
+	repairRequest.CallOrdinal = 1
+	repairRequest.Purpose = peoplesweep.ProviderCallPurposeRepair
+	repairRequest.InputHash = strings.Repeat("a", 64)
+	repairReservation, err := f.store.ReservePersonSweepBudget(t.Context(), repairRequest)
+	must.NoError(err)
+	must.NoError(f.store.MarkPersonSweepBudgetStarted(t.Context(), repairReservation))
 	_, err = f.store.DB().ExecContext(t.Context(), f.store.Rebind(
 		`UPDATE person_sweep_work SET lease_until = ? WHERE person_id = ?`),
 		time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), first.PersonID)
@@ -152,26 +160,27 @@ func TestPersonSweepExpiredLeaseReclaimFinalizesAbandonedAccounting(t *testing.T
 
 	second := claimPersonSweepFixture(t, f.store, "worker-b")
 	checks.Equal(first.Fence+1, second.Fence)
-	var attemptStatus, failureClass, batchStatus, runStatus string
+	var attemptStatus, failureClass, runStatus string
 	must.NoError(f.store.DB().QueryRowContext(t.Context(), f.store.Rebind(
 		`SELECT status, failure_class FROM person_sweep_attempts WHERE id = ?`),
 		fixture.attemptID).Scan(&attemptStatus, &failureClass))
+	var failedCalls int
 	must.NoError(f.store.DB().QueryRowContext(t.Context(), f.store.Rebind(
-		`SELECT status FROM person_sweep_batches WHERE attempt_id = ? AND batch_ordinal = 0`),
-		fixture.attemptID).Scan(&batchStatus))
+		`SELECT COUNT(*) FROM person_sweep_batches WHERE attempt_id = ? AND status = 'failed'`),
+		fixture.attemptID).Scan(&failedCalls))
 	must.NoError(f.store.DB().QueryRowContext(t.Context(), f.store.Rebind(
 		`SELECT status FROM person_sweep_runs WHERE id = ?`), fixture.runID).Scan(&runStatus))
 	checks.Equal("failed", attemptStatus)
 	checks.Equal(string(peoplesweep.FailureLeaseLost), failureClass)
-	checks.Equal("failed", batchStatus)
+	checks.Equal(2, failedCalls)
 	checks.Equal("failed", runStatus)
 	var reservedRequests, actualRequests int64
 	must.NoError(f.store.DB().QueryRowContext(t.Context(), f.store.Rebind(
 		`SELECT reserved_requests, actual_requests FROM person_sweep_daily_usage WHERE utc_day = ?`),
 		testSweepUTCDate).Scan(&reservedRequests, &actualRequests))
 	checks.Zero(reservedRequests)
-	checks.Equal(int64(1), actualRequests,
-		"a request marked started remains conservatively charged after worker loss")
+	checks.Equal(int64(2), actualRequests,
+		"every call marked started remains conservatively charged after worker loss")
 }
 
 func TestPersonSweepConcurrentClaimHasOneWinner(t *testing.T) {

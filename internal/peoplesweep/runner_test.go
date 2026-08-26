@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -73,6 +74,40 @@ type countingTransport struct {
 	profile          peoplesweep.ProviderProfile
 	credentialScheme peoplesweep.AuthScheme
 	preserveVersions bool
+}
+
+type repairTransport struct {
+	responses []peoplesweep.DriverResponse
+	requests  []peoplesweep.StructuredRequest
+	profiles  []peoplesweep.ProviderProfile
+	calls     int
+}
+
+func (t *repairTransport) Prepare(
+	profile peoplesweep.ProviderProfile,
+	request peoplesweep.StructuredRequest,
+) (peoplesweep.PreparedStructuredRequest, error) {
+	t.requests = append(t.requests, request)
+	t.profiles = append(t.profiles, profile)
+	wire, err := json.Marshal(request)
+	if err != nil {
+		return peoplesweep.PreparedStructuredRequest{}, err
+	}
+	return peoplesweep.NewPreparedStructuredRequest(request, wire)
+}
+
+func (t *repairTransport) GeneratePrepared(
+	_ context.Context,
+	_ peoplesweep.ProviderProfile,
+	_ peoplesweep.Credential,
+	_ peoplesweep.PreparedStructuredRequest,
+) (peoplesweep.DriverResponse, error) {
+	if t.calls >= len(t.responses) {
+		return peoplesweep.DriverResponse{}, errors.New("unexpected third provider call")
+	}
+	response := t.responses[t.calls]
+	t.calls++
+	return response, nil
 }
 
 func (t *countingTransport) Prepare(
@@ -335,6 +370,88 @@ func TestRunnerValidatesRequestAndOutputSchema(t *testing.T) {
 			assert.NotContains(err.Error(), "provider-output")
 		})
 	}
+}
+
+func TestRunnerPreparesOneBoundedSameProfileRepair(t *testing.T) {
+	request := structuredTestRequest()
+	transport := &repairTransport{responses: []peoplesweep.DriverResponse{
+		{CandidateJSON: json.RawMessage(`{"ok":false}`), ProviderRequestID: "request-primary",
+			ProviderVersion: "provider-v1", ModelVersion: "model-v1",
+			Usage: peoplesweep.TokenUsage{InputTokens: 17, OutputTokens: 3}, UsageKnown: true},
+		{CandidateJSON: json.RawMessage(`{"ok":true}`), ProviderRequestID: "request-repair",
+			ProviderVersion: "provider-v1", ModelVersion: "model-v1",
+			Usage: peoplesweep.TokenUsage{InputTokens: 23, OutputTokens: 2}, UsageKnown: true},
+	}}
+	runner, err := peoplesweep.NewRunner(
+		runnerTestConfig(), &countingConsent{active: true}, testDriverRegistry(transport),
+		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
+	)
+	require.NoError(t, err)
+
+	prepared, err := runner.PrepareStructured(t.Context(), request)
+	require.NoError(t, err)
+	primary, err := runner.RunPreparedStructured(t.Context(), prepared)
+	var failure *peoplesweep.ValidationFailure
+	require.ErrorAs(t, err, &failure)
+	assert.ErrorIs(t, err, peoplesweep.ErrInvalidStructuredOutput)
+	assert.NotContains(t, err.Error(), `{"ok":false}`)
+	assert.JSONEq(t, `{"ok":false}`, string(failure.Candidate))
+	require.Len(t, failure.Errors, 1)
+	assert.LessOrEqual(t, len(failure.Errors[0]), 256)
+	assert.Equal(t, "request-primary", primary.ProviderRequestID)
+	assert.Equal(t, peoplesweep.TokenUsage{InputTokens: 17, OutputTokens: 3}, primary.Usage)
+	assert.True(t, primary.UsageKnown)
+
+	repair, err := runner.PrepareRepair(request, *failure)
+	require.NoError(t, err)
+	repairRequest := repair.Request()
+	assert.Equal(t, request.Sources, repairRequest.Sources)
+	var instruction struct {
+		OriginalRequest  peoplesweep.StructuredRequest `json:"original_request"`
+		InvalidCandidate string                        `json:"invalid_candidate"`
+		ValidationErrors []string                      `json:"validation_errors"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(repairRequest.InputText), &instruction))
+	assert.Equal(t, request.InputText, instruction.OriginalRequest.InputText)
+	assert.JSONEq(t, `{"ok":false}`, instruction.InvalidCandidate)
+	assert.Equal(t, failure.Errors, instruction.ValidationErrors)
+
+	repaired, err := runner.RunPreparedStructured(t.Context(), repair)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"ok":true}`, string(repaired.Output))
+	assert.Equal(t, 2, transport.calls)
+	require.NotEmpty(t, transport.profiles)
+	for _, profile := range transport.profiles {
+		assert.Equal(t, transport.profiles[0], profile)
+	}
+
+	_, err = runner.PrepareRepair(repairRequest, peoplesweep.ValidationFailure{
+		Candidate: json.RawMessage(`{"ok":false}`), Errors: []string{"still invalid"},
+	})
+	require.ErrorContains(t, err, "already a repair")
+	assert.NotContains(t, err.Error(), `{"ok":false}`)
+}
+
+func TestRunnerRejectsUnsafeRepairFailureBoundsWithoutLeakingContent(t *testing.T) {
+	transport := &repairTransport{}
+	runner, err := peoplesweep.NewRunner(
+		runnerTestConfig(), &countingConsent{active: true}, testDriverRegistry(transport),
+		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
+	)
+	require.NoError(t, err)
+	secret := "provider-body-canary"
+
+	tests := []peoplesweep.ValidationFailure{
+		{Candidate: json.RawMessage(strings.Repeat(secret, (1<<20)/len(secret)+2)), Errors: []string{"invalid"}},
+		{Candidate: json.RawMessage(`{"ok":false}`), Errors: []string{strings.Repeat(secret, 20)}},
+		{Candidate: json.RawMessage(`{"ok":false}`), Errors: slices.Repeat([]string{"invalid"}, 33)},
+	}
+	for _, failure := range tests {
+		_, err := runner.PrepareRepair(structuredTestRequest(), failure)
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), secret)
+	}
+	assert.Empty(t, transport.requests)
 }
 
 func TestRunnerRejectsStructuredRequestBounds(t *testing.T) {

@@ -28,6 +28,10 @@ func (r *noProviderSweepRunner) PrepareStructured(context.Context, peoplesweep.S
 	r.calls++
 	return peoplesweep.PreparedStructuredRequest{}, errors.New("cursor-only sweep must not prepare provider work")
 }
+func (r *noProviderSweepRunner) PrepareRepair(peoplesweep.StructuredRequest, peoplesweep.ValidationFailure) (peoplesweep.PreparedStructuredRequest, error) {
+	r.calls++
+	return peoplesweep.PreparedStructuredRequest{}, errors.New("cursor-only sweep must not prepare provider repair work")
+}
 
 func (r *noProviderSweepRunner) RunPreparedStructured(context.Context, peoplesweep.PreparedStructuredRequest) (peoplesweep.StructuredResponse, error) {
 	r.calls++

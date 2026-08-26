@@ -72,13 +72,16 @@ func (s *openAISweepServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.wireHashes = append(s.wireHashes, wantHash)
 	s.mu.Unlock()
 	if s.store != nil {
-		var reservedHash string
+		var callOrdinal int
+		var purpose string
 		err = s.store.DB().QueryRowContext(r.Context(), s.store.Rebind(`
-			SELECT input_hash FROM person_sweep_batches
-			WHERE status = 'running' ORDER BY batch_ordinal DESC LIMIT 1`)).Scan(&reservedHash)
+			SELECT call_ordinal, purpose FROM person_sweep_batches
+			WHERE status = 'running' AND input_hash = ?`), wantHash).Scan(&callOrdinal, &purpose)
 		assert.NoError(s.t, err)
-		assert.Equal(s.t, wantHash, reservedHash,
-			"the exact sent HTTP body must be covered by the durable reservation")
+		assert.True(s.t,
+			(callOrdinal == 0 && purpose == peoplesweep.ProviderCallPurposePrimary) ||
+				(callOrdinal == 1 && purpose == peoplesweep.ProviderCallPurposeRepair),
+			"the exact sent HTTP body must be covered by a valid durable call reservation")
 	}
 
 	var request capturedChatRequest

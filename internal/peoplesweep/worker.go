@@ -30,12 +30,15 @@ const personSweepCleanupTimeout = 5 * time.Second
 
 type CompletedBatch struct {
 	Ordinal            int
+	CallOrdinal        int
+	Purpose            string
 	ReservationID      string
 	InputHash          string
 	ProviderRequestID  string
 	ProviderVersion    string
 	ModelVersion       string
 	Usage              TokenUsage
+	UsageKnown         bool
 	ActualCostMicroUSD int64
 	Latency            time.Duration
 }
@@ -583,10 +586,12 @@ func (w *Worker) RunPerson(
 		estimate      TokenUsage
 		estimatedCost int64
 		reservation   BudgetReservation
+		callOrdinal   int
+		purpose       string
 	}
 	admitted := make([]admittedBatch, 0, len(assembly.Batches))
-	completedUsage := make([]CompletedUsage, 0, len(assembly.Batches))
-	completedBatches := make([]CompletedBatch, 0, len(assembly.Batches))
+	completedUsage := make([]CompletedUsage, 0, len(assembly.Batches)*2)
+	completedBatches := make([]CompletedBatch, 0, len(assembly.Batches)*2)
 	claims := make([]personfacts.ProposedClaim, 0)
 	totalUsage := Usage{}
 	providerVersion, modelVersion := "", ""
@@ -621,7 +626,8 @@ func (w *Worker) RunPerson(
 				completedUsage, estimateErr, resolvedAt)
 		}
 		reservation, reserveErr := w.Store.ReservePersonSweepBudget(ctx, BudgetReservationRequest{
-			RunID: runID, AttemptID: attemptID, BatchOrdinal: batch.Ordinal,
+			RunID: runID, AttemptID: attemptID, BatchOrdinal: batch.Ordinal, CallOrdinal: 0,
+			Purpose:  ProviderCallPurposePrimary,
 			PersonID: lease.PersonID, ProviderFingerprint: profile.Fingerprint,
 			UTCDate: resolvedAt.UTC().Format(time.DateOnly), InputHash: prepared.WireSHA256(),
 			ItemCount: len(batch.Packet.Seeds) + len(batch.Packet.Context), EstimatedRequests: 1,
@@ -634,90 +640,135 @@ func (w *Worker) RunPerson(
 		}
 		reservations = append(reservations, reservation)
 		admitted = append(admitted, admittedBatch{batch: batch, prepared: prepared,
-			estimate: estimate, estimatedCost: estimatedCost, reservation: reservation})
+			estimate: estimate, estimatedCost: estimatedCost, reservation: reservation,
+			callOrdinal: 0, purpose: ProviderCallPurposePrimary})
 	}
-	for _, current := range admitted {
-		batch, prepared := current.batch, current.prepared
-		estimate, estimatedCost, reservation := current.estimate, current.estimatedCost, current.reservation
-		renewed, renewErr := w.Store.RenewPersonSweep(ctx, lease, w.Config.LeaseDuration)
-		if renewErr != nil {
-			return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
-				completedUsage, renewErr, resolvedAt)
-		}
-		if renewed == nil {
-			return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
-				completedUsage, ErrLeaseLost, resolvedAt)
-		}
-		lease = *renewed
-		if markErr := w.Store.MarkPersonSweepBudgetStarted(ctx, reservation); markErr != nil {
-			_ = w.Store.ReleasePersonSweepBudget(ctx, reservation)
-			return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
-				completedUsage, markErr, resolvedAt)
-		}
-		started := w.now()
-		var response StructuredResponse
-		var runErr error
-		lease, response, runErr = w.runPreparedWithLeaseHeartbeat(ctx, lease, prepared)
-		latency := w.now().Sub(started)
-		latency = max(time.Duration(0), latency)
-		if runErr != nil {
-			if structuredResponseCompleted(response) {
-				requestID := response.ProviderRequestID
-				if !IsSafeProviderMetadata(requestID) {
-					requestID = ""
-				}
-				completedUsage = append(completedUsage, CompletedUsage{BatchOrdinal: batch.Ordinal,
-					ProviderRequestID: requestID, Usage: accountableTokenUsage(response.Usage), Latency: latency})
-			}
-			return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
-				completedUsage, runErr, resolvedAt)
-		}
+	recordCompletedCall := func(call admittedBatch, response StructuredResponse, latency time.Duration) error {
 		requestID := response.ProviderRequestID
 		if !IsSafeProviderMetadata(requestID) {
 			requestID = ""
 		}
-		completedUsage = append(completedUsage, CompletedUsage{BatchOrdinal: batch.Ordinal,
-			ProviderRequestID: requestID, Usage: accountableTokenUsage(response.Usage), Latency: latency})
+		completedUsage = append(completedUsage, CompletedUsage{
+			BatchOrdinal: call.batch.Ordinal, CallOrdinal: call.callOrdinal, Purpose: call.purpose,
+			ProviderRequestID: requestID, Usage: accountableTokenUsage(response.Usage),
+			UsageKnown: response.UsageKnown, Latency: latency,
+		})
 		if response.Usage.InputTokens < 0 || response.Usage.OutputTokens < 0 {
-			return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
-				completedUsage, invalidOutputError{errors.New("provider returned negative token usage")}, resolvedAt)
+			return invalidOutputError{errors.New("provider returned negative token usage")}
 		}
 		if !canonicalProviderIdentity(response.ProviderVersion) ||
 			!canonicalProviderIdentity(response.ModelVersion) ||
 			!IsSafeProviderMetadata(response.ProviderRequestID) {
-			return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
-				completedUsage, invalidOutputError{errors.New("provider returned unsafe identity metadata")}, resolvedAt)
+			return invalidOutputError{errors.New("provider returned unsafe identity metadata")}
 		}
 		if providerVersion == "" {
 			providerVersion, modelVersion = response.ProviderVersion, response.ModelVersion
 		} else if providerVersion != response.ProviderVersion || modelVersion != response.ModelVersion {
-			return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
-				completedUsage, invalidOutputError{errors.New("provider batch identities differ")}, resolvedAt)
+			return invalidOutputError{errors.New("provider call identities differ")}
 		}
-		parsed, parseErr := ParseExtraction(response.Output, batch, profile)
-		if parseErr != nil {
-			return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
-				completedUsage, invalidOutputError{parseErr}, resolvedAt)
+		accounted, actualCost, accountErr := accountCompletedProviderCall(
+			response, call.estimate, call.estimatedCost, w.Config.Budgets)
+		if accountErr != nil {
+			return accountErr
 		}
-		claims = append(claims, parsed...)
-		actualCost, costErr := EstimateCostMicroUSD(response.Usage, w.Config.Budgets)
-		if costErr != nil {
-			return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
-				completedUsage, costErr, resolvedAt)
+		totalUsage, accountErr = addUsage(totalUsage, accounted)
+		if accountErr != nil {
+			return accountErr
 		}
-		actual := Usage{Requests: 1, InputTokens: max(estimate.InputTokens, response.Usage.InputTokens),
-			OutputTokens:          max(estimate.OutputTokens, response.Usage.OutputTokens),
-			EstimatedCostMicroUSD: max(estimatedCost, actualCost)}
-		totalUsage, err = addUsage(totalUsage, actual)
-		if err != nil {
-			return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
-				completedUsage, err, resolvedAt)
-		}
-		completedBatches = append(completedBatches, CompletedBatch{Ordinal: batch.Ordinal,
-			ReservationID: reservation.ID, InputHash: prepared.WireSHA256(),
+		completedBatches = append(completedBatches, CompletedBatch{
+			Ordinal: call.batch.Ordinal, CallOrdinal: call.callOrdinal, Purpose: call.purpose,
+			ReservationID: call.reservation.ID, InputHash: call.prepared.WireSHA256(),
 			ProviderRequestID: response.ProviderRequestID, ProviderVersion: response.ProviderVersion,
-			ModelVersion: response.ModelVersion, Usage: response.Usage,
-			ActualCostMicroUSD: actualCost, Latency: latency})
+			ModelVersion: response.ModelVersion, Usage: accountableTokenUsage(response.Usage),
+			UsageKnown: response.UsageKnown, ActualCostMicroUSD: actualCost, Latency: latency,
+		})
+		return nil
+	}
+	for _, primary := range admitted {
+		call := primary
+		for {
+			renewed, renewErr := w.Store.RenewPersonSweep(ctx, lease, w.Config.LeaseDuration)
+			if renewErr != nil {
+				return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
+					completedUsage, renewErr, resolvedAt)
+			}
+			if renewed == nil {
+				return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
+					completedUsage, ErrLeaseLost, resolvedAt)
+			}
+			lease = *renewed
+			if markErr := w.Store.MarkPersonSweepBudgetStarted(ctx, call.reservation); markErr != nil {
+				_ = w.Store.ReleasePersonSweepBudget(ctx, call.reservation)
+				return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
+					completedUsage, markErr, resolvedAt)
+			}
+			started := w.now()
+			var response StructuredResponse
+			var runErr error
+			lease, response, runErr = w.runPreparedWithLeaseHeartbeat(ctx, lease, call.prepared)
+			latency := max(time.Duration(0), w.now().Sub(started))
+			if structuredResponseCompleted(response) {
+				if recordErr := recordCompletedCall(call, response, latency); recordErr != nil {
+					return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
+						completedUsage, recordErr, resolvedAt)
+				}
+			}
+
+			var failure *ValidationFailure
+			if runErr != nil {
+				if !errors.As(runErr, &failure) || call.callOrdinal != 0 || failure.repair {
+					return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
+						completedUsage, runErr, resolvedAt)
+				}
+			} else {
+				parsed, parseErr := ParseExtraction(response.Output, call.batch, profile)
+				if parseErr == nil {
+					claims = append(claims, parsed...)
+					break
+				}
+				failure = newValidationFailure(response.Output,
+					"candidate failed extraction semantics", call.callOrdinal == 1)
+				if call.callOrdinal != 0 {
+					return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
+						completedUsage, failure, resolvedAt)
+				}
+			}
+
+			repair, repairErr := w.Runner.PrepareRepair(primary.batch.Request, *failure)
+			if repairErr != nil {
+				return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
+					completedUsage, repairErr, resolvedAt)
+			}
+			repairEstimate, estimateErr := EstimateWireTokenReservation(
+				repair.WireRequest(), primary.batch.Request.MaxOutputTokens)
+			if estimateErr != nil {
+				return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
+					completedUsage, estimateErr, resolvedAt)
+			}
+			repairCost, estimateErr := EstimateCostMicroUSD(repairEstimate, w.Config.Budgets)
+			if estimateErr != nil {
+				return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
+					completedUsage, estimateErr, resolvedAt)
+			}
+			repairReservation, reserveErr := w.Store.ReservePersonSweepBudget(ctx, BudgetReservationRequest{
+				RunID: runID, AttemptID: attemptID, BatchOrdinal: primary.batch.Ordinal,
+				CallOrdinal: 1, Purpose: ProviderCallPurposeRepair,
+				PersonID: lease.PersonID, ProviderFingerprint: profile.Fingerprint,
+				UTCDate: resolvedAt.UTC().Format(time.DateOnly), InputHash: repair.WireSHA256(),
+				ItemCount:         len(primary.batch.Packet.Seeds) + len(primary.batch.Packet.Context),
+				EstimatedRequests: 1, EstimatedInputTokens: repairEstimate.InputTokens,
+				EstimatedOutputTokens: repairEstimate.OutputTokens,
+				EstimatedCostMicroUSD: repairCost, Budget: w.Config.Budgets,
+			})
+			if reserveErr != nil {
+				return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
+					completedUsage, reserveErr, resolvedAt)
+			}
+			reservations = append(reservations, repairReservation)
+			call = admittedBatch{batch: primary.batch, prepared: repair, estimate: repairEstimate,
+				estimatedCost: repairCost, reservation: repairReservation,
+				callOrdinal: 1, purpose: ProviderCallPurposeRepair}
+		}
 	}
 	provider, model := string(profile.Protocol), profile.Model
 	if len(completedBatches) == 0 {
@@ -970,12 +1021,34 @@ func classifyPersonSweepFailure(err error) (FailureClass, time.Duration) {
 func structuredResponseCompleted(response StructuredResponse) bool {
 	return len(response.Output) > 0 || response.ProviderRequestID != "" ||
 		response.ProviderVersion != "" || response.ModelVersion != "" ||
-		response.Usage != (TokenUsage{})
+		response.Usage != (TokenUsage{}) || response.UsageKnown
 }
 
 func accountableTokenUsage(usage TokenUsage) TokenUsage {
 	return TokenUsage{InputTokens: max(int64(0), usage.InputTokens),
 		OutputTokens: max(int64(0), usage.OutputTokens)}
+}
+
+func accountCompletedProviderCall(
+	response StructuredResponse,
+	reserved TokenUsage,
+	reservedCost int64,
+	budget BudgetConfig,
+) (Usage, int64, error) {
+	if response.Usage.InputTokens < 0 || response.Usage.OutputTokens < 0 {
+		return Usage{}, 0, errors.New("provider returned negative token usage")
+	}
+	if !response.UsageKnown {
+		return Usage{Requests: 1, InputTokens: reserved.InputTokens,
+			OutputTokens: reserved.OutputTokens, EstimatedCostMicroUSD: reservedCost}, reservedCost, nil
+	}
+	reportedCost, err := EstimateCostMicroUSD(response.Usage, budget)
+	if err != nil {
+		return Usage{}, 0, err
+	}
+	return Usage{Requests: 1, InputTokens: max(reserved.InputTokens, response.Usage.InputTokens),
+		OutputTokens:          max(reserved.OutputTokens, response.Usage.OutputTokens),
+		EstimatedCostMicroUSD: max(reservedCost, reportedCost)}, reportedCost, nil
 }
 
 func personSweepRetryDelay(attemptID string, attempt int, retryAfter, base, maximum time.Duration) time.Duration {

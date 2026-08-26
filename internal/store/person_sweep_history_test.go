@@ -45,7 +45,8 @@ func TestFinalizePersonSweepFailureAccountsAfterLeaseLoss(t *testing.T) {
 	finalization := peoplesweep.FailureFinalization{Lease: *first,
 		AttemptID: "attempt-lease-loss", Class: peoplesweep.FailureProviderHTTP,
 		RetryAt: sweepBudgetNow().Add(time.Hour), Reservations: []peoplesweep.BudgetReservation{reservation},
-		Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0,
+		Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0, CallOrdinal: 0,
+			Purpose: peoplesweep.ProviderCallPurposePrimary, UsageKnown: true,
 			ProviderRequestID: "safe-request-id", Usage: peoplesweep.TokenUsage{
 				InputTokens: 300, OutputTokens: 150}, Latency: time.Second}},
 		FinalizedAt: sweepBudgetNow().Add(time.Minute)}
@@ -82,7 +83,8 @@ func TestPersonSweepHistoryContainsOnlySafeMetadata(t *testing.T) {
 	requirements.NoError(f.store.FinalizePersonSweepFailure(t.Context(), peoplesweep.FailureFinalization{
 		Lease: sweepAttemptLease(f), AttemptID: f.attemptID, Class: peoplesweep.FailureInvalidOutput,
 		RetryAt: sweepBudgetNow().Add(time.Hour), Reservations: []peoplesweep.BudgetReservation{reservation},
-		Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0,
+		Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0, CallOrdinal: 0,
+			Purpose: peoplesweep.ProviderCallPurposePrimary, UsageKnown: true,
 			ProviderRequestID: "request-id-safe", Usage: peoplesweep.TokenUsage{
 				InputTokens: 300, OutputTokens: 150}, Latency: 250 * time.Millisecond}},
 		FinalizedAt: sweepBudgetNow().Add(time.Minute),
@@ -206,7 +208,8 @@ func TestFinalizePersonSweepFailureRejectsAttemptLeaseMismatch(t *testing.T) {
 				Lease: lease, AttemptID: f.attemptID, Class: peoplesweep.FailureTimeout,
 				RetryAt:      sweepBudgetNow().Add(time.Hour),
 				Reservations: []peoplesweep.BudgetReservation{reservation},
-				Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0,
+				Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0, CallOrdinal: 0,
+					Purpose: peoplesweep.ProviderCallPurposePrimary, UsageKnown: true,
 					Usage: peoplesweep.TokenUsage{InputTokens: 300, OutputTokens: 150}}},
 				FinalizedAt: sweepBudgetNow().Add(time.Minute),
 			})
@@ -275,7 +278,8 @@ func TestPersonSweepHistoryRejectsUnsafeProviderRequestID(t *testing.T) {
 		Lease: sweepAttemptLease(f), AttemptID: f.attemptID,
 		Class: peoplesweep.FailureInvalidOutput, RetryAt: sweepBudgetNow().Add(time.Hour),
 		Reservations: []peoplesweep.BudgetReservation{reservation},
-		Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0,
+		Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0, CallOrdinal: 0,
+			Purpose: peoplesweep.ProviderCallPurposePrimary, UsageKnown: true,
 			ProviderRequestID: "unsafe\narchive-derived-value",
 			Usage:             peoplesweep.TokenUsage{InputTokens: 100, OutputTokens: 100}}},
 		FinalizedAt: sweepBudgetNow().Add(time.Minute),

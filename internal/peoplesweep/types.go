@@ -229,10 +229,23 @@ type StartAttempt struct {
 	StartedAt      time.Time
 }
 
+const (
+	ProviderCallPurposePrimary = "primary"
+	ProviderCallPurposeRepair  = "repair"
+)
+
+type ProviderCallCoordinate struct {
+	BatchOrdinal int    `json:"batch_ordinal"`
+	CallOrdinal  int    `json:"call_ordinal"`
+	Purpose      string `json:"purpose"`
+}
+
 type BudgetReservationRequest struct {
 	RunID                 string
 	AttemptID             string
 	BatchOrdinal          int
+	CallOrdinal           int
+	Purpose               string
 	PersonID              int64
 	ProviderFingerprint   string
 	UTCDate               string
@@ -253,8 +266,11 @@ type BudgetReservation struct {
 
 type CompletedUsage struct {
 	BatchOrdinal      int
+	CallOrdinal       int
+	Purpose           string
 	ProviderRequestID string
 	Usage             TokenUsage
+	UsageKnown        bool
 	Latency           time.Duration
 }
 

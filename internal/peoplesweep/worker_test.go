@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -246,6 +247,9 @@ type workerFailureRunner struct{}
 func (workerFailureRunner) PrepareStructured(context.Context, StructuredRequest) (PreparedStructuredRequest, error) {
 	return PreparedStructuredRequest{}, errors.New("unexpected provider preparation")
 }
+func (workerFailureRunner) PrepareRepair(StructuredRequest, ValidationFailure) (PreparedStructuredRequest, error) {
+	return PreparedStructuredRequest{}, errors.New("unexpected provider repair preparation")
+}
 func (workerFailureRunner) RunPreparedStructured(context.Context, PreparedStructuredRequest) (StructuredResponse, error) {
 	return StructuredResponse{}, errors.New("unexpected provider call")
 }
@@ -375,9 +379,193 @@ type workerProductionRunner struct {
 	ran      int
 }
 
+type workerRepairAuthority struct{}
+
+func (workerRepairAuthority) HasSuccessfulPersonInferenceCheck(context.Context, string) (bool, error) {
+	return true, nil
+}
+
+func (workerRepairAuthority) HasActivePersonInferenceConsent(context.Context, string) (bool, error) {
+	return true, nil
+}
+
+type workerRepairDriver struct {
+	responses   []DriverResponse
+	requests    []StructuredRequest
+	profiles    []ProviderProfile
+	credentials []Credential
+	calls       int
+}
+
+func (d *workerRepairDriver) Prepare(
+	profile ProviderProfile,
+	request StructuredRequest,
+) (PreparedStructuredRequest, error) {
+	d.requests = append(d.requests, request)
+	d.profiles = append(d.profiles, profile)
+	wire, err := json.Marshal(request)
+	if err != nil {
+		return PreparedStructuredRequest{}, err
+	}
+	return NewPreparedStructuredRequest(request, wire)
+}
+
+func (d *workerRepairDriver) GeneratePrepared(
+	_ context.Context,
+	_ ProviderProfile,
+	credential Credential,
+	_ PreparedStructuredRequest,
+) (DriverResponse, error) {
+	d.credentials = append(d.credentials, credential)
+	if d.calls >= len(d.responses) {
+		return DriverResponse{}, errors.New("unexpected third provider call")
+	}
+	response := d.responses[d.calls]
+	d.calls++
+	return response, nil
+}
+
+func newWorkerRepairRunner(t *testing.T, config Config, driver *workerRepairDriver) *Runner {
+	t.Helper()
+	runner, err := NewRunner(config, workerRepairAuthority{},
+		NewTestDriverRegistry(ProtocolOpenAIChat, driver),
+		NewCredentialResolver(nil, func(string) (string, bool) { return "test-key", true }))
+	require.NoError(t, err)
+	return runner
+}
+
+func runWorkerRepairCase(
+	t *testing.T,
+	primaryCandidate string,
+	repairCandidate string,
+	reserveErrAt int,
+) (*workerFailureStore, *workerRepairDriver, *workerProductionSink, error) {
+	t.Helper()
+	config, catalog := workerTestConfig(t)
+	mutateTestProvider(&config, func(provider *ProviderConfig) { provider.AllowSensitive = true })
+	config.Budgets.MaxRequestsPerPerson = 2
+	config.Budgets.MaxRequestsPerRun = 2
+	config.Budgets.MaxRequestsPerDay = 2
+	config.Budgets.MaxInputTokensPerPerson = 4_000_000
+	config.Budgets.MaxInputTokensPerRun = 4_000_000
+	config.Budgets.MaxInputTokensPerDay = 4_000_000
+	config.Budgets.MaxOutputTokensPerPerson = 2 * extractionMaxOutputTokens
+	config.Budgets.MaxOutputTokensPerRun = 2 * extractionMaxOutputTokens
+	config.Budgets.MaxOutputTokensPerDay = 2 * extractionMaxOutputTokens
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	store := &workerFailureStore{cursor: Cursor{ReconciliationComplete: true,
+		LastBackstopAt: &now}, reserveErrAt: reserveErrAt}
+	seed := packetTestEvidence(71, SourceConversationText, "repair seed")
+	source := &workerProductionSource{windows: map[GenerationCursorMode]PersonWindow{
+		GenerationCursorOptimistic: {Seeds: []EvidenceItem{seed}, Changes: []ArchiveChange{{
+			Sequence: 1, PersonID: 7, SourceLane: SourceConversationText}}, NextSequence: 1},
+	}}
+	driver := &workerRepairDriver{responses: []DriverResponse{
+		{CandidateJSON: json.RawMessage(primaryCandidate), ProviderRequestID: "request-primary",
+			ProviderVersion: "provider-v1", ModelVersion: "model-v1",
+			Usage: TokenUsage{InputTokens: 11, OutputTokens: 3}, UsageKnown: true},
+		{CandidateJSON: json.RawMessage(repairCandidate), ProviderRequestID: "request-repair",
+			ProviderVersion: "provider-v1", ModelVersion: "model-v1",
+			Usage: TokenUsage{InputTokens: 13, OutputTokens: 2}, UsageKnown: true},
+	}}
+	sink := &workerProductionSink{}
+	worker := Worker{Config: config, Store: store, Source: source,
+		Context: NewContextRetriever(source), Sink: sink,
+		Runner:  newWorkerRepairRunner(t, config, driver),
+		Catalog: workerFailureCatalog{catalog: catalog}, Clock: func() time.Time { return now },
+		NewID: func() string { return "attempt-repair" }, WorkerID: "worker-fixture"}
+	_, err := worker.RunPerson(t.Context(), "run-repair", Lease{PersonID: 7,
+		WorkerID: "worker-fixture", Fence: 1, ExpiresAt: now.Add(time.Hour)}, RunIncremental)
+	return store, driver, sink, err
+}
+
+func TestPersonSweepWorkerRepairsSchemaAndSemanticValidationOnce(t *testing.T) {
+	semanticCandidate := `{"claims":[{"target_key":"unknown-target","relation":"support",` +
+		`"value":"x","evidence_ids":["evidence"],"valid_from":null,"valid_until":null,` +
+		`"confidence_basis_points":500}]}`
+	for _, test := range []struct {
+		name      string
+		candidate string
+		message   string
+	}{
+		{name: "JSON Schema", candidate: `{"claims":"invalid"}`,
+			message: "output does not match requested schema"},
+		{name: "ParseExtraction semantics", candidate: semanticCandidate,
+			message: "candidate failed extraction semantics"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, driver, sink, err := runWorkerRepairCase(t, test.candidate, `{"claims":[]}`, 0)
+			require.NoError(t, err)
+			assert.Equal(t, 2, driver.calls)
+			require.Len(t, store.reserved, 2)
+			assert.Equal(t, []ProviderCallCoordinate{
+				{BatchOrdinal: 0, CallOrdinal: 0, Purpose: ProviderCallPurposePrimary},
+				{BatchOrdinal: 0, CallOrdinal: 1, Purpose: ProviderCallPurposeRepair},
+			}, []ProviderCallCoordinate{
+				{BatchOrdinal: store.reserved[0].BatchOrdinal, CallOrdinal: store.reserved[0].CallOrdinal,
+					Purpose: store.reserved[0].Purpose},
+				{BatchOrdinal: store.reserved[1].BatchOrdinal, CallOrdinal: store.reserved[1].CallOrdinal,
+					Purpose: store.reserved[1].Purpose},
+			})
+			assert.NotEqual(t, store.reserved[0].InputHash, store.reserved[1].InputHash)
+			require.Len(t, store.marked, 2)
+			require.NotEmpty(t, driver.profiles)
+			for _, got := range driver.profiles[1:] {
+				assert.Equal(t, driver.profiles[0], got)
+			}
+			require.Len(t, driver.credentials, 2)
+			assert.Equal(t, driver.credentials[0].Scheme, driver.credentials[1].Scheme)
+			assert.True(t, driver.credentials[0].Value() == driver.credentials[1].Value(),
+				"repair credential differs from primary")
+			require.Len(t, sink.requests, 1)
+			assert.Equal(t, 2, sink.requests[0].Usage.Requests)
+			require.Len(t, sink.requests[0].Batches, 2)
+			foundValidationMessage := false
+			for _, request := range driver.requests {
+				if strings.Contains(request.InputText, test.message) {
+					foundValidationMessage = true
+					break
+				}
+			}
+			assert.True(t, foundValidationMessage,
+				"repair instruction did not contain bounded validation message %q", test.message)
+		})
+	}
+}
+
+func TestPersonSweepWorkerRepairBudgetDenialPreventsRepairIO(t *testing.T) {
+	store, driver, sink, err := runWorkerRepairCase(
+		t, `{"claims":"invalid"}`, `{"claims":[]}`, 2)
+	require.ErrorIs(t, err, ErrBudgetExceeded)
+	assert.Equal(t, 1, driver.calls)
+	assert.Len(t, store.reserved, 2)
+	assert.Len(t, store.marked, 1)
+	assert.Empty(t, sink.requests)
+	require.Len(t, store.finalized, 1)
+	assert.Equal(t, FailureBudget, store.finalized[0].Class)
+	require.Len(t, store.finalized[0].Completed, 1)
+	assert.Equal(t, ProviderCallPurposePrimary, store.finalized[0].Completed[0].Purpose)
+}
+
+func TestPersonSweepWorkerSecondInvalidOutputNeverMakesThirdCall(t *testing.T) {
+	store, driver, sink, err := runWorkerRepairCase(
+		t, `{"claims":"invalid"}`, `{"claims":"still-invalid"}`, 0)
+	require.ErrorIs(t, err, ErrInvalidStructuredOutput)
+	assert.Equal(t, 2, driver.calls)
+	assert.Len(t, store.reserved, 2)
+	assert.Len(t, store.marked, 2)
+	assert.Empty(t, sink.requests)
+	require.Len(t, store.finalized, 1)
+	assert.Equal(t, FailureInvalidOutput, store.finalized[0].Class)
+	assert.Len(t, store.finalized[0].Completed, 2)
+}
+
 func (r *workerProductionRunner) PrepareStructured(_ context.Context, request StructuredRequest) (PreparedStructuredRequest, error) {
 	r.prepared++
 	return NewPreparedStructuredRequest(request, []byte(`{"wire":"prepared"}`))
+}
+func (r *workerProductionRunner) PrepareRepair(StructuredRequest, ValidationFailure) (PreparedStructuredRequest, error) {
+	return PreparedStructuredRequest{}, errors.New("unexpected provider repair preparation")
 }
 func (r *workerProductionRunner) RunPreparedStructured(context.Context, PreparedStructuredRequest) (StructuredResponse, error) {
 	r.ran++

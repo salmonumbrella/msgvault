@@ -31,6 +31,7 @@ type StructuredRequest struct {
 	SchemaName        string             `json:"schema_name"`
 	JSONSchema        json.RawMessage    `json:"json_schema"`
 	MaxOutputTokens   int                `json:"max_output_tokens"`
+	repair            bool
 }
 
 // TokenUsage is provider-reported accounting. It is not trusted as a privacy
@@ -59,7 +60,26 @@ type StructuredResponse struct {
 	ProviderVersion   string          `json:"provider_version"`
 	ModelVersion      string          `json:"model_version"`
 	Usage             TokenUsage      `json:"usage"`
+	UsageKnown        bool            `json:"usage_known"`
 }
+
+// ValidationFailure retains only the bounded candidate and bounded local
+// diagnostics needed to prepare one repair. Error never exposes those bytes.
+type ValidationFailure struct {
+	Candidate json.RawMessage
+	Errors    []string
+	repair    bool
+	summary   string
+}
+
+func (f ValidationFailure) Error() string {
+	if f.summary == "" {
+		return ErrInvalidStructuredOutput.Error() + ": local validation failed"
+	}
+	return ErrInvalidStructuredOutput.Error() + ": " + f.summary
+}
+
+func (f ValidationFailure) Unwrap() error { return ErrInvalidStructuredOutput }
 
 // StructuredDriver is the one-attempt provider boundary. Callers must use
 // Runner rather than invoke a driver directly outside this package.
@@ -72,6 +92,7 @@ type StructuredDriver interface {
 // programs consume.
 type StructuredRunner interface {
 	PrepareStructured(ctx context.Context, request StructuredRequest) (PreparedStructuredRequest, error)
+	PrepareRepair(request StructuredRequest, failure ValidationFailure) (PreparedStructuredRequest, error)
 	RunPreparedStructured(ctx context.Context, prepared PreparedStructuredRequest) (StructuredResponse, error)
 	RunStructured(ctx context.Context, request StructuredRequest) (StructuredResponse, error)
 }
@@ -99,6 +120,7 @@ type PreparedStructuredRequest struct {
 	wireRequest []byte
 	wireSHA256  string
 	synthetic   bool
+	repair      bool
 	preparedBy  *Runner
 }
 
@@ -114,7 +136,7 @@ func NewPreparedStructuredRequest(request StructuredRequest, wireRequest []byte)
 	digest := sha256.Sum256(wire)
 	return PreparedStructuredRequest{
 		request: cloneStructuredRequest(request), wireRequest: wire,
-		wireSHA256: hex.EncodeToString(digest[:]),
+		wireSHA256: hex.EncodeToString(digest[:]), repair: request.repair,
 	}, nil
 }
 

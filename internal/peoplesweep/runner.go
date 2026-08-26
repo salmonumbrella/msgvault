@@ -17,9 +17,14 @@ import (
 )
 
 const (
-	maxStructuredInputBytes   = 128 << 10
-	maxStructuredSchemaBytes  = 64 << 10
-	maxStructuredOutputTokens = 32_768
+	maxStructuredInputBytes       = 128 << 10
+	maxStructuredSchemaBytes      = 64 << 10
+	maxStructuredOutputTokens     = 32_768
+	maxValidationCandidateBytes   = 1 << 20
+	maxValidationMessages         = 32
+	maxValidationMessageBytes     = 256
+	maxRepairStructuredInputBytes = maxStructuredInputBytes + maxValidationCandidateBytes +
+		maxValidationMessages*maxValidationMessageBytes + 16<<10
 )
 
 var (
@@ -127,16 +132,60 @@ func (r *Runner) PrepareStructured(
 	return r.prepare(ctx, request, false)
 }
 
+// PrepareRepair deterministically prepares the only repair packet permitted
+// for a locally invalid candidate. It reuses the exact active runner and
+// original request; callers cannot add archive context through this API.
+func (r *Runner) PrepareRepair(
+	request StructuredRequest,
+	failure ValidationFailure,
+) (PreparedStructuredRequest, error) {
+	if request.repair || failure.repair {
+		return PreparedStructuredRequest{}, errors.New("structured inference request is already a repair")
+	}
+	if len(failure.Candidate) > maxValidationCandidateBytes {
+		return PreparedStructuredRequest{}, errors.New("structured inference repair candidate exceeds its bounded limit")
+	}
+	if len(failure.Errors) == 0 || len(failure.Errors) > maxValidationMessages {
+		return PreparedStructuredRequest{}, errors.New("structured inference repair validation messages exceed their bounded limit")
+	}
+	errorsCopy := make([]string, len(failure.Errors))
+	for index, message := range failure.Errors {
+		if message == "" || !utf8.ValidString(message) || len(message) > maxValidationMessageBytes {
+			return PreparedStructuredRequest{}, errors.New("structured inference repair validation message is invalid")
+		}
+		errorsCopy[index] = message
+	}
+	envelope, err := json.Marshal(struct {
+		OriginalRequest  StructuredRequest `json:"original_request"`
+		InvalidCandidate string            `json:"invalid_candidate"`
+		ValidationErrors []string          `json:"validation_errors"`
+	}{
+		OriginalRequest:  cloneStructuredRequest(request),
+		InvalidCandidate: string(failure.Candidate), ValidationErrors: errorsCopy,
+	})
+	if err != nil {
+		return PreparedStructuredRequest{}, errors.New("encode structured inference repair instruction")
+	}
+	repairRequest := cloneStructuredRequest(request)
+	repairRequest.InputText = string(envelope)
+	repairRequest.repair = true
+	prepared, err := r.prepare(context.Background(), repairRequest, false)
+	if err != nil {
+		return PreparedStructuredRequest{}, fmt.Errorf("prepare structured inference repair: %w", err)
+	}
+	prepared.repair = true
+	return prepared, nil
+}
+
 func (r *Runner) prepare(
 	_ context.Context,
 	request StructuredRequest,
 	synthetic bool,
 ) (PreparedStructuredRequest, error) {
-	resolvedSchema, err := validateStructuredRequest(request, synthetic)
+	_, err := validateStructuredRequest(request, synthetic)
 	if err != nil {
 		return PreparedStructuredRequest{}, err
 	}
-	_ = resolvedSchema
 	profile, err := r.config.Profile()
 	if err != nil {
 		return PreparedStructuredRequest{}, err
@@ -171,7 +220,7 @@ func (r *Runner) runPrepared(
 		return StructuredResponse{}, err
 	}
 	request := prepared.Request()
-	resolvedSchema, err := validateStructuredRequest(request, synthetic)
+	_, err := validateStructuredRequest(request, synthetic)
 	if err != nil {
 		return StructuredResponse{}, err
 	}
@@ -197,7 +246,7 @@ func (r *Runner) runPrepared(
 			return StructuredResponse{}, err
 		}
 	}
-	return r.generateAndValidate(ctx, profile, prepared, resolvedSchema)
+	return r.generateAndValidate(ctx, profile, prepared)
 }
 
 func (r *Runner) requireVerifiedAndConsented(ctx context.Context, fingerprint string) error {
@@ -223,7 +272,6 @@ func (r *Runner) generateAndValidate(
 	ctx context.Context,
 	profile ProviderProfile,
 	prepared PreparedStructuredRequest,
-	resolvedSchema *jsonschema.Resolved,
 ) (StructuredResponse, error) {
 
 	profileName, provider, err := r.config.ActiveProviderConfig()
@@ -243,18 +291,65 @@ func (r *Runner) generateAndValidate(
 		}
 		return StructuredResponse{}, fmt.Errorf("generate structured inference: %w", err)
 	}
+	response, failure, validateErr := r.validate(prepared.Request(), driverResponse,
+		prepared.synthetic)
+	if validateErr != nil {
+		return response, validateErr
+	}
+	if failure != nil {
+		return response, failure
+	}
+	return response, nil
+}
+
+// Validate applies exact local JSON parsing and the request's resolved schema
+// without performing provider I/O. A schema failure retains bounded repair
+// inputs while its returned error remains safe for logs and durable history.
+func (r *Runner) Validate(
+	request StructuredRequest,
+	driverResponse DriverResponse,
+) (StructuredResponse, *ValidationFailure, error) {
+	return r.validate(request, driverResponse, false)
+}
+
+func (r *Runner) validate(
+	request StructuredRequest,
+	driverResponse DriverResponse,
+	synthetic bool,
+) (StructuredResponse, *ValidationFailure, error) {
 	response := structuredResponseFromDriver(driverResponse)
+	resolvedSchema, err := validateStructuredRequest(request, synthetic)
+	if err != nil {
+		return response, nil, err
+	}
 	if !safeProviderMetadata(response.ProviderVersion) || !safeProviderMetadata(response.ModelVersion) {
-		return response, fmt.Errorf("%w: missing authoritative version metadata", ErrInvalidStructuredOutput)
+		return response, nil, fmt.Errorf("%w: missing authoritative version metadata", ErrInvalidStructuredOutput)
+	}
+	if len(response.Output) > maxValidationCandidateBytes {
+		return response, newValidationFailure(response.Output[:maxValidationCandidateBytes],
+			"candidate exceeds the local validation limit", request.repair), nil
 	}
 	var output any
 	if err := decodeJSONSchemaInstance(response.Output, &output); err != nil {
-		return response, fmt.Errorf("%w: invalid structured JSON", ErrInvalidStructuredOutput)
+		return response, newValidationFailure(response.Output,
+			"invalid structured JSON", request.repair), nil
 	}
 	if err := resolvedSchema.Validate(output); err != nil {
-		return response, fmt.Errorf("%w: output does not match requested schema", ErrInvalidStructuredOutput)
+		return response, newValidationFailure(response.Output,
+			"output does not match requested schema", request.repair), nil
 	}
-	return response, nil
+	return response, nil, nil
+}
+
+func newValidationFailure(candidate json.RawMessage, message string, repair bool) *ValidationFailure {
+	if len(candidate) > maxValidationCandidateBytes {
+		candidate = candidate[:maxValidationCandidateBytes]
+	}
+	if len(message) > maxValidationMessageBytes {
+		message = message[:maxValidationMessageBytes]
+	}
+	return &ValidationFailure{Candidate: append(json.RawMessage(nil), candidate...),
+		Errors: []string{message}, repair: repair, summary: message}
 }
 
 func structuredResponseFromDriver(response DriverResponse) StructuredResponse {
@@ -264,6 +359,7 @@ func structuredResponseFromDriver(response DriverResponse) StructuredResponse {
 		ProviderVersion:   response.ProviderVersion,
 		ModelVersion:      response.ModelVersion,
 		Usage:             response.Usage,
+		UsageKnown:        response.UsageKnown,
 	}
 }
 
@@ -334,8 +430,12 @@ func validateStructuredRequest(
 	if !schemaNamePattern.MatchString(request.SchemaName) {
 		return nil, errors.New("structured inference schema_name is invalid")
 	}
+	inputLimit := maxStructuredInputBytes
+	if request.repair {
+		inputLimit = maxRepairStructuredInputBytes
+	}
 	if request.InputText == "" || !utf8.ValidString(request.InputText) ||
-		len(request.InputText) > maxStructuredInputBytes {
+		len(request.InputText) > inputLimit {
 		return nil, errors.New("structured inference input_text must be valid UTF-8 from 1 through 131072 bytes")
 	}
 	if len(request.JSONSchema) == 0 || len(request.JSONSchema) > maxStructuredSchemaBytes {
