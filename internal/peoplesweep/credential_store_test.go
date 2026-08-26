@@ -85,6 +85,128 @@ func TestCredentialStoreLifecycleUsesPrivateFilesAndExactDeletion(t *testing.T) 
 	require.NoError(t, store.Delete("alpha"))
 }
 
+func TestCredentialStorePreflightDeleteValidatesWithoutReadingOrChangingSecret(t *testing.T) {
+	tokensDir := t.TempDir()
+	store := peoplesweep.NewFileCredentialStore(tokensDir)
+	require.NoError(t, store.Save("profile", peoplesweep.NewCredential(
+		peoplesweep.AuthBearer, credentialCanary,
+	)))
+	credentialPath := filepath.Join(tokensDir, "people-providers", "profile.json")
+	before, err := os.ReadFile(credentialPath)
+	require.NoError(t, err)
+	beforeInfo, err := os.Stat(credentialPath)
+	require.NoError(t, err)
+
+	err = store.PreflightDelete("profile")
+	require.NoError(t, err)
+	after, err := os.ReadFile(credentialPath)
+	require.NoError(t, err)
+	afterInfo, err := os.Stat(credentialPath)
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
+	assert.Equal(t, beforeInfo.Size(), afterInfo.Size())
+	assert.Equal(t, beforeInfo.Mode(), afterInfo.Mode())
+}
+
+func TestCredentialStorePreflightDeleteRejectsUnsafeObjects(t *testing.T) {
+	t.Run("tokens directory symlink", func(t *testing.T) {
+		parent := t.TempDir()
+		tokensDir := filepath.Join(parent, "tokens")
+		require.NoError(t, os.Symlink(t.TempDir(), tokensDir))
+
+		err := peoplesweep.NewFileCredentialStore(tokensDir).PreflightDelete("profile")
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), credentialCanary)
+	})
+
+	t.Run("credential namespace symlink", func(t *testing.T) {
+		tokensDir := t.TempDir()
+		require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(tokensDir, "people-providers")))
+
+		err := peoplesweep.NewFileCredentialStore(tokensDir).PreflightDelete("profile")
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), credentialCanary)
+	})
+
+	t.Run("lock symlink", func(t *testing.T) {
+		tokensDir := t.TempDir()
+		root := filepath.Join(tokensDir, "people-providers")
+		require.NoError(t, os.Mkdir(root, 0o700))
+		external := filepath.Join(t.TempDir(), "external-lock")
+		require.NoError(t, os.WriteFile(external, nil, 0o600))
+		require.NoError(t, os.Symlink(external, filepath.Join(root, ".credentials.lock")))
+
+		err := peoplesweep.NewFileCredentialStore(tokensDir).PreflightDelete("profile")
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), credentialCanary)
+	})
+
+	t.Run("credential symlink", func(t *testing.T) {
+		tokensDir := t.TempDir()
+		root := filepath.Join(tokensDir, "people-providers")
+		require.NoError(t, os.Mkdir(root, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(root, ".credentials.lock"), nil, 0o600))
+		external := filepath.Join(t.TempDir(), "external-credential")
+		require.NoError(t, os.WriteFile(external, []byte(credentialCanary), 0o600))
+		require.NoError(t, os.Symlink(external, filepath.Join(root, "profile.json")))
+
+		err := peoplesweep.NewFileCredentialStore(tokensDir).PreflightDelete("profile")
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), credentialCanary)
+		contents, readErr := os.ReadFile(external)
+		require.NoError(t, readErr)
+		assert.Equal(t, credentialCanary, string(contents))
+	})
+
+	t.Run("credential directory", func(t *testing.T) {
+		tokensDir := t.TempDir()
+		root := filepath.Join(tokensDir, "people-providers")
+		require.NoError(t, os.Mkdir(root, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(root, ".credentials.lock"), nil, 0o600))
+		require.NoError(t, os.Mkdir(filepath.Join(root, "profile.json"), 0o700))
+
+		err := peoplesweep.NewFileCredentialStore(tokensDir).PreflightDelete("profile")
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), credentialCanary)
+		assert.DirExists(t, filepath.Join(root, "profile.json"))
+	})
+
+	t.Run("credential permissions", func(t *testing.T) {
+		tokensDir := t.TempDir()
+		store := peoplesweep.NewFileCredentialStore(tokensDir)
+		require.NoError(t, store.Save("profile", peoplesweep.NewCredential(
+			peoplesweep.AuthBearer, credentialCanary,
+		)))
+		credentialPath := filepath.Join(tokensDir, "people-providers", "profile.json")
+		require.NoError(t, os.Chmod(credentialPath, 0o640))
+
+		err := store.PreflightDelete("profile")
+		require.ErrorContains(t, err, "permissions")
+		assert.NotContains(t, err.Error(), credentialCanary)
+		contents, readErr := os.ReadFile(credentialPath)
+		require.NoError(t, readErr)
+		assert.Contains(t, string(contents), credentialCanary)
+	})
+
+	t.Run("credential hard link", func(t *testing.T) {
+		tokensDir := t.TempDir()
+		store := peoplesweep.NewFileCredentialStore(tokensDir)
+		require.NoError(t, store.Save("profile", peoplesweep.NewCredential(
+			peoplesweep.AuthBearer, credentialCanary,
+		)))
+		credentialPath := filepath.Join(tokensDir, "people-providers", "profile.json")
+		linkPath := filepath.Join(t.TempDir(), "credential-link")
+		require.NoError(t, os.Link(credentialPath, linkPath))
+
+		err := store.PreflightDelete("profile")
+		require.ErrorContains(t, err, "links")
+		assert.NotContains(t, err.Error(), credentialCanary)
+		contents, readErr := os.ReadFile(linkPath)
+		require.NoError(t, readErr)
+		assert.Contains(t, string(contents), credentialCanary)
+	})
+}
+
 func TestCredentialStoreRotatesAtomically(t *testing.T) {
 	tokensDir := t.TempDir()
 	store := peoplesweep.NewFileCredentialStore(tokensDir)

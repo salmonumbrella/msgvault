@@ -260,6 +260,65 @@ func TestPersonProviderRemoveCompletesLocalPreflightBeforeRevoke(t *testing.T) {
 	}
 }
 
+func TestPersonProviderDaemonRemovePreflightsStoredCredentialBeforeRevoke(t *testing.T) {
+	configured := personProviderTestConfig()
+	beta := configuredPersonProvider(configured)
+	beta.Model = "beta-model"
+	beta.Credential = peoplesweep.CredentialStored
+	beta.CredentialEnv = ""
+	configured.Providers["beta"] = beta
+	path, _ := retainedPersonProviderTestConfig(t, configured)
+
+	tokensDir := t.TempDir()
+	credentials := peoplesweep.NewFileCredentialStore(tokensDir)
+	require.NoError(t, credentials.Save("beta", peoplesweep.NewCredential(
+		peoplesweep.AuthBearer, providerSetupSecretCanary,
+	)))
+	credentialPath := filepath.Join(tokensDir, "people-providers", "beta.json")
+	retainedPath := credentialPath + ".retained"
+	require.NoError(t, os.Rename(credentialPath, retainedPath))
+	externalPath := filepath.Join(t.TempDir(), "external-credential")
+	require.NoError(t, os.WriteFile(externalPath, []byte("must-remain"), 0o600))
+	require.NoError(t, os.Symlink(externalPath, credentialPath))
+
+	revokes := 0
+	edits := 0
+	deps := personProviderCommandDeps{
+		config:                     func() peoplesweep.Config { return configured },
+		isDaemonSubprocess:         func() bool { return false },
+		providerStoreOwnedByDaemon: func(context.Context) (bool, error) { return true, nil },
+		proxy: func(*cobra.Command, []string, map[string]string) error {
+			revokes++
+			return nil
+		},
+		readConfigFile: func() (config.ConfigFile, error) { return config.ReadConfigFile(path) },
+		editConfigTables: func(etag string, planned []config.TableEdit) (config.ConfigFile, error) {
+			edits++
+			return config.EditConfigTables(path, etag, planned)
+		},
+		restoreConfigFile: func(published, before config.ConfigFile) (config.ConfigFile, error) {
+			return config.RestoreConfigFile(path, published, before)
+		},
+		setup: personProviderSetupDeps{credentials: credentials},
+	}
+
+	output, err := executePersonProviderCommand(t, deps, "remove", "beta")
+	require.Error(t, err)
+	assert.Zero(t, revokes)
+	assert.Zero(t, edits)
+	assert.NotContains(t, output, providerSetupSecretCanary)
+	assert.NotContains(t, err.Error(), providerSetupSecretCanary)
+	external, readErr := os.ReadFile(externalPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, "must-remain", string(external))
+	retained, readErr := os.ReadFile(retainedPath)
+	require.NoError(t, readErr)
+	assert.Contains(t, string(retained), providerSetupSecretCanary)
+	finalConfig, loadErr := config.Load(path, "")
+	require.NoError(t, loadErr)
+	assert.Contains(t, finalConfig.People.Sweep.Providers, "beta")
+}
+
 func TestPersonProviderAnonymousCheckForwardsNoCredential(t *testing.T) {
 	config := personProviderTestConfig()
 	mutateConfiguredPersonProvider(&config, func(provider *peoplesweep.ProviderConfig) {

@@ -70,6 +70,36 @@ func TestCredentialStoreLoadUsesPinnedEntryAfterSwap(t *testing.T) {
 		"load did not read the pinned credential entry")
 }
 
+func TestCredentialStorePreflightDeleteRejectsEntrySwapAfterOpen(t *testing.T) {
+	tokensDir := t.TempDir()
+	store := NewFileCredentialStore(tokensDir)
+	require.NoError(t, store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue)))
+	root := filepath.Join(tokensDir, "people-providers")
+	original := filepath.Join(root, "profile.original")
+	external := filepath.Join(t.TempDir(), "replacement.json")
+	require.NoError(t, os.WriteFile(external, []byte("replacement-test-value"), 0o600))
+	var swapped atomic.Bool
+	store.hooks = &credentialStoreHooks{afterCredentialOpen: func(operation string) {
+		if operation != "preflight-delete" {
+			return
+		}
+		require.NoError(t, os.Rename(filepath.Join(root, "profile.json"), original))
+		require.NoError(t, os.Symlink(external, filepath.Join(root, "profile.json")))
+		swapped.Store(true)
+	}}
+
+	err := store.PreflightDelete("profile")
+	require.ErrorContains(t, err, "changed during deletion preflight")
+	assert.True(t, swapped.Load(), "deletion preflight did not reach the pinned-entry boundary")
+	assert.NotContains(t, err.Error(), credentialSecurityTestValue)
+	originalContents, readErr := os.ReadFile(original)
+	require.NoError(t, readErr)
+	assert.Contains(t, string(originalContents), credentialSecurityTestValue)
+	externalContents, readErr := os.ReadFile(external)
+	require.NoError(t, readErr)
+	assert.Equal(t, "replacement-test-value", string(externalContents))
+}
+
 func TestCredentialStoreSaveRefusesSwappedCandidate(t *testing.T) {
 	tokensDir := t.TempDir()
 	store := NewFileCredentialStore(tokensDir)

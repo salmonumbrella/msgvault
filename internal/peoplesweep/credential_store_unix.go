@@ -273,6 +273,36 @@ func (r *unixCredentialStoreRoot) load(profileName string) ([]byte, error) {
 	return data, nil
 }
 
+func (r *unixCredentialStoreRoot) preflightDelete(profileName string) error {
+	name := profileName + ".json"
+	fd, err := unix.Openat(r.fd, name,
+		unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err == unix.ENOENT {
+		return nil
+	}
+	if err == unix.ELOOP {
+		return errors.New("people provider credential path is not a regular file")
+	}
+	if err != nil {
+		return fmt.Errorf("open people provider credential for deletion preflight without following symlinks: %w", err)
+	}
+	defer unix.Close(fd)
+	var opened unix.Stat_t
+	if err := unix.Fstat(fd, &opened); err != nil {
+		return fmt.Errorf("identify opened people provider credential for deletion preflight: %w", err)
+	}
+	if err := validateUnixCredentialStat(opened, "file"); err != nil {
+		return err
+	}
+	if r.hooks != nil && r.hooks.afterCredentialOpen != nil {
+		r.hooks.afterCredentialOpen("preflight-delete")
+	}
+	if !unixCredentialEntryMatches(r.fd, name, opened) {
+		return errors.New("people provider credential changed during deletion preflight")
+	}
+	return nil
+}
+
 func (r *unixCredentialStoreRoot) delete(profileName string) error {
 	name := profileName + ".json"
 	fd, err := unix.Openat(r.fd, name,

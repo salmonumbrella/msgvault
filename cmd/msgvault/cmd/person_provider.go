@@ -522,6 +522,9 @@ func runPersonProviderRemove(
 		if err != nil {
 			return err
 		}
+		if err := credentials.PreflightDelete(name); err != nil {
+			return fmt.Errorf("preflight stored people provider credential deletion: %w", err)
+		}
 	}
 	directStore := deps.isDaemonSubprocess != nil && deps.isDaemonSubprocess()
 	if !directStore && deps.providerStoreOwnedByDaemon != nil {
