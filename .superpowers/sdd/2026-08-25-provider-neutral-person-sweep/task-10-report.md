@@ -229,3 +229,81 @@ git diff --check
 - A full command-package run reached the repository's 10-minute test timeout in unrelated `TestCacheNeedsBuild_SupersededCirclebackRunWithoutCheckpoint` while SQLite initialized the schema. The final provider-focused command and race runs passed.
 - A Windows config cross-compile could not start because the existing DuckDB dependency excludes all files in its Windows AMD64 binding package. Linux production tests and the platform-specific config tests passed.
 - Recovery retirement deliberately preserves a quarantined artifact instead of deleting or truncating it because a hardlink may still reference the inode. Provider credential canaries are absent from those artifacts.
+
+## Scoped re-review addendum
+
+- Review base: `d0f9627d59685662fd7ae9e7df75e8e4cc576f11`
+- Code commit: `3ed6128fb1212e373b8bfcb44ad81e5175af0592`
+- Subject: `fix: harden provider management transactions`
+
+### Routing and secret handling
+
+- Default command dependencies no longer capture `cfg` before root `PersistentPreRunE`. Add, saved-profile check, direct/daemon execution, and remove resolve a credential store lazily from the current loaded config's exact `TokensDir`. A stored credential operation fails explicitly if that store cannot be resolved.
+- The root-lifecycle regression constructs the production dependencies while `cfg` is nil, lets the real root pre-run load the selected file, then performs stored add and remove without injecting a credential store. It verifies the exact tokens namespace, `0700` directories, `0600` credential and tombstone, and canary absence from output and config.
+
+### Transaction and rollback identity
+
+- `RestoreConfigFile` now requires the exact post-publication `ConfigFile`, not an ETag. The guard covers logical and physical path, bytes, ETag, permissions, and platform file identity. The initial comparison and final exchange or retirement run under the config edit lock while the live object is retained by descriptor.
+- Successful edits verify that the final read is still the object they published. If a byte-identical replacement wins before return, the edit reports `ErrConfigChanged` and returns the transaction object's identity. Normal and uncertain add/remove rollback pass that exact identity directly; there is no separate precheck window.
+- Existing-file and originally-missing rollback preserve byte-identical different-inode replacements, symlink swaps, and hardlink swaps at the final restore boundary. The transaction object alone can be restored or recoverably retired.
+- Remove derives profile, fingerprint, active replacement, credential source, and exact edit plan from one fresh snapshot. It validates the complete plan and resolves any stored credential namespace before daemon revoke. Only-profile and descendant-extension failures now make zero revoke and zero edit calls.
+- Add validates the proposed provider, budgets, and exact selector/profile/price table plan before credential input or provider negotiation. Accepted zero, incomplete, negative, or overflow-prone prices and invalid token/cost caps fail before secret reads, provider calls, credential publication, or config writes. Rejected catalog prices still leave budget bytes untouched.
+
+### Scoped RED evidence
+
+```text
+TestPersonProviderDefaultDependenciesResolveCredentialsAfterConfigLoad:
+people provider credential store is unavailable
+
+RestoreConfigFile identity API:
+cannot use after (variable of struct type ConfigFile) as string value
+undefined: restoreConfigFile
+
+TestEditConfigReturnsPublishedIdentityWhenFinalReadSeesReplacement:
+Expected error with "config changed despite write error" in chain but got nil
+
+TestPersonProviderRemoveCompletesLocalPreflightBeforeRevoke:
+only selected profile: revoke calls = 1
+descendant extension table: expected an error, got nil
+
+TestPersonProviderAcceptedCatalogPricesValidateProposedBudgetBeforeSecretOrProvider:
+validation occurred only after credential read and negotiation
+```
+
+### Scoped GREEN evidence
+
+```text
+go test -tags "fts5 sqlite_vec" ./cmd/msgvault/cmd -run '^TestPersonProviderDefaultDependenciesResolveCredentialsAfterConfigLoad$' -count=1 -timeout=3m
+ok  go.kenn.io/msgvault/cmd/msgvault/cmd  0.955s
+
+go test -tags "fts5 sqlite_vec" ./cmd/msgvault/cmd ./internal/api ./internal/config -run 'PersonProvider|CLIRunCommandAllowed|CLIAllowlist|ConfigEdit|RestoreConfig|SameConfigFileVersion' -count=1 -timeout=10m
+ok  go.kenn.io/msgvault/cmd/msgvault/cmd  18.557s
+ok  go.kenn.io/msgvault/internal/api  0.924s
+ok  go.kenn.io/msgvault/internal/config  1.280s
+
+go test -tags "fts5 sqlite_vec" ./internal/config -count=1
+ok  go.kenn.io/msgvault/internal/config  6.567s
+
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  24.096s
+
+go test -tags "fts5 sqlite_vec" ./internal/store -run 'PersonInference|PersonSweep' -count=1 -timeout=10m
+ok  go.kenn.io/msgvault/internal/store  52.520s
+
+go test -race -tags "fts5 sqlite_vec" ./cmd/msgvault/cmd ./internal/api ./internal/config ./internal/peoplesweep -run 'PersonProvider|CLIRunCommandAllowed|CLIAllowlist|RestoreConfig|SameConfigFileVersion|ValidateConfigTableEdits|CredentialStore' -count=1 -timeout=15m
+ok  go.kenn.io/msgvault/cmd/msgvault/cmd  20.457s
+ok  go.kenn.io/msgvault/internal/api  1.419s
+ok  go.kenn.io/msgvault/internal/config  1.331s
+ok  go.kenn.io/msgvault/internal/peoplesweep  14.081s
+
+gofmt -w <changed Go files>
+go vet -tags "fts5 sqlite_vec" ./cmd/msgvault/cmd ./internal/api ./internal/config ./internal/peoplesweep
+go vet -tags "fts5 sqlite_vec" ./internal/store
+git diff --check
+[exit 0]
+```
+
+### Scoped concerns
+
+- One full `internal/store` run timed out at 10 minutes in unrelated `TestSubsetPersonMergePacketWithRemappedDefinitionIsOmitted` while another shared-host full-repository run exercised the same schema-heavy package. The provider-relevant store subset passed serially in 52.520 seconds.
+- Config identity remains platform-specific behind the existing retained-file implementations. Linux production and final-boundary swap tests passed; the repository's existing DuckDB dependency still prevents a useful Windows package cross-compile.
