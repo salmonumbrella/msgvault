@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -201,6 +202,27 @@ func TestPersonProviderRemoveCompletesLocalPreflightBeforeRevoke(t *testing.T) {
 				require.NoError(t, err)
 				_, writeErr := file.WriteString("\n[people.sweep.providers.beta.operator_extension]\nanswer = 42\n")
 				require.NoError(t, errors.Join(writeErr, file.Close()))
+			},
+			wantError: "descendant content",
+		},
+		{
+			name: "dotted descendant extension",
+			configured: func() peoplesweep.Config {
+				c := personProviderTestConfig()
+				c.Enabled = false
+				beta := configuredPersonProvider(c)
+				beta.Model = "beta-model"
+				c.Providers["beta"] = beta
+				c.Provider = peoplesweep.ProviderSelection{Name: "beta"}
+				return c
+			}(),
+			mutateFile: func(t *testing.T, path string) {
+				content, err := os.ReadFile(path)
+				require.NoError(t, err)
+				header := []byte("[people.sweep.providers.beta]\n")
+				withExtension := append(append([]byte(nil), header...), []byte("operator_extension.answer = 42\n")...)
+				content = bytes.Replace(content, header, withExtension, 1)
+				require.NoError(t, os.WriteFile(path, content, 0o600))
 			},
 			wantError: "descendant content",
 		},
