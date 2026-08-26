@@ -250,7 +250,7 @@ func TestOpenAIChatDriverOmitsAuthorizationForAnonymousLoopback(t *testing.T) {
 		authorization = r.Header.Get("Authorization")
 		_, err := io.WriteString(w,
 			`{"model":"gpt-test","choices":[{"message":{"content":"{\"ok\":true}"}}],"usage":{}}`)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}))
 	defer server.Close()
 
