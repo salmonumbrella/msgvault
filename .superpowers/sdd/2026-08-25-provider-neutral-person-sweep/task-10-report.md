@@ -365,3 +365,77 @@ The full combined package command was bounded after `196.295s`: `internal/people
 ### Limitation
 
 - Preflight establishes only locally knowable validity of the current pinned target and access while it holds the credential-root lock. It deliberately does not claim that a later delete must succeed: the lock is released before daemon revoke, and a subsequent filesystem race is handled by `Delete` revalidation plus the existing fail-closed config rollback and partial-failure reporting.
+
+## Read-only credential preflight addendum
+
+- Date: `2026-08-26`
+- Review base: `08d9e380f7d5ab9ccbbea5f3edcfab110aca4f63`
+- Code and test commit: `7f12ecbbb0a3d8fdb07d8a7678f5e3a8b442898a`
+- Subject: `fix: make credential deletion preflight read-only`
+
+### Filesystem and routing boundary
+
+- `FileCredentialStore.PreflightDelete` no longer enters `withCredentialRoot`. Its platform-specific path opens only existing objects, pins the tokens directory, resolves the namespace, marker, and credential descriptor-relatively with no-follow checks, and rejects missing state. It validates exact directory and file classes, current-user ownership, `0700` directory modes, `0600` file modes, link counts, writable access, and descriptor-to-entry identity without reading credential bytes.
+- Preflight performs no create, chmod, chown, rename, remove, truncate, write, fsync, or content read. It takes the same exclusive `flock` used by store writers on the already-open namespace directory; this changes kernel lock state only. The existing marker is opened without `O_CREAT` and its contents and metadata remain untouched.
+- A zero-length deletion tombstone is absent credential state for preflight and is rejected with `ErrCredentialNotFound`. `Delete` remains independently idempotent, reopens the namespace and target after daemon revoke and config publication, and repeats its no-follow, owner, mode, type, link-count, and identity checks.
+- Production stored-profile removal still completes preflight before daemon ownership discovery or revoke. The real Cobra regression shows that a missing tokens root causes zero revoke, zero config edit, zero `Delete`, no filesystem creation, and no profile removal.
+
+### RED evidence
+
+```text
+go test -v -tags "fts5 sqlite_vec" ./internal/peoplesweep -run '^TestCredentialStorePreflightDeleteRejectsMissingStateWithoutCreatingIt$' -count=1 -timeout=3m
+--- FAIL: TestCredentialStorePreflightDeleteRejectsMissingStateWithoutCreatingIt
+    --- FAIL: .../tokens_root
+        An error is expected but got nil.
+        entries changed: [] -> [tokens]
+    --- FAIL: .../credential_namespace
+        An error is expected but got nil.
+        entries changed: [] -> [people-providers]
+    --- FAIL: .../lock_marker
+        An error is expected but got nil.
+        entries changed: [profile.json] -> [.credentials.lock profile.json]
+    --- FAIL: .../credential_target
+        expected ErrCredentialNotFound in chain, got nil
+    --- FAIL: .../credential_tombstone
+        expected ErrCredentialNotFound in chain, got nil
+FAIL
+
+go test -v -tags "fts5 sqlite_vec" ./internal/peoplesweep -run '^TestCredentialStorePreflightDeleteRejectsWrongModesWithoutRepair$' -count=1 -timeout=3m
+--- FAIL: TestCredentialStorePreflightDeleteRejectsWrongModesWithoutRepair
+    --- FAIL: .../tokens_root
+        An error is expected but got nil.
+        mode changed: 0750 -> 0700
+    --- FAIL: .../credential_namespace
+        An error is expected but got nil.
+        mode changed: 0750 -> 0700
+FAIL
+
+go test -v -tags "fts5 sqlite_vec" ./cmd/msgvault/cmd -run '^TestPersonProviderDaemonRemoveMissingCredentialRootHasZeroSideEffects$' -count=1 -timeout=3m
+--- FAIL: TestPersonProviderDaemonRemoveMissingCredentialRootHasZeroSideEffects
+    person_provider_routing_test.go:373: An error is expected but got nil.
+FAIL
+```
+
+### GREEN evidence
+
+```text
+gofmt -w <changed Go files>
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'CredentialStore' -count=1 -timeout=5m
+ok  go.kenn.io/msgvault/internal/peoplesweep  15.160s
+
+go test -tags "fts5 sqlite_vec" ./cmd/msgvault/cmd -run '^(TestPersonProviderDaemonRemoveMissingCredentialRootHasZeroSideEffects|TestPersonProviderDaemonRemovePreflightsStoredCredentialBeforeRevoke|TestPersonProviderRemove.*)$' -count=1 -timeout=3m
+ok  go.kenn.io/msgvault/cmd/msgvault/cmd  2.015s
+
+go test -race -tags "fts5 sqlite_vec" ./internal/peoplesweep ./cmd/msgvault/cmd -run '^(TestCredentialStorePreflightDelete.*|TestCredentialStoreRejectsFIFOWithoutBlocking|TestPersonProviderDaemonRemoveMissingCredentialRootHasZeroSideEffects|TestPersonProviderDaemonRemovePreflightsStoredCredentialBeforeRevoke|TestPersonProviderRemove.*)$' -count=1 -timeout=5m
+ok  go.kenn.io/msgvault/internal/peoplesweep  1.307s
+ok  go.kenn.io/msgvault/cmd/msgvault/cmd  5.490s
+
+go vet -tags "fts5 sqlite_vec" ./internal/peoplesweep ./cmd/msgvault/cmd
+git diff --check
+[exit 0]
+```
+
+### Limitations
+
+- Preflight and delete cannot be atomic across daemon revoke. The preflight lock is released before routing; `Delete` therefore reopens and revalidates, and a post-preflight race can still produce the existing partial-failure result with consent left revoked and the exact config rollback attempted.
+- The unsupported-platform implementation returns the same fail-closed `errCredentialStoreUnsupported` without touching the filesystem, and its unit test now covers preflight. A FreeBSD cross-test could not compile the package because the repository's existing DuckDB and sqlite bindings exclude the required target definitions; no unsupported-platform execution is claimed.
