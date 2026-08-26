@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -673,6 +674,25 @@ func TestPersonProviderNamedConsentAndRevoke(t *testing.T) {
 	betaActive, err = st.HasActivePersonInferenceConsent(t.Context(), betaProfile.Fingerprint)
 	require.NoError(t, err)
 	assert.False(t, betaActive)
+}
+
+func TestPersonProviderGuardedRevokeRejectsChangedNamedFingerprint(t *testing.T) {
+	configured := personProviderTestConfig()
+	profile, err := configured.Profile()
+	require.NoError(t, err)
+	st := testutil.NewSQLiteTestStore(t)
+	_, err = st.EnsurePersonInferenceProfile(t.Context(), profile)
+	require.NoError(t, err)
+	_, _, err = st.GrantPersonInferenceConsent(t.Context(), profile.Fingerprint, personProviderConsentActor)
+	require.NoError(t, err)
+	deps := localPersonProviderDeps(configured, st, nil)
+
+	_, err = executePersonProviderCommand(t, deps,
+		"revoke", "default", "--if-fingerprint", strings.Repeat("0", 64))
+	require.ErrorContains(t, err, "changed since removal began")
+	status, err := st.GetPersonInferenceConsentStatus(t.Context(), profile.Fingerprint)
+	require.NoError(t, err)
+	assert.True(t, status.Active)
 }
 
 func TestPersonProviderNamedStatusAndRevokeWorkWhileSweepDisabled(t *testing.T) {

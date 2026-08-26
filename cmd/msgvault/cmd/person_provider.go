@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,8 +21,9 @@ import (
 )
 
 const (
-	personProviderCommandName  = "provider"
-	personProviderConsentActor = "cli"
+	personProviderCommandName       = "provider"
+	personProviderConsentActor      = "cli"
+	personProviderIfFingerprintFlag = "if-fingerprint"
 )
 
 type personProviderStore interface {
@@ -482,6 +484,19 @@ func runPersonProviderRemove(
 	if err != nil {
 		return err
 	}
+	directStore := deps.isDaemonSubprocess != nil && deps.isDaemonSubprocess()
+	if !directStore && deps.providerStoreOwnedByDaemon != nil {
+		owned, ownershipErr := deps.providerStoreOwnedByDaemon(command.Context())
+		if ownershipErr != nil {
+			return ownershipErr
+		}
+		directStore = !owned
+	}
+	if !directStore {
+		if err := proxySavedPersonProviderRevoke(command, deps, name, profile.Fingerprint); err != nil {
+			return err
+		}
+	}
 	edits := make([]config.TableEdit, 0, 2)
 	if active {
 		names := make([]string, 0, len(configured.Providers)-1)
@@ -503,20 +518,18 @@ func runPersonProviderRemove(
 	})
 	after, err := deps.editConfigTables(before.ETag, edits)
 	if err != nil {
+		if errors.Is(err, config.ErrConfigChanged) {
+			return rollbackUncertainPersonProviderRemove(err, deps, before, after, !directStore)
+		}
+		if !directStore {
+			return errors.Join(err, errors.New("exact people provider consent remains revoked after config conflict"))
+		}
 		return err
 	}
 	rollback := func(cause error) error {
 		return errors.Join(cause, restoreRemovedPersonProviderConfig(deps, after, before))
 	}
 
-	directStore := deps.isDaemonSubprocess != nil && deps.isDaemonSubprocess()
-	if !directStore && deps.providerStoreOwnedByDaemon != nil {
-		owned, ownershipErr := deps.providerStoreOwnedByDaemon(command.Context())
-		if ownershipErr != nil {
-			return rollback(ownershipErr)
-		}
-		directStore = !owned
-	}
 	if directStore {
 		st, cleanup, openErr := deps.openStore()
 		if openErr != nil {
@@ -528,8 +541,6 @@ func runPersonProviderRemove(
 		); err != nil {
 			return rollback(err)
 		}
-	} else if err := proxySavedPersonProviderRevoke(command, deps, name); err != nil {
-		return rollback(err)
 	}
 	if provider.Credential == peoplesweep.CredentialStored {
 		if deps.setup.credentials == nil {
@@ -553,6 +564,27 @@ func restoreRemovedPersonProviderConfig(
 		return fmt.Errorf("restore removed people provider config: %w", err)
 	}
 	return nil
+}
+
+func rollbackUncertainPersonProviderRemove(
+	cause error,
+	deps personProviderCommandDeps,
+	before, expected config.ConfigFile,
+	consentRevoked bool,
+) error {
+	current, err := deps.readConfigFile()
+	if err != nil {
+		cause = errors.Join(cause, fmt.Errorf("inspect uncertain people provider removal: %w", err))
+	} else if config.SameConfigFileVersion(current, expected) {
+		cause = errors.Join(cause, restoreRemovedPersonProviderConfig(deps, current, before))
+	} else {
+		cause = errors.Join(cause,
+			errors.New("people provider removal publication is uncertain and the current version was preserved"))
+	}
+	if consentRevoked {
+		cause = errors.Join(cause, errors.New("exact people provider consent remains revoked"))
+	}
+	return cause
 }
 
 func newPersonProviderConsentCommand(deps personProviderCommandDeps) *cobra.Command {
@@ -592,11 +624,20 @@ func newPersonProviderRevokeCommand(deps personProviderCommandDeps) *cobra.Comma
 	var all bool
 	var jsonOutput bool
 	var semanticEmbeddings bool
+	var ifFingerprint string
 	command := &cobra.Command{
 		Use:   "revoke [name]",
 		Short: "Revoke consent for the exact people inference policy",
 		Args:  optionalPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
+			if ifFingerprint != "" {
+				if err := validatePersonProviderFingerprint(ifFingerprint); err != nil {
+					return err
+				}
+				if len(args) != 1 || all || semanticEmbeddings {
+					return errors.New("--if-fingerprint requires one named people provider revoke")
+				}
+			}
 			if !deps.isDaemonSubprocess() {
 				return deps.proxy(command, args, nil)
 			}
@@ -610,6 +651,17 @@ func newPersonProviderRevokeCommand(deps personProviderCommandDeps) *cobra.Comma
 				if err != nil {
 					return err
 				}
+				if ifFingerprint != "" {
+					guarded := runDeps.config()
+					guarded.Enabled = true
+					profile, profileErr := guarded.Profile()
+					if profileErr != nil {
+						return profileErr
+					}
+					if profile.Fingerprint != ifFingerprint {
+						return errors.New("people provider profile changed since removal began")
+					}
+				}
 			}
 			return runPersonProviderRevoke(command, runDeps, all, jsonOutput, semanticEmbeddings)
 		},
@@ -618,7 +670,21 @@ func newPersonProviderRevokeCommand(deps personProviderCommandDeps) *cobra.Comma
 	command.Flags().BoolVar(&jsonOutput, flagJSON, false, "Output structured JSON")
 	command.Flags().BoolVar(&semanticEmbeddings, "semantic-embeddings", false,
 		"Select the curated-person semantic embedding policy")
+	command.Flags().StringVar(&ifFingerprint, personProviderIfFingerprintFlag, "",
+		"Require an exact provider fingerprint")
+	_ = command.Flags().MarkHidden(personProviderIfFingerprintFlag)
 	return command
+}
+
+func validatePersonProviderFingerprint(fingerprint string) error {
+	if len(fingerprint) != 64 {
+		return errors.New("invalid people provider fingerprint")
+	}
+	decoded, err := hex.DecodeString(fingerprint)
+	if err != nil || len(decoded) != 32 || strings.ToLower(fingerprint) != fingerprint {
+		return errors.New("invalid people provider fingerprint")
+	}
+	return nil
 }
 
 func newPersonProviderHistoryCommand(deps personProviderCommandDeps) *cobra.Command {

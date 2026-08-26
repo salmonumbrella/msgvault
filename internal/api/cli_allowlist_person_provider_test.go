@@ -41,6 +41,9 @@ func TestCLIRunCommandAllowedPermitsExactPersonProviderCommands(t *testing.T) {
 		{name: "list", args: []string{"person", "provider", "list", "--json"}, want: true},
 		{name: "consent", args: []string{"person", "provider", "consent", "--yes"}, want: true},
 		{name: "revoke", args: []string{"person", "provider", "revoke"}, want: true},
+		{name: "guarded revoke", args: []string{
+			"person", "provider", "revoke", "alpha", "--if-fingerprint", strings.Repeat("a", 64),
+		}, want: true},
 		{name: "check", args: []string{"person", "provider", "check", "--json"}, want: true},
 		{name: "named check", args: []string{"person", "provider", "check", "alpha", "--json"}, want: true},
 		{name: "history", args: []string{"person", "provider", "history", "alpha", "--limit", "20"}, want: true},
@@ -52,6 +55,12 @@ func TestCLIRunCommandAllowedPermitsExactPersonProviderCommands(t *testing.T) {
 		{name: "secret flag smuggling", args: []string{"person", "provider", "check", "--api-key=secret-canary"}},
 		{name: "control profile name", args: []string{"person", "provider", "check", "bad\nname"}},
 		{name: "oversize profile name", args: []string{"person", "provider", "history", strings.Repeat("x", 65)}},
+		{name: "invalid guarded revoke fingerprint", args: []string{
+			"person", "provider", "revoke", "alpha", "--if-fingerprint", "not-a-fingerprint",
+		}},
+		{name: "guarded revoke without profile", args: []string{
+			"person", "provider", "revoke", "--if-fingerprint", strings.Repeat("a", 64),
+		}},
 		{name: "extra positional smuggling", args: []string{"person", "provider", "check", "alpha", "beta"}},
 		{name: "list positional smuggling", args: []string{"person", "provider", "list", "alpha"}},
 		{name: "missing operation", args: []string{"person", "provider"}},

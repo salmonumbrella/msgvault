@@ -1556,6 +1556,7 @@ func cliRunPersonProviderArgsAllowed(operation string, args []string) bool {
 		for _, name := range []string{"all", "json", "semantic-embeddings"} {
 			boolFlags[name] = true
 		}
+		valueFlags["if-fingerprint"] = true
 	case "history":
 		maxPositionals = 1
 		boolFlags["json"] = true
@@ -1569,6 +1570,7 @@ func cliRunPersonProviderArgsAllowed(operation string, args []string) bool {
 	}
 
 	positionals := 0
+	guardedRevoke := false
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
 		if !strings.HasPrefix(argument, "--") {
@@ -1591,14 +1593,35 @@ func cliRunPersonProviderArgsAllowed(operation string, args []string) bool {
 		if !valueFlags[name] {
 			return false
 		}
+		flagValue := value
 		if hasValue {
-			if value == "" {
+			if flagValue == "" {
 				return false
 			}
-			continue
+		} else {
+			index++
+			if index >= len(args) || args[index] == "" || strings.HasPrefix(args[index], "-") {
+				return false
+			}
+			flagValue = args[index]
 		}
-		index++
-		if index >= len(args) || args[index] == "" || strings.HasPrefix(args[index], "-") {
+		if name == "if-fingerprint" && !validPersonProviderFingerprint(flagValue) {
+			return false
+		}
+		guardedRevoke = guardedRevoke || name == "if-fingerprint"
+	}
+	if guardedRevoke && positionals != 1 {
+		return false
+	}
+	return true
+}
+
+func validPersonProviderFingerprint(fingerprint string) bool {
+	if len(fingerprint) != 64 {
+		return false
+	}
+	for _, value := range fingerprint {
+		if !strings.ContainsRune("0123456789abcdef", value) {
 			return false
 		}
 	}

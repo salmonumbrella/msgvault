@@ -131,11 +131,17 @@ func TestPersonProviderFrontendRemoveProxiesOnlyNamedRevoke(t *testing.T) {
 	beta.Model = "beta-model"
 	configured.Providers["beta"] = beta
 	path, _ := retainedPersonProviderTestConfig(t, configured)
+	selected := configured
+	selected.Provider = peoplesweep.ProviderSelection{Name: "beta"}
+	profile, err := selected.Profile()
+	require.NoError(t, err)
 	var gotArgs []string
+	var events []string
 	deps := personProviderCommandDeps{
 		config:             func() peoplesweep.Config { return configured },
 		isDaemonSubprocess: func() bool { return false },
 		proxy: func(command *cobra.Command, args []string, _ map[string]string) error {
+			events = append(events, "revoke")
 			var err error
 			gotArgs, err = daemonCLIArgsFromCobra(command, args)
 			return err
@@ -148,6 +154,7 @@ func TestPersonProviderFrontendRemoveProxiesOnlyNamedRevoke(t *testing.T) {
 			return config.ReadConfigFile(path)
 		},
 		editConfigTables: func(etag string, edits []config.TableEdit) (config.ConfigFile, error) {
+			events = append(events, "edit")
 			return config.EditConfigTables(path, etag, edits)
 		},
 		restoreConfigFile: func(etag string, before config.ConfigFile) (config.ConfigFile, error) {
@@ -156,9 +163,12 @@ func TestPersonProviderFrontendRemoveProxiesOnlyNamedRevoke(t *testing.T) {
 		configHomeDir: func() string { return filepath.Dir(path) },
 	}
 
-	_, err := executePersonProviderCommand(t, deps, "remove", "beta")
+	_, err = executePersonProviderCommand(t, deps, "remove", "beta")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"person", "provider", "revoke", "beta"}, gotArgs)
+	assert.Equal(t, []string{
+		"person", "provider", "revoke", "--if-fingerprint=" + profile.Fingerprint, "beta",
+	}, gotArgs)
+	assert.Equal(t, []string{"revoke", "edit"}, events)
 }
 
 func TestPersonProviderAnonymousCheckForwardsNoCredential(t *testing.T) {

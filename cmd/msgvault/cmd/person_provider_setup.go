@@ -580,15 +580,16 @@ func executeSavedPersonProviderCheck(
 	if directStore {
 		return runPersonProviderCheck(command, deps, name, false)
 	}
-	return proxySavedPersonProviderOperation(command, deps, "check", name)
+	return proxySavedPersonProviderOperation(command, deps, "check", name, "")
 }
 
 func proxySavedPersonProviderRevoke(
 	command *cobra.Command,
 	deps personProviderCommandDeps,
 	name string,
+	fingerprint string,
 ) error {
-	return proxySavedPersonProviderOperation(command, deps, "revoke", name)
+	return proxySavedPersonProviderOperation(command, deps, "revoke", name, fingerprint)
 }
 
 func proxySavedPersonProviderOperation(
@@ -596,6 +597,7 @@ func proxySavedPersonProviderOperation(
 	deps personProviderCommandDeps,
 	operation string,
 	name string,
+	fingerprint string,
 ) error {
 	if err := peoplesweep.ValidateProviderProfileName(name); err != nil {
 		return err
@@ -607,6 +609,18 @@ func proxySavedPersonProviderOperation(
 	person := &cobra.Command{Use: "person"}
 	provider := &cobra.Command{Use: "provider"}
 	leaf := &cobra.Command{Use: operation}
+	if fingerprint != "" {
+		if operation != "revoke" {
+			return errors.New("people provider fingerprint guard is unavailable for this operation")
+		}
+		if err := validatePersonProviderFingerprint(fingerprint); err != nil {
+			return err
+		}
+		leaf.Flags().String(personProviderIfFingerprintFlag, "", "")
+		if err := leaf.Flags().Set(personProviderIfFingerprintFlag, fingerprint); err != nil {
+			return err
+		}
+	}
 	provider.AddCommand(leaf)
 	person.AddCommand(provider)
 	root.AddCommand(person)
