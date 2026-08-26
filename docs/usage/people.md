@@ -61,6 +61,10 @@ msgvault person sweep run --limit 5
 msgvault person sweep status
 ```
 
+`provider consent <name>` can grant the checked profile while scheduling is
+still disabled. `provider use <name>` selects that profile and enables people
+sweeps, so the following manual run and future scheduled runs use it.
+
 Use `--api-key-stdin` during `provider add` to store a profile-specific key
 outside `config.toml`, or `--credential-env NAME` to store only an environment
 variable name. Never put the secret value in a command argument. Custom local

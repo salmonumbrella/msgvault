@@ -599,7 +599,7 @@ func TestPersonProviderListAndUseRequireExactVerification(t *testing.T) {
 	checks.Contains(used, `beta`)
 	must.Len(edits, 1)
 	checks.Equal([]string{"people", "sweep"}, edits[0].Path)
-	checks.Equal(map[string]any{"provider": "beta"}, edits[0].Values)
+	checks.Equal(map[string]any{"enabled": true, "provider": "beta"}, edits[0].Values)
 }
 
 func TestPersonProviderUseVerifiesFingerprintFromSameConfigSnapshot(t *testing.T) {
@@ -718,7 +718,10 @@ func TestPersonProviderNamedStatusAndRevokeWorkWhileSweepDisabled(t *testing.T) 
 	require.NoError(t, err)
 	assert.False(t, active)
 	_, err = executePersonProviderCommand(t, deps, "consent", "default", "--yes")
-	assert.ErrorContains(t, err, "disabled")
+	require.NoError(t, err)
+	active, err = st.HasActivePersonInferenceConsent(t.Context(), profile.Fingerprint)
+	require.NoError(t, err)
+	assert.True(t, active)
 }
 
 func TestPersonProviderCommandsRejectInputAndDisabledConfigBeforeStore(t *testing.T) {

@@ -452,7 +452,9 @@ func runPersonProviderUse(
 		return fmt.Errorf("people provider profile %q requires an exact successful check before selection", name)
 	}
 	if _, err := deps.editConfigTables(before.ETag, []config.TableEdit{{
-		Path: []string{"people", "sweep"}, Values: map[string]any{"provider": name},
+		Path: []string{"people", "sweep"}, Values: map[string]any{
+			"enabled": true, "provider": name,
+		},
 	}}); err != nil {
 		return err
 	}
@@ -625,7 +627,7 @@ func newPersonProviderConsentCommand(deps personProviderCommandDeps) *cobra.Comm
 					return errors.New("a named people provider cannot be combined with --semantic-embeddings")
 				}
 				var err error
-				runDeps, err = personProviderDepsForName(deps, args[0], true)
+				runDeps, err = personProviderDepsForName(deps, args[0], false)
 				if err != nil {
 					return err
 				}
