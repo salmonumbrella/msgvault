@@ -92,7 +92,6 @@ type credentialStoreHooks struct {
 type credentialStoreRoot interface {
 	save(profileName string, data []byte) error
 	load(profileName string) ([]byte, error)
-	preflightDelete(profileName string) error
 	delete(profileName string) error
 }
 
@@ -183,16 +182,14 @@ func (s *FileCredentialStore) Load(profileName string) (Credential, error) {
 	return credential, err
 }
 
-// PreflightDelete validates the current credential namespace and exact target
-// for deletion without reading or modifying credential contents. Delete
-// repeats all checks because filesystem state can change after this returns.
+// PreflightDelete read-only validates an existing credential namespace and
+// exact target without reading credential contents. Delete reopens and repeats
+// its checks because this preflight is not atomic with daemon revocation.
 func (s *FileCredentialStore) PreflightDelete(profileName string) error {
 	if err := validateCredentialProfileName(profileName); err != nil {
 		return err
 	}
-	return s.withCredentialRoot("preflight-delete", func(root credentialStoreRoot) error {
-		return root.preflightDelete(profileName)
-	})
+	return s.preflightExistingCredentialDelete(profileName)
 }
 
 // Delete removes only the exact named record and is idempotent when absent.

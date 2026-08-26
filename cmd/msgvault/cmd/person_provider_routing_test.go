@@ -17,6 +17,16 @@ import (
 	"go.kenn.io/msgvault/internal/testutil"
 )
 
+type deleteCountingCredentialStore struct {
+	peoplesweep.CredentialStore
+	deletes int
+}
+
+func (s *deleteCountingCredentialStore) Delete(profileName string) error {
+	s.deletes++
+	return s.CredentialStore.Delete(profileName)
+}
+
 func TestPersonProviderFrontendRoutesExactCommandsAndCredential(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -314,6 +324,66 @@ func TestPersonProviderDaemonRemovePreflightsStoredCredentialBeforeRevoke(t *tes
 	retained, readErr := os.ReadFile(retainedPath)
 	require.NoError(t, readErr)
 	assert.Contains(t, string(retained), providerSetupSecretCanary)
+	finalConfig, loadErr := config.Load(path, "")
+	require.NoError(t, loadErr)
+	assert.Contains(t, finalConfig.People.Sweep.Providers, "beta")
+}
+
+func TestPersonProviderDaemonRemoveMissingCredentialRootHasZeroSideEffects(t *testing.T) {
+	configured := personProviderTestConfig()
+	beta := configuredPersonProvider(configured)
+	beta.Model = "beta-model"
+	beta.Credential = peoplesweep.CredentialStored
+	beta.CredentialEnv = ""
+	configured.Providers["beta"] = beta
+	path, _ := retainedPersonProviderTestConfig(t, configured)
+
+	tokensParent := t.TempDir()
+	tokensDir := filepath.Join(tokensParent, "missing-tokens")
+	credentials := &deleteCountingCredentialStore{
+		CredentialStore: peoplesweep.NewFileCredentialStore(tokensDir),
+	}
+	beforeTokensParent, statErr := os.Stat(tokensParent)
+	require.NoError(t, statErr)
+	beforeEntries, readErr := os.ReadDir(tokensParent)
+	require.NoError(t, readErr)
+
+	revokes := 0
+	edits := 0
+	deps := personProviderCommandDeps{
+		config:                     func() peoplesweep.Config { return configured },
+		isDaemonSubprocess:         func() bool { return false },
+		providerStoreOwnedByDaemon: func(context.Context) (bool, error) { return true, nil },
+		proxy: func(*cobra.Command, []string, map[string]string) error {
+			revokes++
+			return nil
+		},
+		readConfigFile: func() (config.ConfigFile, error) { return config.ReadConfigFile(path) },
+		editConfigTables: func(etag string, planned []config.TableEdit) (config.ConfigFile, error) {
+			edits++
+			return config.EditConfigTables(path, etag, planned)
+		},
+		restoreConfigFile: func(published, before config.ConfigFile) (config.ConfigFile, error) {
+			return config.RestoreConfigFile(path, published, before)
+		},
+		setup: personProviderSetupDeps{credentials: credentials},
+	}
+
+	output, err := executePersonProviderCommand(t, deps, "remove", "beta")
+	require.ErrorContains(t, err, "preflight stored people provider credential deletion")
+	assert.Zero(t, revokes)
+	assert.Zero(t, edits)
+	assert.Zero(t, credentials.deletes)
+	assert.NotContains(t, output, providerSetupSecretCanary)
+	assert.NotContains(t, err.Error(), providerSetupSecretCanary)
+	assert.NoDirExists(t, tokensDir)
+	afterTokensParent, statErr := os.Stat(tokensParent)
+	require.NoError(t, statErr)
+	assert.True(t, os.SameFile(beforeTokensParent, afterTokensParent))
+	assert.Equal(t, beforeTokensParent.Mode(), afterTokensParent.Mode())
+	afterEntries, readErr := os.ReadDir(tokensParent)
+	require.NoError(t, readErr)
+	assert.Equal(t, beforeEntries, afterEntries)
 	finalConfig, loadErr := config.Load(path, "")
 	require.NoError(t, loadErr)
 	assert.Contains(t, finalConfig.People.Sweep.Providers, "beta")

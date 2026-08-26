@@ -321,7 +321,7 @@ func TestCredentialStoreDeleteDetectsZeroTombstoneSwap(t *testing.T) {
 }
 
 func TestCredentialStoreRejectsFIFOWithoutBlocking(t *testing.T) {
-	for _, operation := range []string{"save", "load", "delete"} {
+	for _, operation := range []string{"save", "load", "preflight-delete", "delete"} {
 		t.Run(operation, func(t *testing.T) {
 			tokensDir := t.TempDir()
 			store := NewFileCredentialStore(tokensDir)
@@ -337,6 +337,8 @@ func TestCredentialStoreRejectsFIFOWithoutBlocking(t *testing.T) {
 				case "load":
 					_, err := store.Load("profile")
 					result <- err
+				case "preflight-delete":
+					result <- store.PreflightDelete("profile")
 				case "delete":
 					result <- store.Delete("profile")
 				}
