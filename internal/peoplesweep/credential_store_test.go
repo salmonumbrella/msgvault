@@ -70,18 +70,14 @@ func assertCredentialPathsUnchanged(
 			require.ErrorIs(t, err, os.ErrNotExist, path)
 			continue
 		}
-		if !assert.NoError(t, err, path) {
-			continue
-		}
+		require.NoError(t, err, path)
 		assert.True(t, os.SameFile(want.info, gotInfo), "%s inode changed", path)
 		assert.Equal(t, want.info.Mode(), gotInfo.Mode(), "%s mode changed", path)
 		assert.Equal(t, want.info.Size(), gotInfo.Size(), "%s size changed", path)
 		assert.Equal(t, want.info.ModTime(), gotInfo.ModTime(), "%s mtime changed", path)
 		if want.info.IsDir() {
 			entries, readErr := os.ReadDir(path)
-			if !assert.NoError(t, readErr, path) {
-				continue
-			}
+			require.NoError(t, readErr, path)
 			gotEntries := make([]string, 0, len(entries))
 			for _, entry := range entries {
 				gotEntries = append(gotEntries, entry.Name())
@@ -89,9 +85,7 @@ func assertCredentialPathsUnchanged(
 			assert.Equal(t, want.entries, gotEntries, "%s entries changed", path)
 		} else if want.info.Mode().IsRegular() {
 			contents, readErr := os.ReadFile(path)
-			if !assert.NoError(t, readErr, path) {
-				continue
-			}
+			require.NoError(t, readErr, path)
 			assert.Equal(t, want.contentDigest, sha256.Sum256(contents), "%s contents changed", path)
 		}
 	}
