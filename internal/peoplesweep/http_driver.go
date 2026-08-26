@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/net/http/httpguts"
 )
 
 const maxProviderResponseBytes = 1 << 20
@@ -49,12 +51,29 @@ func (d *httpDriver) post(
 	credential Credential,
 	body []byte,
 ) (httpDriverResponse, error) {
+	return d.postWithHeaders(ctx, target, profile, credential, body, nil)
+}
+
+func (d *httpDriver) postWithHeaders(
+	ctx context.Context,
+	target string,
+	profile ProviderProfile,
+	credential Credential,
+	body []byte,
+	headers map[string]string,
+) (httpDriverResponse, error) {
 	request, err := http.NewRequestWithContext( // #nosec G704 -- the exact operator-configured endpoint is validated by ProviderProfile.
 		ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return httpDriverResponse{}, errors.New("create inference provider request")
 	}
 	request.Header.Set("Content-Type", "application/json")
+	for name, value := range headers {
+		if !httpguts.ValidHeaderFieldName(name) || !safeHTTPHeaderValue(value) {
+			return httpDriverResponse{}, errors.New("inference provider request header is invalid")
+		}
+		request.Header.Set(name, value)
+	}
 	if err := applyHTTPCredential(request, profile.Auth, credential); err != nil {
 		return httpDriverResponse{}, err
 	}
