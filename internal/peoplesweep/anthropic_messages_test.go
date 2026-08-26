@@ -64,10 +64,10 @@ func TestAnthropicMessagesEmitsForcedToolRequestExactly(t *testing.T) {
 		assert.Empty(t, r.Header.Get("Authorization"))
 		var err error
 		received, err = io.ReadAll(r.Body)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		w.Header().Set("Request-Id", "req-anthropic-1")
 		_, err = io.WriteString(w, `{"id":"msg_123","type":"message","role":"assistant","model":"claude-test-build","content":[{"type":"tool_use","id":"toolu_123","name":"person_facts","input":{"ok":true}}],"stop_reason":"tool_use","usage":{"input_tokens":17,"output_tokens":5}}`)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}))
 	defer server.Close()
 
@@ -98,9 +98,9 @@ func TestAnthropicMessagesPromptModeUsesOneCompleteJSONText(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		received, err = io.ReadAll(r.Body)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		_, err = io.WriteString(w, `{"id":"msg_123","type":"message","role":"assistant","model":"claude-test-build","content":[{"type":"text","text":"{\"ok\":true}"}],"stop_reason":"end_turn","usage":{}}`)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}))
 	defer server.Close()
 
