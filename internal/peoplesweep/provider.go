@@ -61,6 +61,7 @@ type StructuredResponse struct {
 	ModelVersion      string          `json:"model_version"`
 	Usage             TokenUsage      `json:"usage"`
 	UsageKnown        bool            `json:"usage_known"`
+	execution         *runnerExecutionSession
 }
 
 // ValidationFailure retains only the bounded candidate and bounded local
@@ -70,6 +71,7 @@ type ValidationFailure struct {
 	Errors    []string
 	repair    bool
 	summary   string
+	execution *runnerExecutionSession
 }
 
 func (f ValidationFailure) Error() string {
@@ -89,16 +91,19 @@ type StructuredDriver interface {
 }
 
 // PreparedStructuredCall is an opaque, one-shot provider call whose complete
-// non-I/O policy and credential checks have already succeeded. Callers may
-// durably mark the matching reservation started immediately before Run.
+// non-I/O policy and credential checks succeed before its marker callback.
+// Once that callback succeeds, Execute crosses directly into provider I/O.
 type PreparedStructuredCall interface {
-	Run(ctx context.Context) (StructuredResponse, error)
+	Execute(ctx context.Context, markStarted func(context.Context) error) (StructuredResponse, error)
 }
 
 // StructuredExecutionSession pins one active profile, driver, and resolved
 // credential for a primary call and its optional same-profile repair.
 type StructuredExecutionSession interface {
-	PrepareCall(ctx context.Context, prepared PreparedStructuredRequest) (PreparedStructuredCall, error)
+	PrimaryCall(prepared PreparedStructuredRequest) (PreparedStructuredCall, error)
+	SemanticValidationFailure(response StructuredResponse) (ValidationFailure, error)
+	PrepareRepair(failure ValidationFailure) (PreparedStructuredRequest, error)
+	RepairCall(prepared PreparedStructuredRequest) (PreparedStructuredCall, error)
 }
 
 // StructuredRunner is the consent-gated entry point later people-sweep
@@ -106,7 +111,7 @@ type StructuredExecutionSession interface {
 type StructuredRunner interface {
 	PrepareStructured(ctx context.Context, request StructuredRequest) (PreparedStructuredRequest, error)
 	PrepareRepair(request StructuredRequest, failure ValidationFailure) (PreparedStructuredRequest, error)
-	BeginStructuredExecution(ctx context.Context) (StructuredExecutionSession, error)
+	BeginStructuredExecution(ctx context.Context, primary PreparedStructuredRequest) (StructuredExecutionSession, error)
 	RunPreparedStructured(ctx context.Context, prepared PreparedStructuredRequest) (StructuredResponse, error)
 	RunStructured(ctx context.Context, request StructuredRequest) (StructuredResponse, error)
 }
@@ -136,7 +141,11 @@ type PreparedStructuredRequest struct {
 	synthetic   bool
 	repair      bool
 	preparedBy  *Runner
+	identity    *preparedRequestIdentity
+	execution   *runnerExecutionSession
 }
+
+type preparedRequestIdentity struct{}
 
 // NewPreparedStructuredRequest creates an immutable-by-copy request packet.
 func NewPreparedStructuredRequest(request StructuredRequest, wireRequest []byte) (PreparedStructuredRequest, error) {

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -65,13 +66,41 @@ type runnerExecutionSession struct {
 	profile    ProviderProfile
 	provider   ProviderConfig
 	credential Credential
+	primary    PreparedStructuredRequest
+	mu         sync.Mutex
+	state      runnerExecutionState
+	response   StructuredResponse
+	failure    ValidationFailure
+	repair     PreparedStructuredRequest
 }
 
 type runnerPreparedCall struct {
 	session  *runnerExecutionSession
 	prepared PreparedStructuredRequest
+	kind     runnerCallKind
 	ran      atomic.Bool
 }
+
+type runnerExecutionState uint8
+
+const (
+	runnerSessionPrimaryReady runnerExecutionState = iota
+	runnerSessionPrimaryIssued
+	runnerSessionPrimaryStarted
+	runnerSessionPrimaryCompleted
+	runnerSessionPrimaryRepairable
+	runnerSessionRepairPrepared
+	runnerSessionRepairIssued
+	runnerSessionRepairStarted
+	runnerSessionTerminal
+)
+
+type runnerCallKind uint8
+
+const (
+	runnerPrimaryCall runnerCallKind = iota
+	runnerRepairCall
+)
 
 // NewRunner creates a gated runner without resolving a credential or touching
 // the network.
@@ -196,9 +225,16 @@ func (r *Runner) PrepareRepair(
 // retains the credential only in memory and never exposes it to callers.
 func (r *Runner) BeginStructuredExecution(
 	ctx context.Context,
+	primary PreparedStructuredRequest,
 ) (StructuredExecutionSession, error) {
 	profile, err := r.config.Profile()
 	if err != nil {
+		return nil, err
+	}
+	if primary.preparedBy != r || primary.identity == nil || primary.repair || primary.Request().repair {
+		return nil, errors.New("structured execution session requires its exact prepared primary")
+	}
+	if err := r.validatePrepared(primary, profile, false); err != nil {
 		return nil, err
 	}
 	if err := r.requireVerifiedAndConsented(ctx, profile.Fingerprint); err != nil {
@@ -212,44 +248,205 @@ func (r *Runner) BeginStructuredExecution(
 	if err != nil {
 		return nil, fmt.Errorf("resolve people provider credential: %w", err)
 	}
-	return &runnerExecutionSession{runner: r, profile: profile,
-		provider: provider, credential: credential}, nil
+	return &runnerExecutionSession{runner: r, profile: profile, provider: provider,
+		credential: credential, primary: primary, state: runnerSessionPrimaryReady}, nil
 }
 
-func (s *runnerExecutionSession) PrepareCall(
-	ctx context.Context,
+func (s *runnerExecutionSession) PrimaryCall(
 	prepared PreparedStructuredRequest,
 ) (PreparedStructuredCall, error) {
 	if s == nil || s.runner == nil {
 		return nil, errors.New("structured execution session is invalid")
 	}
-	if err := s.runner.validatePrepared(prepared, s.profile, false); err != nil {
-		return nil, err
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != runnerSessionPrimaryReady {
+		return nil, errors.New("structured execution session primary call is unavailable")
 	}
-	active, err := s.runner.config.Profile()
-	if err != nil {
-		return nil, err
+	if !samePreparedIdentity(prepared, s.primary) {
+		return nil, errors.New("structured execution call does not match its bound primary")
 	}
-	if active.Fingerprint != s.profile.Fingerprint {
-		return nil, errors.New("structured execution session provider profile changed")
-	}
-	if err := s.runner.requireVerifiedAndConsented(ctx, s.profile.Fingerprint); err != nil {
-		return nil, err
-	}
-	return &runnerPreparedCall{session: s, prepared: prepared}, nil
+	s.state = runnerSessionPrimaryIssued
+	return &runnerPreparedCall{session: s, prepared: prepared, kind: runnerPrimaryCall}, nil
 }
 
-func (c *runnerPreparedCall) Run(ctx context.Context) (StructuredResponse, error) {
+func (s *runnerExecutionSession) SemanticValidationFailure(
+	response StructuredResponse,
+) (ValidationFailure, error) {
+	if s == nil || s.runner == nil {
+		return ValidationFailure{}, errors.New("structured execution session is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != runnerSessionPrimaryCompleted || response.execution != s ||
+		!bytes.Equal(response.Output, s.response.Output) {
+		return ValidationFailure{}, errors.New("structured execution semantic failure does not match its primary")
+	}
+	failure := newValidationFailure(response.Output, "candidate failed extraction semantics", false)
+	failure.execution = s
+	s.failure = cloneValidationFailure(*failure)
+	s.state = runnerSessionPrimaryRepairable
+	return *failure, nil
+}
+
+func (s *runnerExecutionSession) PrepareRepair(
+	failure ValidationFailure,
+) (PreparedStructuredRequest, error) {
+	if s == nil || s.runner == nil {
+		return PreparedStructuredRequest{}, errors.New("structured execution session is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == runnerSessionPrimaryReady || s.state == runnerSessionPrimaryIssued ||
+		s.state == runnerSessionPrimaryStarted {
+		return PreparedStructuredRequest{}, errors.New("structured execution session primary has no repairable validation failure")
+	}
+	if s.state != runnerSessionPrimaryRepairable || !sameValidationFailure(failure, s.failure) {
+		return PreparedStructuredRequest{}, errors.New("structured execution repair does not match its primary validation failure")
+	}
+	if failure.repair {
+		return PreparedStructuredRequest{}, errors.New("structured execution session repair is unavailable")
+	}
+	repair, err := s.runner.PrepareRepair(s.primary.Request(), failure)
+	if err != nil {
+		s.state = runnerSessionTerminal
+		return PreparedStructuredRequest{}, err
+	}
+	repair.execution = s
+	s.repair = repair
+	s.state = runnerSessionRepairPrepared
+	return repair, nil
+}
+
+func (s *runnerExecutionSession) RepairCall(
+	prepared PreparedStructuredRequest,
+) (PreparedStructuredCall, error) {
+	if s == nil || s.runner == nil {
+		return nil, errors.New("structured execution session is invalid")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != runnerSessionRepairPrepared {
+		return nil, errors.New("structured execution session repair call is unavailable")
+	}
+	if prepared.execution != s || !samePreparedIdentity(prepared, s.repair) {
+		return nil, errors.New("structured execution call does not match its bound repair")
+	}
+	s.state = runnerSessionRepairIssued
+	return &runnerPreparedCall{session: s, prepared: prepared, kind: runnerRepairCall}, nil
+}
+
+func samePreparedIdentity(left, right PreparedStructuredRequest) bool {
+	return left.identity != nil && left.identity == right.identity && left.preparedBy == right.preparedBy &&
+		left.repair == right.repair && left.synthetic == right.synthetic &&
+		left.wireSHA256 == right.wireSHA256 && bytes.Equal(left.wireRequest, right.wireRequest)
+}
+
+func (c *runnerPreparedCall) Execute(
+	ctx context.Context,
+	markStarted func(context.Context) error,
+) (StructuredResponse, error) {
 	if c == nil || c.session == nil || c.session.runner == nil {
 		return StructuredResponse{}, errors.New("prepared structured call is invalid")
 	}
+	if markStarted == nil {
+		return StructuredResponse{}, errors.New("prepared structured call requires a started marker")
+	}
 	if !c.ran.CompareAndSwap(false, true) {
-		return StructuredResponse{}, errors.New("prepared structured call was already run")
+		return StructuredResponse{}, errors.New("prepared structured call was already claimed")
+	}
+	if err := c.session.claim(ctx, c); err != nil {
+		return StructuredResponse{}, err
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, c.session.provider.RequestTimeout)
 	defer cancel()
-	return c.session.runner.generateAndValidateResolved(requestCtx, c.session.profile,
+	if err := markStarted(requestCtx); err != nil {
+		c.session.terminate()
+		return StructuredResponse{}, err
+	}
+	response, err := c.session.runner.generateAndValidateResolved(requestCtx, c.session.profile,
 		c.session.credential, c.prepared)
+	c.session.complete(c.kind, &response, err)
+	return response, err
+}
+
+func (s *runnerExecutionSession) claim(ctx context.Context, call *runnerPreparedCall) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	want := runnerSessionPrimaryIssued
+	next := runnerSessionPrimaryStarted
+	if call.kind == runnerRepairCall {
+		want = runnerSessionRepairIssued
+		next = runnerSessionRepairStarted
+	}
+	bound := s.primary
+	if call.kind == runnerRepairCall {
+		bound = s.repair
+	}
+	if s.state != want || !samePreparedIdentity(call.prepared, bound) {
+		s.state = runnerSessionTerminal
+		return errors.New("prepared structured call does not match its execution session")
+	}
+	active, err := s.runner.config.Profile()
+	if err != nil {
+		s.state = runnerSessionTerminal
+		return err
+	}
+	if active.Fingerprint != s.profile.Fingerprint {
+		s.state = runnerSessionTerminal
+		return errors.New("structured execution session provider profile changed")
+	}
+	if err := s.runner.requireVerifiedAndConsented(ctx, s.profile.Fingerprint); err != nil {
+		s.state = runnerSessionTerminal
+		return err
+	}
+	s.state = next
+	return nil
+}
+
+func (s *runnerExecutionSession) terminate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state = runnerSessionTerminal
+}
+
+func (s *runnerExecutionSession) complete(
+	kind runnerCallKind,
+	response *StructuredResponse,
+	runErr error,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	response.execution = s
+	if kind == runnerRepairCall {
+		s.state = runnerSessionTerminal
+		return
+	}
+	var failure *ValidationFailure
+	if errors.As(runErr, &failure) {
+		failure.execution = s
+		s.failure = cloneValidationFailure(*failure)
+		s.state = runnerSessionPrimaryRepairable
+		return
+	}
+	if runErr != nil {
+		s.state = runnerSessionTerminal
+		return
+	}
+	s.response = *response
+	s.state = runnerSessionPrimaryCompleted
+}
+
+func cloneValidationFailure(failure ValidationFailure) ValidationFailure {
+	failure.Candidate = append(json.RawMessage(nil), failure.Candidate...)
+	failure.Errors = slices.Clone(failure.Errors)
+	return failure
+}
+
+func sameValidationFailure(left, right ValidationFailure) bool {
+	return left.execution != nil && left.execution == right.execution &&
+		left.repair == right.repair && left.summary == right.summary &&
+		bytes.Equal(left.Candidate, right.Candidate) && slices.Equal(left.Errors, right.Errors)
 }
 
 func (r *Runner) prepare(
@@ -274,6 +471,7 @@ func (r *Runner) prepare(
 	}
 	prepared.synthetic = synthetic
 	prepared.preparedBy = r
+	prepared.identity = &preparedRequestIdentity{}
 	return prepared, nil
 }
 

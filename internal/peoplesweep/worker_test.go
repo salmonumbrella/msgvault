@@ -250,7 +250,7 @@ func (workerFailureRunner) PrepareStructured(context.Context, StructuredRequest)
 func (workerFailureRunner) PrepareRepair(StructuredRequest, ValidationFailure) (PreparedStructuredRequest, error) {
 	return PreparedStructuredRequest{}, errors.New("unexpected provider repair preparation")
 }
-func (workerFailureRunner) BeginStructuredExecution(context.Context) (StructuredExecutionSession, error) {
+func (workerFailureRunner) BeginStructuredExecution(context.Context, PreparedStructuredRequest) (StructuredExecutionSession, error) {
 	return nil, errors.New("unexpected provider execution")
 }
 func (workerFailureRunner) RunPreparedStructured(context.Context, PreparedStructuredRequest) (StructuredResponse, error) {
@@ -379,24 +379,45 @@ type workerProductionRunner struct {
 	started  chan<- struct{}
 	block    <-chan struct{}
 	prepared int
+	sessions int
 	ran      int
 }
 
-type workerProductionExecution struct{ runner *workerProductionRunner }
+type workerProductionExecution struct {
+	runner  *workerProductionRunner
+	primary PreparedStructuredRequest
+}
 
 type workerProductionCall struct {
 	runner   *workerProductionRunner
 	prepared PreparedStructuredRequest
 }
 
-func (e workerProductionExecution) PrepareCall(
-	_ context.Context,
+func (e workerProductionExecution) PrimaryCall(
 	prepared PreparedStructuredRequest,
 ) (PreparedStructuredCall, error) {
 	return workerProductionCall{runner: e.runner, prepared: prepared}, nil
 }
 
-func (c workerProductionCall) Run(ctx context.Context) (StructuredResponse, error) {
+func (workerProductionExecution) SemanticValidationFailure(StructuredResponse) (ValidationFailure, error) {
+	return ValidationFailure{}, errors.New("unexpected semantic validation failure")
+}
+
+func (workerProductionExecution) PrepareRepair(ValidationFailure) (PreparedStructuredRequest, error) {
+	return PreparedStructuredRequest{}, errors.New("unexpected repair preparation")
+}
+
+func (workerProductionExecution) RepairCall(PreparedStructuredRequest) (PreparedStructuredCall, error) {
+	return nil, errors.New("unexpected repair call")
+}
+
+func (c workerProductionCall) Execute(
+	ctx context.Context,
+	markStarted func(context.Context) error,
+) (StructuredResponse, error) {
+	if err := markStarted(ctx); err != nil {
+		return StructuredResponse{}, err
+	}
 	return c.runner.RunPreparedStructured(ctx, c.prepared)
 }
 
@@ -690,8 +711,12 @@ func (r *workerProductionRunner) PrepareStructured(_ context.Context, request St
 func (r *workerProductionRunner) PrepareRepair(StructuredRequest, ValidationFailure) (PreparedStructuredRequest, error) {
 	return PreparedStructuredRequest{}, errors.New("unexpected provider repair preparation")
 }
-func (r *workerProductionRunner) BeginStructuredExecution(context.Context) (StructuredExecutionSession, error) {
-	return workerProductionExecution{runner: r}, nil
+func (r *workerProductionRunner) BeginStructuredExecution(
+	_ context.Context,
+	primary PreparedStructuredRequest,
+) (StructuredExecutionSession, error) {
+	r.sessions++
+	return workerProductionExecution{runner: r, primary: primary}, nil
 }
 func (r *workerProductionRunner) RunPreparedStructured(context.Context, PreparedStructuredRequest) (StructuredResponse, error) {
 	r.ran++
@@ -737,12 +762,13 @@ func TestPersonSweepWorkerHeartbeatsLeaseDuringProviderIO(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		execution, beginErr := runner.BeginStructuredExecution(t.Context())
+		primary := PreparedStructuredRequest{}
+		execution, beginErr := runner.BeginStructuredExecution(t.Context(), primary)
 		if beginErr != nil {
 			done <- result{err: beginErr}
 			return
 		}
-		call, prepareErr := execution.PrepareCall(t.Context(), PreparedStructuredRequest{})
+		call, prepareErr := execution.PrimaryCall(primary)
 		if prepareErr != nil {
 			done <- result{err: prepareErr}
 			return
@@ -1017,6 +1043,40 @@ func TestPersonSweepWorkerReservesEveryBatchBeforeProviderCall(t *testing.T) {
 	checks.Zero(runner.ran, "no paid provider call may precede full-batch budget admission")
 	requirements.Len(store.released, 1)
 	checks.Equal("reservation-fixture-1", store.released[0].ID)
+}
+
+func TestPersonSweepWorkerUsesOneExecutionSessionPerPreparedPrimary(t *testing.T) {
+	config, catalog := workerTestConfig(t)
+	config.Budgets.MaxRequestsPerPerson = 2
+	config.Budgets.MaxOutputTokensPerPerson = 2 * extractionMaxOutputTokens
+	config.EvidenceMaxItems = 1
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	store := &workerFailureStore{cursor: Cursor{
+		ReconciliationComplete: true, LastBackstopAt: &now,
+	}}
+	source := &workerProductionSource{windows: map[GenerationCursorMode]PersonWindow{
+		GenerationCursorOptimistic: {
+			Seeds: []EvidenceItem{
+				packetTestEvidence(33, SourceConversationText, "first session seed"),
+				packetTestEvidence(34, SourceConversationText, "second session seed"),
+			},
+			Changes:      []ArchiveChange{{Sequence: 2, PersonID: 7, SourceLane: SourceConversationText}},
+			NextSequence: 2,
+		},
+	}}
+	runner := &workerProductionRunner{}
+	worker := Worker{Config: config, Store: store, Source: source,
+		Context: NewContextRetriever(source), Sink: &workerProductionSink{}, Runner: runner,
+		Catalog: workerFailureCatalog{catalog: catalog}, Clock: func() time.Time { return now },
+		NewID: func() string { return "attempt-primary-sessions" }, WorkerID: "worker-fixture"}
+
+	_, err := worker.RunPerson(t.Context(), "run-primary-sessions", Lease{PersonID: 7,
+		WorkerID: "worker-fixture", Fence: 1, ExpiresAt: now.Add(time.Hour)}, RunIncremental)
+	require.NoError(t, err)
+	assert.Equal(t, 2, runner.prepared)
+	assert.Equal(t, 2, runner.sessions)
+	assert.Equal(t, 2, runner.ran)
+	assert.Len(t, store.marked, 2)
 }
 
 func TestPersonSweepWorkerNoChangedSeedAdvancesCursorWithoutProvider(t *testing.T) {

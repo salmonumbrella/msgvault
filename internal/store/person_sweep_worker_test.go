@@ -33,7 +33,7 @@ func (r *noProviderSweepRunner) PrepareRepair(peoplesweep.StructuredRequest, peo
 	return peoplesweep.PreparedStructuredRequest{}, errors.New("cursor-only sweep must not prepare provider repair work")
 }
 
-func (r *noProviderSweepRunner) BeginStructuredExecution(context.Context) (peoplesweep.StructuredExecutionSession, error) {
+func (r *noProviderSweepRunner) BeginStructuredExecution(context.Context, peoplesweep.PreparedStructuredRequest) (peoplesweep.StructuredExecutionSession, error) {
 	r.calls++
 	return nil, errors.New("cursor-only sweep must not begin provider execution")
 }

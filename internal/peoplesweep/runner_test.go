@@ -77,10 +77,11 @@ type countingTransport struct {
 }
 
 type repairTransport struct {
-	responses []peoplesweep.DriverResponse
-	requests  []peoplesweep.StructuredRequest
-	profiles  []peoplesweep.ProviderProfile
-	calls     int
+	responses   []peoplesweep.DriverResponse
+	requests    []peoplesweep.StructuredRequest
+	profiles    []peoplesweep.ProviderProfile
+	credentials []peoplesweep.Credential
+	calls       int
 }
 
 func (t *repairTransport) Prepare(
@@ -99,15 +100,327 @@ func (t *repairTransport) Prepare(
 func (t *repairTransport) GeneratePrepared(
 	_ context.Context,
 	_ peoplesweep.ProviderProfile,
-	_ peoplesweep.Credential,
+	credential peoplesweep.Credential,
 	_ peoplesweep.PreparedStructuredRequest,
 ) (peoplesweep.DriverResponse, error) {
+	t.credentials = append(t.credentials, credential)
 	if t.calls >= len(t.responses) {
 		return peoplesweep.DriverResponse{}, errors.New("unexpected third provider call")
 	}
 	response := t.responses[t.calls]
 	t.calls++
 	return response, nil
+}
+
+type runnerExecutionFixture struct {
+	runner    *peoplesweep.Runner
+	transport *repairTransport
+	request   peoplesweep.StructuredRequest
+	primary   peoplesweep.PreparedStructuredRequest
+}
+
+func newRunnerExecutionFixture(
+	t *testing.T,
+	responses ...peoplesweep.DriverResponse,
+) runnerExecutionFixture {
+	t.Helper()
+	transport := &repairTransport{responses: responses}
+	runner, err := peoplesweep.NewRunner(
+		runnerTestConfig(), &countingConsent{active: true}, testDriverRegistry(transport),
+		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
+	)
+	require.NoError(t, err)
+	request := structuredTestRequest()
+	primary, err := runner.PrepareStructured(t.Context(), request)
+	require.NoError(t, err)
+	return runnerExecutionFixture{runner: runner, transport: transport,
+		request: request, primary: primary}
+}
+
+func invalidRunnerExecution(
+	t *testing.T,
+) (runnerExecutionFixture, peoplesweep.StructuredExecutionSession,
+	*peoplesweep.ValidationFailure, *int) {
+	t.Helper()
+	fixture := newRunnerExecutionFixture(t,
+		peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":false}`),
+			ProviderVersion: "provider-v1", ModelVersion: "model-v1"},
+		peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`),
+			ProviderVersion: "provider-v1", ModelVersion: "model-v1"},
+	)
+	session, err := fixture.runner.BeginStructuredExecution(t.Context(), fixture.primary)
+	require.NoError(t, err)
+	call, err := session.PrimaryCall(fixture.primary)
+	require.NoError(t, err)
+	started := 0
+	_, err = call.Execute(t.Context(), func(context.Context) error {
+		started++
+		return nil
+	})
+	var failure *peoplesweep.ValidationFailure
+	require.ErrorAs(t, err, &failure)
+	return fixture, session, failure, &started
+}
+
+func TestRunnerExecutionSessionRejectsRepairFirst(t *testing.T) {
+	fixture := newRunnerExecutionFixture(t)
+	session, err := fixture.runner.BeginStructuredExecution(t.Context(), fixture.primary)
+	require.NoError(t, err)
+
+	_, err = session.PrepareRepair(peoplesweep.ValidationFailure{
+		Candidate: json.RawMessage(`{"ok":false}`), Errors: []string{"invalid"},
+	})
+	require.ErrorContains(t, err, "primary")
+	assert.Zero(t, fixture.transport.calls)
+}
+
+func TestRunnerExecutionSessionRejectsDoublePrimary(t *testing.T) {
+	fixture := newRunnerExecutionFixture(t,
+		peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`),
+			ProviderVersion: "provider-v1", ModelVersion: "model-v1"})
+	session, err := fixture.runner.BeginStructuredExecution(t.Context(), fixture.primary)
+	require.NoError(t, err)
+	first, err := session.PrimaryCall(fixture.primary)
+	require.NoError(t, err)
+
+	_, err = session.PrimaryCall(fixture.primary)
+	require.ErrorContains(t, err, "primary")
+	started := 0
+	_, err = first.Execute(t.Context(), func(context.Context) error {
+		started++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, started)
+	assert.Equal(t, 1, fixture.transport.calls)
+}
+
+func TestRunnerExecutionSessionRejectsCrossBatchPrimary(t *testing.T) {
+	fixture := newRunnerExecutionFixture(t,
+		peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`),
+			ProviderVersion: "provider-v1", ModelVersion: "model-v1"})
+	otherRequest := structuredTestRequest()
+	otherRequest.InputText = `{"different":"batch"}`
+	other, err := fixture.runner.PrepareStructured(t.Context(), otherRequest)
+	require.NoError(t, err)
+	session, err := fixture.runner.BeginStructuredExecution(t.Context(), fixture.primary)
+	require.NoError(t, err)
+
+	_, err = session.PrimaryCall(other)
+	require.ErrorContains(t, err, "bound primary")
+	call, err := session.PrimaryCall(fixture.primary)
+	require.NoError(t, err)
+	started := 0
+	_, err = call.Execute(t.Context(), func(context.Context) error {
+		started++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, started)
+	assert.Equal(t, 1, fixture.transport.calls)
+}
+
+func TestRunnerExecutionSessionRejectsDoubleRepair(t *testing.T) {
+	fixture, session, failure, started := invalidRunnerExecution(t)
+	repair, err := session.PrepareRepair(*failure)
+	require.NoError(t, err)
+	_, err = session.PrepareRepair(*failure)
+	require.ErrorContains(t, err, "repair")
+	call, err := session.RepairCall(repair)
+	require.NoError(t, err)
+	_, err = session.RepairCall(repair)
+	require.ErrorContains(t, err, "repair")
+
+	_, err = call.Execute(t.Context(), func(context.Context) error {
+		(*started)++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, *started)
+	assert.Equal(t, 2, fixture.transport.calls)
+}
+
+func TestRunnerExecutionSessionRejectsForgedRepairPacket(t *testing.T) {
+	fixture, session, failure, started := invalidRunnerExecution(t)
+	forged, err := fixture.runner.PrepareRepair(fixture.request, *failure)
+	require.NoError(t, err)
+	bound, err := session.PrepareRepair(*failure)
+	require.NoError(t, err)
+
+	_, err = session.RepairCall(forged)
+	require.ErrorContains(t, err, "bound repair")
+	call, err := session.RepairCall(bound)
+	require.NoError(t, err)
+	_, err = call.Execute(t.Context(), func(context.Context) error {
+		(*started)++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, *started)
+	assert.Equal(t, 2, fixture.transport.calls)
+}
+
+func TestRunnerExecutionSessionRejectsMutatedPrimaryFailure(t *testing.T) {
+	fixture, session, failure, started := invalidRunnerExecution(t)
+	mutated := *failure
+	mutated.Candidate = json.RawMessage(`{"ok":"forged"}`)
+
+	_, err := session.PrepareRepair(mutated)
+	require.ErrorContains(t, err, "validation failure")
+	repair, err := session.PrepareRepair(*failure)
+	require.NoError(t, err)
+	call, err := session.RepairCall(repair)
+	require.NoError(t, err)
+	_, err = call.Execute(t.Context(), func(context.Context) error {
+		(*started)++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, *started)
+	assert.Equal(t, 2, fixture.transport.calls)
+}
+
+func TestRunnerExecutionCallReuseFailsBeforeStartedMarker(t *testing.T) {
+	fixture := newRunnerExecutionFixture(t,
+		peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`),
+			ProviderVersion: "provider-v1", ModelVersion: "model-v1"})
+	session, err := fixture.runner.BeginStructuredExecution(t.Context(), fixture.primary)
+	require.NoError(t, err)
+	call, err := session.PrimaryCall(fixture.primary)
+	require.NoError(t, err)
+	started := 0
+	mark := func(context.Context) error {
+		started++
+		return nil
+	}
+	_, err = call.Execute(t.Context(), mark)
+	require.NoError(t, err)
+	_, err = call.Execute(t.Context(), mark)
+	require.ErrorContains(t, err, "already claimed")
+	assert.Equal(t, 1, started)
+	assert.Equal(t, 1, fixture.transport.calls)
+}
+
+func TestRunnerExecutionSessionClaimsPrimaryAndHandleOnceConcurrently(t *testing.T) {
+	fixture := newRunnerExecutionFixture(t,
+		peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`),
+			ProviderVersion: "provider-v1", ModelVersion: "model-v1"})
+	session, err := fixture.runner.BeginStructuredExecution(t.Context(), fixture.primary)
+	require.NoError(t, err)
+
+	const contenders = 16
+	type preparedResult struct {
+		call peoplesweep.PreparedStructuredCall
+		err  error
+	}
+	preparedResults := make(chan preparedResult, contenders)
+	var prepareGroup sync.WaitGroup
+	for range contenders {
+		prepareGroup.Add(1)
+		go func() {
+			defer prepareGroup.Done()
+			call, callErr := session.PrimaryCall(fixture.primary)
+			preparedResults <- preparedResult{call: call, err: callErr}
+		}()
+	}
+	prepareGroup.Wait()
+	close(preparedResults)
+	var call peoplesweep.PreparedStructuredCall
+	prepareErrors := 0
+	for result := range preparedResults {
+		if result.err != nil {
+			prepareErrors++
+			continue
+		}
+		call = result.call
+	}
+	require.NotNil(t, call)
+	assert.Equal(t, contenders-1, prepareErrors)
+
+	var started atomic.Int64
+	executionErrors := make(chan error, contenders)
+	var executeGroup sync.WaitGroup
+	for range contenders {
+		executeGroup.Add(1)
+		go func() {
+			defer executeGroup.Done()
+			_, executeErr := call.Execute(t.Context(), func(context.Context) error {
+				started.Add(1)
+				return nil
+			})
+			executionErrors <- executeErr
+		}()
+	}
+	executeGroup.Wait()
+	close(executionErrors)
+	successes := 0
+	for executeErr := range executionErrors {
+		if executeErr == nil {
+			successes++
+		}
+	}
+	assert.Equal(t, 1, successes)
+	assert.Equal(t, int64(1), started.Load())
+	assert.Equal(t, 1, fixture.transport.calls)
+}
+
+func TestRunnerExecutionMarkerFailureTerminatesWithoutProviderIO(t *testing.T) {
+	fixture := newRunnerExecutionFixture(t)
+	session, err := fixture.runner.BeginStructuredExecution(t.Context(), fixture.primary)
+	require.NoError(t, err)
+	call, err := session.PrimaryCall(fixture.primary)
+	require.NoError(t, err)
+	markErr := errors.New("mark fixture")
+	started := 0
+	_, err = call.Execute(t.Context(), func(context.Context) error {
+		started++
+		return markErr
+	})
+	require.ErrorIs(t, err, markErr)
+	_, err = call.Execute(t.Context(), func(context.Context) error {
+		started++
+		return nil
+	})
+	require.ErrorContains(t, err, "already claimed")
+	_, err = session.PrimaryCall(fixture.primary)
+	require.ErrorContains(t, err, "primary")
+	assert.Equal(t, 1, started)
+	assert.Zero(t, fixture.transport.calls)
+}
+
+func TestRunnerExecutionConsentFailureOccursBeforeStartedMarker(t *testing.T) {
+	consent := &countingConsent{active: true}
+	transport := &repairTransport{responses: []peoplesweep.DriverResponse{{
+		CandidateJSON:   json.RawMessage(`{"ok":true}`),
+		ProviderVersion: "provider-v1", ModelVersion: "model-v1",
+	}}}
+	runner, err := peoplesweep.NewRunner(
+		runnerTestConfig(), consent, testDriverRegistry(transport),
+		lookupCredentialResolver(func(string) (string, bool) { return "test-key", true }),
+	)
+	require.NoError(t, err)
+	primary, err := runner.PrepareStructured(t.Context(), structuredTestRequest())
+	require.NoError(t, err)
+	session, err := runner.BeginStructuredExecution(t.Context(), primary)
+	require.NoError(t, err)
+	call, err := session.PrimaryCall(primary)
+	require.NoError(t, err)
+	consent.active = false
+	started := 0
+
+	_, err = call.Execute(t.Context(), func(context.Context) error {
+		started++
+		return nil
+	})
+	require.ErrorIs(t, err, peoplesweep.ErrPersonSweepConsentRevoked)
+	assert.Zero(t, started)
+	assert.Zero(t, transport.calls)
+	_, err = call.Execute(t.Context(), func(context.Context) error {
+		started++
+		return nil
+	})
+	require.ErrorContains(t, err, "already claimed")
+	assert.Zero(t, started)
 }
 
 func (t *countingTransport) Prepare(
@@ -390,11 +703,11 @@ func TestRunnerPreparesOneBoundedSameProfileRepair(t *testing.T) {
 
 	prepared, err := runner.PrepareStructured(t.Context(), request)
 	require.NoError(t, err)
-	execution, err := runner.BeginStructuredExecution(t.Context())
+	execution, err := runner.BeginStructuredExecution(t.Context(), prepared)
 	require.NoError(t, err)
-	primaryCall, err := execution.PrepareCall(t.Context(), prepared)
+	primaryCall, err := execution.PrimaryCall(prepared)
 	require.NoError(t, err)
-	primary, err := primaryCall.Run(t.Context())
+	primary, err := primaryCall.Execute(t.Context(), func(context.Context) error { return nil })
 	var failure *peoplesweep.ValidationFailure
 	require.ErrorAs(t, err, &failure)
 	assert.ErrorIs(t, err, peoplesweep.ErrInvalidStructuredOutput)
@@ -406,7 +719,7 @@ func TestRunnerPreparesOneBoundedSameProfileRepair(t *testing.T) {
 	assert.Equal(t, peoplesweep.TokenUsage{InputTokens: 17, OutputTokens: 3}, primary.Usage)
 	assert.True(t, primary.UsageKnown)
 
-	repair, err := runner.PrepareRepair(request, *failure)
+	repair, err := execution.PrepareRepair(*failure)
 	require.NoError(t, err)
 	repairRequest := repair.Request()
 	assert.Equal(t, request.Sources, repairRequest.Sources)
@@ -423,9 +736,9 @@ func TestRunnerPreparesOneBoundedSameProfileRepair(t *testing.T) {
 	_, err = runner.RunPreparedStructured(t.Context(), repair)
 	require.ErrorContains(t, err, "execution session")
 	assert.Equal(t, 1, transport.calls)
-	repairCall, err := execution.PrepareCall(t.Context(), repair)
+	repairCall, err := execution.RepairCall(repair)
 	require.NoError(t, err)
-	repaired, err := repairCall.Run(t.Context())
+	repaired, err := repairCall.Execute(t.Context(), func(context.Context) error { return nil })
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"ok":true}`, string(repaired.Output))
 	assert.Equal(t, 2, transport.calls)

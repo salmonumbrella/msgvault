@@ -644,13 +644,21 @@ func (w *Worker) RunPerson(
 			estimate: estimate, estimatedCost: estimatedCost, reservation: reservation,
 			callOrdinal: 0, purpose: ProviderCallPurposePrimary})
 	}
-	var execution StructuredExecutionSession
-	if len(admitted) > 0 {
-		execution, err = w.Runner.BeginStructuredExecution(ctx)
-		if err != nil {
+	executions := make([]StructuredExecutionSession, len(admitted))
+	primaryCalls := make([]PreparedStructuredCall, len(admitted))
+	for index := range admitted {
+		execution, beginErr := w.Runner.BeginStructuredExecution(ctx, admitted[index].prepared)
+		if beginErr != nil {
 			return PersonRunResult{}, w.finalizePreflightFailure(ctx, lease, attemptID,
-				reservations, completedUsage, err, resolvedAt)
+				reservations, completedUsage, beginErr, resolvedAt)
 		}
+		primaryCall, callErr := execution.PrimaryCall(admitted[index].prepared)
+		if callErr != nil {
+			return PersonRunResult{}, w.finalizePreflightFailure(ctx, lease, attemptID,
+				reservations, completedUsage, callErr, resolvedAt)
+		}
+		executions[index] = execution
+		primaryCalls[index] = primaryCall
 	}
 	recordCompletedCall := func(call admittedBatch, response StructuredResponse, latency time.Duration) error {
 		requestID := response.ProviderRequestID
@@ -693,8 +701,10 @@ func (w *Worker) RunPerson(
 		})
 		return nil
 	}
-	for _, primary := range admitted {
+	for primaryIndex, primary := range admitted {
+		execution := executions[primaryIndex]
 		call := primary
+		preparedCall := primaryCalls[primaryIndex]
 		for {
 			renewed, renewErr := w.Store.RenewPersonSweep(ctx, lease, w.Config.LeaseDuration)
 			if renewErr != nil {
@@ -706,11 +716,6 @@ func (w *Worker) RunPerson(
 					completedUsage, ErrLeaseLost, resolvedAt)
 			}
 			lease = *renewed
-			preparedCall, prepareErr := execution.PrepareCall(ctx, call.prepared)
-			if prepareErr != nil {
-				return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
-					completedUsage, prepareErr, resolvedAt)
-			}
 			started := w.now()
 			var response StructuredResponse
 			var runErr error
@@ -748,15 +753,26 @@ func (w *Worker) RunPerson(
 					claims = append(claims, parsed...)
 					break
 				}
-				failure = newValidationFailure(response.Output,
-					"candidate failed extraction semantics", call.callOrdinal == 1)
 				if call.callOrdinal != 0 {
+					failure = newValidationFailure(response.Output,
+						"candidate failed extraction semantics", true)
 					return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
 						completedUsage, failure, resolvedAt)
 				}
+				semanticFailure, semanticErr := execution.SemanticValidationFailure(response)
+				if semanticErr != nil {
+					return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
+						completedUsage, semanticErr, resolvedAt)
+				}
+				failure = &semanticFailure
 			}
 
-			repair, repairErr := w.Runner.PrepareRepair(primary.batch.Request, *failure)
+			repair, repairErr := execution.PrepareRepair(*failure)
+			if repairErr != nil {
+				return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
+					completedUsage, repairErr, resolvedAt)
+			}
+			repairCall, repairErr := execution.RepairCall(repair)
 			if repairErr != nil {
 				return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
 					completedUsage, repairErr, resolvedAt)
@@ -790,6 +806,7 @@ func (w *Worker) RunPerson(
 			call = admittedBatch{batch: primary.batch, prepared: repair, estimate: repairEstimate,
 				estimatedCost: repairCost, reservation: repairReservation,
 				callOrdinal: 1, purpose: ProviderCallPurposeRepair}
+			preparedCall = repairCall
 		}
 	}
 	provider, model := string(profile.Protocol), profile.Model
@@ -871,11 +888,7 @@ func (w *Worker) runPreparedWithLeaseHeartbeat(
 			}
 		}
 	}(lease)
-	var response StructuredResponse
-	runErr := markStarted(heartbeatCtx)
-	if runErr == nil {
-		response, runErr = call.Run(heartbeatCtx)
-	}
+	response, runErr := call.Execute(heartbeatCtx, markStarted)
 	close(stop)
 	cancel()
 	heartbeat := <-result
