@@ -31,6 +31,7 @@ const (
 type capabilityAttempt struct {
 	path string
 	body map[string]any
+	err  error
 }
 
 func TestCapabilityNegotiationUsesFixedOutputAndTokenOrderWithoutArchiveContext(t *testing.T) {
@@ -526,16 +527,12 @@ func TestCapabilityDriversRejectRepresentationCodesForPromptOnlyAttempts(t *test
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var calls atomic.Int32
+			attempts := make(chan capabilityAttempt, 1)
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
-				assert.Equal(t, test.path, r.URL.Path)
 				var body map[string]any
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-				if test.protocol == ProtocolGoogleGenerateContent {
-					assert.NotContains(t, body, "model")
-				} else {
-					assert.Equal(t, "synthetic-model", body["model"])
-				}
+				decodeErr := json.NewDecoder(r.Body).Decode(&body)
+				attempts <- capabilityAttempt{path: r.URL.Path, body: body, err: decodeErr}
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(test.errorBody))
 			}))
@@ -559,6 +556,14 @@ func TestCapabilityDriversRejectRepresentationCodesForPromptOnlyAttempts(t *test
 			require.ErrorAs(t, callErr, &providerErr)
 			assert.Empty(t, providerErr.Capability)
 			assert.Equal(t, int32(1), calls.Load())
+			attempt := <-attempts
+			require.NoError(t, attempt.err)
+			assert.Equal(t, test.path, attempt.path)
+			if test.protocol == ProtocolGoogleGenerateContent {
+				assert.NotContains(t, attempt.body, "model")
+			} else {
+				assert.Equal(t, "synthetic-model", attempt.body["model"])
+			}
 		})
 	}
 }
@@ -761,16 +766,12 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 			for index, body := range test.bodies {
 				t.Run(fmt.Sprintf("case-%d", index), func(t *testing.T) {
 					var calls atomic.Int32
+					attempts := make(chan capabilityAttempt, 1)
 					server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						calls.Add(1)
-						assert.Equal(t, test.path, r.URL.Path)
 						var requestBody map[string]any
-						require.NoError(t, json.NewDecoder(r.Body).Decode(&requestBody))
-						if test.protocol == ProtocolGoogleGenerateContent {
-							assert.NotContains(t, requestBody, "model")
-						} else {
-							assert.Equal(t, "synthetic-model", requestBody["model"])
-						}
+						decodeErr := json.NewDecoder(r.Body).Decode(&requestBody)
+						attempts <- capabilityAttempt{path: r.URL.Path, body: requestBody, err: decodeErr}
 						w.WriteHeader(http.StatusBadRequest)
 						_, _ = w.Write([]byte(body))
 					}))
@@ -784,6 +785,14 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 					require.Error(t, negotiationErr)
 					assert.Empty(t, got)
 					assert.Equal(t, int32(1), calls.Load())
+					attempt := <-attempts
+					require.NoError(t, attempt.err)
+					assert.Equal(t, test.path, attempt.path)
+					if test.protocol == ProtocolGoogleGenerateContent {
+						assert.NotContains(t, attempt.body, "model")
+					} else {
+						assert.Equal(t, "synthetic-model", attempt.body["model"])
+					}
 					for _, fragment := range []string{
 						"unsupported", "parameter", "model", "endpoint", "billing", "policy",
 						capabilityResponseCanary, capabilityCredentialValue, capabilityMessageCanary,
@@ -799,12 +808,11 @@ func TestCapabilityNegotiationStopsAfterUnclassifiedErrorForEveryProtocol(t *tes
 }
 
 func TestCapabilityNegotiationNeverSwitchesProtocolEndpointOrModel(t *testing.T) {
-	var paths []string
+	attempts := make(chan capabilityAttempt, 6)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.Path)
 		var body map[string]any
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-		assert.Equal(t, "synthetic-model", body["model"])
+		decodeErr := json.NewDecoder(r.Body).Decode(&body)
+		attempts <- capabilityAttempt{path: r.URL.Path, body: body, err: decodeErr}
 		parameter := "max_completion_tokens"
 		if _, present := body["max_tokens"]; present {
 			parameter = "max_tokens"
@@ -821,9 +829,11 @@ func TestCapabilityNegotiationNeverSwitchesProtocolEndpointOrModel(t *testing.T)
 		NewCredential(AuthBearer, capabilityCredentialValue))
 	require.Error(t, err)
 	assert.Empty(t, got)
-	assert.Len(t, paths, 6)
-	for _, path := range paths {
-		assert.Equal(t, "/chat/completions", path)
+	for range 6 {
+		attempt := <-attempts
+		require.NoError(t, attempt.err)
+		assert.Equal(t, "/chat/completions", attempt.path)
+		assert.Equal(t, "synthetic-model", attempt.body["model"])
 	}
 }
 

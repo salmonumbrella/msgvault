@@ -81,7 +81,7 @@ func (d *GoogleGenerateContentDriver) Prepare(
 	case OutputModePromptJSON:
 		body.SystemInstruction.Parts[0].Text = promptJSONInstruction + string(request.JSONSchema)
 	default:
-		return PreparedStructuredRequest{}, errors.New("Google generateContent profile has unsupported output mode")
+		return PreparedStructuredRequest{}, errors.New("google generateContent profile has unsupported output mode")
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -179,11 +179,11 @@ func googleGenerateContentTarget(endpoint, model string) (string, error) {
 	parsed, err := url.Parse(endpoint)
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.Opaque != "" ||
 		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.ForceQuery {
-		return "", errors.New("Google generateContent endpoint join is unsafe")
+		return "", errors.New("google generateContent endpoint join is unsafe")
 	}
 	if parsed.RawPath != "" || unsafeGooglePath(parsed.Path) || containsUnicodeControl(parsed.Path) ||
 		model == "." || model == ".." || containsUnicodeControl(model) {
-		return "", errors.New("Google generateContent endpoint join is unsafe")
+		return "", errors.New("google generateContent endpoint join is unsafe")
 	}
 	basePath := strings.TrimRight(parsed.Path, "/")
 	escapedBasePath := strings.TrimRight(parsed.EscapedPath(), "/")

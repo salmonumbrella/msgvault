@@ -1599,12 +1599,11 @@ func cliRunPersonProviderArgsAllowed(operation string, args []string) bool {
 				return false
 			}
 		} else {
-			nextIndex := index + 1
-			if nextIndex >= len(args) {
+			remaining := args[index:]
+			if len(remaining) < 2 {
 				return false
 			}
-			flagValue = args[nextIndex]
-			index = nextIndex
+			flagValue = remaining[1]
 			if flagValue == "" || strings.HasPrefix(flagValue, "-") {
 				return false
 			}

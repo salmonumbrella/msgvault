@@ -340,6 +340,7 @@ func TestCredentialDeleteGuardRejectsValidIdentityReplacements(t *testing.T) {
 			name:      "credential target",
 			wantError: "credential changed during guarded deletion",
 			replace: func(t *testing.T, tokensDir, replacementTokensDir string) (string, string) {
+				t.Helper()
 				root := filepath.Join(tokensDir, credentialNamespace)
 				target := filepath.Join(root, "profile.json")
 				retained := target + ".retained"
