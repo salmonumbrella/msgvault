@@ -19,6 +19,7 @@ Task commits:
 - `46334706` — `fix: bind provider credential deletion guard`
 - `fc5bc03e` — `feat: wire provider-neutral people sweeps`
 - `6ee76482` — `docs: explain people sweep provider profiles`
+- `c1d1606b` — `fix: bind add credential rollback`
 
 Base: `733e49ddd4315160fb1d97305d2676134a942520`.
 
@@ -255,6 +256,109 @@ inspected. They are pre-existing placeholders, not live credentials or private
 downstream identifiers. The Task 11 production and documentation changes
 introduced no match. The raw placeholder values are intentionally not copied
 into this report so the report does not become a new scrub finding.
+
+## Fix round 1: identity-bound add rollback
+
+The add rollback previously called `SaveNew`, released the credential lock,
+and later acquired a fresh deletion preflight. That cleanup could adopt and
+truncate an otherwise valid same-profile credential installed after the new
+credential was published. The rollback authorization was discovered too late
+and was not bound to the object created by `SaveNew`.
+
+`SaveNew` now returns an opaque `CredentialCleanupGuard` with its create-only
+result. The guard is assembled through the exact tokens-root and namespace
+descriptors used for publication and pins the validated lock marker and exact
+published credential inode. Those descriptors and identity metadata retain no
+credential bytes. The guard does not retain the namespace flock across config
+publication or the saved-profile check. `CleanupNew` consumes the guard,
+acquires the secure namespace lock, and revalidates all live identities before
+retiring only the pinned credential.
+
+The cleanup guard is sealed, opaque when formatted, rejected by JSON and text
+serialization, single-use, and explicitly closable. Wrong store, wrong
+profile, reuse, use after close, and unsupported platforms fail closed.
+Successful add closes the capability without deleting. Every rollback after a
+successful credential publication uses this bound capability; no add rollback
+performs a fresh `PreflightDelete`.
+
+Changed files in this fix:
+
+- `internal/peoplesweep/credential_store.go`
+- `internal/peoplesweep/credential_store_unix.go`
+- `internal/peoplesweep/credential_store_unsupported.go`
+- `internal/peoplesweep/credential_store_test.go`
+- `internal/peoplesweep/credential_store_security_test.go`
+- `cmd/msgvault/cmd/person_provider_setup.go`
+- `cmd/msgvault/cmd/person_provider_setup_test.go`
+- `cmd/msgvault/cmd/person_provider_routing_test.go`
+
+Identity-substitution coverage:
+
+| Substitution point | Cleanup result | Original credential | Replacement credential |
+|---|---|---|---|
+| Tokens root | Explicit identity conflict | Untouched | Untouched |
+| Credential namespace | Explicit identity conflict | Untouched | Untouched |
+| Lock marker | Explicit identity conflict | Untouched | Untouched |
+| Credential target | Explicit identity conflict | Untouched | Untouched |
+| After `SaveNew`, before config publication failure | Explicit cleanup conflict; config remains exact | Untouched | Untouched |
+| After config publication, during final saved-profile check | Explicit cleanup conflict; exact config restored | Untouched | Untouched |
+
+Both production regressions use the real file credential store and config
+edit/restore path. They also assert that no consent row is granted. Ordinary
+failed adds still remove the exact newly created credential, and `SaveNew`
+remains create-only under concurrent writers. The removal deletion guard and
+its production recovery behavior are unchanged.
+
+RED evidence against the error-only `SaveNew` API:
+
+```text
+$ go test -tags "fts5 sqlite_vec" ./internal/peoplesweep ./cmd/msgvault/cmd -run 'CredentialCleanupGuard|PersonProviderAdd(ConfigFailure|FinalCheckFailure)RejectsReplacement' -count=1
+# go.kenn.io/msgvault/internal/peoplesweep [...]
+assignment mismatch: SaveNew returned two values where the tests require a cleanup guard, create result, and error
+CleanupNew undefined
+CredentialCleanupGuard undefined
+FAIL
+```
+
+Final focused GREEN evidence:
+
+```text
+$ go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'Credential(Store|CleanupGuard|DeleteGuard)' -count=1 -timeout 3m
+ok  go.kenn.io/msgvault/internal/peoplesweep  7.078s
+
+$ go test -tags "fts5 sqlite_vec" ./cmd/msgvault/cmd -run 'PersonProvider.*(Remove|Add|Setup)|Credential' -count=1 -timeout 4m
+ok  go.kenn.io/msgvault/cmd/msgvault/cmd  31.102s
+
+$ go test -tags "fts5 sqlite_vec" ./internal/peoplesweep ./cmd/msgvault/cmd -run 'ProviderModesEndToEnd|OpenAIEndToEnd|ProductionPersonSweep' -count=1 -timeout 4m
+ok  go.kenn.io/msgvault/internal/peoplesweep  1.192s
+ok  go.kenn.io/msgvault/cmd/msgvault/cmd  1.701s
+
+$ go test -race -tags "fts5 sqlite_vec" ./internal/peoplesweep ./cmd/msgvault/cmd -run 'Credential(CleanupGuard|DeleteGuard)|PersonProviderAdd(ConfigFailure|FinalCheckFailure)RejectsReplacement|PersonProviderDaemonRemoveValidReplacementRace' -count=1 -timeout 5m
+ok  go.kenn.io/msgvault/internal/peoplesweep  3.077s
+ok  go.kenn.io/msgvault/cmd/msgvault/cmd  3.582s
+
+$ go vet -tags "fts5 sqlite_vec" ./internal/peoplesweep ./cmd/msgvault/cmd
+exit 0
+
+$ golangci-lint run --new-from-rev=6235c43c ./internal/peoplesweep ./cmd/msgvault/cmd
+0 issues.
+
+$ git diff --check
+exit 0
+```
+
+The seven Task-11-introduced mechanical diagnostics were corrected: three
+`testifylint` require-error findings, three `thelper` findings, and one
+`unparam` finding. The focused non-mutating lint command above reports no new
+issues relative to the prior Task 11 report commit. The wider branch lint debt
+recorded earlier was not mechanically rewritten.
+
+The exact private-data and credential scrub was rerun and returned the same
+seven inspected pre-existing placeholders described above: one release smoke
+fixture, five documentation placeholders, and one API source comment. This fix
+introduced no production or documentation scrub match. Per the requested
+scope, the already-recorded schema-heavy broad suites were not rerun in this
+fix round.
 
 ## Concerns
 
