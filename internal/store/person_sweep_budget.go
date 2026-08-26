@@ -860,10 +860,6 @@ func (s *Store) FinalizePersonSweepFailure(
 		if input.Lease.PersonID != attempt.personID || input.Lease.Fence != attempt.leaseFence {
 			return errors.New("finalize person sweep failure: lease does not match durable attempt")
 		}
-		if attempt.status == peoplesweep.AttemptFailed &&
-			attempt.failureClass == peoplesweep.FailureLeaseLost {
-			return nil
-		}
 		if alreadyFinalized && attempt.failureClass != input.Class {
 			return errors.New("finalize person sweep failure: terminal failure class mismatch")
 		}

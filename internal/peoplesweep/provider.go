@@ -88,11 +88,25 @@ type StructuredDriver interface {
 	GeneratePrepared(ctx context.Context, profile ProviderProfile, credential Credential, prepared PreparedStructuredRequest) (DriverResponse, error)
 }
 
+// PreparedStructuredCall is an opaque, one-shot provider call whose complete
+// non-I/O policy and credential checks have already succeeded. Callers may
+// durably mark the matching reservation started immediately before Run.
+type PreparedStructuredCall interface {
+	Run(ctx context.Context) (StructuredResponse, error)
+}
+
+// StructuredExecutionSession pins one active profile, driver, and resolved
+// credential for a primary call and its optional same-profile repair.
+type StructuredExecutionSession interface {
+	PrepareCall(ctx context.Context, prepared PreparedStructuredRequest) (PreparedStructuredCall, error)
+}
+
 // StructuredRunner is the consent-gated entry point later people-sweep
 // programs consume.
 type StructuredRunner interface {
 	PrepareStructured(ctx context.Context, request StructuredRequest) (PreparedStructuredRequest, error)
 	PrepareRepair(request StructuredRequest, failure ValidationFailure) (PreparedStructuredRequest, error)
+	BeginStructuredExecution(ctx context.Context) (StructuredExecutionSession, error)
 	RunPreparedStructured(ctx context.Context, prepared PreparedStructuredRequest) (StructuredResponse, error)
 	RunStructured(ctx context.Context, request StructuredRequest) (StructuredResponse, error)
 }

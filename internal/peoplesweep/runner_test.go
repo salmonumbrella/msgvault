@@ -390,7 +390,11 @@ func TestRunnerPreparesOneBoundedSameProfileRepair(t *testing.T) {
 
 	prepared, err := runner.PrepareStructured(t.Context(), request)
 	require.NoError(t, err)
-	primary, err := runner.RunPreparedStructured(t.Context(), prepared)
+	execution, err := runner.BeginStructuredExecution(t.Context())
+	require.NoError(t, err)
+	primaryCall, err := execution.PrepareCall(t.Context(), prepared)
+	require.NoError(t, err)
+	primary, err := primaryCall.Run(t.Context())
 	var failure *peoplesweep.ValidationFailure
 	require.ErrorAs(t, err, &failure)
 	assert.ErrorIs(t, err, peoplesweep.ErrInvalidStructuredOutput)
@@ -416,7 +420,12 @@ func TestRunnerPreparesOneBoundedSameProfileRepair(t *testing.T) {
 	assert.JSONEq(t, `{"ok":false}`, instruction.InvalidCandidate)
 	assert.Equal(t, failure.Errors, instruction.ValidationErrors)
 
-	repaired, err := runner.RunPreparedStructured(t.Context(), repair)
+	_, err = runner.RunPreparedStructured(t.Context(), repair)
+	require.ErrorContains(t, err, "execution session")
+	assert.Equal(t, 1, transport.calls)
+	repairCall, err := execution.PrepareCall(t.Context(), repair)
+	require.NoError(t, err)
+	repaired, err := repairCall.Run(t.Context())
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"ok":true}`, string(repaired.Output))
 	assert.Equal(t, 2, transport.calls)

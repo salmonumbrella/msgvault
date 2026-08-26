@@ -67,6 +67,7 @@ type ApplyRequest struct {
 	CursorEnvelope     []GenerationCursor
 	Batches            []CompletedBatch
 	Usage              Usage
+	Budget             BudgetConfig
 	CursorAdvances     []CursorAdvance
 	DeferredCursorWork bool
 	CompletedAt        time.Time
@@ -643,6 +644,14 @@ func (w *Worker) RunPerson(
 			estimate: estimate, estimatedCost: estimatedCost, reservation: reservation,
 			callOrdinal: 0, purpose: ProviderCallPurposePrimary})
 	}
+	var execution StructuredExecutionSession
+	if len(admitted) > 0 {
+		execution, err = w.Runner.BeginStructuredExecution(ctx)
+		if err != nil {
+			return PersonRunResult{}, w.finalizePreflightFailure(ctx, lease, attemptID,
+				reservations, completedUsage, err, resolvedAt)
+		}
+	}
 	recordCompletedCall := func(call admittedBatch, response StructuredResponse, latency time.Duration) error {
 		requestID := response.ProviderRequestID
 		if !IsSafeProviderMetadata(requestID) {
@@ -697,15 +706,28 @@ func (w *Worker) RunPerson(
 					completedUsage, ErrLeaseLost, resolvedAt)
 			}
 			lease = *renewed
-			if markErr := w.Store.MarkPersonSweepBudgetStarted(ctx, call.reservation); markErr != nil {
-				_ = w.Store.ReleasePersonSweepBudget(ctx, call.reservation)
+			preparedCall, prepareErr := execution.PrepareCall(ctx, call.prepared)
+			if prepareErr != nil {
 				return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
-					completedUsage, markErr, resolvedAt)
+					completedUsage, prepareErr, resolvedAt)
 			}
 			started := w.now()
 			var response StructuredResponse
 			var runErr error
-			lease, response, runErr = w.runPreparedWithLeaseHeartbeat(ctx, lease, call.prepared)
+			marked := false
+			lease, response, runErr = w.runPreparedWithLeaseHeartbeat(ctx, lease,
+				func(markCtx context.Context) error {
+					if markErr := w.Store.MarkPersonSweepBudgetStarted(markCtx, call.reservation); markErr != nil {
+						return markErr
+					}
+					marked = true
+					return nil
+				}, preparedCall)
+			if !marked {
+				_ = w.Store.ReleasePersonSweepBudget(ctx, call.reservation)
+				return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
+					completedUsage, runErr, resolvedAt)
+			}
 			latency := max(time.Duration(0), w.now().Sub(started))
 			if structuredResponseCompleted(response) {
 				if recordErr := recordCompletedCall(call, response, latency); recordErr != nil {
@@ -796,7 +818,7 @@ func (w *Worker) RunPerson(
 	lease = *renewed
 	apply, applyErr := w.Sink.ApplyPersonSweep(ctx, ApplyRequest{Lease: lease, RunID: runID,
 		AttemptID: attemptID, Generation: generation, CursorEnvelope: assembly.CursorEnvelope,
-		Batches: completedBatches, Usage: totalUsage, CursorAdvances: advances,
+		Batches: completedBatches, Usage: totalUsage, Budget: w.Config.Budgets, CursorAdvances: advances,
 		DeferredCursorWork: deferredCursorWork, CompletedAt: w.now()})
 	if applyErr != nil {
 		return PersonRunResult{}, w.finalizeFailure(ctx, lease, attemptID, reservations,
@@ -813,7 +835,10 @@ type leaseHeartbeatResult struct {
 }
 
 func (w *Worker) runPreparedWithLeaseHeartbeat(
-	ctx context.Context, lease Lease, prepared PreparedStructuredRequest,
+	ctx context.Context,
+	lease Lease,
+	markStarted func(context.Context) error,
+	call PreparedStructuredCall,
 ) (Lease, StructuredResponse, error) {
 	heartbeatCtx, cancel := context.WithCancel(ctx)
 	stop := make(chan struct{})
@@ -846,7 +871,11 @@ func (w *Worker) runPreparedWithLeaseHeartbeat(
 			}
 		}
 	}(lease)
-	response, runErr := w.Runner.RunPreparedStructured(heartbeatCtx, prepared)
+	var response StructuredResponse
+	runErr := markStarted(heartbeatCtx)
+	if runErr == nil {
+		response, runErr = call.Run(heartbeatCtx)
+	}
 	close(stop)
 	cancel()
 	heartbeat := <-result
@@ -1042,13 +1071,17 @@ func accountCompletedProviderCall(
 		return Usage{Requests: 1, InputTokens: reserved.InputTokens,
 			OutputTokens: reserved.OutputTokens, EstimatedCostMicroUSD: reservedCost}, reservedCost, nil
 	}
-	reportedCost, err := EstimateCostMicroUSD(response.Usage, budget)
+	reconciled := TokenUsage{
+		InputTokens:  max(reserved.InputTokens, response.Usage.InputTokens),
+		OutputTokens: max(reserved.OutputTokens, response.Usage.OutputTokens),
+	}
+	reconciledCost, err := EstimateCostMicroUSD(reconciled, budget)
 	if err != nil {
 		return Usage{}, 0, err
 	}
-	return Usage{Requests: 1, InputTokens: max(reserved.InputTokens, response.Usage.InputTokens),
-		OutputTokens:          max(reserved.OutputTokens, response.Usage.OutputTokens),
-		EstimatedCostMicroUSD: max(reservedCost, reportedCost)}, reportedCost, nil
+	return Usage{Requests: 1, InputTokens: reconciled.InputTokens,
+		OutputTokens:          reconciled.OutputTokens,
+		EstimatedCostMicroUSD: reconciledCost}, reconciledCost, nil
 }
 
 func personSweepRetryDelay(attemptID string, attempt int, retryAfter, base, maximum time.Duration) time.Duration {

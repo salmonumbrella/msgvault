@@ -50,6 +50,10 @@ func TestFinalizePersonSweepFailureAccountsAfterLeaseLoss(t *testing.T) {
 			ProviderRequestID: "safe-request-id", Usage: peoplesweep.TokenUsage{
 				InputTokens: 300, OutputTokens: 150}, Latency: time.Second}},
 		FinalizedAt: sweepBudgetNow().Add(time.Minute)}
+	requirements.Error(journal.store.FinalizePersonSweepFailure(t.Context(), finalization),
+		"a reclaimed lease-lost attempt rejects a different terminal class and metadata")
+	finalization.Class = peoplesweep.FailureLeaseLost
+	finalization.Completed = nil
 	requirements.NoError(journal.store.FinalizePersonSweepFailure(t.Context(), finalization))
 	requirements.NoError(journal.store.FinalizePersonSweepFailure(t.Context(), finalization))
 

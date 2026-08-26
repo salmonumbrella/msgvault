@@ -241,15 +241,15 @@ func TestPersonSweepStateMachineParity(t *testing.T) {
 	defer f.server.Close()
 	ctx := t.Context()
 
-	// A provider-completed stale attempt is charged, but its expired fence
-	// cannot mutate the reclaimed work owner or cursor.
+	// A provider-completed stale attempt is conservatively charged by reclaim.
+	// Its exact lease-lost replay is a no-op and cannot rewrite the new owner.
 	oldLease := parityClaim(t, f.store, "parity-old-worker")
 	oldAssembly := parityAssembly(t, f)
 	oldRunID, oldAttemptID := "run-parity-old", "attempt-parity-old"
 	parityStartRunAttempt(t, f, oldRunID, oldAttemptID, oldLease,
 		oldAssembly.CursorEnvelope, peoplesweep.RunIncremental)
 	require.Len(oldAssembly.Batches, 1)
-	reservation, response := parityRunChargedBatch(t, f, oldRunID, oldAttemptID,
+	reservation, _ := parityRunChargedBatch(t, f, oldRunID, oldAttemptID,
 		oldAssembly.Batches[0])
 	_, err := f.store.DB().ExecContext(ctx, f.store.Rebind(`
 		UPDATE person_sweep_work SET lease_until = ? WHERE person_id = ?`),
@@ -257,14 +257,10 @@ func TestPersonSweepStateMachineParity(t *testing.T) {
 	require.NoError(err)
 	newLease := parityClaim(t, f.store, "parity-new-worker")
 	require.NoError(f.store.FinalizePersonSweepFailure(ctx, peoplesweep.FailureFinalization{
-		Lease: *oldLease, AttemptID: oldAttemptID, Class: peoplesweep.FailureProviderHTTP,
+		Lease: *oldLease, AttemptID: oldAttemptID, Class: peoplesweep.FailureLeaseLost,
 		RetryAt:      f.now.Add(time.Hour),
 		Reservations: []peoplesweep.BudgetReservation{reservation},
-		Completed: []peoplesweep.CompletedUsage{{BatchOrdinal: 0, CallOrdinal: 0,
-			Purpose:           peoplesweep.ProviderCallPurposePrimary,
-			ProviderRequestID: response.ProviderRequestID, Usage: response.Usage,
-			UsageKnown: response.UsageKnown}},
-		FinalizedAt: f.now,
+		FinalizedAt:  f.now,
 	}))
 	require.NoError(f.store.FinishPersonSweepRun(ctx, oldRunID,
 		peoplesweep.RunFailed, f.now))

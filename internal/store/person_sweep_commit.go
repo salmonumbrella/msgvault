@@ -244,6 +244,9 @@ func validatePersonSweepApplyRequest(request peoplesweep.ApplyRequest) error {
 		strings.TrimSpace(request.Generation.ModelVersion) == "" {
 		return errors.New("apply person sweep provider generation has incomplete identity")
 	}
+	if err := peoplesweep.ValidateBudgetConfig(request.Budget); err != nil {
+		return fmt.Errorf("apply person sweep provider generation has invalid budget: %w", err)
+	}
 	seen := make(map[peoplesweep.ProviderCallCoordinate]struct{}, len(request.Batches))
 	coordinates := make([]personSweepBatchCoordinate, 0, len(request.Batches))
 	for _, batch := range request.Batches {
@@ -442,13 +445,22 @@ func (s *Store) reconcilePersonSweepSuccessBatchesTx(
 			batch.inputHash != completed.InputHash {
 			return 0, errors.New("apply person sweep completed batch is not the running reservation")
 		}
+		if batch.budgetFingerprint != personSweepBudgetFingerprint(request.Budget) {
+			return 0, errors.New("apply person sweep completed batch budget does not match its reservation")
+		}
 		actual := batch.reserved
 		if completed.UsageKnown {
-			actual = peoplesweep.Usage{Requests: max(batch.reserved.Requests, 1),
+			reconciledTokens := peoplesweep.TokenUsage{
 				InputTokens:  max(batch.reserved.InputTokens, completed.Usage.InputTokens),
 				OutputTokens: max(batch.reserved.OutputTokens, completed.Usage.OutputTokens),
-				EstimatedCostMicroUSD: max(batch.reserved.EstimatedCostMicroUSD,
-					completed.ActualCostMicroUSD)}
+			}
+			reconciledCost, err := peoplesweep.EstimateCostMicroUSD(reconciledTokens, request.Budget)
+			if err != nil {
+				return 0, fmt.Errorf("apply person sweep completed batch cost: %w", err)
+			}
+			actual = peoplesweep.Usage{Requests: max(batch.reserved.Requests, 1),
+				InputTokens: reconciledTokens.InputTokens, OutputTokens: reconciledTokens.OutputTokens,
+				EstimatedCostMicroUSD: reconciledCost}
 		}
 		result, err := tx.ExecContext(ctx, `UPDATE person_sweep_batches SET status = 'succeeded',
 			provider_request_id = ?, actual_requests = ?, actual_input_tokens = ?,

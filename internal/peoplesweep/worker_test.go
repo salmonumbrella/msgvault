@@ -250,6 +250,9 @@ func (workerFailureRunner) PrepareStructured(context.Context, StructuredRequest)
 func (workerFailureRunner) PrepareRepair(StructuredRequest, ValidationFailure) (PreparedStructuredRequest, error) {
 	return PreparedStructuredRequest{}, errors.New("unexpected provider repair preparation")
 }
+func (workerFailureRunner) BeginStructuredExecution(context.Context) (StructuredExecutionSession, error) {
+	return nil, errors.New("unexpected provider execution")
+}
 func (workerFailureRunner) RunPreparedStructured(context.Context, PreparedStructuredRequest) (StructuredResponse, error) {
 	return StructuredResponse{}, errors.New("unexpected provider call")
 }
@@ -379,14 +382,44 @@ type workerProductionRunner struct {
 	ran      int
 }
 
-type workerRepairAuthority struct{}
+type workerProductionExecution struct{ runner *workerProductionRunner }
 
-func (workerRepairAuthority) HasSuccessfulPersonInferenceCheck(context.Context, string) (bool, error) {
-	return true, nil
+type workerProductionCall struct {
+	runner   *workerProductionRunner
+	prepared PreparedStructuredRequest
 }
 
-func (workerRepairAuthority) HasActivePersonInferenceConsent(context.Context, string) (bool, error) {
-	return true, nil
+func (e workerProductionExecution) PrepareCall(
+	_ context.Context,
+	prepared PreparedStructuredRequest,
+) (PreparedStructuredCall, error) {
+	return workerProductionCall{runner: e.runner, prepared: prepared}, nil
+}
+
+func (c workerProductionCall) Run(ctx context.Context) (StructuredResponse, error) {
+	return c.runner.RunPreparedStructured(ctx, c.prepared)
+}
+
+type workerRepairAuthority struct {
+	verificationErr error
+	consentErr      error
+}
+
+type workerCredentialResolverFunc func(string, ProviderProfile) (Credential, error)
+
+func (f workerCredentialResolverFunc) Resolve(
+	profileName string,
+	profile ProviderProfile,
+) (Credential, error) {
+	return f(profileName, profile)
+}
+
+func (a workerRepairAuthority) HasSuccessfulPersonInferenceCheck(context.Context, string) (bool, error) {
+	return a.verificationErr == nil, a.verificationErr
+}
+
+func (a workerRepairAuthority) HasActivePersonInferenceConsent(context.Context, string) (bool, error) {
+	return a.consentErr == nil, a.consentErr
 }
 
 type workerRepairDriver struct {
@@ -427,9 +460,20 @@ func (d *workerRepairDriver) GeneratePrepared(
 
 func newWorkerRepairRunner(t *testing.T, config Config, driver *workerRepairDriver) *Runner {
 	t.Helper()
-	runner, err := NewRunner(config, workerRepairAuthority{},
-		NewTestDriverRegistry(ProtocolOpenAIChat, driver),
+	return newWorkerRepairRunnerWithDependencies(t, config, driver, workerRepairAuthority{},
 		NewCredentialResolver(nil, func(string) (string, bool) { return "test-key", true }))
+}
+
+func newWorkerRepairRunnerWithDependencies(
+	t *testing.T,
+	config Config,
+	driver *workerRepairDriver,
+	authority ProviderAuthority,
+	resolver CredentialResolver,
+) *Runner {
+	t.Helper()
+	runner, err := NewRunner(config, authority,
+		NewTestDriverRegistry(ProtocolOpenAIChat, driver), resolver)
 	require.NoError(t, err)
 	return runner
 }
@@ -439,6 +483,19 @@ func runWorkerRepairCase(
 	primaryCandidate string,
 	repairCandidate string,
 	reserveErrAt int,
+) (*workerFailureStore, *workerRepairDriver, *workerProductionSink, error) {
+	return runWorkerRepairCaseWithDependencies(t, primaryCandidate, repairCandidate,
+		reserveErrAt, workerRepairAuthority{},
+		NewCredentialResolver(nil, func(string) (string, bool) { return "test-key", true }))
+}
+
+func runWorkerRepairCaseWithDependencies(
+	t *testing.T,
+	primaryCandidate string,
+	repairCandidate string,
+	reserveErrAt int,
+	authority ProviderAuthority,
+	resolver CredentialResolver,
 ) (*workerFailureStore, *workerRepairDriver, *workerProductionSink, error) {
 	t.Helper()
 	config, catalog := workerTestConfig(t)
@@ -471,12 +528,60 @@ func runWorkerRepairCase(
 	sink := &workerProductionSink{}
 	worker := Worker{Config: config, Store: store, Source: source,
 		Context: NewContextRetriever(source), Sink: sink,
-		Runner:  newWorkerRepairRunner(t, config, driver),
+		Runner:  newWorkerRepairRunnerWithDependencies(t, config, driver, authority, resolver),
 		Catalog: workerFailureCatalog{catalog: catalog}, Clock: func() time.Time { return now },
 		NewID: func() string { return "attempt-repair" }, WorkerID: "worker-fixture"}
 	_, err := worker.RunPerson(t.Context(), "run-repair", Lease{PersonID: 7,
 		WorkerID: "worker-fixture", Fence: 1, ExpiresAt: now.Add(time.Hour)}, RunIncremental)
 	return store, driver, sink, err
+}
+
+func TestPersonSweepWorkerPinsOneCredentialAcrossPrimaryAndRepair(t *testing.T) {
+	var resolveCalls int
+	resolver := workerCredentialResolverFunc(func(string, ProviderProfile) (Credential, error) {
+		resolveCalls++
+		return NewCredential(AuthBearer, fmt.Sprintf("rotated-key-%d", resolveCalls)), nil
+	})
+	store, driver, sink, err := runWorkerRepairCaseWithDependencies(
+		t, `{"claims":"invalid"}`, `{"claims":[]}`, 0, workerRepairAuthority{}, resolver)
+	require.NoError(t, err)
+	assert.Equal(t, 1, resolveCalls)
+	require.Len(t, driver.credentials, 2)
+	assert.Equal(t, driver.credentials[0].Value(), driver.credentials[1].Value())
+	assert.Len(t, store.marked, 2)
+	assert.Len(t, sink.requests, 1)
+}
+
+func TestPersonSweepWorkerPreIOGateFailuresNeverMarkStarted(t *testing.T) {
+	gateErr := errors.New("gate fixture")
+	tests := []struct {
+		name      string
+		authority ProviderAuthority
+		resolver  CredentialResolver
+	}{
+		{
+			name:      "consent lookup",
+			authority: workerRepairAuthority{consentErr: gateErr},
+			resolver:  NewCredentialResolver(nil, func(string) (string, bool) { return "test-key", true }),
+		},
+		{
+			name:      "credential resolution",
+			authority: workerRepairAuthority{},
+			resolver: workerCredentialResolverFunc(func(string, ProviderProfile) (Credential, error) {
+				return Credential{}, gateErr
+			}),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store, driver, sink, err := runWorkerRepairCaseWithDependencies(
+				t, `{"claims":[]}`, `{"claims":[]}`, 0, test.authority, test.resolver)
+			require.ErrorIs(t, err, gateErr)
+			assert.Empty(t, store.marked)
+			assert.Zero(t, driver.calls)
+			assert.Empty(t, sink.requests)
+		})
+	}
 }
 
 func TestPersonSweepWorkerRepairsSchemaAndSemanticValidationOnce(t *testing.T) {
@@ -560,12 +665,33 @@ func TestPersonSweepWorkerSecondInvalidOutputNeverMakesThirdCall(t *testing.T) {
 	assert.Len(t, store.finalized[0].Completed, 2)
 }
 
+func TestAccountCompletedProviderCallPricesReconciledTokenDimensions(t *testing.T) {
+	budget := BudgetConfig{
+		InputCostMicroUSDPerMillionTokens:  2_000_000,
+		OutputCostMicroUSDPerMillionTokens: 3_000_000,
+	}
+	reserved := TokenUsage{InputTokens: 100, OutputTokens: 100}
+	reservedCost, err := EstimateCostMicroUSD(reserved, budget)
+	require.NoError(t, err)
+
+	usage, actualCost, err := accountCompletedProviderCall(StructuredResponse{
+		Usage: TokenUsage{InputTokens: 200, OutputTokens: 1}, UsageKnown: true,
+	}, reserved, reservedCost, budget)
+	require.NoError(t, err)
+	assert.Equal(t, Usage{Requests: 1, InputTokens: 200, OutputTokens: 100,
+		EstimatedCostMicroUSD: 700}, usage)
+	assert.Equal(t, int64(700), actualCost)
+}
+
 func (r *workerProductionRunner) PrepareStructured(_ context.Context, request StructuredRequest) (PreparedStructuredRequest, error) {
 	r.prepared++
 	return NewPreparedStructuredRequest(request, []byte(`{"wire":"prepared"}`))
 }
 func (r *workerProductionRunner) PrepareRepair(StructuredRequest, ValidationFailure) (PreparedStructuredRequest, error) {
 	return PreparedStructuredRequest{}, errors.New("unexpected provider repair preparation")
+}
+func (r *workerProductionRunner) BeginStructuredExecution(context.Context) (StructuredExecutionSession, error) {
+	return workerProductionExecution{runner: r}, nil
 }
 func (r *workerProductionRunner) RunPreparedStructured(context.Context, PreparedStructuredRequest) (StructuredResponse, error) {
 	r.ran++
@@ -611,9 +737,19 @@ func TestPersonSweepWorkerHeartbeatsLeaseDuringProviderIO(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
+		execution, beginErr := runner.BeginStructuredExecution(t.Context())
+		if beginErr != nil {
+			done <- result{err: beginErr}
+			return
+		}
+		call, prepareErr := execution.PrepareCall(t.Context(), PreparedStructuredRequest{})
+		if prepareErr != nil {
+			done <- result{err: prepareErr}
+			return
+		}
 		lease, _, err := worker.runPreparedWithLeaseHeartbeat(t.Context(), Lease{
 			PersonID: 7, WorkerID: "worker-fixture", Fence: 1,
-		}, PreparedStructuredRequest{})
+		}, func(context.Context) error { return nil }, call)
 		done <- result{lease: lease, err: err}
 	}()
 	<-started

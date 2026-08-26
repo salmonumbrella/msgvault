@@ -44,6 +44,15 @@ func personSweepApplyBudget() peoplesweep.BudgetConfig {
 }
 
 func newPersonSweepApplyFixture(t *testing.T, suffix string, provider bool) personSweepApplyFixture {
+	return newPersonSweepApplyFixtureWithBudget(t, suffix, provider, personSweepApplyBudget())
+}
+
+func newPersonSweepApplyFixtureWithBudget(
+	t *testing.T,
+	suffix string,
+	provider bool,
+	budget peoplesweep.BudgetConfig,
+) personSweepApplyFixture {
 	t.Helper()
 	st, personID, targets := newPersonFactProjectionStore(t)
 	program := strings.Repeat("a", 64)
@@ -118,13 +127,15 @@ func newPersonSweepApplyFixture(t *testing.T, suffix string, provider bool) pers
 	_, err = st.db.ExecContext(t.Context(), `INSERT INTO person_inference_consents
 		(profile_fingerprint, granted_by) VALUES (?, 'test')`, profile)
 	require.NoError(t, err)
-	budget := personSweepApplyBudget()
+	reservedCost, err := peoplesweep.EstimateCostMicroUSD(
+		peoplesweep.TokenUsage{InputTokens: 3, OutputTokens: 2}, budget)
+	require.NoError(t, err)
 	reservation, err := st.ReservePersonSweepBudget(t.Context(), peoplesweep.BudgetReservationRequest{
 		RunID: runID, AttemptID: attemptID, BatchOrdinal: 0, CallOrdinal: 0,
 		Purpose: peoplesweep.ProviderCallPurposePrimary, PersonID: personID,
 		ProviderFingerprint: profile, UTCDate: "2026-08-23", InputHash: strings.Repeat("c", 64),
 		ItemCount: 1, EstimatedRequests: 1, EstimatedInputTokens: 3,
-		EstimatedOutputTokens: 2, EstimatedCostMicroUSD: 5, Budget: budget})
+		EstimatedOutputTokens: 2, EstimatedCostMicroUSD: reservedCost, Budget: budget})
 	require.NoError(t, err)
 	require.NoError(t, st.MarkPersonSweepBudgetStarted(t.Context(), reservation))
 	request.Batches = []peoplesweep.CompletedBatch{{Ordinal: 0, CallOrdinal: 0,
@@ -135,9 +146,30 @@ func newPersonSweepApplyFixture(t *testing.T, suffix string, provider bool) pers
 		ActualCostMicroUSD: 3,
 		Latency:            time.Second}}
 	request.Usage = peoplesweep.Usage{Requests: 1, InputTokens: 3, OutputTokens: 2,
-		EstimatedCostMicroUSD: 5}
+		EstimatedCostMicroUSD: reservedCost}
+	request.Budget = budget
 	fixture.request, fixture.reservation = request, reservation
 	return fixture
+}
+
+func TestApplyPersonSweepPricesReconciledKnownUsageDimensions(t *testing.T) {
+	budget := personSweepApplyBudget()
+	budget.InputCostMicroUSDPerMillionTokens = 2_000_000
+	budget.OutputCostMicroUSDPerMillionTokens = 3_000_000
+	f := newPersonSweepApplyFixtureWithBudget(t, "reconciled-cost", true, budget)
+	f.request.Batches[0].Usage = peoplesweep.TokenUsage{InputTokens: 4, OutputTokens: 1}
+	f.request.Batches[0].ActualCostMicroUSD = 11
+	f.request.Usage = peoplesweep.Usage{Requests: 1, InputTokens: 4, OutputTokens: 2,
+		EstimatedCostMicroUSD: 14}
+
+	_, err := f.store.ApplyPersonSweep(t.Context(), f.request)
+	require.NoError(t, err)
+	var inputTokens, outputTokens, actualCost int64
+	require.NoError(t, f.store.db.QueryRow(`SELECT actual_input_tokens,
+		actual_output_tokens, actual_cost_micro_usd FROM person_sweep_batches
+		WHERE attempt_id = ? AND batch_ordinal = 0 AND call_ordinal = 0`,
+		f.attemptID).Scan(&inputTokens, &outputTokens, &actualCost))
+	assert.Equal(t, []int64{4, 2, 14}, []int64{inputTokens, outputTokens, actualCost})
 }
 
 func TestApplyPersonSweepCommitsFactsUsageAndCursorAtomically(t *testing.T) {

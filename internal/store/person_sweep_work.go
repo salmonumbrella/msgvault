@@ -123,7 +123,7 @@ func (s *Store) finalizeReclaimedPersonSweepAttempt(
 	rows, err := tx.QueryContext(ctx, `SELECT batch_ordinal, call_ordinal, purpose, utc_day, status,
 		reserved_requests, reserved_input_tokens, reserved_output_tokens, reserved_cost_micro_usd
 		FROM person_sweep_batches
-		WHERE attempt_id = ? AND status IN ('reserved', 'running')
+		WHERE attempt_id = ?
 		ORDER BY batch_ordinal, call_ordinal`, attemptID)
 	if err != nil {
 		return fmt.Errorf("list abandoned person sweep batches: %w", err)
@@ -153,7 +153,18 @@ func (s *Store) finalizeReclaimedPersonSweepAttempt(
 	if err := rows.Close(); err != nil {
 		return fmt.Errorf("close abandoned person sweep batches: %w", err)
 	}
+	coordinates := make([]personSweepBatchCoordinate, 0, len(batches))
 	for _, batch := range batches {
+		coordinates = append(coordinates, personSweepBatchCoordinate{ordinal: batch.ordinal,
+			callOrdinal: batch.callOrdinal, purpose: batch.purpose, day: batch.day})
+	}
+	if err := validatePersonSweepCallCoordinateSet(coordinates); err != nil {
+		return fmt.Errorf("finalize abandoned person sweep attempt: %w", err)
+	}
+	for _, batch := range batches {
+		if batch.status != "reserved" && batch.status != "running" {
+			continue
+		}
 		actual := peoplesweep.Usage{}
 		status := "cancelled"
 		if batch.status == "running" {

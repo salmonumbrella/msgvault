@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -57,6 +58,19 @@ type Runner struct {
 	authority ProviderAuthority
 	driver    StructuredDriver
 	resolver  CredentialResolver
+}
+
+type runnerExecutionSession struct {
+	runner     *Runner
+	profile    ProviderProfile
+	provider   ProviderConfig
+	credential Credential
+}
+
+type runnerPreparedCall struct {
+	session  *runnerExecutionSession
+	prepared PreparedStructuredRequest
+	ran      atomic.Bool
 }
 
 // NewRunner creates a gated runner without resolving a credential or touching
@@ -177,6 +191,67 @@ func (r *Runner) PrepareRepair(
 	return prepared, nil
 }
 
+// BeginStructuredExecution performs every non-I/O identity, authority, and
+// credential check needed to pin one execution identity. The returned session
+// retains the credential only in memory and never exposes it to callers.
+func (r *Runner) BeginStructuredExecution(
+	ctx context.Context,
+) (StructuredExecutionSession, error) {
+	profile, err := r.config.Profile()
+	if err != nil {
+		return nil, err
+	}
+	if err := r.requireVerifiedAndConsented(ctx, profile.Fingerprint); err != nil {
+		return nil, err
+	}
+	profileName, provider, err := r.config.ActiveProviderConfig()
+	if err != nil {
+		return nil, err
+	}
+	credential, err := r.resolver.Resolve(profileName, profile)
+	if err != nil {
+		return nil, fmt.Errorf("resolve people provider credential: %w", err)
+	}
+	return &runnerExecutionSession{runner: r, profile: profile,
+		provider: provider, credential: credential}, nil
+}
+
+func (s *runnerExecutionSession) PrepareCall(
+	ctx context.Context,
+	prepared PreparedStructuredRequest,
+) (PreparedStructuredCall, error) {
+	if s == nil || s.runner == nil {
+		return nil, errors.New("structured execution session is invalid")
+	}
+	if err := s.runner.validatePrepared(prepared, s.profile, false); err != nil {
+		return nil, err
+	}
+	active, err := s.runner.config.Profile()
+	if err != nil {
+		return nil, err
+	}
+	if active.Fingerprint != s.profile.Fingerprint {
+		return nil, errors.New("structured execution session provider profile changed")
+	}
+	if err := s.runner.requireVerifiedAndConsented(ctx, s.profile.Fingerprint); err != nil {
+		return nil, err
+	}
+	return &runnerPreparedCall{session: s, prepared: prepared}, nil
+}
+
+func (c *runnerPreparedCall) Run(ctx context.Context) (StructuredResponse, error) {
+	if c == nil || c.session == nil || c.session.runner == nil {
+		return StructuredResponse{}, errors.New("prepared structured call is invalid")
+	}
+	if !c.ran.CompareAndSwap(false, true) {
+		return StructuredResponse{}, errors.New("prepared structured call was already run")
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, c.session.provider.RequestTimeout)
+	defer cancel()
+	return c.session.runner.generateAndValidateResolved(requestCtx, c.session.profile,
+		c.session.credential, c.prepared)
+}
+
 func (r *Runner) prepare(
 	_ context.Context,
 	request StructuredRequest,
@@ -202,12 +277,15 @@ func (r *Runner) prepare(
 	return prepared, nil
 }
 
-// RunPreparedStructured rechecks exact profile authority, resolves the
-// credential, and sends only the opaque prepared packet.
+// RunPreparedStructured is the single-call convenience path. Repairs require
+// a pinned StructuredExecutionSession so they cannot resolve a new credential.
 func (r *Runner) RunPreparedStructured(
 	ctx context.Context,
 	prepared PreparedStructuredRequest,
 ) (StructuredResponse, error) {
+	if prepared.repair || prepared.Request().repair {
+		return StructuredResponse{}, errors.New("structured inference repair requires a pinned execution session")
+	}
 	return r.runPrepared(ctx, prepared, prepared.preparedBy == r && prepared.synthetic)
 }
 
@@ -216,29 +294,11 @@ func (r *Runner) runPrepared(
 	prepared PreparedStructuredRequest,
 	synthetic bool,
 ) (StructuredResponse, error) {
-	if err := prepared.validateWireHash(); err != nil {
-		return StructuredResponse{}, err
-	}
-	request := prepared.Request()
-	_, err := validateStructuredRequest(request, synthetic)
-	if err != nil {
-		return StructuredResponse{}, err
-	}
 	profile, err := r.config.Profile()
 	if err != nil {
 		return StructuredResponse{}, err
 	}
-	expected, err := r.driver.Prepare(profile, request)
-	if err != nil {
-		return StructuredResponse{}, fmt.Errorf("re-encode prepared structured inference: %w", err)
-	}
-	if err := expected.validateWireHash(); err != nil {
-		return StructuredResponse{}, errors.New("prepared structured request deterministic provider encoding is invalid")
-	}
-	if !bytes.Equal(prepared.WireRequest(), expected.WireRequest()) {
-		return StructuredResponse{}, errors.New("prepared structured request does not match deterministic provider encoding")
-	}
-	if err := validateRequestPolicy(request, profile, synthetic); err != nil {
+	if err := r.validatePrepared(prepared, profile, synthetic); err != nil {
 		return StructuredResponse{}, err
 	}
 	if !synthetic {
@@ -247,6 +307,35 @@ func (r *Runner) runPrepared(
 		}
 	}
 	return r.generateAndValidate(ctx, profile, prepared)
+}
+
+func (r *Runner) validatePrepared(
+	prepared PreparedStructuredRequest,
+	profile ProviderProfile,
+	synthetic bool,
+) error {
+	if err := prepared.validateWireHash(); err != nil {
+		return err
+	}
+	request := prepared.Request()
+	_, err := validateStructuredRequest(request, synthetic)
+	if err != nil {
+		return err
+	}
+	expected, err := r.driver.Prepare(profile, request)
+	if err != nil {
+		return fmt.Errorf("re-encode prepared structured inference: %w", err)
+	}
+	if err := expected.validateWireHash(); err != nil {
+		return errors.New("prepared structured request deterministic provider encoding is invalid")
+	}
+	if !bytes.Equal(prepared.WireRequest(), expected.WireRequest()) {
+		return errors.New("prepared structured request does not match deterministic provider encoding")
+	}
+	if err := validateRequestPolicy(request, profile, synthetic); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *Runner) requireVerifiedAndConsented(ctx context.Context, fingerprint string) error {
@@ -284,7 +373,16 @@ func (r *Runner) generateAndValidate(
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, provider.RequestTimeout)
 	defer cancel()
-	driverResponse, err := r.driver.GeneratePrepared(requestCtx, profile, credential, prepared)
+	return r.generateAndValidateResolved(requestCtx, profile, credential, prepared)
+}
+
+func (r *Runner) generateAndValidateResolved(
+	ctx context.Context,
+	profile ProviderProfile,
+	credential Credential,
+	prepared PreparedStructuredRequest,
+) (StructuredResponse, error) {
+	driverResponse, err := r.driver.GeneratePrepared(ctx, profile, credential, prepared)
 	if err != nil {
 		if errors.Is(err, ErrInvalidStructuredOutput) {
 			return structuredResponseFromDriver(driverResponse), fmt.Errorf("generate structured inference: %w", err)
