@@ -46,6 +46,26 @@ func NewDriverRegistry(
 	}, nil
 }
 
+// capabilityDriver resolves exactly one already-registered HTTP protocol for
+// setup negotiation. It deliberately excludes Codex process construction and
+// performs no runtime profile, authority, consent, or credential lookup.
+func (r *DriverRegistry) capabilityDriver(protocol Protocol) (StructuredDriver, error) {
+	if r == nil {
+		return nil, errors.New("people inference driver registry is required")
+	}
+	switch protocol {
+	case ProtocolOpenAIChat, ProtocolOpenAIResponses,
+		ProtocolAnthropicMessages, ProtocolGoogleGenerateContent:
+		driver, ok := r.drivers[protocol]
+		if !ok || driver == nil {
+			return nil, fmt.Errorf("unsupported people sweep protocol %q", protocol)
+		}
+		return driver, nil
+	default:
+		return nil, fmt.Errorf("unsupported people sweep capability protocol %q", protocol)
+	}
+}
+
 func (r *DriverRegistry) Driver(
 	protocol Protocol,
 	provider ProviderConfig,
