@@ -633,7 +633,7 @@ func TestPersonProviderAddReadsOnlyExactEnvironmentOrMaskedTerminal(t *testing.T
 		assert.Contains(t, string(content), `credential_env = "EXACT_PROVIDER_KEY"`)
 		assert.NotContains(t, string(content), providerSetupSecretCanary)
 		_, err = deps.setup.credentials.Load("env-provider")
-		assert.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
+		require.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
 	})
 
 	t.Run("masked terminal", func(t *testing.T) {
@@ -1159,7 +1159,7 @@ func TestPersonProviderAddConfigConflictKeepsConcurrentEditAndDeletesOnlyNewCred
 	assert.NotContains(t, string(content), providerSetupSecretCanary)
 	assert.NotContains(t, output, providerSetupSecretCanary)
 	_, err = deps.setup.credentials.Load("conflicted")
-	assert.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
+	require.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
 }
 
 func TestPersonProviderAddRollsBackExactUncertainPublication(t *testing.T) {
@@ -1191,7 +1191,7 @@ func TestPersonProviderAddRollsBackExactUncertainPublication(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, beforeBytes, afterBytes)
 	_, err = deps.setup.credentials.Load("uncertain")
-	assert.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
+	require.ErrorIs(t, err, peoplesweep.ErrCredentialNotFound)
 }
 
 func TestPersonProviderAddFailedCheckRestoresOriginallyMissingConfig(t *testing.T) {
@@ -1314,7 +1314,7 @@ func TestPersonProviderConcurrentExactAddNeverReadsSecretOrOverwrites(t *testing
 			require.NoError(t, loadErr)
 			assert.Equal(t, "operator-raced-model", current.People.Sweep.Providers["raced"].Model)
 			_, credentialErr := deps.setup.credentials.Load("raced")
-			assert.ErrorIs(t, credentialErr, peoplesweep.ErrCredentialNotFound)
+			require.ErrorIs(t, credentialErr, peoplesweep.ErrCredentialNotFound)
 		})
 	}
 }

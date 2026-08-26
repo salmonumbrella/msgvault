@@ -644,7 +644,7 @@ answer = 42
 	_, err = EditConfigTables(path, snapshot.ETag, []TableEdit{{
 		Path: []string{"people", "sweep", "providers", "old"}, Remove: true,
 	}})
-	assert.ErrorIs(t, err, ErrAmbiguousConfigTarget)
+	require.ErrorIs(t, err, ErrAmbiguousConfigTarget)
 	assert.Equal(t, before, string(mustReadFile(t, path)))
 }
 
@@ -700,7 +700,7 @@ func TestEditConfigRejectsConcurrentAndAmbiguousWrites(t *testing.T) {
 		require.NoError(t, err)
 
 		_, err = EditConfigFile(path, snapshot.ETag, []Edit{{Key: "web.theme", Value: "system"}})
-		assert.ErrorIs(t, err, ErrAmbiguousConfigTarget)
+		require.ErrorIs(t, err, ErrAmbiguousConfigTarget)
 	})
 }
 
@@ -1379,7 +1379,7 @@ func TestEditConfigRollsBackMissingFileWhenFirstDirectorySyncFails(t *testing.T)
 	require.Error(err)
 	require.NotErrorIs(err, ErrConfigChanged)
 	_, statErr := os.Stat(path)
-	assert.ErrorIs(t, statErr, fs.ErrNotExist)
+	require.ErrorIs(statErr, fs.ErrNotExist)
 }
 
 func TestEditConfigReportsChangedWhenMissingRollbackDirectorySyncFails(t *testing.T) {
@@ -1398,7 +1398,7 @@ func TestEditConfigReportsChangedWhenMissingRollbackDirectorySyncFails(t *testin
 	_, err = editConfigFile(path, snapshot.ETag, []Edit{{Key: "web.theme", Value: "dark"}}, ops)
 	require.ErrorIs(err, ErrConfigChanged)
 	_, statErr := os.Stat(path)
-	assert.ErrorIs(t, statErr, fs.ErrNotExist)
+	require.ErrorIs(statErr, fs.ErrNotExist)
 }
 
 func TestEditConfigReportsChangedWhenFinalDirectorySyncFails(t *testing.T) {
@@ -1729,7 +1729,7 @@ func TestReadConfigFileRejectsUnsafeTargets(t *testing.T) {
 		require.NoError(t, os.Symlink("missing.toml", link))
 		_, err := ReadConfigFile(link)
 		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrUnsafeConfigTarget)
+		require.ErrorIs(t, err, ErrUnsafeConfigTarget)
 	})
 
 	t.Run("non regular target", func(t *testing.T) {
