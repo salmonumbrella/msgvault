@@ -280,6 +280,90 @@ func TestRunnerExecutionSessionRejectsMutatedPrimaryFailure(t *testing.T) {
 	assert.Equal(t, 2, fixture.transport.calls)
 }
 
+func TestRunnerExecutionSessionRejectsInPlaceMutatedPrimaryResponse(t *testing.T) {
+	fixture := newRunnerExecutionFixture(t,
+		peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`),
+			ProviderVersion: "provider-v1", ModelVersion: "model-v1"})
+	session, err := fixture.runner.BeginStructuredExecution(t.Context(), fixture.primary)
+	require.NoError(t, err)
+	call, err := session.PrimaryCall(fixture.primary)
+	require.NoError(t, err)
+	response, err := call.Execute(t.Context(), func(context.Context) error { return nil })
+	require.NoError(t, err)
+	pristine := response
+	pristine.Output = slices.Clone(response.Output)
+
+	copy(response.Output, json.RawMessage(`{"ok":null}`))
+	_, err = session.SemanticValidationFailure(response)
+	require.ErrorContains(t, err, "does not match")
+
+	failure, err := session.SemanticValidationFailure(pristine)
+	require.NoError(t, err)
+	repair, err := session.PrepareRepair(failure)
+	require.NoError(t, err)
+	var instruction struct {
+		InvalidCandidate string `json:"invalid_candidate"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(repair.Request().InputText), &instruction))
+	assert.JSONEq(t, `{"ok":true}`, instruction.InvalidCandidate)
+	assert.Equal(t, 1, fixture.transport.calls)
+}
+
+func TestRunnerExecutionSessionRejectsInPlaceMutatedFailureSlices(t *testing.T) {
+	fixture, session, failure, started := invalidRunnerExecution(t)
+	originalCandidate := slices.Clone(failure.Candidate)
+	originalMessage := failure.Errors[0]
+
+	failure.Candidate[2] = 'x'
+	_, err := session.PrepareRepair(*failure)
+	require.ErrorContains(t, err, "validation failure")
+	copy(failure.Candidate, originalCandidate)
+	failure.Errors[0] = "forged validation message"
+	_, err = session.PrepareRepair(*failure)
+	require.ErrorContains(t, err, "validation failure")
+	failure.Errors[0] = originalMessage
+
+	repair, err := session.PrepareRepair(*failure)
+	require.NoError(t, err)
+	call, err := session.RepairCall(repair)
+	require.NoError(t, err)
+	_, err = call.Execute(t.Context(), func(context.Context) error {
+		(*started)++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, *started)
+	assert.Equal(t, 2, fixture.transport.calls)
+}
+
+func TestRunnerExecutionRepairAccessorsDoNotAliasSessionLineage(t *testing.T) {
+	fixture, session, failure, started := invalidRunnerExecution(t)
+	repair, err := session.PrepareRepair(*failure)
+	require.NoError(t, err)
+	wire := repair.WireRequest()
+	originalWire := slices.Clone(wire)
+	request := repair.Request()
+	originalSchema := slices.Clone(request.JSONSchema)
+	originalSources := slices.Clone(request.Sources)
+
+	wire[0] ^= 0xff
+	request.JSONSchema[0] ^= 0xff
+	request.Sources[0].ObservedOn = "1900-01-01"
+	assert.Equal(t, originalWire, repair.WireRequest())
+	assert.Equal(t, originalSchema, repair.Request().JSONSchema)
+	assert.Equal(t, originalSources, repair.Request().Sources)
+
+	call, err := session.RepairCall(repair)
+	require.NoError(t, err)
+	_, err = call.Execute(t.Context(), func(context.Context) error {
+		(*started)++
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, *started)
+	assert.Equal(t, 2, fixture.transport.calls)
+}
+
 func TestRunnerExecutionCallReuseFailsBeforeStartedMarker(t *testing.T) {
 	fixture := newRunnerExecutionFixture(t,
 		peoplesweep.DriverResponse{CandidateJSON: json.RawMessage(`{"ok":true}`),

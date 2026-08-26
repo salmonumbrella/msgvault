@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -244,12 +245,14 @@ func (r *Runner) BeginStructuredExecution(
 	if err != nil {
 		return nil, err
 	}
-	credential, err := r.resolver.Resolve(profileName, profile)
+	credential, err := r.resolver.Resolve(profileName, cloneProviderProfile(profile))
 	if err != nil {
 		return nil, fmt.Errorf("resolve people provider credential: %w", err)
 	}
-	return &runnerExecutionSession{runner: r, profile: profile, provider: provider,
-		credential: credential, primary: primary, state: runnerSessionPrimaryReady}, nil
+	provider.AllowedSources = slices.Clone(provider.AllowedSources)
+	return &runnerExecutionSession{runner: r, profile: cloneProviderProfile(profile), provider: provider,
+		credential: credential, primary: clonePreparedStructuredRequest(primary),
+		state: runnerSessionPrimaryReady}, nil
 }
 
 func (s *runnerExecutionSession) PrimaryCall(
@@ -267,7 +270,8 @@ func (s *runnerExecutionSession) PrimaryCall(
 		return nil, errors.New("structured execution call does not match its bound primary")
 	}
 	s.state = runnerSessionPrimaryIssued
-	return &runnerPreparedCall{session: s, prepared: prepared, kind: runnerPrimaryCall}, nil
+	return &runnerPreparedCall{session: s, prepared: clonePreparedStructuredRequest(prepared),
+		kind: runnerPrimaryCall}, nil
 }
 
 func (s *runnerExecutionSession) SemanticValidationFailure(
@@ -278,11 +282,10 @@ func (s *runnerExecutionSession) SemanticValidationFailure(
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state != runnerSessionPrimaryCompleted || response.execution != s ||
-		!bytes.Equal(response.Output, s.response.Output) {
+	if s.state != runnerSessionPrimaryCompleted || !sameStructuredResponse(response, s.response) {
 		return ValidationFailure{}, errors.New("structured execution semantic failure does not match its primary")
 	}
-	failure := newValidationFailure(response.Output, "candidate failed extraction semantics", false)
+	failure := newValidationFailure(s.response.Output, "candidate failed extraction semantics", false)
 	failure.execution = s
 	s.failure = cloneValidationFailure(*failure)
 	s.state = runnerSessionPrimaryRepairable
@@ -307,15 +310,15 @@ func (s *runnerExecutionSession) PrepareRepair(
 	if failure.repair {
 		return PreparedStructuredRequest{}, errors.New("structured execution session repair is unavailable")
 	}
-	repair, err := s.runner.PrepareRepair(s.primary.Request(), failure)
+	repair, err := s.runner.PrepareRepair(s.primary.Request(), s.failure)
 	if err != nil {
 		s.state = runnerSessionTerminal
 		return PreparedStructuredRequest{}, err
 	}
 	repair.execution = s
-	s.repair = repair
+	s.repair = clonePreparedStructuredRequest(repair)
 	s.state = runnerSessionRepairPrepared
-	return repair, nil
+	return clonePreparedStructuredRequest(repair), nil
 }
 
 func (s *runnerExecutionSession) RepairCall(
@@ -333,13 +336,42 @@ func (s *runnerExecutionSession) RepairCall(
 		return nil, errors.New("structured execution call does not match its bound repair")
 	}
 	s.state = runnerSessionRepairIssued
-	return &runnerPreparedCall{session: s, prepared: prepared, kind: runnerRepairCall}, nil
+	return &runnerPreparedCall{session: s, prepared: clonePreparedStructuredRequest(prepared),
+		kind: runnerRepairCall}, nil
 }
 
 func samePreparedIdentity(left, right PreparedStructuredRequest) bool {
 	return left.identity != nil && left.identity == right.identity && left.preparedBy == right.preparedBy &&
+		left.execution == right.execution && reflect.DeepEqual(left.request, right.request) &&
 		left.repair == right.repair && left.synthetic == right.synthetic &&
 		left.wireSHA256 == right.wireSHA256 && bytes.Equal(left.wireRequest, right.wireRequest)
+}
+
+func clonePreparedStructuredRequest(prepared PreparedStructuredRequest) PreparedStructuredRequest {
+	prepared.request = cloneStructuredRequest(prepared.request)
+	prepared.wireRequest = slices.Clone(prepared.wireRequest)
+	return prepared
+}
+
+func cloneStructuredResponse(response StructuredResponse) StructuredResponse {
+	response.Output = slices.Clone(response.Output)
+	return response
+}
+
+func cloneProviderProfile(profile ProviderProfile) ProviderProfile {
+	profile.AllowedSources = slices.Clone(profile.AllowedSources)
+	profile.DisclosedPacketFields = slices.Clone(profile.DisclosedPacketFields)
+	profile.PolicyJSON = slices.Clone(profile.PolicyJSON)
+	return profile
+}
+
+func sameStructuredResponse(left, right StructuredResponse) bool {
+	return left.execution != nil && left.execution == right.execution &&
+		bytes.Equal(left.Output, right.Output) &&
+		left.ProviderRequestID == right.ProviderRequestID &&
+		left.ProviderVersion == right.ProviderVersion &&
+		left.ModelVersion == right.ModelVersion && left.Usage == right.Usage &&
+		left.UsageKnown == right.UsageKnown
 }
 
 func (c *runnerPreparedCall) Execute(
@@ -433,7 +465,7 @@ func (s *runnerExecutionSession) complete(
 		s.state = runnerSessionTerminal
 		return
 	}
-	s.response = *response
+	s.response = cloneStructuredResponse(*response)
 	s.state = runnerSessionPrimaryCompleted
 }
 
@@ -465,7 +497,7 @@ func (r *Runner) prepare(
 	if err := validateRequestPolicy(request, profile, synthetic); err != nil {
 		return PreparedStructuredRequest{}, err
 	}
-	prepared, err := r.driver.Prepare(profile, request)
+	prepared, err := r.driver.Prepare(cloneProviderProfile(profile), cloneStructuredRequest(request))
 	if err != nil {
 		return PreparedStructuredRequest{}, fmt.Errorf("prepare structured inference: %w", err)
 	}
@@ -520,7 +552,7 @@ func (r *Runner) validatePrepared(
 	if err != nil {
 		return err
 	}
-	expected, err := r.driver.Prepare(profile, request)
+	expected, err := r.driver.Prepare(cloneProviderProfile(profile), cloneStructuredRequest(request))
 	if err != nil {
 		return fmt.Errorf("re-encode prepared structured inference: %w", err)
 	}
@@ -565,7 +597,7 @@ func (r *Runner) generateAndValidate(
 	if err != nil {
 		return StructuredResponse{}, err
 	}
-	credential, err := r.resolver.Resolve(profileName, profile)
+	credential, err := r.resolver.Resolve(profileName, cloneProviderProfile(profile))
 	if err != nil {
 		return StructuredResponse{}, fmt.Errorf("resolve people provider credential: %w", err)
 	}
@@ -580,7 +612,8 @@ func (r *Runner) generateAndValidateResolved(
 	credential Credential,
 	prepared PreparedStructuredRequest,
 ) (StructuredResponse, error) {
-	driverResponse, err := r.driver.GeneratePrepared(ctx, profile, credential, prepared)
+	driverResponse, err := r.driver.GeneratePrepared(ctx, cloneProviderProfile(profile), credential,
+		clonePreparedStructuredRequest(prepared))
 	if err != nil {
 		if errors.Is(err, ErrInvalidStructuredOutput) {
 			return structuredResponseFromDriver(driverResponse), fmt.Errorf("generate structured inference: %w", err)
