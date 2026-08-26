@@ -212,3 +212,38 @@ git diff --check
 ```
 
 Open concern unchanged: compatible providers may omit structured parameter metadata. Those errors deliberately fail closed and require explicit manual/custom selection.
+
+## Review fix round 3: 2026-08-26
+
+- Code commit: `852ec784541873f7b78fe0f691beb1a7aefe11e9` (`fix: match capability errors to attempted fields`).
+- Generic unsupported codes in every protocol family now require a bounded structured parameter. Anthropic reads `error.param`; Gemini reads duplicate-safe `ErrorInfo.metadata.parameter`. Parameterless generic codes stop; only exact representation-specific codes may omit a parameter.
+- Parameter matching is an exact per-attempt allowlist. Native-schema, JSON-object, and prompt modes expose different fields; reasoning fields require reasoning to be emitted; arbitrary descendants and case/nesting variants are rejected.
+- Four-family TLS negatives cover parameterless/model/endpoint/auth/billing/policy, wrong-mode and absent-reasoning fields, fake descendants/casing, duplicate keys/params, and malformed envelopes. Each stops after one call and errors omit individual message/param/code/body/credential fragments.
+
+Round-3 RED:
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'TestCapability(ErrorClassification|NegotiationRetriesClassified)' -count=1
+--- FAIL: TestCapabilityErrorClassificationRequiresProtocolSpecificStructuredCode/anthropic
+    expected: "unsupported_representation" actual: ""
+--- FAIL: TestCapabilityErrorClassificationRequiresProtocolSpecificStructuredCode/google
+    expected: "unsupported_representation" actual: ""
+FAIL
+```
+
+Round-3 GREEN:
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run 'Test(OpenAIChat|OpenAIResponses|AnthropicMessages|GoogleGenerateContent|DriverRegistry|Capability|ModelsDev)' -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  19.355s
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  49.093s
+go test -race -tags "fts5 sqlite_vec" ./internal/peoplesweep -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  50.946s
+go fmt ./...
+go vet -tags "fts5 sqlite_vec" ./internal/peoplesweep/...
+git diff --check
+[exit 0]
+```
+
+Open concern unchanged: compatible implementations lacking exact structured parameter metadata fail closed to manual/custom selection.
