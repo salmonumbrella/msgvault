@@ -206,6 +206,49 @@ func TestGoogleGenerateContentRejectsUnsafeEndpointJoinBeforeIO(t *testing.T) {
 	assert.Zero(t, calls.Load())
 }
 
+func TestGoogleGenerateContentRejectsUnicodeControlsBeforeIO(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer server.Close()
+
+	for _, test := range []struct {
+		name     string
+		endpoint string
+		model    string
+		canary   string
+	}{
+		{name: "endpoint C0", endpoint: server.URL + "/v1beta/\x00", model: "gemini-test"},
+		{name: "endpoint DEL", endpoint: server.URL + "/v1beta/\x7f", model: "gemini-test"},
+		{name: "endpoint C1 U+0085", endpoint: server.URL + "/v1beta/path-secret-canary\u0085", model: "gemini-test", canary: "path-secret-canary"},
+		{name: "endpoint C1 U+009F", endpoint: server.URL + "/v1beta/path-secret-canary\u009f", model: "gemini-test", canary: "path-secret-canary"},
+		{name: "model C0", endpoint: server.URL + "/v1beta", model: "model-secret-canary\x00", canary: "model-secret-canary"},
+		{name: "model DEL", endpoint: server.URL + "/v1beta", model: "model-secret-canary\x7f", canary: "model-secret-canary"},
+		{name: "model C1 U+0085", endpoint: server.URL + "/v1beta", model: "model-secret\u0085canary", canary: "model-secret"},
+		{name: "model C1 U+009F", endpoint: server.URL + "/v1beta", model: "model-secret-canary\u009f", canary: "model-secret-canary"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := peoplesweep.ProviderConfig{
+				Protocol: peoplesweep.ProtocolGoogleGenerateContent, Endpoint: test.endpoint, Model: test.model,
+				Auth: peoplesweep.AuthGoogleAPIKey, Credential: peoplesweep.CredentialEnv, CredentialEnv: "TEST_KEY",
+				OutputMode:       peoplesweep.OutputModePromptJSON,
+				RetentionPosture: "zero_retention", TrainingPosture: "no_training",
+				AllowedSources: []peoplesweep.SourceClass{peoplesweep.SourceConversationText}, SourceSince: "2025-01-01",
+			}
+			profile, err := configWithProvider(provider).Profile()
+			if err == nil {
+				_, err = peoplesweep.NewGoogleGenerateContentDriver(server.Client()).Prepare(profile, structuredTestRequest())
+			}
+			require.Error(t, err)
+			if test.canary != "" {
+				assert.NotContains(t, err.Error(), test.canary)
+			}
+		})
+	}
+	assert.Zero(t, calls.Load())
+}
+
 func TestGoogleGenerateContentRejectsBlockedMissingAndAmbiguousCandidates(t *testing.T) {
 	tests := []struct {
 		name, body string
@@ -301,24 +344,33 @@ func TestGoogleGenerateContentDistinguishesCompleteUsagePresence(t *testing.T) {
 }
 
 func TestGoogleGenerateContentRejectsPartialNegativeAndOverflowUsage(t *testing.T) {
-	for _, usage := range []string{
-		`"promptTokenCount":1`,
-		`"candidatesTokenCount":1`,
-		`"promptTokenCount":-1,"candidatesTokenCount":2`,
-		`"promptTokenCount":2,"candidatesTokenCount":-1`,
-		`"promptTokenCount":9223372036854775808,"candidatesTokenCount":2`,
-		`"promptTokenCount":2,"candidatesTokenCount":9223372036854775808`,
+	for _, test := range []struct {
+		name, usage string
+	}{
+		{name: "prompt missing", usage: `"candidatesTokenCount":1`},
+		{name: "candidate missing", usage: `"promptTokenCount":1`},
+		{name: "prompt null", usage: `"promptTokenCount":null`},
+		{name: "candidate null", usage: `"candidatesTokenCount":null`},
+		{name: "prompt null with candidate", usage: `"promptTokenCount":null,"candidatesTokenCount":2`},
+		{name: "candidate null with prompt", usage: `"promptTokenCount":2,"candidatesTokenCount":null`},
+		{name: "both null", usage: `"promptTokenCount":null,"candidatesTokenCount":null`},
+		{name: "prompt negative", usage: `"promptTokenCount":-1,"candidatesTokenCount":2`},
+		{name: "candidate negative", usage: `"promptTokenCount":2,"candidatesTokenCount":-1`},
+		{name: "prompt overflow", usage: `"promptTokenCount":9223372036854775808,"candidatesTokenCount":2`},
+		{name: "candidate overflow", usage: `"promptTokenCount":2,"candidatesTokenCount":9223372036854775808`},
 	} {
-		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, err := io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001","usageMetadata":{`+usage+`},"secret":"provider-body-secret"}`)
-			assert.NoError(t, err)
-		}))
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, err := io.WriteString(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"{\"ok\":true}"}]},"finishReason":"STOP"}],"modelVersion":"gemini-test-001","usageMetadata":{`+test.usage+`},"secret":"provider-body-secret"}`)
+				assert.NoError(t, err)
+			}))
+			defer server.Close()
 
-		_, err := generateGoogleContent(t, server,
-			googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
-		server.Close()
-		require.ErrorIs(t, err, peoplesweep.ErrInvalidStructuredOutput)
-		assert.NotContains(t, err.Error(), "provider-body-secret")
+			_, err := generateGoogleContent(t, server,
+				googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
+			require.ErrorIs(t, err, peoplesweep.ErrInvalidStructuredOutput)
+			assert.NotContains(t, err.Error(), "provider-body-secret")
+		})
 	}
 }
 

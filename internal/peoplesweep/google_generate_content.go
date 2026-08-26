@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode"
 )
 
 type googleGenerateContentRequest struct {
@@ -94,12 +95,14 @@ type googleGenerateContentEnvelope struct {
 	PromptFeedback *struct {
 		BlockReason string `json:"blockReason"`
 	} `json:"promptFeedback"`
-	UsageMetadata *struct {
-		PromptTokenCount     *int64 `json:"promptTokenCount"`
-		CandidatesTokenCount *int64 `json:"candidatesTokenCount"`
-	} `json:"usageMetadata"`
-	ModelVersion string `json:"modelVersion"`
-	ResponseID   string `json:"responseId"`
+	UsageMetadata *googleUsageMetadata `json:"usageMetadata"`
+	ModelVersion  string               `json:"modelVersion"`
+	ResponseID    string               `json:"responseId"`
+}
+
+type googleUsageMetadata struct {
+	PromptTokenCount     json.RawMessage `json:"promptTokenCount"`
+	CandidatesTokenCount json.RawMessage `json:"candidatesTokenCount"`
 }
 
 type googleCandidate struct {
@@ -178,13 +181,9 @@ func googleGenerateContentTarget(endpoint, model string) (string, error) {
 		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.ForceQuery {
 		return "", errors.New("Google generateContent endpoint join is unsafe")
 	}
-	if parsed.RawPath != "" || unsafeGooglePath(parsed.Path) || model == "." || model == ".." {
+	if parsed.RawPath != "" || unsafeGooglePath(parsed.Path) || containsUnicodeControl(parsed.Path) ||
+		model == "." || model == ".." || containsUnicodeControl(model) {
 		return "", errors.New("Google generateContent endpoint join is unsafe")
-	}
-	for _, char := range []byte(model) {
-		if char < 0x20 || char == 0x7f {
-			return "", errors.New("Google generateContent endpoint join is unsafe")
-		}
 	}
 	basePath := strings.TrimRight(parsed.Path, "/")
 	escapedBasePath := strings.TrimRight(parsed.EscapedPath(), "/")
@@ -192,6 +191,15 @@ func googleGenerateContentTarget(endpoint, model string) (string, error) {
 	parsed.Path = basePath + "/models/" + model + ":generateContent"
 	parsed.RawPath = escapedBasePath + "/models/" + escapedModel + ":generateContent"
 	return parsed.String(), nil
+}
+
+func containsUnicodeControl(value string) bool {
+	for _, char := range value {
+		if unicode.IsControl(char) {
+			return true
+		}
+	}
+	return false
 }
 
 func unsafeGooglePath(path string) bool {
@@ -204,20 +212,26 @@ func unsafeGooglePath(path string) bool {
 	return false
 }
 
-func applyGoogleUsage(result *DriverResponse, usage *struct {
-	PromptTokenCount     *int64 `json:"promptTokenCount"`
-	CandidatesTokenCount *int64 `json:"candidatesTokenCount"`
-}) error {
-	if usage == nil || (usage.PromptTokenCount == nil && usage.CandidatesTokenCount == nil) {
+func applyGoogleUsage(result *DriverResponse, usage *googleUsageMetadata) error {
+	if usage == nil || (len(usage.PromptTokenCount) == 0 && len(usage.CandidatesTokenCount) == 0) {
 		return nil
 	}
-	if usage.PromptTokenCount == nil || usage.CandidatesTokenCount == nil ||
-		*usage.PromptTokenCount < 0 || *usage.CandidatesTokenCount < 0 {
+	if len(usage.PromptTokenCount) == 0 || len(usage.CandidatesTokenCount) == 0 {
+		return errors.Join(ErrInvalidStructuredOutput, errors.New("provider returned invalid token usage"))
+	}
+	if bytes.Equal(bytes.TrimSpace(usage.PromptTokenCount), []byte("null")) ||
+		bytes.Equal(bytes.TrimSpace(usage.CandidatesTokenCount), []byte("null")) {
+		return errors.Join(ErrInvalidStructuredOutput, errors.New("provider returned invalid token usage"))
+	}
+	var promptTokens, candidateTokens int64
+	if decodeSingleJSON(usage.PromptTokenCount, &promptTokens) != nil ||
+		decodeSingleJSON(usage.CandidatesTokenCount, &candidateTokens) != nil ||
+		promptTokens < 0 || candidateTokens < 0 {
 		return errors.Join(ErrInvalidStructuredOutput, errors.New("provider returned invalid token usage"))
 	}
 	result.UsageKnown = true
 	result.Usage = TokenUsage{
-		InputTokens: *usage.PromptTokenCount, OutputTokens: *usage.CandidatesTokenCount,
+		InputTokens: promptTokens, OutputTokens: candidateTokens,
 	}
 	return nil
 }
