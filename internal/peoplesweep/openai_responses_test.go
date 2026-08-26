@@ -84,9 +84,9 @@ func TestOpenAIResponsesEmitsSavedOutputModesExactly(t *testing.T) {
 				assert.Equal(t, "Bearer test-key", r.Header.Get("Authorization"))
 				var err error
 				received, err = io.ReadAll(r.Body)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 				_, err = io.WriteString(w, `{"model":"gpt-test-build","output":[{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"}]}]}`)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -119,7 +119,7 @@ func TestOpenAIResponsesTraversesOutputItemsAndBlocks(t *testing.T) {
 			],
 			"usage":{"input_tokens":17,"output_tokens":5,"total_tokens":22}
 		}`)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}))
 	defer server.Close()
 
@@ -187,7 +187,7 @@ func TestOpenAIResponsesRejectsMisplacedOrBlankOutputText(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w,
 					`{"model":"gpt-test-build","output":[`+test.output+`],"secret":"provider-secret-body"}`)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -216,7 +216,7 @@ func TestOpenAIResponsesRequiresExactlyOneNonEmptyOutputText(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, test.body)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -243,7 +243,7 @@ func TestOpenAIResponsesDistinguishesUsagePresence(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, `{"model":"gpt-test-build","output":[{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"}]}]`+test.usage+`}`)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -271,7 +271,7 @@ func TestOpenAIResponsesRejectsInvalidUsageWithoutEchoingBody(t *testing.T) {
 			body := `{"model":"gpt-test-build","output":[{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"}]}],"usage":{` + test.usage + `},"secret":"provider-secret-body"}`
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, body)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -289,7 +289,7 @@ func TestOpenAIResponsesBoundsSafeMetadata(t *testing.T) {
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("x-request-id", strings.Repeat("r", 129))
 			_, err := io.WriteString(w, `{"model":"gpt-test-build","output":[{"type":"message","content":[{"type":"output_text","text":"{\"ok\":true}"}]}]}`)
-			require.NoError(t, err)
+			assert.NoError(t, err)
 		}))
 		defer server.Close()
 
@@ -306,9 +306,9 @@ func TestOpenAIResponsesBoundsSafeMetadata(t *testing.T) {
 					"model":  model,
 					"output": []any{map[string]any{"type": "message", "content": []any{map[string]any{"type": "output_text", "text": `{"ok":true}`}}}},
 				})
-				require.NoError(t, err)
+				assert.NoError(t, err)
 				_, err = w.Write(body)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -347,7 +347,7 @@ func TestOpenAIResponsesSanitizesHTTPFailuresWithoutRetry(t *testing.T) {
 				w.Header().Set("x-request-id", "req-safe")
 				w.WriteHeader(status)
 				_, err := io.WriteString(w, `{"error":{"message":"provider-secret-body"}}`)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -369,7 +369,7 @@ func TestOpenAIResponsesUsesSharedBodyAndRedirectLimits(t *testing.T) {
 	t.Run("oversized success body", func(t *testing.T) {
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, err := io.WriteString(w, strings.Repeat("x", (1<<20)+1))
-			require.NoError(t, err)
+			assert.NoError(t, err)
 		}))
 		defer server.Close()
 

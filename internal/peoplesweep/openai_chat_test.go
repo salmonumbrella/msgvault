@@ -40,9 +40,9 @@ func TestOpenAIChatFixturesEmitSavedCapabilitiesExactly(t *testing.T) {
 			var got []byte
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				got, err = io.ReadAll(r.Body)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 				_, err = io.WriteString(w, `{"model":"reported-build","choices":[{"message":{"content":"{\"ok\":true}"}}]}`)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -210,7 +210,7 @@ func TestOpenAIChatDriverDistinguishesMissingUsageFromReportedZero(t *testing.T)
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, `{"model":"gpt-test","choices":[{"message":{"content":"{\"ok\":true}"}}]`+test.usage+`}`)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 			profile := providerTestProfile(t, server.URL+"/v1", false)
@@ -328,7 +328,7 @@ func TestOpenAIChatDriverRejectsUnsafeModelVersion(t *testing.T) {
 		t.Run(model[:1], func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, `{"model":"`+model+`","choices":[{"message":{"content":"{\"ok\":true}"}}],"usage":{}}`)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -424,7 +424,7 @@ func TestOpenAIChatDriverRejectsMalformedResponsesWithoutEchoingThem(t *testing.
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, err := io.WriteString(w, test.body)
-				require.NoError(t, err)
+				assert.NoError(t, err)
 			}))
 			defer server.Close()
 
@@ -442,7 +442,7 @@ func TestOpenAIChatDriverRejectsMalformedResponsesWithoutEchoingThem(t *testing.
 func TestOpenAIChatDriverBoundsResponseBody(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, err := io.WriteString(w, strings.Repeat("x", (1<<20)+1))
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}))
 	defer server.Close()
 
@@ -499,9 +499,9 @@ func TestOpenAIChatPreparedRequestUsesExactHTTPBody(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
 		received, err = io.ReadAll(r.Body)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		_, err = io.WriteString(w, `{"model":"gpt-test","choices":[{"message":{"content":"{\"ok\":true}"}}],"usage":{}}`)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 	}))
 	defer server.Close()
 
