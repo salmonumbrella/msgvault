@@ -41,9 +41,9 @@ func TestCapabilityNegotiationUsesFixedOutputAndTokenOrderWithoutArchiveContext(
 		http.StatusNotFound, http.StatusOK}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
-		assert.NoError(t, json.NewDecoder(r.Body).Decode(&body)) //nolint:testifylint // handler goroutine cannot call require/FailNow
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 		encoded, err := json.Marshal(body)
-		assert.NoError(t, err) //nolint:testifylint // handler goroutine cannot call require/FailNow
+		assert.NoError(t, err)
 		assert.NotContains(t, string(encoded), capabilityArchiveCanary)
 		assert.NotContains(t, string(encoded), capabilityCredentialValue)
 		assert.Equal(t, "Bearer "+capabilityCredentialValue, r.Header.Get("Authorization"))
@@ -112,7 +112,7 @@ func TestCapabilityNegotiationChecksRequestedReasoningSeparately(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				call := calls.Add(1)
 				var body map[string]any
-				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body)) //nolint:testifylint // handler goroutine cannot call require/FailNow
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 				if call == 1 {
 					assert.NotContains(t, body, "reasoning_effort")
 					assert.NotContains(t, body, "reasoning")
@@ -480,7 +480,7 @@ func TestCapabilityNegotiationStopsOnParameterizedRepresentationCodeForEveryProt
 				calls.Add(1)
 				assert.Equal(t, test.path, r.URL.Path)
 				var body map[string]any
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 				if test.protocol == ProtocolGoogleGenerateContent {
 					assert.NotContains(t, body, "model")
 				} else {
