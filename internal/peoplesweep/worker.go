@@ -459,7 +459,7 @@ func (w *Worker) Run(ctx context.Context, request RunRequest) (RunResult, error)
 			break
 		}
 		result.PeopleAttempted++
-		person, personErr := w.RunPerson(ctx, runID, *lease, request.Mode)
+		person, personErr := w.runPerson(ctx, runID, *lease, request.Mode, profile, catalog, now)
 		if personErr != nil {
 			if firstErr == nil {
 				firstErr = personErr
@@ -495,6 +495,18 @@ func (w *Worker) RunPerson(
 	if err != nil {
 		return PersonRunResult{}, w.failClaim(ctx, lease, "", err)
 	}
+	return w.runPerson(ctx, runID, lease, mode, profile, catalog, resolvedAt)
+}
+
+func (w *Worker) runPerson(
+	ctx context.Context,
+	runID string,
+	lease Lease,
+	mode RunMode,
+	profile ProviderProfile,
+	catalog personfacts.Catalog,
+	resolvedAt time.Time,
+) (PersonRunResult, error) {
 	keys := make([]CursorKey, 0, len(profile.AllowedSources))
 	for _, lane := range profile.AllowedSources {
 		keys = append(keys, CursorKey{PersonID: lease.PersonID, SourceLane: lane,

@@ -109,7 +109,9 @@ func defaultPersonSweepCommandDeps() personSweepCommandDeps {
 			if !ok {
 				return nil, errors.New("people sweep production store is unavailable")
 			}
-			return newProductionPersonSweepWorker(config, st, cfg.TokensDir(), os.LookupEnv)
+			productionConfig := *cfg
+			productionConfig.People.Sweep = config
+			return newProductionPersonSweepWorker(&productionConfig, st)
 		},
 		isDaemonSubprocess: isDaemonCLISubprocess,
 		lookupEnv:          os.LookupEnv,

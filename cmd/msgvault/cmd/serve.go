@@ -430,7 +430,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if err := addPeopleSweepJob(
-		sched, cfg.People.Sweep, newPeopleSweepScheduledRun(cfg.People.Sweep, s, cfg.TokensDir()),
+		sched, cfg.People.Sweep, newPeopleSweepScheduledRun(cfg, s),
 	); err != nil {
 		return fmt.Errorf("schedule people sweep: %w", err)
 	}

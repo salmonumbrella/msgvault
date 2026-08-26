@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -51,6 +52,7 @@ type openAISweepServer struct {
 	responses   []openAISweepResponse
 	responseFor func([]byte, int) (openAISweepResponse, error)
 	wireHashes  []string
+	outputMode  peoplesweep.OutputMode
 }
 
 func (s *openAISweepServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -87,11 +89,16 @@ func (s *openAISweepServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var request capturedChatRequest
 	assert.NoError(s.t, json.Unmarshal(raw, &request))
 	assert.Equal(s.t, "model-request-2026", request.Model)
-	assert.Equal(s.t, peoplesweep.ExtractionSchemaName, request.ResponseFormat.JSONSchema.Name)
-	assert.Equal(s.t, "json_schema", request.ResponseFormat.Type)
-	assert.True(s.t, request.ResponseFormat.JSONSchema.Strict)
-	assert.JSONEq(s.t, string(peoplesweep.ExtractionJSONSchema()),
-		string(request.ResponseFormat.JSONSchema.Schema))
+	if s.outputMode == peoplesweep.OutputModePromptJSON {
+		assert.Empty(s.t, request.ResponseFormat.Type)
+		assert.Contains(s.t, request.Messages[0].Content, string(peoplesweep.ExtractionJSONSchema()))
+	} else {
+		assert.Equal(s.t, peoplesweep.ExtractionSchemaName, request.ResponseFormat.JSONSchema.Name)
+		assert.Equal(s.t, "json_schema", request.ResponseFormat.Type)
+		assert.True(s.t, request.ResponseFormat.JSONSchema.Strict)
+		assert.JSONEq(s.t, string(peoplesweep.ExtractionJSONSchema()),
+			string(request.ResponseFormat.JSONSchema.Schema))
+	}
 	var response openAISweepResponse
 	if s.responseFor != nil {
 		response, err = s.responseFor(raw, call)
@@ -125,6 +132,18 @@ type openAISweepFixture struct {
 	personID int64
 	now      time.Time
 	worker   peoplesweep.Worker
+}
+
+type countingOpenAISweepCatalog struct {
+	source peoplesweep.CatalogSource
+	calls  int
+}
+
+func (c *countingOpenAISweepCatalog) BuildPersonFactCatalogContext(
+	ctx context.Context, includeSensitive bool,
+) (personfacts.Catalog, error) {
+	c.calls++
+	return c.source.BuildPersonFactCatalogContext(ctx, includeSensitive)
 }
 
 func newOpenAISweepFixture(
@@ -201,13 +220,11 @@ func newOpenAISweepFixture(
 		require.NoError(t, err)
 	}
 
-	runner, err := peoplesweep.NewRunner(config, st,
-		peoplesweep.NewTestDriverRegistry(peoplesweep.ProtocolOpenAIChat,
-			peoplesweep.NewOpenAIChatDriver(server.Client())),
-		peoplesweep.NewCredentialResolver(nil, func(name string) (string, bool) {
-			assert.Equal(t, "SYNTHETIC_OPENAI_KEY", name)
-			return "synthetic-api-key", true
-		}))
+	registry, err := peoplesweep.NewDriverRegistry(server.Client(), nil, nil)
+	require.NoError(t, err)
+	t.Setenv("SYNTHETIC_OPENAI_KEY", "synthetic-api-key")
+	runner, err := peoplesweep.NewRunner(config, st, registry,
+		peoplesweep.NewCredentialResolver(nil, os.LookupEnv))
 	require.NoError(t, err)
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	ids := 0
@@ -226,6 +243,7 @@ func newOpenAISweepFixture(
 		WorkerID: "worker-openai-compatible",
 	}
 	provider.store = st
+	provider.outputMode = profile.OutputMode
 	return fixture
 }
 
@@ -490,7 +508,7 @@ func inspectOpenAISweepFactState(
 	return nil
 }
 
-func TestOpenAIChatSweepAppliesSupportedClaimEndToEnd(t *testing.T) {
+func TestOpenAIEndToEndNativeSchemaAppliesSupportedClaim(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	var wantProjection peoplesweep.ProjectedValue
@@ -509,12 +527,15 @@ func TestOpenAIChatSweepAppliesSupportedClaimEndToEnd(t *testing.T) {
 	server := httptest.NewTLSServer(provider)
 	defer server.Close()
 	fixture := newOpenAISweepFixture(t, server, provider, 1, nil)
+	catalog := &countingOpenAISweepCatalog{source: fixture.store}
+	fixture.worker.Catalog = catalog
 	wantProjection, wantUnresolved = seedOpenAISweepFactState(t, fixture)
 
 	result, err := runOpenAISweep(t, fixture)
 	require.NoError(err)
 	assert.Equal(1, result.PeopleSucceeded)
 	assert.Equal(1, result.ProjectedWrites)
+	assert.Equal(1, catalog.calls, "one worker run must resolve one active profile and catalog")
 	values, err := fixture.store.ListPersonAttributeValuesContext(t.Context(), fixture.personID,
 		store.PersonAttributeQuery{DefinitionSlug: store.AttributeSlugAskMeAbout})
 	require.NoError(err)
