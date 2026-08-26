@@ -149,7 +149,7 @@ func TestRestoreConfigFileRestoresOriginallyMissingSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, restored.Exists)
 	_, statErr := os.Stat(path)
-	assert.ErrorIs(t, statErr, fs.ErrNotExist)
+	require.ErrorIs(t, statErr, fs.ErrNotExist)
 	recoveries, err := filepath.Glob(filepath.Join(dir, configRetiredPrefix+"*"))
 	require.NoError(t, err)
 	require.Len(t, recoveries, 1)
@@ -178,6 +178,7 @@ func TestRestoreConfigPinsExpectedPublishedIdentityAtFinalBoundary(t *testing.T)
 		{
 			name: "different inode with identical bytes",
 			swap: func(t *testing.T, path string, content []byte) {
+				t.Helper()
 				replacement := filepath.Join(filepath.Dir(path), "operator-replacement.toml")
 				require.NoError(t, os.WriteFile(replacement, content, 0o600))
 				require.NoError(t, os.Rename(replacement, path))
@@ -218,7 +219,7 @@ func TestRestoreConfigPinsExpectedPublishedIdentityAtFinalBoundary(t *testing.T)
 			}
 			_, err = restoreConfigFile(path, after, before, ops)
 			require.Error(t, err)
-			assert.ErrorIs(t, err, ErrConfigConflict)
+			require.ErrorIs(t, err, ErrConfigConflict)
 			assert.Equal(t, after.Content, mustReadFile(t, path))
 		})
 	}
@@ -460,7 +461,7 @@ func TestEditConfigRejectsSemanticDuplicateSpellings(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = EditConfigFile(path, snapshot.ETag, []Edit{{Key: "integrations.tasks.enabled", Value: true}})
-	assert.ErrorIs(t, err, ErrAmbiguousConfigTarget)
+	require.ErrorIs(t, err, ErrAmbiguousConfigTarget)
 }
 
 // TestConfigEditTablesPreservesUnrelatedBytesAndRemovesOneExactTable catches

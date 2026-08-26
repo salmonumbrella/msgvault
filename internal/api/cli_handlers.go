@@ -1600,10 +1600,13 @@ func cliRunPersonProviderArgsAllowed(operation string, args []string) bool {
 			}
 		} else {
 			index++
-			if index >= len(args) || args[index] == "" || strings.HasPrefix(args[index], "-") {
+			if index >= len(args) {
 				return false
 			}
 			flagValue = args[index]
+			if flagValue == "" || strings.HasPrefix(flagValue, "-") {
+				return false
+			}
 		}
 		if name == "if-fingerprint" && !validPersonProviderFingerprint(flagValue) {
 			return false

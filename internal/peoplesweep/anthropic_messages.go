@@ -55,14 +55,14 @@ func (d *AnthropicMessagesDriver) Prepare(
 		return PreparedStructuredRequest{}, err
 	}
 	if profile.Protocol != ProtocolAnthropicMessages {
-		return PreparedStructuredRequest{}, errors.New("Anthropic Messages driver requires anthropic_messages profile")
+		return PreparedStructuredRequest{}, errors.New("anthropic messages driver requires anthropic_messages profile")
 	}
 	if profile.Auth != AuthXAPIKey {
-		return PreparedStructuredRequest{}, errors.New("Anthropic Messages profile requires x_api_key authentication")
+		return PreparedStructuredRequest{}, errors.New("anthropic messages profile requires x_api_key authentication")
 	}
 	if profile.ReasoningEffort != "" ||
 		(profile.ReasoningMode != "" && profile.ReasoningMode != "provider_default") {
-		return PreparedStructuredRequest{}, errors.New("Anthropic Messages profile has unsupported reasoning settings")
+		return PreparedStructuredRequest{}, errors.New("anthropic messages profile has unsupported reasoning settings")
 	}
 	body := anthropicRequest{
 		Model: profile.Model, System: structuredSystemInstruction,

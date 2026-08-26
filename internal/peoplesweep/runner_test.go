@@ -400,12 +400,10 @@ func TestRunnerExecutionSessionClaimsPrimaryAndHandleOnceConcurrently(t *testing
 	preparedResults := make(chan preparedResult, contenders)
 	var prepareGroup sync.WaitGroup
 	for range contenders {
-		prepareGroup.Add(1)
-		go func() {
-			defer prepareGroup.Done()
+		prepareGroup.Go(func() {
 			call, callErr := session.PrimaryCall(fixture.primary)
 			preparedResults <- preparedResult{call: call, err: callErr}
-		}()
+		})
 	}
 	prepareGroup.Wait()
 	close(preparedResults)
@@ -425,15 +423,13 @@ func TestRunnerExecutionSessionClaimsPrimaryAndHandleOnceConcurrently(t *testing
 	executionErrors := make(chan error, contenders)
 	var executeGroup sync.WaitGroup
 	for range contenders {
-		executeGroup.Add(1)
-		go func() {
-			defer executeGroup.Done()
+		executeGroup.Go(func() {
 			_, executeErr := call.Execute(t.Context(), func(context.Context) error {
 				started.Add(1)
 				return nil
 			})
 			executionErrors <- executeErr
-		}()
+		})
 	}
 	executeGroup.Wait()
 	close(executionErrors)

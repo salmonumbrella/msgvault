@@ -39,14 +39,14 @@ type observedProviderReader struct {
 
 func (r *countingProviderReader) Read(destination []byte) (int, error) {
 	r.reads++
-	return r.data.Read(destination)
+	return r.data.Read(destination) //nolint:wrapcheck // Test reader transparently delegates to bytes.Reader.
 }
 
 func (r *observedProviderReader) Read(destination []byte) (int, error) {
 	if len(destination) > r.maxDestination {
 		r.maxDestination = len(destination)
 	}
-	return r.data.Read(destination)
+	return r.data.Read(destination) //nolint:wrapcheck // Test reader transparently delegates to bytes.Reader.
 }
 
 func (r *providerCredentialChunkReader) Read(destination []byte) (int, error) {

@@ -130,7 +130,7 @@ func (s *FileCredentialStore) Save(profileName string, credential Credential) er
 	if err := validateStoredCredential(credential); err != nil {
 		return err
 	}
-	data, err := json.Marshal(credentialFile{Scheme: credential.Scheme, Value: credential.Value()}) //nolint:gosec // serialized only into the private 0600 store
+	data, err := json.Marshal(credentialFile{Scheme: credential.Scheme, Value: credential.Value()})
 	if err != nil {
 		return errors.New("serialize people provider credential")
 	}
@@ -151,7 +151,7 @@ func (s *FileCredentialStore) SaveNew(
 	if err := validateStoredCredential(credential); err != nil {
 		return nil, false, err
 	}
-	data, err := json.Marshal(credentialFile{Scheme: credential.Scheme, Value: credential.Value()}) //nolint:gosec // serialized only into the private 0600 store
+	data, err := json.Marshal(credentialFile{Scheme: credential.Scheme, Value: credential.Value()})
 	if err != nil {
 		return nil, false, errors.New("serialize people provider credential")
 	}

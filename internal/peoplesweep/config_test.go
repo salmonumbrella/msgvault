@@ -2,6 +2,7 @@ package peoplesweep_test
 
 import (
 	"bytes"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -46,9 +47,7 @@ func activeProvider(config peoplesweep.Config) peoplesweep.ProviderConfig {
 
 func setActiveProvider(config *peoplesweep.Config, provider peoplesweep.ProviderConfig) {
 	providers := make(map[string]peoplesweep.ProviderConfig, len(config.Providers))
-	for name, configured := range config.Providers {
-		providers[name] = configured
-	}
+	maps.Copy(providers, config.Providers)
 	providers[config.Provider.Name] = provider
 	config.Providers = providers
 }

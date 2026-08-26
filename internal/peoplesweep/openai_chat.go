@@ -79,6 +79,7 @@ func (d *OpenAIChatDriver) Prepare(
 func messagesFor(request StructuredRequest, mode OutputMode) []map[string]string {
 	instruction := structuredSystemInstruction
 	switch mode {
+	case OutputModeNativeJSONSchema:
 	case OutputModeJSONObject:
 		instruction = jsonObjectInstruction + string(request.JSONSchema)
 	case OutputModePromptJSON:

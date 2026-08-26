@@ -20,6 +20,7 @@ import (
 
 type deleteCountingCredentialStore struct {
 	peoplesweep.CredentialStore
+
 	deletes int
 }
 
@@ -33,6 +34,7 @@ func (s *deleteCountingCredentialStore) Delete(
 
 type postPreflightRaceCredentialStore struct {
 	peoplesweep.CredentialStore
+
 	beforeDelete func() error
 }
 
@@ -230,6 +232,7 @@ func TestPersonProviderRemoveCompletesLocalPreflightBeforeRevoke(t *testing.T) {
 				return c
 			}(),
 			mutateFile: func(t *testing.T, path string) {
+				t.Helper()
 				file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 				require.NoError(t, err)
 				_, writeErr := file.WriteString("\n[people.sweep.providers.beta.operator_extension]\nanswer = 42\n")

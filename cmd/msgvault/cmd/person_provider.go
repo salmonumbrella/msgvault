@@ -1505,9 +1505,10 @@ func printPersonProviderDisclosure(w io.Writer, profile peoplesweep.ProviderProf
 		dateRange = profile.SourceSince + " onward"
 	}
 	authentication := "anonymous loopback"
-	if profile.Credential == peoplesweep.CredentialEnv {
+	switch profile.Credential {
+	case peoplesweep.CredentialEnv:
 		authentication = "environment variable " + profile.CredentialRef
-	} else if profile.Credential == peoplesweep.CredentialStored {
+	case peoplesweep.CredentialStored:
 		authentication = "stored credential (" + string(profile.Auth) + ")"
 	}
 	sensitive := "denied"

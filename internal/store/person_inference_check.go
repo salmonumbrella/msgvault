@@ -89,7 +89,7 @@ func (s *Store) GetPersonInferenceCheck(
 		&check.ProviderRequestID, &check.ModelVersion, &profileDriverVersion, &profileOutputMode,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return nil, nil //nolint:nilnil // A missing check is the documented optional result.
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read people inference check: %w", err)

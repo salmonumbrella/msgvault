@@ -261,6 +261,7 @@ func TestPersonSweepReclaimRejectsMalformedDurableCallCoordinates(t *testing.T) 
 		{name: "repair without primary", addInvalid: func(
 			t *testing.T, fixture personSweepBudgetFixture, primary peoplesweep.BudgetReservationRequest,
 		) {
+			t.Helper()
 			repair := primary
 			repair.CallOrdinal = 1
 			repair.Purpose = peoplesweep.ProviderCallPurposeRepair
@@ -272,6 +273,7 @@ func TestPersonSweepReclaimRejectsMalformedDurableCallCoordinates(t *testing.T) 
 		{name: "primary ordinal gap", addInvalid: func(
 			t *testing.T, fixture personSweepBudgetFixture, _ peoplesweep.BudgetReservationRequest,
 		) {
+			t.Helper()
 			request := sweepReservation(fixture, 1, 100,
 				"provider-fingerprint", generousSweepBudget())
 			reservation, err := fixture.store.ReservePersonSweepBudget(t.Context(), request)

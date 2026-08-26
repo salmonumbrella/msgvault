@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -497,6 +498,8 @@ func scanPersonInferenceProfile(row scanner) (peoplesweep.ProviderProfile, error
 		provider.CredentialEnv = profile.CredentialRef
 	case peoplesweep.CredentialStored:
 		profileName = profile.CredentialRef
+	case peoplesweep.CredentialNone:
+		provider.CredentialEnv = ""
 	}
 	profileConfig := peoplesweep.Config{
 		Enabled: true, Provider: peoplesweep.ProviderSelection{Name: profileName},
@@ -535,7 +538,7 @@ func scanLegacyPersonInferenceProfile(
 		return peoplesweep.ProviderProfile{}, fmt.Errorf("encode legacy people inference policy: %w", err)
 	}
 	digest := sha256.Sum256(canonicalPolicy)
-	if fingerprint != fmt.Sprintf("%x", digest) || !equalJSON([]byte(policyJSON), canonicalPolicy) ||
+	if fingerprint != hex.EncodeToString(digest[:]) || !equalJSON([]byte(policyJSON), canonicalPolicy) ||
 		legacy.Kind != kind || legacy.Endpoint != endpoint || legacy.Model != model ||
 		legacy.APIKeyEnv != apiKeyEnv || legacy.AllowAnonymous != allowAnonymous ||
 		legacy.RetentionPosture != retention || legacy.TrainingPosture != training ||

@@ -454,8 +454,7 @@ func (s *runnerExecutionSession) complete(
 		s.state = runnerSessionTerminal
 		return
 	}
-	var failure *ValidationFailure
-	if errors.As(runErr, &failure) {
+	if failure, ok := errors.AsType[*ValidationFailure](runErr); ok {
 		failure.execution = s
 		s.failure = cloneValidationFailure(*failure)
 		s.state = runnerSessionPrimaryRepairable
@@ -592,7 +591,6 @@ func (r *Runner) generateAndValidate(
 	profile ProviderProfile,
 	prepared PreparedStructuredRequest,
 ) (StructuredResponse, error) {
-
 	profileName, provider, err := r.config.ActiveProviderConfig()
 	if err != nil {
 		return StructuredResponse{}, err

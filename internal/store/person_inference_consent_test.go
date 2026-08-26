@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -222,7 +223,7 @@ func TestPersonInferenceProfilesLoadLegacyPersistedPolicy(t *testing.T) {
 	policyJSON := fmt.Sprintf(`{"kind":"openai_compatible","endpoint":"https://api.example.test/v1","model":"gpt-legacy","api_key_env":"LEGACY_KEY","allow_anonymous":false,"retention_posture":"zero_retention","training_posture":"no_training","allowed_sources":["conversation_text"],"source_since":"2025-01-01","source_until":"","allow_sensitive":false,"reasoning_effort":"","execution_boundary":"","packet_renderer_policy":"person-sweep-packet-v1","program_fingerprint":"%s","disclosed_packet_fields":["person_id","program_identity","catalog","current_projection","unresolved_claims","seed_evidence","retrieved_context"]}`,
 		legacyProgramFingerprint)
 	digest := sha256.Sum256([]byte(policyJSON))
-	fingerprint := fmt.Sprintf("%x", digest)
+	fingerprint := hex.EncodeToString(digest[:])
 
 	_, err := st.DB().Exec(st.Rebind(`
 		INSERT INTO person_inference_profiles
@@ -247,7 +248,7 @@ func TestPersonInferenceProfilesLoadLegacyPersistedPolicy(t *testing.T) {
 	assert.Equal(peoplesweep.CredentialEnv, profile.Credential)
 	assert.Equal("LEGACY_KEY", profile.CredentialRef)
 	assert.Equal(legacyProgramFingerprint, profile.ProgramFingerprint)
-	assert.Equal(policyJSON, string(profile.PolicyJSON))
+	assert.JSONEq(policyJSON, string(profile.PolicyJSON))
 }
 
 func TestPersonInferenceConsentConcurrentGrantAndRevoke(t *testing.T) {

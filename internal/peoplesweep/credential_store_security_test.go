@@ -415,17 +415,13 @@ func assertCredentialSecurityPathMatches(
 ) {
 	t.Helper()
 	got, err := os.Lstat(path)
-	if !assert.NoError(t, err, path) {
-		return
-	}
+	require.NoError(t, err, path)
 	assert.True(t, os.SameFile(want.info, got), "%s inode changed", path)
 	assert.Equal(t, want.info.Mode(), got.Mode(), "%s mode changed", path)
 	assert.Equal(t, want.info.Size(), got.Size(), "%s size changed", path)
 	if want.info.IsDir() {
 		entries, readErr := os.ReadDir(path)
-		if !assert.NoError(t, readErr, path) {
-			return
-		}
+		require.NoError(t, readErr, path)
 		gotEntries := make([]string, 0, len(entries))
 		for _, entry := range entries {
 			gotEntries = append(gotEntries, entry.Name())
@@ -433,9 +429,7 @@ func assertCredentialSecurityPathMatches(
 		assert.Equal(t, want.entries, gotEntries, "%s entries changed", path)
 	} else if want.info.Mode().IsRegular() {
 		contents, readErr := os.ReadFile(path)
-		if !assert.NoError(t, readErr, path) {
-			return
-		}
+		require.NoError(t, readErr, path)
 		assert.Equal(t, want.contentDigest, sha256.Sum256(contents), "%s contents changed", path)
 	}
 }
@@ -463,7 +457,7 @@ func TestCredentialStoreSaveUsesPinnedNamespaceAfterPathSwap(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(external, "profile.json"))
 	contents, err := os.ReadFile(filepath.Join(retained, "profile.json"))
 	require.NoError(t, err)
-	assert.True(t, len(contents) > 0, "credential was not published in the pinned namespace")
+	assert.Positive(t, len(contents), "credential was not published in the pinned namespace")
 }
 
 func TestCredentialStoreLoadUsesPinnedEntryAfterSwap(t *testing.T) {
@@ -487,7 +481,7 @@ func TestCredentialStoreLoadUsesPinnedEntryAfterSwap(t *testing.T) {
 
 	credential, err := store.Load("profile")
 	require.NoError(t, err)
-	assert.True(t, credential.Value() == credentialSecurityTestValue,
+	assert.Equal(t, credentialSecurityTestValue, credential.Value(),
 		"load did not read the pinned credential entry")
 }
 
@@ -579,13 +573,13 @@ func TestCredentialStoreRejectsHardLinkedMutationTargets(t *testing.T) {
 		external := filepath.Join(t.TempDir(), "external")
 		const externalContents = "external file must remain unchanged"
 		require.NoError(t, os.WriteFile(external, []byte(externalContents), 0o600))
-		require.NoError(t, os.Link(external, filepath.Join(root, unixCredentialCandidateName)))
+		require.NoError(t, os.Link(external, filepath.Join(root, unixCredentialStagingName)))
 
 		err := store.Save("profile", NewCredential(AuthBearer, credentialSecurityTestValue))
 		require.ErrorContains(t, err, "links")
 		contents, readErr := os.ReadFile(external)
 		require.NoError(t, readErr)
-		assert.True(t, string(contents) == externalContents, "candidate reuse modified an external hard link")
+		assert.Equal(t, externalContents, string(contents), "candidate reuse modified an external hard link")
 		assert.NoFileExists(t, filepath.Join(root, "profile.json"))
 	})
 
@@ -606,7 +600,7 @@ func TestCredentialStoreRejectsHardLinkedMutationTargets(t *testing.T) {
 		require.ErrorContains(t, err, "links")
 		contents, readErr := os.ReadFile(external)
 		require.NoError(t, readErr)
-		assert.True(t, string(contents) == externalContents,
+		assert.Equal(t, externalContents, string(contents),
 			"candidate write or cleanup modified a hard link added after open")
 	})
 
@@ -624,7 +618,7 @@ func TestCredentialStoreRejectsHardLinkedMutationTargets(t *testing.T) {
 		require.ErrorContains(t, err, "links")
 		contents, readErr := os.ReadFile(external)
 		require.NoError(t, readErr)
-		assert.True(t, string(contents) == externalContents, "credential deletion modified an external hard link")
+		assert.Equal(t, externalContents, string(contents), "credential deletion modified an external hard link")
 	})
 
 	t.Run("credential linked before wipe", func(t *testing.T) {
@@ -832,7 +826,7 @@ func TestCredentialStoreRepeatedSaveDeleteKeepsArtifactsBounded(t *testing.T) {
 	assert.LessOrEqual(t, len(entries), 2, "save/delete cycles accumulated credential-store artifacts")
 
 	_, err = store.Load("profile")
-	assert.True(t, errors.Is(err, ErrCredentialNotFound), "deleted credential did not remain logically absent")
+	assert.ErrorIs(t, err, ErrCredentialNotFound, "deleted credential did not remain logically absent")
 }
 
 func TestCredentialStoreLockReplacementCannotSplitExclusion(t *testing.T) {

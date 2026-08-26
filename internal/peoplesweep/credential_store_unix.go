@@ -15,7 +15,7 @@ import (
 )
 
 // The pinned namespace lock serializes reuse of this single candidate slot.
-const unixCredentialCandidateName = ".credential-candidate"
+const unixCredentialStagingName = ".credential-candidate" //nolint:gosec // A fixed private staging filename is not a credential.
 
 type unixCredentialStoreRoot struct {
 	fd                int
@@ -125,13 +125,17 @@ func validateUnixDirectoryFD(fd int, kind string) error {
 	return nil
 }
 
-func ensureUnixCredentialLockMarker(rootFD int) error {
+func ensureUnixCredentialLockMarker(rootFD int) (retErr error) {
 	fd, err := unix.Openat(rootFD, ".credentials.lock",
 		unix.O_RDWR|unix.O_CLOEXEC|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
 	if err != nil {
 		return fmt.Errorf("open people provider credential lock relative to pinned directory: %w", err)
 	}
-	defer unix.Close(fd)
+	defer func() {
+		if err := unix.Close(fd); err != nil && retErr == nil {
+			retErr = fmt.Errorf("close people provider credential lock: %w", err)
+		}
+	}()
 	if err := validateUnixCredentialFD(fd, "lock"); err != nil {
 		return err
 	}
@@ -582,7 +586,7 @@ func validateUnixPrivateDirectoryFD(fd int, kind string) (unix.Stat_t, error) {
 	if stat.Mode&0o777 != 0o700 {
 		return unix.Stat_t{}, fmt.Errorf("people provider %s directory permissions are not private", kind)
 	}
-	if stat.Uid != uint32(os.Geteuid()) {
+	if stat.Uid != unixEffectiveUID() {
 		return unix.Stat_t{}, fmt.Errorf("people provider %s directory owner does not match the current user", kind)
 	}
 	return stat, nil
@@ -607,7 +611,11 @@ func unixPrivateDirectoryPathMatches(path string, opened unix.Stat_t) bool {
 func unixPrivateDirectoryStatMatches(opened, current unix.Stat_t) bool {
 	return opened.Dev == current.Dev && opened.Ino == current.Ino &&
 		current.Mode&unix.S_IFMT == unix.S_IFDIR &&
-		current.Mode&0o777 == 0o700 && current.Uid == uint32(os.Geteuid())
+		current.Mode&0o777 == 0o700 && current.Uid == unixEffectiveUID()
+}
+
+func unixEffectiveUID() uint32 {
+	return uint32(os.Geteuid()) //nolint:gosec // Unix effective UIDs are non-negative uint32 values.
 }
 
 func (r *unixCredentialStoreRoot) save(profileName string, data []byte) (retErr error) {
@@ -621,8 +629,11 @@ func (r *unixCredentialStoreRoot) save(profileName string, data []byte) (retErr 
 	}
 	var candidateIdentity unix.Stat_t
 	if err := unix.Fstat(int(candidate.Fd()), &candidateIdentity); err != nil {
-		_ = candidate.Close()
-		return fmt.Errorf("identify opened people provider credential candidate: %w", err)
+		identityErr := fmt.Errorf("identify opened people provider credential candidate: %w", err)
+		if closeErr := candidate.Close(); closeErr != nil {
+			return errors.Join(identityErr, fmt.Errorf("close people provider credential candidate: %w", closeErr))
+		}
+		return identityErr
 	}
 	committed := false
 	defer func() {
@@ -633,7 +644,9 @@ func (r *unixCredentialStoreRoot) save(profileName string, data []byte) (retErr 
 			}
 			return
 		}
-		_ = candidate.Close()
+		if err := candidate.Close(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close published people provider credential: %w", err))
+		}
 	}()
 	if r.hooks != nil && r.hooks.afterCandidateOpen != nil {
 		r.hooks.afterCandidateOpen(candidateName)
@@ -667,7 +680,11 @@ func (r *unixCredentialStoreRoot) save(profileName string, data []byte) (retErr 
 	if err != nil {
 		return errors.New("people provider credential candidate changed during publication")
 	}
-	defer unix.Close(publishedFD)
+	defer func() {
+		if err := unix.Close(publishedFD); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close published people provider credential: %w", err))
+		}
+	}()
 	var publishedIdentity unix.Stat_t
 	if err := unix.Fstat(publishedFD, &publishedIdentity); err != nil ||
 		candidateIdentity.Dev != publishedIdentity.Dev || candidateIdentity.Ino != publishedIdentity.Ino ||
@@ -686,10 +703,10 @@ func (r *unixCredentialStoreRoot) save(profileName string, data []byte) (retErr 
 func createUnixCredentialCandidate(rootFD int) (string, *os.File, error) {
 	for range 2 {
 		created := false
-		fd, err := unix.Openat(rootFD, unixCredentialCandidateName,
+		fd, err := unix.Openat(rootFD, unixCredentialStagingName,
 			unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 		if err == unix.ENOENT {
-			fd, err = unix.Openat(rootFD, unixCredentialCandidateName,
+			fd, err = unix.Openat(rootFD, unixCredentialStagingName,
 				unix.O_RDWR|unix.O_CLOEXEC|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
 			if err == unix.EEXIST {
 				continue
@@ -713,30 +730,34 @@ func createUnixCredentialCandidate(rootFD int) (string, *os.File, error) {
 				return "", nil, errors.New("sync reset people provider credential candidate")
 			}
 		}
-		return unixCredentialCandidateName, os.NewFile(uintptr(fd), unixCredentialCandidateName), nil
+		return unixCredentialStagingName, os.NewFile(uintptr(fd), unixCredentialStagingName), nil
 	}
 	return "", nil, errors.New("could not open the people provider credential candidate")
 }
 
-func (r *unixCredentialStoreRoot) load(profileName string) ([]byte, error) {
+func (r *unixCredentialStoreRoot) load(profileName string) (data []byte, retErr error) {
 	name := profileName + ".json"
 	fd, err := unix.Openat(r.fd, name,
 		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	if err == unix.ENOENT {
+	if errors.Is(err, unix.ENOENT) {
 		return nil, fmt.Errorf("%w for profile %q", ErrCredentialNotFound, profileName)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("open people provider credential for profile %q without following symlinks: %w", profileName, err)
 	}
 	file := os.NewFile(uintptr(fd), name)
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close pinned people provider credential for profile %q: %w", profileName, err))
+		}
+	}()
 	if err := validateUnixCredentialFD(fd, "file"); err != nil {
 		return nil, err
 	}
 	if r.hooks != nil && r.hooks.afterCredentialOpen != nil {
 		r.hooks.afterCredentialOpen("load")
 	}
-	data, err := io.ReadAll(file)
+	data, err = io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("read pinned people provider credential for profile %q: %w", profileName, err)
 	}
@@ -748,7 +769,7 @@ func (r *unixCredentialStoreRoot) load(profileName string) ([]byte, error) {
 	return data, nil
 }
 
-func inspectUnixCredentialEntry(rootFD int, name string, allowMissing bool) error {
+func inspectUnixCredentialEntry(rootFD int, name string, allowMissing bool) (retErr error) {
 	fd, err := unix.Openat(rootFD, name,
 		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err == unix.ENOENT && allowMissing {
@@ -760,7 +781,11 @@ func inspectUnixCredentialEntry(rootFD int, name string, allowMissing bool) erro
 	if err != nil {
 		return fmt.Errorf("inspect people provider credential entry without following symlinks: %w", err)
 	}
-	defer unix.Close(fd)
+	defer func() {
+		if err := unix.Close(fd); err != nil && retErr == nil {
+			retErr = fmt.Errorf("close inspected people provider credential: %w", err)
+		}
+	}()
 	return validateUnixCredentialFD(fd, "file")
 }
 
@@ -817,10 +842,10 @@ func validateUnixCredentialStat(stat unix.Stat_t, kind string) error {
 	if stat.Mode&0o777 != 0o600 {
 		return fmt.Errorf("people provider credential %s permissions are not private", kind)
 	}
-	if stat.Uid != uint32(os.Geteuid()) {
+	if stat.Uid != unixEffectiveUID() {
 		return fmt.Errorf("people provider credential %s owner does not match the current user", kind)
 	}
-	if uint64(stat.Nlink) != 1 {
+	if stat.Nlink != 1 {
 		return fmt.Errorf("people provider credential %s has an unsafe number of links", kind)
 	}
 	return nil

@@ -181,7 +181,7 @@ func TestCredentialStoreLifecycleUsesPrivateFilesAndExactDeletion(t *testing.T) 
 	loaded, err := store.Load("alpha")
 	require.NoError(t, err)
 	assert.Equal(t, peoplesweep.AuthBearer, loaded.Scheme)
-	assert.True(t, loaded.Value() == credentialCanary, "loaded credential differs")
+	assert.Equal(t, credentialCanary, loaded.Value(), "loaded credential differs")
 
 	require.NoError(t, guardedCredentialDelete(store, "alpha"))
 	_, err = store.Load("alpha")
@@ -189,7 +189,7 @@ func TestCredentialStoreLifecycleUsesPrivateFilesAndExactDeletion(t *testing.T) 
 	remaining, err := store.Load("alpha.backup")
 	require.NoError(t, err)
 	assert.Equal(t, peoplesweep.AuthXAPIKey, remaining.Scheme)
-	assert.True(t, remaining.Value() == credentialCanary, "remaining credential differs")
+	assert.Equal(t, credentialCanary, remaining.Value(), "remaining credential differs")
 	assert.ErrorIs(t, guardedCredentialDelete(store, "alpha"), peoplesweep.ErrCredentialNotFound)
 }
 
@@ -224,10 +224,10 @@ func TestCredentialStoreDeleteRetiresOnlyExactPinnedTargetAsBoundedTombstone(t *
 	assert.Zero(t, targetAfter.Size())
 	var targetStat unix.Stat_t
 	require.NoError(t, unix.Lstat(targetPath, &targetStat))
-	assert.Equal(t, uint64(1), uint64(targetStat.Nlink))
+	assert.Equal(t, uint64(1), targetStat.Nlink)
 	tombstone, err := os.ReadFile(targetPath)
 	require.NoError(t, err)
-	assert.Zero(t, len(tombstone), "credential tombstone retained bytes")
+	assert.Empty(t, tombstone, "credential tombstone retained bytes")
 	assertCredentialPathsUnchanged(t, stableBefore)
 	require.NoError(t, guard.Close())
 	assert.ErrorIs(t, validateCredentialDeletePreflight(store), peoplesweep.ErrCredentialNotFound)
@@ -663,15 +663,13 @@ func TestCredentialStoreRotatesAtomically(t *testing.T) {
 	require.NoError(t, store.Save("rotate", peoplesweep.NewCredential(peoplesweep.AuthBearer, credentialCanary+"-old")))
 
 	var wg sync.WaitGroup
-	errors := make(chan error, 1)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	errCh := make(chan error, 1)
+	wg.Go(func() {
 		for range 200 {
 			credential, err := store.Load("rotate")
 			if err != nil {
 				select {
-				case errors <- err:
+				case errCh <- err:
 				default:
 				}
 				return
@@ -679,20 +677,20 @@ func TestCredentialStoreRotatesAtomically(t *testing.T) {
 			value := credential.Value()
 			if value != credentialCanary+"-old" && value != credentialCanary+"-new" {
 				select {
-				case errors <- fmt.Errorf("reader observed a partial credential"):
+				case errCh <- errors.New("reader observed a partial credential"):
 				default:
 				}
 				return
 			}
 		}
-	}()
+	})
 	for range 100 {
 		require.NoError(t, store.Save("rotate", peoplesweep.NewCredential(peoplesweep.AuthBearer, credentialCanary+"-new")))
 		require.NoError(t, store.Save("rotate", peoplesweep.NewCredential(peoplesweep.AuthBearer, credentialCanary+"-old")))
 	}
 	wg.Wait()
 	select {
-	case err := <-errors:
+	case err := <-errCh:
 		require.NoError(t, err)
 	default:
 	}
@@ -704,12 +702,10 @@ func TestCredentialStoreSerializesConcurrentSaves(t *testing.T) {
 	var wg sync.WaitGroup
 	errors := make(chan error, profiles)
 	for index := range profiles {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			name := fmt.Sprintf("profile-%02d", index)
 			errors <- store.Save(name, peoplesweep.NewCredential(peoplesweep.AuthBearer, credentialCanary))
-		}()
+		})
 	}
 	wg.Wait()
 	close(errors)
@@ -720,7 +716,7 @@ func TestCredentialStoreSerializesConcurrentSaves(t *testing.T) {
 		credential, err := store.Load(fmt.Sprintf("profile-%02d", index))
 		require.NoError(t, err)
 		assert.Equal(t, peoplesweep.AuthBearer, credential.Scheme)
-		assert.True(t, credential.Value() == credentialCanary, "loaded credential differs")
+		assert.Equal(t, credentialCanary, credential.Value(), "loaded credential differs")
 	}
 }
 
@@ -849,13 +845,13 @@ func TestCredentialResolverUsesStoredEnvironmentAndNoneSources(t *testing.T) {
 		peoplesweep.CredentialStored, "stored-profile", peoplesweep.AuthXAPIKey))
 	require.NoError(t, err)
 	assert.Equal(t, peoplesweep.AuthXAPIKey, stored.Scheme)
-	assert.True(t, stored.Value() == credentialCanary, "stored credential differs")
+	assert.Equal(t, credentialCanary, stored.Value(), "stored credential differs")
 
 	environment, err := resolver.Resolve("ignored-profile-name", credentialTestProfile(t,
 		peoplesweep.CredentialEnv, "TEST_CREDENTIAL", peoplesweep.AuthBearer))
 	require.NoError(t, err)
 	assert.Equal(t, peoplesweep.AuthBearer, environment.Scheme)
-	assert.True(t, environment.Value() == credentialCanary, "environment credential differs")
+	assert.Equal(t, credentialCanary, environment.Value(), "environment credential differs")
 
 	none, err := resolver.Resolve("local", credentialTestProfile(t,
 		peoplesweep.CredentialNone, "", peoplesweep.AuthNone))

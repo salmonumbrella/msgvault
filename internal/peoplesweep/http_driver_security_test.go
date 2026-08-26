@@ -100,8 +100,8 @@ func TestHTTPDriverAllowsOnlyCanonicalAnthropicVersionFixedHeader(t *testing.T) 
 	var calls atomic.Int64
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		assert.Equal(t, "2023-06-01", r.Header.Get("anthropic-version"))
-		assert.Equal(t, "credential-key", r.Header.Get("x-api-key"))
+		assert.Equal(t, "2023-06-01", r.Header.Get("Anthropic-Version"))
+		assert.Equal(t, "credential-key", r.Header.Get("X-Api-Key"))
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		body, err := io.ReadAll(r.Body)
 		assert.NoError(t, err)

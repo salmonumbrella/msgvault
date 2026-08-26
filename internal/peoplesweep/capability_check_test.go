@@ -3,7 +3,6 @@ package peoplesweep
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -41,9 +40,9 @@ func TestCapabilityNegotiationUsesFixedOutputAndTokenOrderWithoutArchiveContext(
 		http.StatusNotFound, http.StatusOK}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 		encoded, err := json.Marshal(body)
-		require.NoError(t, err)
+		assert.NoError(t, err)
 		assert.NotContains(t, string(encoded), capabilityArchiveCanary)
 		assert.NotContains(t, string(encoded), capabilityCredentialValue)
 		assert.Equal(t, "Bearer "+capabilityCredentialValue, r.Header.Get("Authorization"))
@@ -112,7 +111,7 @@ func TestCapabilityNegotiationChecksRequestedReasoningSeparately(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				call := calls.Add(1)
 				var body map[string]any
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 				if call == 1 {
 					assert.NotContains(t, body, "reasoning_effort")
 					assert.NotContains(t, body, "reasoning")
@@ -849,7 +848,7 @@ func TestCapabilityNegotiationRejectsMissingRegistryWithoutPanic(t *testing.T) {
 		capabilityTestCandidate(ProtocolOpenAIChat, "https://example.test/v1"),
 		NewCredential(AuthBearer, capabilityCredentialValue))
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, context.Canceled))
+	assert.NotErrorIs(t, err, context.Canceled)
 }
 
 func capabilityTestCandidate(protocol Protocol, endpoint string) ProviderConfig {

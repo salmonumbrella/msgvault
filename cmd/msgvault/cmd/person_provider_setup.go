@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"strings"
@@ -512,9 +513,7 @@ func personProviderProposedConfig(
 	configured.Enabled = true
 	configured.Provider = peoplesweep.ProviderSelection{Name: name}
 	providers := make(map[string]peoplesweep.ProviderConfig, len(configured.Providers)+1)
-	for existingName, existing := range configured.Providers {
-		providers[existingName] = existing
-	}
+	maps.Copy(providers, configured.Providers)
 	providers[name] = candidate
 	configured.Providers = providers
 	configured.ApplyDefaults()
@@ -705,7 +704,7 @@ func proxySavedPersonProviderOperation(
 		}
 		leaf.Flags().String(personProviderIfFingerprintFlag, "", "")
 		if err := leaf.Flags().Set(personProviderIfFingerprintFlag, fingerprint); err != nil {
-			return err
+			return fmt.Errorf("set person provider fingerprint guard: %w", err)
 		}
 	}
 	provider.AddCommand(leaf)

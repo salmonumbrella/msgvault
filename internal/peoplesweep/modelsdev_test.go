@@ -275,7 +275,9 @@ func cookieJarWithCanary(t *testing.T) http.CookieJar {
 	require.NoError(t, err)
 	catalogURL, err := url.Parse(modelsDevURL)
 	require.NoError(t, err)
-	jar.SetCookies(catalogURL, []*http.Cookie{{Name: "session", Value: modelsDevRequestCanary}})
+	jar.SetCookies(catalogURL, []*http.Cookie{{
+		Name: "session", Value: modelsDevRequestCanary, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+	}})
 	return jar
 }
 
@@ -285,6 +287,7 @@ func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) 
 
 type closeTrackingBody struct {
 	io.ReadCloser
+
 	closed *atomic.Bool
 }
 
@@ -302,14 +305,17 @@ func (zeroReader) Read(buffer []byte) (int, error) {
 
 func oneModelCatalog(cost string) string {
 	var buffer bytes.Buffer
-	_ = json.NewEncoder(&buffer).Encode(map[string]any{
+	if err := json.NewEncoder(&buffer).Encode(map[string]any{
 		"one": map[string]any{
 			"id": "one", "name": "One", "models": map[string]any{
 				"model": json.RawMessage(`{"id":"model","name":"Model","cost":` + cost + `}`),
 			},
 		},
-	})
+	}); err != nil {
+		panic(err)
+	}
 	return buffer.String()
 }
 
-func int64Pointer(value int64) *int64 { return &value }
+//go:fix inline
+func int64Pointer(value int64) *int64 { return new(value) }

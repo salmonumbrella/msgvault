@@ -129,6 +129,8 @@ func validateCapabilityReasoning(candidate ProviderConfig) error {
 			(candidate.ReasoningMode == "" || candidate.ReasoningMode == "provider_default") {
 			return nil
 		}
+	case ProtocolCodexAppServer:
+		return errors.New("reasoning capability negotiation is unavailable for codex app server")
 	}
 	return errors.New("reasoning settings are not represented by the selected protocol")
 }

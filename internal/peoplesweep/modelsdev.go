@@ -118,7 +118,7 @@ func (c *ModelsDevClient) Fetch(ctx context.Context) ([]ProviderSuggestion, erro
 		return nil, ErrModelsDevUnavailable
 	}
 	request.Header.Set("User-Agent", modelsDevCatalogUserAgent)
-	response, err := c.client.Do(request)
+	response, err := c.client.Do(request) //nolint:bodyclose // Every successful response is drained and closed by disposeHTTPResponse below.
 	if err != nil {
 		if requestCtx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, ErrModelsDevTimeout
@@ -290,7 +290,7 @@ func modelsDevPrices(ctx context.Context, raw json.RawMessage) (*int64, *int64, 
 
 func modelsDevPrice(raw json.RawMessage) (*int64, error) {
 	if len(raw) == 0 {
-		return nil, nil
+		return nil, nil //nolint:nilnil // An omitted provider catalog price is an intentional optional value.
 	}
 	trimmed := strings.TrimSpace(string(raw))
 	if len(trimmed) == 0 || len(trimmed) > 64 || trimmed == "null" {

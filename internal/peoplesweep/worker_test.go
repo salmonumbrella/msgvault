@@ -505,6 +505,7 @@ func runWorkerRepairCase(
 	repairCandidate string,
 	reserveErrAt int,
 ) (*workerFailureStore, *workerRepairDriver, *workerProductionSink, error) {
+	t.Helper()
 	return runWorkerRepairCaseWithDependencies(t, primaryCandidate, repairCandidate,
 		reserveErrAt, workerRepairAuthority{},
 		NewCredentialResolver(nil, func(string) (string, bool) { return "test-key", true }))
@@ -641,7 +642,7 @@ func TestPersonSweepWorkerRepairsSchemaAndSemanticValidationOnce(t *testing.T) {
 			}
 			require.Len(t, driver.credentials, 2)
 			assert.Equal(t, driver.credentials[0].Scheme, driver.credentials[1].Scheme)
-			assert.True(t, driver.credentials[0].Value() == driver.credentials[1].Value(),
+			assert.Equal(t, driver.credentials[0].Value(), driver.credentials[1].Value(),
 				"repair credential differs from primary")
 			require.Len(t, sink.requests, 1)
 			assert.Equal(t, 2, sink.requests[0].Usage.Requests)

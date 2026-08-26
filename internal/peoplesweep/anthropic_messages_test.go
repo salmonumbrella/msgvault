@@ -59,13 +59,13 @@ func TestAnthropicMessagesEmitsForcedToolRequestExactly(t *testing.T) {
 		assert.Equal(t, http.MethodPost, r.Method)
 		assert.Equal(t, "/api/v1/messages", r.URL.Path)
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
-		assert.Equal(t, "test-key", r.Header.Get("x-api-key"))
-		assert.Equal(t, "2023-06-01", r.Header.Get("anthropic-version"))
+		assert.Equal(t, "test-key", r.Header.Get("X-Api-Key"))
+		assert.Equal(t, "2023-06-01", r.Header.Get("Anthropic-Version"))
 		assert.Empty(t, r.Header.Get("Authorization"))
 		var err error
 		received, err = io.ReadAll(r.Body)
 		assert.NoError(t, err)
-		w.Header().Set("request-id", "req-anthropic-1")
+		w.Header().Set("Request-Id", "req-anthropic-1")
 		_, err = io.WriteString(w, `{"id":"msg_123","type":"message","role":"assistant","model":"claude-test-build","content":[{"type":"tool_use","id":"toolu_123","name":"person_facts","input":{"ok":true}}],"stop_reason":"tool_use","usage":{"input_tokens":17,"output_tokens":5}}`)
 		assert.NoError(t, err)
 	}))
@@ -75,14 +75,14 @@ func TestAnthropicMessagesEmitsForcedToolRequestExactly(t *testing.T) {
 	driver := peoplesweep.NewAnthropicMessagesDriver(server.Client())
 	prepared, err := driver.Prepare(profile, structuredTestRequest())
 	require.NoError(t, err)
-	assert.Equal(t, want, string(prepared.WireRequest()))
+	assert.JSONEq(t, want, string(prepared.WireRequest()))
 
 	response, err := driver.GeneratePrepared(
 		t.Context(), profile,
 		peoplesweep.NewCredential(peoplesweep.AuthXAPIKey, "test-key"), prepared,
 	)
 	require.NoError(t, err)
-	assert.Equal(t, want, string(received))
+	assert.JSONEq(t, want, string(received))
 	assert.JSONEq(t, `{"ok":true}`, string(response.CandidateJSON))
 	assert.Equal(t, "req-anthropic-1", response.ProviderRequestID)
 	assert.Equal(t, "anthropic-messages-v1", response.ProviderVersion)
@@ -107,7 +107,7 @@ func TestAnthropicMessagesPromptModeUsesOneCompleteJSONText(t *testing.T) {
 	profile := anthropicTestProfile(t, server.URL, "claude-test", peoplesweep.OutputModePromptJSON)
 	response, err := generateAnthropicMessages(t, server, profile)
 	require.NoError(t, err)
-	assert.Equal(t, want, string(received))
+	assert.JSONEq(t, want, string(received))
 	assert.JSONEq(t, `{"ok":true}`, string(response.CandidateJSON))
 	assert.True(t, response.UsageKnown)
 	assert.Equal(t, peoplesweep.TokenUsage{}, response.Usage)
@@ -355,7 +355,7 @@ func TestAnthropicMessagesRejectsInvalidUsageAndUnsafeMetadata(t *testing.T) {
 
 	t.Run("unsafe request ID is discarded", func(t *testing.T) {
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("request-id", strings.Repeat("r", 129))
+			w.Header().Set("Request-Id", strings.Repeat("r", 129))
 			_, err := io.WriteString(w, `{"type":"message","role":"assistant","model":"claude-test-build","content":[{"type":"text","text":"{\"ok\":true}"}]}`)
 			assert.NoError(t, err)
 		}))
@@ -372,7 +372,7 @@ func TestAnthropicMessagesSanitizesHTTPFailureAndMakesOneAttempt(t *testing.T) {
 	var calls atomic.Int64
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
-		w.Header().Set("request-id", "req-safe")
+		w.Header().Set("Request-Id", "req-safe")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, err := io.WriteString(w, `{"error":{"message":"provider-secret-body"}}`)
 		assert.NoError(t, err)

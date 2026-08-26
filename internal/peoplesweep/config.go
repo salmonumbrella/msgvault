@@ -335,6 +335,7 @@ func (c *Config) ApplyDefaults() {
 	}
 }
 
+//nolint:gosec // This names the required environment variable; it is not a credential value.
 func defaultProviderConfig() ProviderConfig {
 	return ProviderConfig{
 		Protocol: ProtocolOpenAIChat, Endpoint: "https://api.openai.com/v1",
@@ -629,6 +630,8 @@ func (c Config) Profile() (ProviderProfile, error) {
 		credentialRef = provider.CredentialEnv
 	case CredentialStored:
 		credentialRef = name
+	case CredentialNone:
+		credentialRef = ""
 	}
 	sources := slices.Clone(provider.AllowedSources)
 	slices.Sort(sources)
@@ -686,6 +689,8 @@ func (p ProviderProfile) Validate() error {
 		provider.CredentialEnv = p.CredentialRef
 	case CredentialStored:
 		name = p.CredentialRef
+	case CredentialNone:
+		provider.CredentialEnv = ""
 	}
 	config := Config{
 		Enabled: true, Provider: ProviderSelection{Name: name},

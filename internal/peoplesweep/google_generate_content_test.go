@@ -59,9 +59,9 @@ func TestGoogleGenerateContentEmitsNativeSchemaRequestExactly(t *testing.T) {
 		assert.Equal(t, "/v1beta/models/gemini%2F2.5%25flash:generateContent", r.RequestURI)
 		assert.Empty(t, r.URL.RawQuery)
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
-		assert.Equal(t, "test-key", r.Header.Get("x-goog-api-key"))
+		assert.Equal(t, "test-key", r.Header.Get("X-Goog-Api-Key"))
 		assert.Empty(t, r.Header.Get("Authorization"))
-		assert.Empty(t, r.Header.Get("x-api-key"))
+		assert.Empty(t, r.Header.Get("X-Api-Key"))
 		var err error
 		received, err = io.ReadAll(r.Body)
 		assert.NoError(t, err)
@@ -74,14 +74,14 @@ func TestGoogleGenerateContentEmitsNativeSchemaRequestExactly(t *testing.T) {
 	driver := peoplesweep.NewGoogleGenerateContentDriver(server.Client())
 	prepared, err := driver.Prepare(profile, structuredTestRequest())
 	require.NoError(t, err)
-	assert.Equal(t, want, string(prepared.WireRequest()))
+	assert.JSONEq(t, want, string(prepared.WireRequest()))
 
 	response, err := driver.GeneratePrepared(
 		t.Context(), profile,
 		peoplesweep.NewCredential(peoplesweep.AuthGoogleAPIKey, "test-key"), prepared,
 	)
 	require.NoError(t, err)
-	assert.Equal(t, want, string(received))
+	assert.JSONEq(t, want, string(received))
 	assert.JSONEq(t, `{"ok":true}`, string(response.CandidateJSON))
 	assert.Equal(t, "resp-google-1", response.ProviderRequestID)
 	assert.Equal(t, "google-generate-content-v1", response.ProviderVersion)
@@ -106,7 +106,7 @@ func TestGoogleGenerateContentPromptModeUsesSchemaInstruction(t *testing.T) {
 	response, err := generateGoogleContent(t, server,
 		googleTestProfile(t, server.URL, "gemini-test", peoplesweep.OutputModePromptJSON))
 	require.NoError(t, err)
-	assert.Equal(t, want, string(received))
+	assert.JSONEq(t, want, string(received))
 	assert.JSONEq(t, `{"ok":true}`, string(response.CandidateJSON))
 }
 
@@ -422,7 +422,7 @@ func TestGoogleGenerateContentSanitizesHTTPFailureAndMakesOneAttempt(t *testing.
 	var calls atomic.Int64
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
-		w.Header().Set("request-id", "req-safe")
+		w.Header().Set("Request-Id", "req-safe")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, err := io.WriteString(w, `{"error":{"message":"provider-body-secret"}}`)
 		assert.NoError(t, err)

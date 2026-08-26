@@ -80,7 +80,7 @@ func (d *httpDriver) postWithHeaders(
 		return httpDriverResponse{}, err
 	}
 
-	response, err := d.client.Do(request)
+	response, err := d.client.Do(request) //nolint:bodyclose // Every successful response is drained and closed by disposeHTTPResponse below.
 	if err != nil {
 		return httpDriverResponse{}, &safeTransportError{
 			operation: "call inference provider", cause: err,
@@ -193,6 +193,8 @@ func classifyProviderCapabilityError(profile ProviderProfile, body []byte) Provi
 		if relevantDetails == 1 && matched {
 			return ProviderCapabilityUnsupportedRepresentation
 		}
+	case ProtocolCodexAppServer:
+		return ""
 	}
 	return ""
 }
@@ -215,6 +217,8 @@ func capabilityCodeMatchesProfile(
 	case ProtocolGoogleGenerateContent:
 		genericCode = code == "UNSUPPORTED_PARAMETER" || code == "UNSUPPORTED_VALUE"
 		representationCode = code == "UNSUPPORTED_RESPONSE_FORMAT" || code == "UNSUPPORTED_JSON_SCHEMA"
+	case ProtocolCodexAppServer:
+		return false
 	}
 	if genericCode {
 		return capabilityParameterMatchesProfile(profile, parameter)
@@ -270,12 +274,16 @@ func capabilityRepresentationCodeMatchesProfile(profile ProviderProfile, code st
 			return code == "unsupported_response_format" || code == "unsupported_json_schema"
 		case OutputModeJSONObject:
 			return code == "unsupported_response_format"
+		case OutputModePromptJSON:
+			return false
 		}
 	case ProtocolAnthropicMessages:
 		return profile.OutputMode == OutputModeNativeJSONSchema && code == "unsupported_json_schema"
 	case ProtocolGoogleGenerateContent:
 		return profile.OutputMode == OutputModeNativeJSONSchema &&
 			(code == "UNSUPPORTED_RESPONSE_FORMAT" || code == "UNSUPPORTED_JSON_SCHEMA")
+	case ProtocolCodexAppServer:
+		return false
 	}
 	return false
 }
@@ -288,6 +296,8 @@ func capabilityRepresentationParameterMatchesProfile(profile ProviderProfile, pa
 			return parameter == "response_format" || parameter == "response_format.type" || parameter == "response_format.json_schema"
 		case OutputModeJSONObject:
 			return parameter == "response_format" || parameter == "response_format.type"
+		case OutputModePromptJSON:
+			return false
 		}
 	case ProtocolOpenAIResponses:
 		switch profile.OutputMode {
@@ -295,6 +305,8 @@ func capabilityRepresentationParameterMatchesProfile(profile ProviderProfile, pa
 			return parameter == "text.format" || parameter == "text.format.type" || parameter == "text.format.schema"
 		case OutputModeJSONObject:
 			return parameter == "text.format" || parameter == "text.format.type"
+		case OutputModePromptJSON:
+			return false
 		}
 	case ProtocolAnthropicMessages:
 		return profile.OutputMode == OutputModeNativeJSONSchema &&
@@ -302,6 +314,8 @@ func capabilityRepresentationParameterMatchesProfile(profile ProviderProfile, pa
 	case ProtocolGoogleGenerateContent:
 		return profile.OutputMode == OutputModeNativeJSONSchema &&
 			(parameter == "generationConfig.responseMimeType" || parameter == "generationConfig.responseSchema")
+	case ProtocolCodexAppServer:
+		return false
 	}
 	return false
 }
@@ -395,9 +409,9 @@ func applyHTTPCredential(request *http.Request, scheme AuthScheme, credential Cr
 	case AuthBearer:
 		request.Header.Set("Authorization", "Bearer "+value)
 	case AuthXAPIKey:
-		request.Header.Set("x-api-key", value)
+		request.Header.Set("X-Api-Key", value)
 	case AuthGoogleAPIKey:
-		request.Header.Set("x-goog-api-key", value)
+		request.Header.Set("X-Goog-Api-Key", value)
 	default:
 		return errors.New("unsupported people provider HTTP authentication scheme")
 	}

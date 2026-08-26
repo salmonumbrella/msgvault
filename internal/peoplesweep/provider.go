@@ -66,7 +66,7 @@ type StructuredResponse struct {
 
 // ValidationFailure retains only the bounded candidate and bounded local
 // diagnostics needed to prepare one repair. Error never exposes those bytes.
-type ValidationFailure struct {
+type ValidationFailure struct { //nolint:errname // Public error type retained for compatibility with existing consumers.
 	Candidate json.RawMessage
 	Errors    []string
 	repair    bool
