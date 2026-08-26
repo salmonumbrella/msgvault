@@ -439,3 +439,89 @@ git diff --check
 
 - Preflight and delete cannot be atomic across daemon revoke. The preflight lock is released before routing; `Delete` therefore reopens and revalidates, and a post-preflight race can still produce the existing partial-failure result with consent left revoked and the exact config rollback attempted.
 - The unsupported-platform implementation returns the same fail-closed `errCredentialStoreUnsupported` without touching the filesystem, and its unit test now covers preflight. A FreeBSD cross-test could not compile the package because the repository's existing DuckDB and sqlite bindings exclude the required target definitions; no unsupported-platform execution is claimed.
+
+## Fail-closed existing-credential deletion addendum
+
+- Date: `2026-08-26`
+- Review base: `9dd117e6ac30d76b1427a94e36d72487616d5f98`
+- Code and test commit: `503852ac3d7c1adeb3cedef07284f231369ddd52`
+- Subject: `fix: fail closed on provider credential deletion`
+
+### Filesystem and removal boundary
+
+- `FileCredentialStore.Delete` no longer enters the mutating `withCredentialRoot` bootstrap. Preflight and deletion now share one existing-only traversal that opens the live tokens root, namespace, existing lock marker, and exact non-empty credential with no-follow descriptor-relative operations. Save and `SaveNew` retain their existing bootstrap behavior.
+- The shared traversal rejects missing objects, zero-length tombstones, wrong owners, wrong `0700`/`0600` modes, symlinks, non-regular files, and extra hard links without creating, chmodding, replacing, truncating, or otherwise repairing them. Unsupported platforms return the existing fail-closed unsupported error for both preflight and deletion.
+- The namespace descriptor remains exclusively flocked while deletion compares the pinned tokens descriptor with the live tokens path, the pinned namespace descriptor with the live namespace entry, the pinned marker with its live entry, and the exact target descriptor with its live entry. Those checks run after the target opens and again immediately before truncation. A root, namespace, marker, or target swap therefore aborts before the pinned credential is touched.
+- A valid deletion truncates and fsyncs the same exact `0600`, single-link credential inode to a bounded zero-length tombstone. It does not unlink the pathname, accumulate artifacts, or change another credential. A second delete reports `ErrCredentialNotFound` instead of converting absence into success.
+- Production stored-profile removal still completes read-only preflight before daemon revoke. Its later `Delete` independently repeats every check. The post-preflight target-disappearance regression revokes once, publishes the config edit once, receives `ErrCredentialNotFound`, restores the exact config snapshot once, and leaves the retained credential inode and bytes unchanged. Consent is not recreated or reported as restored.
+- Filesystem assertions snapshot identities, modes, directory entries, sizes, and content digests. Errors and test output do not include credential bytes.
+
+### RED evidence
+
+```text
+go test -v -tags "fts5 sqlite_vec" ./internal/peoplesweep -run '^(TestCredentialStoreLifecycleUsesPrivateFilesAndExactDeletion|TestCredentialStoreDeleteRetiresOnlyExactPinnedTargetAsBoundedTombstone|TestCredentialStoreDeleteRejectsMissingStateAfterPreflightWithoutRecreatingIt|TestCredentialStoreDeleteRejectsWrongModesAfterPreflightWithoutRepair|TestCredentialStoreDeleteRejectsUnsafeTargetAfterPreflightWithoutChangingIt|TestCredentialStoreDeleteRejectsTokensRootSwapAfterCredentialOpen|TestCredentialStoreDeleteRejectsNamespaceSwapAfterCredentialOpen)$' -count=1 -timeout=3m
+--- FAIL: TestCredentialStoreDeleteRejectsTokensRootSwapAfterCredentialOpen
+    An error is expected but got nil.
+--- FAIL: TestCredentialStoreDeleteRejectsNamespaceSwapAfterCredentialOpen
+    An error is expected but got nil.
+--- FAIL: TestCredentialStoreLifecycleUsesPrivateFilesAndExactDeletion
+    Expected error with "people provider credential not found" in chain but got nil.
+--- FAIL: TestCredentialStoreDeleteRejectsMissingStateAfterPreflightWithoutRecreatingIt
+    --- FAIL: .../tokens_root
+        An error is expected but got nil.
+        entries changed: [tokens.retained] -> [tokens tokens.retained]
+    --- FAIL: .../credential_namespace
+        An error is expected but got nil.
+        entries changed: [people-providers.retained] -> [people-providers people-providers.retained]
+    --- FAIL: .../lock_marker
+        An error is expected but got nil.
+        credential size changed from 22 to 0
+    --- FAIL: .../credential_target
+        Expected ErrCredentialNotFound in chain but got nil.
+    --- FAIL: .../credential_tombstone
+        Expected ErrCredentialNotFound in chain but got nil.
+--- FAIL: TestCredentialStoreDeleteRejectsWrongModesAfterPreflightWithoutRepair
+    --- FAIL: .../tokens_root
+        An error is expected but got nil; mode changed from 0750 to 0700; credential size changed from 22 to 0.
+    --- FAIL: .../credential_namespace
+        An error is expected but got nil; mode changed from 0750 to 0700; credential size changed from 22 to 0.
+FAIL  go.kenn.io/msgvault/internal/peoplesweep  0.950s
+
+go test -v -tags "fts5 sqlite_vec" ./internal/peoplesweep -run '^TestCredentialStoreDeleteDetectsSwapAtRemovalBoundary$' -count=1 -timeout=3m
+--- FAIL: TestCredentialStoreDeleteDetectsSwapAtRemovalBoundary
+    profile.original size changed from 60 to 0
+    profile.original contents changed
+FAIL  go.kenn.io/msgvault/internal/peoplesweep  0.175s
+
+go test -v -tags "fts5 sqlite_vec" ./cmd/msgvault/cmd -run '^TestPersonProviderDaemonRemovePostPreflightCredentialRaceRollsBackConfig$' -count=1 -timeout=3m
+--- FAIL: TestPersonProviderDaemonRemovePostPreflightCredentialRaceRollsBackConfig
+    Expected error with "people provider credential not found" in chain but got nil.
+    expected config restores: 1; actual: 0
+    final provider map does not contain "beta"
+FAIL  go.kenn.io/msgvault/cmd/msgvault/cmd  0.439s
+```
+
+### GREEN evidence
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep ./cmd/msgvault/cmd ./internal/config -run 'CredentialStore|PersonProvider.*Remove|RestoreConfig' -count=1 -timeout=8m
+ok  go.kenn.io/msgvault/internal/peoplesweep  16.843s
+ok  go.kenn.io/msgvault/cmd/msgvault/cmd  4.172s
+ok  go.kenn.io/msgvault/internal/config  0.435s
+
+go test -race -tags "fts5 sqlite_vec" ./internal/peoplesweep ./cmd/msgvault/cmd ./internal/config -run 'CredentialStore(Delete|PreflightDelete|RejectsFIFO)|PersonProvider.*Remove|RestoreConfig' -count=1 -timeout=8m
+ok  go.kenn.io/msgvault/internal/peoplesweep  2.125s
+ok  go.kenn.io/msgvault/cmd/msgvault/cmd  4.866s
+ok  go.kenn.io/msgvault/internal/config  1.394s
+
+go fmt ./...
+go vet -tags "fts5 sqlite_vec" ./internal/peoplesweep ./cmd/msgvault/cmd ./internal/config
+git diff --check
+[exit 0]
+```
+
+### Limitations
+
+- Preflight and deletion remain intentionally separate across daemon revoke. A post-preflight race now fails deletion and attempts exact config rollback, but consent may remain revoked; this flow does not restore or claim to restore consent.
+- The final identity comparison and truncate are adjacent under the namespace flock. That lock coordinates credential-store participants but remains an advisory Unix lock; it does not prevent an unrelated process that ignores the lock from attempting a rename after the final comparison.
+- Linux exercised the production path, swap hooks, race detector, and static checks. The unsupported-platform implementation and test were updated to fail closed for `Delete`, but no cross-platform execution is claimed because the repository's existing native dependencies still prevent a useful FreeBSD package test.
