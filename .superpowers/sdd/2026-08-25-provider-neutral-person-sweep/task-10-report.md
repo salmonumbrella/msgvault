@@ -311,3 +311,57 @@ git diff --check
 
 - One full `internal/store` run timed out at 10 minutes in unrelated `TestSubsetPersonMergePacketWithRemappedDefinitionIsOmitted` while another shared-host full-repository run exercised the same schema-heavy package. The provider-relevant store subset passed serially in 52.520 seconds.
 - Config identity remains platform-specific behind the existing retained-file implementations. Linux production and final-boundary swap tests passed; the repository's existing DuckDB dependency still prevents a useful Windows package cross-compile.
+
+## Stored-credential removal preflight addendum
+
+- Date: `2026-08-26`
+- Review base: `94213e5b5b909caa0f2ef2ebf8c79842a399cb6a`
+- Code and test commit: `1cfdcf87576bb46067dd1234ad2efcb0c4ecaade`
+- Subject: `fix: preflight provider credential deletion`
+
+### Transaction and filesystem boundary
+
+- `CredentialStore.PreflightDelete` now validates the same production credential namespace, exclusive root lock, exact target access, owner, mode, file type, link count, and no-follow path identity used by deletion. It opens the exact target `O_RDWR|O_NOFOLLOW|O_NONBLOCK`, compares the pinned descriptor with the directory entry, and performs no read, truncate, rename, unlink, or secret serialization.
+- Stored-profile removal resolves the live credential store and completes this preflight before daemon ownership routing and guarded revoke. A preflight failure therefore makes zero revoke, config edit, and credential deletion calls. The command regression uses the production file store and Cobra path with a symlinked exact target; the external target, retained credential, and saved profile remain unchanged, and the canary is absent from output and errors.
+- Missing exact credentials remain an idempotent success, matching `Delete`; the securely pinned namespace and lock marker are still validated. `Delete` reacquires the lock and repeats every target check after revoke and config publication.
+
+### RED evidence
+
+```text
+go test -tags "fts5 sqlite_vec" ./cmd/msgvault/cmd -run '^TestPersonProviderDaemonRemovePreflightsStoredCredentialBeforeRevoke$' -count=1
+--- FAIL: TestPersonProviderDaemonRemovePreflightsStoredCredentialBeforeRevoke
+person_provider_routing_test.go:307: Should be zero, but was 1
+person_provider_routing_test.go:308: Should be zero, but was 1
+FAIL  go.kenn.io/msgvault/cmd/msgvault/cmd
+
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run '^TestCredentialStorePreflightDelete' -count=1
+credential_store_test.go:100:14: store.PreflightDelete undefined
+FAIL  go.kenn.io/msgvault/internal/peoplesweep [build failed]
+
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep -run '^TestCredentialStorePreflightDeleteRejectsEntrySwapAfterOpen$' -count=1
+--- FAIL: TestCredentialStorePreflightDeleteRejectsEntrySwapAfterOpen
+credential_store_security_test.go:92: An error is expected but got nil.
+FAIL  go.kenn.io/msgvault/internal/peoplesweep
+```
+
+### GREEN evidence
+
+```text
+go test -tags "fts5 sqlite_vec" ./internal/peoplesweep ./cmd/msgvault/cmd -run '^(TestCredentialStorePreflightDelete|TestPersonProviderDaemonRemovePreflightsStoredCredentialBeforeRevoke|TestPersonProviderRemove)' -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  0.102s
+ok  go.kenn.io/msgvault/cmd/msgvault/cmd  1.361s
+
+go test -race -tags "fts5 sqlite_vec" ./internal/peoplesweep ./cmd/msgvault/cmd -run '^(TestCredentialStorePreflightDelete|TestPersonProviderDaemonRemovePreflightsStoredCredentialBeforeRevoke|TestPersonProviderRemove)' -count=1
+ok  go.kenn.io/msgvault/internal/peoplesweep  1.225s
+ok  go.kenn.io/msgvault/cmd/msgvault/cmd  4.103s
+
+go vet -tags "fts5 sqlite_vec" ./internal/peoplesweep ./cmd/msgvault/cmd
+git diff --check
+[exit 0]
+```
+
+The full combined package command was bounded after `196.295s`: `internal/peoplesweep` passed in `36.181s`, while `cmd/msgvault/cmd` was still running unrelated schema-heavy tests and was interrupted without a reported assertion failure. This is not recorded as a command-package pass; the focused command-package and race runs above are the completion evidence.
+
+### Limitation
+
+- Preflight establishes only locally knowable validity of the current pinned target and access while it holds the credential-root lock. It deliberately does not claim that a later delete must succeed: the lock is released before daemon revoke, and a subsequent filesystem race is handled by `Delete` revalidation plus the existing fail-closed config rollback and partial-failure reporting.
