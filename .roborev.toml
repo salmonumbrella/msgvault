@@ -1,3 +1,6 @@
+review_agent = "pi"
+review_model = "zai/glm-5.3"
+review_reasoning = "high"
 display_name = "msgvault"
 
 review_guidelines = """

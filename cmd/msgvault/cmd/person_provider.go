@@ -137,7 +137,7 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 				config,
 				st,
 				transport,
-				os.LookupEnv,
+				peopleSweepProviderCredentialLookup(cfg),
 			)
 		},
 		newCodexClient: func(config peoplesweep.Config) (personProviderCodexClient, error) {

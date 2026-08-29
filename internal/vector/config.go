@@ -228,7 +228,16 @@ func (e EmbeddingsConfig) Validate() error {
 	}
 	u, err := url.Parse(e.Endpoint)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return fmt.Errorf("vector.embeddings.endpoint: must be an http or https URL with a host (got %q)", e.Endpoint)
+		return errors.New("vector.embeddings.endpoint: must be an http or https URL with a host")
+	}
+	if u.User != nil {
+		return errors.New("vector.embeddings.endpoint: must not contain credentials")
+	}
+	if u.RawQuery != "" {
+		return errors.New("vector.embeddings.endpoint: must not contain a query")
+	}
+	if u.Fragment != "" {
+		return errors.New("vector.embeddings.endpoint: must not contain a fragment")
 	}
 	if e.Model == "" {
 		return fmt.Errorf("vector.embeddings.model: required (the index generation fingerprint is %q, which is ambiguous without a model name)", e.Fingerprint())

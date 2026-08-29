@@ -1,4 +1,5 @@
 ---
+last_edited: 2026-08-28
 title: Web UI
 description: Use and securely deploy msgvault's daemon-served analytical interface.
 ---
@@ -149,6 +150,16 @@ People in this workspace are observed identity clusters. Source identities
 that mean “me,” explicit durable profile promotion, display-name overrides, and
 typed profile attributes are separate curated operations; see [People,
 Profiles, and Source Identities](/usage/people/).
+
+Directory is the curated durable-person workspace. Its person detail keeps
+Overview, Organizations, Relationships, Network, and Media & Files together.
+The Network tab can request one, two, or three hops and optionally include
+ended records. It visualizes at most 250 nodes and 500 connections, while an
+always-present list groups the same connections by hop for keyboard and screen
+reader use. Person and organization names in this view come from durable
+profiles. Edges come only from curated typed relationships and employments
+(including shared organizations), never messages, participant co-occurrence,
+or inferred communication activity.
 
 Domains provides the same activity-and-files analysis for an exact domain
 fact. A domain is not treated as an inferred organization identity. Selecting

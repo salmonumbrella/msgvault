@@ -173,3 +173,7 @@ type SearchVisualAttachmentsBody = VisualTextSearchRequest
 type GetSearchCoverageBody = SearchCoverageRequest
 
 type PatchSettingsBody = SettingsPatchRequest
+
+type PutSettingsPersonEnrichmentProviderBody = PersonEnrichmentProviderUpdate
+
+type PutSettingsProviderCredentialBody = ProviderCredentialWriteRequest

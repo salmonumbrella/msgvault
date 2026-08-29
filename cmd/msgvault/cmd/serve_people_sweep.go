@@ -27,9 +27,14 @@ func addPeopleSweepJob(
 
 func newPeopleSweepScheduledRun(
 	config peoplesweep.Config, st *store.Store,
+	lookups ...peoplesweep.CredentialLookup,
 ) func(context.Context) error {
+	lookup := peoplesweep.CredentialLookup(os.LookupEnv)
+	if len(lookups) > 0 && lookups[0] != nil {
+		lookup = lookups[0]
+	}
 	return func(ctx context.Context) error {
-		worker, err := newProductionPersonSweepWorker(config, st, os.LookupEnv)
+		worker, err := newProductionPersonSweepWorker(config, st, lookup)
 		if err != nil {
 			return err
 		}
