@@ -324,9 +324,9 @@ type Server struct {
 	backend            vector.Backend
 	personSearchEngine PersonSearchEngine
 	visualSearch       *visual.SearchService
-	visualBuild        func(context.Context) error
-	visualRun          func(context.Context) error
-	visualRetry        func(context.Context, int64, string) error
+	visualBuild        func(context.Context, operations.PassScope) error
+	visualRun          func(context.Context, operations.PassScope) error
+	visualRetry        func(context.Context, operations.PassScope, int64, string) error
 	visualStatus       func(context.Context, bool) (visual.Status, error)
 	// visualCoverageScan serializes the archive-wide coverage scan behind
 	// GET /multimodal/status?coverage=1.

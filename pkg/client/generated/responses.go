@@ -607,6 +607,16 @@ type GetDocumentIndexStatusErrorResponseJSON429 = ErrorResponse
 
 type GetDocumentIndexStatusErrorResponseJSON503 = ErrorResponse
 
+type GetCurrentDocumentIndexStatusResponse = DocumentIndexStatusResponse
+
+type GetCurrentDocumentIndexStatusErrorResponse = ErrorResponse
+
+type GetCurrentDocumentIndexStatusErrorResponseJSON = ErrorResponse
+
+type GetCurrentDocumentIndexStatusErrorResponseJSON429 = ErrorResponse
+
+type GetCurrentDocumentIndexStatusErrorResponseJSON503 = ErrorResponse
+
 type GetDocumentVectorStatusResponse = DocumentVectorOperationsResponse
 
 type GetDocumentVectorStatusErrorResponse = ErrorResponse
@@ -1423,29 +1433,29 @@ type GetVisualAttachmentStatusErrorResponse = ErrorResponse
 
 type ListOperationRunsResponse = OperationRunsResponse
 
-type ListOperationRunsErrorResponse = ErrorResponse
+type ListOperationRunsErrorResponse = OperationErrorResponse
 
-type ListOperationRunsErrorResponseJSON = ErrorResponse
+type ListOperationRunsErrorResponseJSON = OperationErrorResponse
 
-type ListOperationRunsErrorResponseJSON500 = ErrorResponse
+type ListOperationRunsErrorResponseJSON500 = OperationErrorResponse
 
-type ListOperationRunsErrorResponseJSON503 = ErrorResponse
+type ListOperationRunsErrorResponseJSON503 = OperationErrorResponse
 
 type GetOperationRunResponse = OperationRunDetail
 
-type GetOperationRunErrorResponse = ErrorResponse
+type GetOperationRunErrorResponse = OperationErrorResponse
 
-type GetOperationRunErrorResponseJSON = ErrorResponse
+type GetOperationRunErrorResponseJSON = OperationErrorResponse
 
-type GetOperationRunErrorResponseJSON409 = ErrorResponse
+type GetOperationRunErrorResponseJSON409 = OperationErrorResponse
 
-type GetOperationRunErrorResponseJSON500 = ErrorResponse
+type GetOperationRunErrorResponseJSON500 = OperationErrorResponse
 
-type GetOperationRunErrorResponseJSON503 = ErrorResponse
+type GetOperationRunErrorResponseJSON503 = OperationErrorResponse
 
 type GetOperationStatusResponse = OperationStatusResponse
 
-type GetOperationStatusErrorResponse = ErrorResponse
+type GetOperationStatusErrorResponse = OperationErrorResponse
 
 type ListOrganizationsResponse = OrganizationsResponse
 
@@ -3502,6 +3512,17 @@ type GetDocumentIndexStatusResp struct {
 	JSON403      *GetDocumentIndexStatusErrorResponseJSON
 	JSON429      *GetDocumentIndexStatusErrorResponseJSON429
 	JSON503      *GetDocumentIndexStatusErrorResponseJSON503
+}
+
+type GetCurrentDocumentIndexStatusResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *GetCurrentDocumentIndexStatusResponse
+	JSON400      *GetCurrentDocumentIndexStatusErrorResponse
+	JSON403      *GetCurrentDocumentIndexStatusErrorResponseJSON
+	JSON429      *GetCurrentDocumentIndexStatusErrorResponseJSON429
+	JSON503      *GetCurrentDocumentIndexStatusErrorResponseJSON503
 }
 
 type GetDocumentVectorStatusResp struct {

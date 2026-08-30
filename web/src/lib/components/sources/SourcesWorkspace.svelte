@@ -14,8 +14,13 @@
   const STALE_LAST_RESULT_MS = 24 * 60 * 60 * 1_000;
 
   let {
-    client, maxAwaitingPolls = 6, now = () => new Date()
-  }: { client: APIClient; maxAwaitingPolls?: number; now?: () => Date } = $props();
+    client, maxAwaitingPolls = 6, now = () => new Date(), onOpenOperations = () => undefined
+  }: {
+    client: APIClient;
+    maxAwaitingPolls?: number;
+    now?: () => Date;
+    onOpenOperations?: () => void;
+  } = $props();
   let sources = $state<Source[]>([]);
   let loading = $state(true);
   let statusError = $state('');
@@ -246,7 +251,13 @@
 </script>
 
 <main class="sources" aria-label="Sources">
-  <header><div><p>Archive workspace</p><h1>Sources</h1></div><span>Status and incremental sync</span></header>
+  <header>
+    <div><p>Archive workspace</p><h1>Sources</h1></div>
+    <div class="header-actions">
+      <span>Status and incremental sync</span>
+      <Button size="sm" surface="soft" label="View source operations" onclick={onOpenOperations} />
+    </div>
+  </header>
   {#if statusError}<p class="notice notice--error" role="alert">{statusError}</p>{/if}
   {#if triggerError}<p class="notice notice--error" role="alert">{triggerError}</p>{/if}
   {#if awaitingState === 'awaiting'}<p class="notice" role="status">Awaiting accepted sync run…</p>
@@ -336,6 +347,7 @@
 <style>
   .sources { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: var(--space-4); padding: var(--space-5) var(--space-6); }
   header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
+  .header-actions { display: flex; align-items: center; gap: var(--space-3); }
   header p, h1 { margin: 0; }
   header p { color: var(--status-warning-ink); font-size: var(--font-size-2xs); font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
   header span, td span, td time { color: var(--text-muted); font-size: var(--font-size-xs); }

@@ -1113,6 +1113,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/documents/status/current": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get extracted document index status for the selected durable profile */
+        get: operations["getCurrentDocumentIndexStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/documents/vectors/status": {
         parameters: {
             query?: never;
@@ -5785,6 +5802,10 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        OperationErrorResponse: {
+            error: string;
+            message?: string;
+        };
         OperationHealth: {
             busy: boolean;
             label?: string;
@@ -5808,25 +5829,19 @@ export interface components {
             related_status?: "listSourceStatus" | "getDocumentIndexStatus" | "getDocumentVectorStatus" | "getVisualAttachmentStatus" | "getCardDAVStatus";
             supported_actions: ("carddav_sync" | "visual_build" | "visual_resume")[];
             unavailable_code?: string;
-        } & {
-            [key: string]: unknown;
         };
         OperationPublicCounter: {
             /** @enum {string} */
-            name: "processed" | "added" | "updated" | "item_errors" | "attempted" | "succeeded" | "failed" | "projected_writes" | "books" | "created" | "removed";
+            name: "added" | "attempted" | "books" | "created" | "failed" | "identity_rejected" | "item_errors" | "processed" | "projected_writes" | "removed" | "requested" | "skipped" | "started" | "succeeded" | "suppressed" | "truncated" | "updated";
             /** @enum {string} */
-            unit: "messages" | "people" | "writes" | "books" | "contacts";
+            unit: "attachments" | "books" | "chunks" | "contacts" | "documents" | "messages" | "people" | "writes";
             /** Format: int64 */
             value: number;
-        } & {
-            [key: string]: unknown;
         };
         OperationPublicError: {
             /** @enum {string} */
-            code: "source_sync_failed" | "person_sweep_failed" | "policy" | "budget" | "lease_lost" | "rate_limited" | "timeout" | "provider_http" | "invalid_output" | "archive_gap" | "internal" | "cancelled" | "retry_after" | "authentication_failed" | "upstream_failed" | "safety_limit" | "sync_failed" | "unsafe_error_redacted" | "daemon_restarted" | "carddav_sync_failed";
+            code: "archive_gap" | "authentication_failed" | "budget" | "cancelled" | "carddav_sync_failed" | "daemon_restarted" | "internal" | "invalid_output" | "invocation_archive_drift" | "invocation_authentication_failed" | "invocation_cancelled" | "invocation_daemon_restarted" | "invocation_internal" | "invocation_invalid_output" | "invocation_rate_limited" | "invocation_safety_limit" | "invocation_timeout" | "invocation_unsafe_error_redacted" | "invocation_upstream_failed" | "lease_lost" | "person_sweep_failed" | "policy" | "provider_http" | "rate_limited" | "retry_after" | "safety_limit" | "source_sync_failed" | "sync_failed" | "timeout" | "unsafe_error_redacted" | "upstream_failed";
             message: string;
-        } & {
-            [key: string]: unknown;
         };
         OperationRunDetail: {
             counters: components["schemas"]["OperationPublicCounter"][];
@@ -5838,14 +5853,15 @@ export interface components {
             kind: "carddav_sync" | "document_embedding" | "document_extraction" | "message_embedding" | "person_embedding" | "person_enrichment" | "person_sweep" | "source_sync" | "visual_embedding";
             /** @enum {string} */
             lane: "contacts" | "documents" | "messages" | "person_facts" | "visual_attachments";
+            /** @enum {string} */
+            related_status?: "listSourceStatus" | "getDocumentIndexStatus" | "getDocumentVectorStatus" | "getVisualAttachmentStatus" | "getCardDAVStatus";
             /** Format: date-time */
             started_at: string;
             /** @enum {string} */
             state: "cancelled" | "failed" | "partial" | "queued" | "running" | "succeeded";
+            supported_actions: ("carddav_sync" | "visual_build" | "visual_resume")[];
             /** @enum {string} */
             trigger?: "manual" | "scheduled";
-        } & {
-            [key: string]: unknown;
         };
         OperationRunSummary: {
             counters: components["schemas"]["OperationPublicCounter"][];
@@ -5863,20 +5879,16 @@ export interface components {
             state: "cancelled" | "failed" | "partial" | "queued" | "running" | "succeeded";
             /** @enum {string} */
             trigger?: "manual" | "scheduled";
-        } & {
-            [key: string]: unknown;
         };
         OperationRunsResponse: {
+            /** Format: int64 */
+            membership_revision: number;
             next_cursor?: string;
             runs: components["schemas"]["OperationRunSummary"][];
             unavailable_kinds: components["schemas"]["OperationUnavailableKind"][];
-        } & {
-            [key: string]: unknown;
         };
         OperationStatusResponse: {
             lanes: components["schemas"]["OperationLaneStatus"][];
-        } & {
-            [key: string]: unknown;
         };
         OperationUnavailableKind: {
             /** @enum {string} */
@@ -5884,8 +5896,6 @@ export interface components {
             /** @enum {string} */
             lane: "contacts" | "documents" | "messages" | "person_facts" | "visual_attachments";
             unavailable_code: string;
-        } & {
-            [key: string]: unknown;
         };
         Organization: {
             /** Format: date-time */
@@ -12780,6 +12790,71 @@ export interface operations {
             };
         };
     };
+    getCurrentDocumentIndexStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentIndexStatusResponse"];
+                };
+            };
+            /** @description Error */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Error */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Error */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Error */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     getDocumentVectorStatus: {
         parameters: {
             query?: {
@@ -15185,9 +15260,13 @@ export interface operations {
                 lane?: "contacts" | "documents" | "messages" | "person_facts" | "visual_attachments";
                 /** @description Exact operation state */
                 state?: "cancelled" | "failed" | "partial" | "queued" | "running" | "succeeded";
+                /** @description Inclusive canonical UTC RFC3339 lower bound */
+                started_from?: string;
+                /** @description Exclusive canonical UTC RFC3339 upper bound */
+                started_before?: string;
                 /** @description Maximum runs to return (default 25, max 100) */
                 limit?: number;
-                /** @description Opaque cursor bound to this archive and the exact kind, lane, and state filters */
+                /** @description Opaque cursor bound to this archive and the complete normalized filter set */
                 cursor?: string;
             };
             header?: never;
@@ -15211,7 +15290,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["OperationErrorResponse"];
                 };
             };
             /** @description Error */
@@ -15220,7 +15299,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["OperationErrorResponse"];
                 };
             };
             /** @description Error */
@@ -15229,7 +15308,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["OperationErrorResponse"];
                 };
             };
             /** @description Error */
@@ -15238,7 +15317,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["OperationErrorResponse"];
                 };
             };
             /** @description Error */
@@ -15247,7 +15326,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["OperationErrorResponse"];
                 };
             };
         };
@@ -15279,7 +15358,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["OperationErrorResponse"];
                 };
             };
             /** @description Error */
@@ -15288,7 +15367,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["OperationErrorResponse"];
                 };
             };
             /** @description Error */
@@ -15297,7 +15376,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["OperationErrorResponse"];
                 };
             };
             /** @description Error */
@@ -15306,7 +15385,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["OperationErrorResponse"];
                 };
             };
             /** @description Error */
@@ -15315,7 +15394,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["OperationErrorResponse"];
                 };
             };
             /** @description Error */
@@ -15324,7 +15403,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["OperationErrorResponse"];
                 };
             };
         };
@@ -15353,7 +15432,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["OperationErrorResponse"];
                 };
             };
         };

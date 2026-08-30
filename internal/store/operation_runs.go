@@ -25,18 +25,24 @@ var _ operations.HistoryReader = (*Store)(nil)
 
 var durableOperationKinds = []operations.Kind{
 	operations.KindCardDAVSync,
+	operations.KindDocumentEmbedding,
+	operations.KindDocumentExtraction,
+	operations.KindMessageEmbedding,
+	operations.KindPersonEmbedding,
+	operations.KindPersonEnrichment,
 	operations.KindPersonSweep,
 	operations.KindSourceSync,
+	operations.KindVisualEmbedding,
 }
 
 const (
 	sourceOperationRunColumns = `id, started_at, completed_at, status,
 		messages_processed, messages_added, messages_updated, errors_count`
-	sourceOperationSQLiteTimestampLayout = "2006-01-02 15:04:05"
+	sourceOperationSQLiteTimestampLayout = "2006-01-02 15:04:05.999999999"
 	cardDAVOperationRunColumns           = `id, trigger, state, started_at, finished_at,
 		books, created, updated, removed,
 		CASE WHEN state IN ('failed', 'cancelled', 'partial') THEN error_code ELSE '' END`
-	cardDAVOperationSQLiteTimestampLayout = "2006-01-02 15:04:05"
+	cardDAVOperationSQLiteTimestampLayout = "2006-01-02 15:04:05.999999999"
 )
 
 func personSweepOperationRunColumns(textCollation string) string {
@@ -93,10 +99,18 @@ func (s *Store) listSourceOperationRunsFrom(
 		return nil, errors.New("source operation fetch limit must be between one and query limit plus one")
 	}
 
-	conditions := make([]string, 0, 2)
-	args := make([]any, 0, 4)
+	conditions := make([]string, 0, 4)
+	args := make([]any, 0, 6)
 	if len(query.States) > 0 {
 		conditions = append(conditions, sourceOperationStateCondition(query.States))
+	}
+	if query.StartedFrom != nil {
+		conditions = append(conditions, `started_at >= ?`)
+		args = append(args, s.sourceOperationTimestampParam(*query.StartedFrom))
+	}
+	if query.StartedBefore != nil {
+		conditions = append(conditions, `started_at < ?`)
+		args = append(args, s.sourceOperationTimestampParam(*query.StartedBefore))
 	}
 	if query.Position != nil {
 		condition, positionArgs, err := s.sourceOperationPositionCondition(*query.Position)
@@ -340,10 +354,18 @@ func (s *Store) listPersonSweepOperationRunsFrom(
 		return nil, errors.New("person sweep operation fetch limit must be between one and query limit plus one")
 	}
 
-	conditions := make([]string, 0, 2)
-	args := make([]any, 0, 4)
+	conditions := make([]string, 0, 4)
+	args := make([]any, 0, 6)
 	if len(query.States) > 0 {
 		conditions = append(conditions, personSweepOperationStateCondition(query.States))
+	}
+	if query.StartedFrom != nil {
+		conditions = append(conditions, `r.started_at >= ?`)
+		args = append(args, s.dialect.TimestampParam(*query.StartedFrom))
+	}
+	if query.StartedBefore != nil {
+		conditions = append(conditions, `r.started_at < ?`)
+		args = append(args, s.dialect.TimestampParam(*query.StartedBefore))
 	}
 	if query.Position != nil {
 		condition, positionArgs, err := s.personSweepOperationPositionCondition(*query.Position)
@@ -592,10 +614,18 @@ func (s *Store) listCardDAVOperationRunsFrom(
 		return nil, errors.New("CardDAV operation fetch limit must be between one and query limit plus one")
 	}
 
-	conditions := make([]string, 0, 2)
-	args := make([]any, 0, 4)
+	conditions := make([]string, 0, 4)
+	args := make([]any, 0, 6)
 	if len(query.States) > 0 {
 		conditions = append(conditions, cardDAVOperationStateCondition(query.States))
+	}
+	if query.StartedFrom != nil {
+		conditions = append(conditions, `started_at >= ?`)
+		args = append(args, s.cardDAVOperationTimestampParam(*query.StartedFrom))
+	}
+	if query.StartedBefore != nil {
+		conditions = append(conditions, `started_at < ?`)
+		args = append(args, s.cardDAVOperationTimestampParam(*query.StartedBefore))
 	}
 	if query.Position != nil {
 		condition, positionArgs, err := s.cardDAVOperationPositionCondition(*query.Position)
@@ -842,48 +872,8 @@ func (s *Store) Kinds() []operations.Kind {
 // count query.
 func (s *Store) ListRuns(
 	ctx context.Context, query operations.Query,
-) ([]operations.Run, error) {
-	if err := query.Validate(); err != nil {
-		return nil, fmt.Errorf("list operation runs: %w", err)
-	}
-	selected, err := selectedDurableOperationKinds(query.Kinds)
-	if err != nil {
-		return nil, err
-	}
-	fetchLimit := query.Limit + 1
-	merged := make([]operations.Run, 0, len(selected)*fetchLimit)
-	err = s.withReadSnapshotContext(ctx, func(tx *loggedTx) error {
-		for _, kind := range selected {
-			var runs []operations.Run
-			var listErr error
-			switch kind {
-			case operations.KindCardDAVSync:
-				runs, listErr = s.listCardDAVOperationRunsFrom(ctx, tx, query, fetchLimit)
-			case operations.KindPersonSweep:
-				runs, listErr = s.listPersonSweepOperationRunsFrom(ctx, tx, query, fetchLimit)
-			case operations.KindSourceSync:
-				runs, listErr = s.listSourceOperationRunsFrom(ctx, tx, query, fetchLimit)
-			default:
-				return fmt.Errorf("list operation runs for %q: %w", kind, ErrOperationHistoryUnavailable)
-			}
-			if listErr != nil {
-				return fmt.Errorf("list operation runs for %q: %w", kind, listErr)
-			}
-			merged = append(merged, runs...)
-			if s.operationHistoryAfterAdapterReadHook != nil {
-				s.operationHistoryAfterAdapterReadHook(string(kind))
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list operation history snapshot: %w", err)
-	}
-	operations.SortRuns(merged)
-	if len(merged) > fetchLimit {
-		merged = merged[:fetchLimit]
-	}
-	return merged, nil
+) (operations.HistorySnapshot, error) {
+	return s.listOperationHistorySnapshot(ctx, query)
 }
 
 func selectedDurableOperationKinds(requested []operations.Kind) ([]operations.Kind, error) {
@@ -907,6 +897,12 @@ func (s *Store) GetRun(ctx context.Context, id operations.StableID) (operations.
 	switch id.Kind() {
 	case operations.KindCardDAVSync:
 		return s.getCardDAVOperationRun(ctx, id)
+	case operations.KindDocumentEmbedding, operations.KindDocumentExtraction,
+		operations.KindMessageEmbedding, operations.KindPersonEmbedding,
+		operations.KindVisualEmbedding:
+		return s.getInvocationOperationRun(ctx, id)
+	case operations.KindPersonEnrichment:
+		return s.getPersonEnrichmentOperationRun(ctx, id)
 	case operations.KindPersonSweep:
 		return s.getPersonSweepOperationRun(ctx, id)
 	case operations.KindSourceSync:
@@ -928,6 +924,10 @@ func (s *Store) LaneStatus(
 	switch kind {
 	case operations.KindCardDAVSync:
 		return s.cardDAVOperationLaneStatus(ctx)
+	case operations.KindDocumentEmbedding, operations.KindDocumentExtraction,
+		operations.KindMessageEmbedding, operations.KindPersonEmbedding,
+		operations.KindPersonEnrichment, operations.KindVisualEmbedding:
+		return s.genericOperationLaneStatus(ctx, kind)
 	case operations.KindPersonSweep:
 		return s.personSweepOperationLaneStatus(ctx)
 	case operations.KindSourceSync:

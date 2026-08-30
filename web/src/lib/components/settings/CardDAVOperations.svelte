@@ -11,6 +11,7 @@
     TableHeaderCell,
     type ChipTone
   } from '@kenn-io/kit-ui';
+  import { getContext } from 'svelte';
 
   import type { CardDAVBook, CardDAVBookRoles, CardDAVController } from '../../carddav/controller.svelte';
   import type { components } from '../../api/generated/schema';
@@ -18,7 +19,18 @@
   type CardDAVRun = components['schemas']['CardDAVRunResponse'];
   type RepairReason = NonNullable<components['schemas']['CardDAVStatusResponse']['repair_reason']>;
 
-  let { controller }: { controller: CardDAVController } = $props();
+  let {
+    controller,
+    onOpenOperations: providedOpenOperations = undefined
+  }: {
+    controller: CardDAVController;
+    onOpenOperations?: () => void;
+  } = $props();
+  const shellOpenOperations = getContext<(() => void) | undefined>('msgvault:open-carddav-operations');
+
+  function openOperations(): void {
+    (providedOpenOperations ?? shellOpenOperations)?.();
+  }
 
   const repairCopy: Record<RepairReason, string> = {
     account_missing: 'CardDAV account discovery is missing. Test and save the account again.',
@@ -110,6 +122,7 @@
     <div class="actions">
       <Button label={controller.syncPending ? 'Checking CardDAV state…' : 'Sync now'} disabled={!controller.canSync} onclick={() => void controller.sync(false)} />
       <Button label={controller.syncPending ? 'Checking CardDAV state…' : 'Full sync'} disabled={!controller.canSync} tone="info" onclick={() => void controller.sync(true)} />
+      <Button label="View CardDAV operations" surface="soft" onclick={openOperations} />
     </div>
   </div>
 </SettingsSection>

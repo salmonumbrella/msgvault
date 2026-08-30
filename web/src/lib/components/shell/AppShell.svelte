@@ -11,7 +11,7 @@
     initShortcuts,
     type PaletteCommand
   } from '@kenn-io/kit-ui';
-  import { onDestroy, onMount, tick, type Snippet, untrack } from 'svelte';
+  import { onDestroy, onMount, setContext, tick, type Snippet, untrack } from 'svelte';
 
   import type { APIClient } from '../../api/client';
   import type { components } from '../../api/generated/schema';
@@ -22,6 +22,7 @@
     ExploreGroupRow,
     ExploreFileFact,
     ExploreSearchMode,
+    OperationStatusAuthority,
     ExploreURLState,
     ExploreWorkspace,
     FileViewerTarget,
@@ -38,7 +39,14 @@
   import { DirectoryReviewController } from '../../directory/review-controller.svelte';
   import { RelationshipReviewController } from '../../directory/relationship-review-controller.svelte';
   import { FactLedgerController } from '../../directory/fact-ledger-controller.svelte';
-  import type { CardDAVSettingsRequest } from '../../carddav/navigation';
+  import { OperationsController } from '../../operations/controller.svelte';
+  import type { OperationRunDetail, OperationsURLState } from '../../operations/models';
+  import {
+    settingsNavigationTarget as targetForSettingsAuthority,
+    type CardDAVSettingsRequest,
+    type SettingsNavigationAuthority,
+    type SettingsNavigationTarget
+  } from '../../carddav/navigation';
   import { createCommandRegistry, type AppCommand, type CommandHandlers } from '../../commands/registry';
   import {
     createAppearancePreferences,
@@ -50,6 +58,7 @@
   import GroupTable from '../explore/GroupTable.svelte';
   import SavedViewsWorkspace from '../saved-views/SavedViewsWorkspace.svelte';
   import SourcesWorkspace from '../sources/SourcesWorkspace.svelte';
+  import OperationsWorkspace from '../operations/OperationsWorkspace.svelte';
   import DeletionsWorkspace from '../deletions/DeletionsWorkspace.svelte';
   import FilesWorkspace from '../files/FilesWorkspace.svelte';
   import FileViewer from '../files/FileViewer.svelte';
@@ -65,9 +74,14 @@
     client: APIClient;
     state?: ExploreState;
     enabled?: boolean;
-    settings?: Snippet<[CardDAVSettingsRequest | undefined, (key: number) => void]>;
+    settings?: Snippet<[
+      CardDAVSettingsRequest | undefined,
+      (key: number) => void,
+      SettingsNavigationTarget | undefined
+    ]>;
     appearanceDefaults?: AppearanceDefaults;
     searchModeDefault?: ExploreSearchMode;
+    archiveContextKey?: string;
   }
 
   let {
@@ -76,7 +90,8 @@
     enabled = true,
     settings = undefined,
     appearanceDefaults = { theme: 'system', density: 'compact' },
-    searchModeDefault = undefined
+    searchModeDefault = undefined,
+    archiveContextKey = ''
   }: Props = $props();
 
   const ownsState = untrack(() => providedState === undefined);
@@ -185,8 +200,65 @@
     commitWorkspace('settings');
   }
 
+  function openOperations(
+    operationLane: OperationsURLState['operationLane'],
+    operationKind: OperationsURLState['operationKind']
+  ): void {
+    announceOperation('Opening filtered operation history.');
+    commitNavigation({
+      workspace: 'operations',
+      operationLane,
+      operationKind,
+      operationState: '',
+      operationStartedFrom: '',
+      operationStartedBefore: '',
+      operationRunID: null,
+      operationStatus: ''
+    });
+  }
+
+  type RelatedOperationStatus = NonNullable<OperationRunDetail['related_status']>;
+
+  function openOperationAuthority(target: RelatedOperationStatus): void {
+    if (target === 'listSourceStatus') {
+      announceOperation('Opening source status.');
+      commitWorkspace('sources');
+      return;
+    }
+    if (target === 'getCardDAVStatus') {
+      openCardDAVSettings();
+      return;
+    }
+    const statusTargets: Record<
+      Exclude<RelatedOperationStatus, 'listSourceStatus' | 'getCardDAVStatus'>,
+      string
+    > = {
+      getDocumentIndexStatus: 'Opening live document index status.',
+      getDocumentVectorStatus: 'Opening live document vector status.',
+      getVisualAttachmentStatus: 'Opening live visual attachment status.'
+    };
+    announceOperation(statusTargets[target]);
+    commitNavigation({ workspace: 'operations', operationStatus: target });
+  }
+
+  function openOperationConfiguration(target: OperationStatusAuthority): void {
+    const settingsTargets: Record<OperationStatusAuthority, SettingsNavigationAuthority> = {
+      getDocumentIndexStatus: 'document_index',
+      getDocumentVectorStatus: 'document_vector',
+      getVisualAttachmentStatus: 'visual_attachments'
+    };
+    commitNavigation({ workspace: 'settings', settingsAuthority: settingsTargets[target] });
+  }
+
+  setContext('msgvault:open-carddav-operations', () => openOperations('contacts', 'carddav_sync'));
+
   function consumeCardDAVSettingsRequest(key: number): void {
     if (cardDAVSettingsRequest?.key === key) cardDAVSettingsRequest = undefined;
+  }
+
+  function openWorkspaceTab(workspace: ExploreWorkspace): void {
+    if (workspace === 'settings') cardDAVSettingsRequest = undefined;
+    commitWorkspace(workspace);
   }
 
   function commitGrouping(dimension: ExploreGroupDimension): void {
@@ -224,6 +296,10 @@
     (patch) => commitNavigation(patch)
   );
   const factLedgerController = new FactLedgerController(untrack(() => client));
+  const operationsController = new OperationsController(
+    untrack(() => client),
+    (patch) => commitNavigation(patch)
+  );
   // Participant IDs only enter here from a successfully loaded
   // /participants/{id} Relationship detail. It is intentionally ephemeral:
   // browser restoration and ordinary Directory navigation never invent a
@@ -231,6 +307,9 @@
   let directoryPromotionParticipantID = $state<number>();
   let cardDAVSettingsRequest = $state<CardDAVSettingsRequest>();
   let cardDAVSettingsRequestKey = 0;
+  const settingsNavigationTarget = $derived(exploreState.current.workspace === 'settings'
+    ? targetForSettingsAuthority(exploreState.current.settingsAuthority)
+    : undefined);
   let operationAnnouncementKey = 0;
   let operationAnnouncement = $state({ key: 0, message: '' });
   type APIExploreSelection = components['schemas']['ExploreSelection'];
@@ -243,6 +322,7 @@
     { id: 'files', label: 'Files' },
     { id: 'saved_views', label: 'Saved Views' },
     { id: 'sources', label: 'Sources' },
+    { id: 'operations', label: 'Operations' },
     { id: 'deletions', label: 'Deletions' },
     { id: 'settings', label: 'Settings' }
   ];
@@ -254,6 +334,21 @@
 
   $effect(() => {
     if (exploreState.current.workspace !== 'settings') cardDAVSettingsRequest = undefined;
+  });
+
+  $effect(() => {
+    if (exploreState.current.workspace !== 'operations') return;
+    const operationState: OperationsURLState = {
+      operationLane: exploreState.current.operationLane,
+      operationKind: exploreState.current.operationKind,
+      operationState: exploreState.current.operationState,
+      operationStartedFrom: exploreState.current.operationStartedFrom,
+      operationStartedBefore: exploreState.current.operationStartedBefore,
+      operationRunID: exploreState.current.operationRunID,
+      operationStatus: exploreState.current.operationStatus
+    };
+    const context = archiveContextKey;
+    untrack(() => { void operationsController.applyURLState(operationState, context); });
   });
   // A default landing (no `explore` param at all — the very first visit,
   // not a URL that named a workspace) starts on the Relationships hub. If
@@ -979,6 +1074,7 @@
     directoryReviewController.destroy();
     relationshipReviewController.destroy();
     factLedgerController.destroy();
+    operationsController.destroy();
     if (ownsState) exploreState.destroy();
   });
 </script>
@@ -991,7 +1087,7 @@
     {tabs}
     active={exploreState.current.workspace}
     centerTabs
-    onchange={(workspace) => commitWorkspace(workspace as ExploreWorkspace)}
+    onchange={(workspace) => openWorkspaceTab(workspace as ExploreWorkspace)}
   >
     {#snippet left()}
       <div class="brand" aria-label="msgvault home"><span aria-hidden="true">◇</span> msgvault</div>
@@ -1028,7 +1124,7 @@
   </TopBar>
 
   {#if exploreState.current.workspace === 'settings'}
-    {#if settings}{@render settings(cardDAVSettingsRequest, consumeCardDAVSettingsRequest)}{/if}
+    {#if settings}{@render settings(cardDAVSettingsRequest, consumeCardDAVSettingsRequest, settingsNavigationTarget)}{/if}
   {:else if exploreState.current.workspace === 'saved_views'}
     <SavedViewsWorkspace
       {client}
@@ -1037,7 +1133,25 @@
       onOpen={(state) => { void openSavedView(state); }}
     />
   {:else if exploreState.current.workspace === 'sources'}
-    <SourcesWorkspace {client} />
+    <SourcesWorkspace {client} onOpenOperations={() => openOperations('messages', 'source_sync')} />
+  {:else if exploreState.current.workspace === 'operations'}
+    <OperationsWorkspace
+      {client}
+      controller={operationsController}
+      state={{
+        operationLane: exploreState.current.operationLane,
+        operationKind: exploreState.current.operationKind,
+        operationState: exploreState.current.operationState,
+        operationStartedFrom: exploreState.current.operationStartedFrom,
+        operationStartedBefore: exploreState.current.operationStartedBefore,
+        operationRunID: exploreState.current.operationRunID,
+        operationStatus: exploreState.current.operationStatus
+      }}
+      onStateChange={(patch) => commitNavigation(patch)}
+      onNavigate={openOperationAuthority}
+      onConfigure={openOperationConfiguration}
+      onAnnounce={announceOperation}
+    />
   {:else if exploreState.current.workspace === 'deletions'}
     <DeletionsWorkspace
       {client}
