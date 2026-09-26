@@ -310,12 +310,17 @@ func TestAcceleratorWorkerCanBeKilledAndRetried(t *testing.T) {
 		"MSGVAULT_TEST_ACCELERATOR_GENERATION="+strconv.FormatInt(int64(generationID), 10),
 		"MSGVAULT_TEST_ACCELERATOR_MARKER="+marker,
 	)
+	t.Cleanup(func() {
+		cancel()
+		if command.Process != nil && command.ProcessState == nil {
+			_ = command.Wait()
+		}
+	})
 	require.NoError(t, command.Start())
 	require.Eventually(t, func() bool {
 		_, statErr := os.Stat(marker)
 		return statErr == nil
 	}, 5*time.Second, 10*time.Millisecond)
-	time.Sleep(50 * time.Millisecond)
 	cancel()
 	require.Error(t, command.Wait())
 	require.NotNil(t, command.ProcessState)
