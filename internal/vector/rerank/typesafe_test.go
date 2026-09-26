@@ -164,7 +164,7 @@ func TestJevFailureReturnsAttemptedCallsAndPartialUsage(t *testing.T) {
 			if recorded {
 				break
 			}
-			time.Sleep(time.Millisecond)
+			time.Sleep(time.Millisecond) //nolint:kennlint // waits for concurrent request accounting before returning the later failure
 		}
 		budget.mu.Lock()
 		recorded := budget.cost > 0

@@ -315,7 +315,7 @@ func TestAcceleratorWorkerCanBeKilledAndRetried(t *testing.T) {
 		_, statErr := os.Stat(marker)
 		return statErr == nil
 	}, 5*time.Second, 10*time.Millisecond)
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond) //nolint:kennlint // gives the real subprocess time to open SQLite before cancellation
 	cancel()
 	require.Error(t, command.Wait())
 	require.NotNil(t, command.ProcessState)
