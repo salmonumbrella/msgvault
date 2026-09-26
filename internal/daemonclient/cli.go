@@ -421,6 +421,18 @@ func (c *Client) RunCLISync(
 	req CLISyncRequest,
 	output func(stream, data string) error,
 ) error {
+	if req.BuildCache || req.NoBuildCache {
+		version, err := c.APISchemaVersion(ctx)
+		if err != nil {
+			return fmt.Errorf("check daemon sync cache flags capability: %w", err)
+		}
+		if !apiSchemaVersionAtLeast(version, syncCacheFlagsMinAPISchemaVersion) {
+			return fmt.Errorf(
+				"sync cache flags require daemon API schema %s or newer (daemon reports %q); upgrade the daemon",
+				syncCacheFlagsMinAPISchemaVersion, version,
+			)
+		}
+	}
 	if req.SourceIDSet {
 		if err := c.requireSourceIDSyncCapability(ctx); err != nil {
 			return err
@@ -459,6 +471,7 @@ func (c *Client) RunCLISync(
 
 const (
 	sourceIDSyncMinAPISchemaVersion    = "2.4.0"
+	syncCacheFlagsMinAPISchemaVersion  = "2.31.0"
 	searchDeletionMinAPISchemaVersion  = "2.12.0"
 	deduplicatePlanMinAPISchemaVersion = "2.13.0"
 	repairMessageMinAPISchemaVersion   = "2.15.0"

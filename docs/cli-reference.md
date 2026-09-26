@@ -482,6 +482,10 @@ manual syncs leave a usable stale cache in place until the minimum rebuild
 interval expires. The daemon owns any refresh after the sync command returns.
 The two flags are mutually exclusive.
 
+For `sync` and `sync-full`, either cache flag requires daemon API schema 2.31.0
+or newer. The CLI reports an upgrade error before starting sync against an
+older daemon.
+
 Folder filters are applied only to IMAP accounts. See
 [IMAP Folder Sync](/docs/usage/imap/) for examples and matching rules.
 

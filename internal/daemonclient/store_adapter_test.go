@@ -254,6 +254,71 @@ func TestRunCLISyncRejectsOldDaemonBeforeStartingSourceScopedSync(t *testing.T) 
 	assert.Zero(t, syncCalls, "source-scoped sync must not start on an older daemon")
 }
 
+func TestRunCLISyncCacheFlagsRequireCompatibleDaemon(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		full bool
+	}{
+		{name: "sync"},
+		{name: "sync-full", full: true},
+	} {
+		for _, test := range []struct {
+			name        string
+			version     string
+			build       bool
+			skip        bool
+			healthError bool
+			wantError   string
+		}{
+			{name: "default on older daemon", version: "2.30.0"},
+			{name: "build on older daemon", version: "2.30.0", build: true, wantError: "upgrade the daemon"},
+			{name: "skip on older daemon", version: "2.30.0", skip: true, wantError: "upgrade the daemon"},
+			{name: "build on supported daemon", version: "2.31.0", build: true},
+			{name: "skip on supported daemon", version: "2.31.0", skip: true},
+			{name: "health unavailable", build: true, healthError: true, wantError: "check daemon sync cache flags capability"},
+		} {
+			t.Run(mode.name+"/"+test.name, func(t *testing.T) {
+				assertions := assert.New(t)
+				requirements := require.New(t)
+				var syncCalls, healthCalls atomic.Int32
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/api/v1/health" {
+						healthCalls.Add(1)
+						if test.healthError {
+							http.Error(w, "health unavailable", http.StatusBadGateway)
+							return
+						}
+						writeJSONResponse(t, w, map[string]any{"status": "ok", "api_schema_version": test.version})
+						return
+					}
+					syncCalls.Add(1)
+					assertions.Equal("/api/v1/cli/"+mode.name, r.URL.Path)
+					assertions.Equal(http.MethodPost, r.Method)
+					assertions.Equal(test.build, r.URL.Query().Get("build-cache") == "true")
+					assertions.Equal(test.skip, r.URL.Query().Get("no-build-cache") == "true")
+					w.Header().Set("Content-Type", "application/x-ndjson")
+					_, _ = w.Write([]byte("{\"type\":\"complete\"}\n"))
+				}))
+				t.Cleanup(srv.Close)
+				st := newTestStore(srv, "")
+				err := st.RunCLISync(t.Context(), CLISyncRequest{
+					Full: mode.full, BuildCache: test.build, NoBuildCache: test.skip,
+				}, nil)
+				if test.wantError != "" {
+					requirements.ErrorContains(err, test.wantError)
+					assertions.Zero(syncCalls.Load(), "unsupported flags must fail before sync starts")
+				} else {
+					requirements.NoError(err)
+					assertions.Equal(int32(1), syncCalls.Load())
+				}
+				if !test.build && !test.skip {
+					assertions.Zero(healthCalls.Load(), "default sync needs no cache flag capability check")
+				}
+			})
+		}
+	}
+}
+
 func TestRunCLICommandStreamsOutput(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
