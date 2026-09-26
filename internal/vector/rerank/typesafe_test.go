@@ -145,45 +145,38 @@ func TestJevAccounting(t *testing.T) {
 }
 
 func TestJevFailureReturnsAttemptedCallsAndPartialUsage(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-	response := captureResponse(t, "capture_per_candidate.json")
-	budget := &Budget{MaxRequests: 10, StopUSD: 1, InputUSDPerM: 1, OutputUSDPerM: 1}
-	scorer, err := NewJev("per-candidate", "secret-key", budget, nil)
-	require.NoError(err)
-	var requests atomic.Int32
-	scorer.client = &http.Client{Transport: testTransport(func(_ *http.Request) (*http.Response, error) {
-		if requests.Add(1) == 1 {
-			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(response)))}, nil
-		}
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
+	synctest.Test(t, func(t *testing.T) {
+		assert := assert.New(t)
+		require := require.New(t)
+		response := captureResponse(t, "capture_per_candidate.json")
+		budget := &Budget{MaxRequests: 10, StopUSD: 1, InputUSDPerM: 1, OutputUSDPerM: 1}
+		scorer, err := NewJev("per-candidate", "secret-key", budget, nil)
+		require.NoError(err)
+		var requests atomic.Int32
+		scorer.client = &http.Client{Transport: testTransport(func(_ *http.Request) (*http.Response, error) {
+			if requests.Add(1) == 1 {
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(response)))}, nil
+			}
+			synctest.Wait()
 			budget.mu.Lock()
 			recorded := budget.cost > 0
 			budget.mu.Unlock()
-			if recorded {
-				break
+			if !recorded {
+				return nil, errors.New("first call usage was not recorded")
 			}
-			time.Sleep(time.Millisecond)
-		}
-		budget.mu.Lock()
-		recorded := budget.cost > 0
-		budget.mu.Unlock()
-		if !recorded {
-			return nil, errors.New("first call usage was not recorded")
-		}
-		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: http.Header{"Content-Type": []string{"text/plain"}}, Body: io.NopCloser(strings.NewReader("private provider body"))}, nil
-	})}
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: http.Header{"Content-Type": []string{"text/plain"}}, Body: io.NopCloser(strings.NewReader("private provider body"))}, nil
+		})}
 
-	result, err := scorer.Rerank(context.Background(), Request{Query: "query", Candidates: []string{"first", "second"}})
-	require.ErrorContains(err, "HTTP 503")
-	assert.Equal(2, result.Usage.Requests)
-	assert.Equal(int64(342), *result.Usage.InputTokens)
-	assert.Equal(int64(20), *result.Usage.OutputTokens)
-	assert.False(result.Usage.Complete)
-	assert.Equal("provider returned HTTP 503", SafeFailure(err))
-	assert.NotContains(err.Error(), "private provider body")
-	assert.NotContains(err.Error(), "secret-key")
+		result, err := scorer.Rerank(context.Background(), Request{Query: "query", Candidates: []string{"first", "second"}})
+		require.ErrorContains(err, "HTTP 503")
+		assert.Equal(2, result.Usage.Requests)
+		assert.Equal(int64(342), *result.Usage.InputTokens)
+		assert.Equal(int64(20), *result.Usage.OutputTokens)
+		assert.False(result.Usage.Complete)
+		assert.Equal("provider returned HTTP 503", SafeFailure(err))
+		assert.NotContains(err.Error(), "private provider body")
+		assert.NotContains(err.Error(), "secret-key")
+	})
 }
 
 type contextErrorBody struct{ ctx context.Context }

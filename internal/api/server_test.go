@@ -1398,12 +1398,12 @@ func TestCardDAVNetworkRoutesReceiveProtectiveDeadline(t *testing.T) {
 func TestCLIRequestDurationPolicy(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name        string
-		apiKey      string
-		bindAddr    string
-		allowUnsafe bool
-		configure   func(*Server, *http.Request)
-		wantTimeout bool
+		name         string
+		apiKey       string
+		bindAddr     string
+		allowUnsafe  bool
+		configure    func(*Server, *http.Request)
+		wantDeadline bool
 	}{
 		{
 			name: "keyless loopback CLI",
@@ -1413,10 +1413,10 @@ func TestCLIRequestDurationPolicy(t *testing.T) {
 			},
 		},
 		{
-			name:        "keyless remote CLI remains bounded",
-			bindAddr:    "0.0.0.0",
-			allowUnsafe: true,
-			wantTimeout: true,
+			name:         "keyless remote CLI remains bounded",
+			bindAddr:     "0.0.0.0",
+			allowUnsafe:  true,
+			wantDeadline: true,
 			configure: func(srv *Server, req *http.Request) {
 				req.RemoteAddr = "198.51.100.23:4242"
 				req.Header.Set(apiprotocol.ClientClassHeader, apiprotocol.ClientClassCLI)
@@ -1424,10 +1424,10 @@ func TestCLIRequestDurationPolicy(t *testing.T) {
 			},
 		},
 		{
-			name:        "forwarded loopback cannot spoof keyless remote CLI",
-			bindAddr:    "0.0.0.0",
-			allowUnsafe: true,
-			wantTimeout: true,
+			name:         "forwarded loopback cannot spoof keyless remote CLI",
+			bindAddr:     "0.0.0.0",
+			allowUnsafe:  true,
+			wantDeadline: true,
 			configure: func(srv *Server, req *http.Request) {
 				req.RemoteAddr = "198.51.100.23:4242"
 				req.Header.Set("Forwarded", "for=127.0.0.1")
@@ -1446,13 +1446,13 @@ func TestCLIRequestDurationPolicy(t *testing.T) {
 			},
 		},
 		{
-			name:        "unmarked API request",
-			wantTimeout: true,
+			name:         "unmarked API request",
+			wantDeadline: true,
 		},
 		{
-			name:        "browser session cannot opt in",
-			apiKey:      cliTimeoutTestAPIKey,
-			wantTimeout: true,
+			name:         "browser session cannot opt in",
+			apiKey:       cliTimeoutTestAPIKey,
+			wantDeadline: true,
 			configure: func(srv *Server, req *http.Request) {
 				id, _, err := srv.sessions.create()
 				require.NoError(t, err, "create session")
@@ -1485,8 +1485,10 @@ func TestCLIRequestDurationPolicy(t *testing.T) {
 					require.NoError(t, srv.Shutdown(context.Background()))
 				})
 
+				var gotDeadline bool
 				handlerResult := make(chan error, 1)
 				handler := srv.timeoutMiddleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+					_, gotDeadline = r.Context().Deadline()
 					select {
 					case <-time.After(40 * time.Millisecond):
 						handlerResult <- nil
@@ -1501,7 +1503,8 @@ func TestCLIRequestDurationPolicy(t *testing.T) {
 
 				handler.ServeHTTP(httptest.NewRecorder(), req)
 				err := <-handlerResult
-				if tt.wantTimeout {
+				assert.Equal(t, tt.wantDeadline, gotDeadline, "request context deadline policy")
+				if tt.wantDeadline {
 					assert.ErrorIs(t, err, context.DeadlineExceeded)
 				} else {
 					assert.NoError(t, err)
