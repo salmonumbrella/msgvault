@@ -202,6 +202,9 @@ func runExportToken(cmd *cobra.Command, args []string) error {
 		return errors.New("configuration is unavailable")
 	}
 	cfg := state.cfg
+	if cfg.Remote.SigningEnabled() {
+		return errors.New("export-token is unavailable with signed remote ingress; configure providers locally on the server")
+	}
 	email := args[0]
 
 	// Resolution order: flag > env var > config file
