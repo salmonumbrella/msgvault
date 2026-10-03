@@ -15,49 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestSanitizeExportTokenPath(t *testing.T) {
-	tokensDir := "/data/tokens"
-
-	tests := []struct {
-		name  string
-		email string
-		want  string
-	}{
-		{
-			"normal email",
-			"user@gmail.com",
-			filepath.Join(tokensDir, "user@gmail.com.json"),
-		},
-		{
-			"email with dots",
-			"first.last@example.co.uk",
-			filepath.Join(tokensDir, "first.last@example.co.uk.json"),
-		},
-		{
-			"email with plus",
-			"user+tag@gmail.com",
-			filepath.Join(tokensDir, "user+tag@gmail.com.json"),
-		},
-		{
-			"strips slashes",
-			"user/evil@gmail.com",
-			filepath.Join(tokensDir, "userevil@gmail.com.json"),
-		},
-		{
-			"strips backslashes",
-			"user\\evil@gmail.com",
-			filepath.Join(tokensDir, "userevil@gmail.com.json"),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := sanitizeExportTokenPath(tokensDir, tt.email)
-			assert.Equal(t, tt.want, got, "sanitizeExportTokenPath(%q)", tt.email)
-		})
-	}
-}
-
 func TestEmailValidation(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -2,18 +2,19 @@ package cmd
 
 import (
 	"bytes"
-	"crypto/sha256"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.kenn.io/msgvault/internal/config"
+	"go.kenn.io/msgvault/internal/oauth"
 )
 
 var (
@@ -62,10 +63,11 @@ func init() {
 
 // tokenExporter uploads OAuth tokens to a remote msgvault server.
 type tokenExporter struct {
-	httpClient *http.Client
-	tokensDir  string
-	stdout     io.Writer
-	stderr     io.Writer
+	tokenCommands config.OAuthTokenCommands
+	httpClient    *http.Client
+	tokensDir     string
+	stdout        io.Writer
+	stderr        io.Writer
 }
 
 // exportResult holds the resolved parameters after a successful export,
@@ -100,14 +102,10 @@ func (e *tokenExporter) export(
 		return nil, err
 	}
 
-	// Read local token
-	tokenPath := sanitizeExportTokenPath(e.tokensDir, email)
-	if _, err := os.Stat(tokenPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf(
-			"no token found for %s\n\nRun 'msgvault add-account %s' first to authenticate",
-			email, email)
+	tokenData, err := oauth.NewTokenStore(e.tokensDir, e.tokenCommands).Read(context.Background(), email)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("no token found for %s\n\nRun 'msgvault add-account %s' first to authenticate", email, email)
 	}
-	tokenData, err := os.ReadFile(tokenPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read token: %w", err)
 	}
@@ -216,10 +214,11 @@ func runExportToken(cmd *cobra.Command, args []string) error {
 	}
 
 	exporter := &tokenExporter{
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		tokensDir:  cfg.TokensDir(),
-		stdout:     os.Stdout,
-		stderr:     os.Stderr,
+		tokenCommands: cfg.OAuth.Tokens,
+		httpClient:    &http.Client{Timeout: 30 * time.Second},
+		tokensDir:     cfg.TokensDir(),
+		stdout:        os.Stdout,
+		stderr:        os.Stderr,
 	}
 
 	allowInsecure := exportAllowInsecure || cfg.Remote.AllowInsecure
@@ -274,29 +273,4 @@ func validateExportEmail(email string) error {
 		return errors.New("invalid email format: contains path characters")
 	}
 	return nil
-}
-
-// sanitizeExportTokenPath returns a safe file path for the token.
-// Matches the server-side sanitizeTokenPath function in handlers.go.
-func sanitizeExportTokenPath(tokensDir, email string) string {
-	// Remove dangerous characters
-	safe := strings.Map(func(r rune) rune {
-		if r == '/' || r == '\\' || r == '\x00' {
-			return -1
-		}
-		return r
-	}, email)
-
-	// Build path and verify it's within tokensDir
-	path := filepath.Join(tokensDir, safe+".json")
-	cleanPath := filepath.Clean(path)
-	cleanTokensDir := filepath.Clean(tokensDir)
-
-	// If path escapes tokensDir, use hash-based fallback
-	if !strings.HasPrefix(cleanPath, cleanTokensDir+string(os.PathSeparator)) {
-		return filepath.Join(tokensDir,
-			fmt.Sprintf("%x.json", sha256.Sum256([]byte(email))))
-	}
-
-	return cleanPath
 }
