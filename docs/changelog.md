@@ -1,10 +1,20 @@
 ---
-last_edited: "2026-10-02"
+last_edited: "2026-10-03"
 title: Changelog
 description: Release history for msgvault
 ---
 
 All notable changes to msgvault, grouped by release.
+
+## Unreleased
+
+- Archive existing Bland call recordings, transcripts and retained postcall
+  enrichment as meetings. See the [Bland guide](usage/meetings.md#bland-recorded-calls).
+- Archive existing Twilio call recordings and retained legacy, classic,
+  Relay, Batch, and Conversation Orchestrator speech as searchable meetings.
+  Recording downloads obey media policy and support configured decryption keys
+  and external media mappings. See [Twilio meetings](usage/meetings.md#twilio).
+- Preserve recording attachment counts when meeting transcripts are enriched.
 
 ## 0.21.0
 <small>2026-10-02</small>

@@ -17,6 +17,7 @@ const (
 	sourceTypeGranola        = "granola"
 	sourceTypeCircleback     = "circleback"
 	sourceTypeNotionMeetings = "notion_meetings"
+	sourceTypeTwilio         = "twilio"
 	sourceTypeMuesli         = "muesli"
 )
 

@@ -509,7 +509,9 @@ type Config struct {
 	Slack              SlackConfig                     `toml:"slack"`
 	Granola            []GranolaSource                 `toml:"granola"`
 	Circleback         []CirclebackSource              `toml:"circleback"`
+	Bland              []BlandSource                   `toml:"bland"`
 	NotionMeetings     []NotionMeetingsSource          `toml:"notion_meetings"`
+	Twilio             []TwilioSource                  `toml:"twilio"`
 	Muesli             []MuesliSource                  `toml:"muesli"`
 	Backup             BackupConfig                    `toml:"backup"`
 	Discord            DiscordConfig                   `toml:"discord"`
@@ -1085,6 +1087,9 @@ func decodeConfig(cfg *Config, path string, explicit, homeOverride bool, content
 	cfg.applyGCalDefaults()
 	cfg.applyMeetingSourceDefaults()
 	if err := cfg.validateMeetingSources(); err != nil {
+		return nil, err
+	}
+	if err := cfg.prepareTwilioSources(); err != nil {
 		return nil, err
 	}
 
@@ -1893,6 +1898,9 @@ func normalizedMeetingAccountEmail(value string) (string, bool) {
 // single entry with no identifier becomes "default" so the CLI argument can
 // be omitted in the common one-account case.
 func (c *Config) applyMeetingSourceDefaults() {
+	if len(c.Bland) == 1 && c.Bland[0].Identifier == "" {
+		c.Bland[0].Identifier = "default"
+	}
 	if len(c.Granola) == 1 && c.Granola[0].Identifier == "" {
 		c.Granola[0].Identifier = "default"
 	}
@@ -1911,6 +1919,9 @@ func (c *Config) applyMeetingSourceDefaults() {
 // or duplicate identifiers — the identifier keys the source row and token
 // file, so a collision would silently merge two accounts.
 func (c *Config) validateMeetingSources() error {
+	if err := c.validateBlandSources(); err != nil {
+		return err
+	}
 	check := func(kind string, ids []string) error {
 		seen := map[string]bool{}
 		for _, id := range ids {
