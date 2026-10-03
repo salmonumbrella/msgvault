@@ -1561,6 +1561,7 @@ type storeAPIAdapter struct {
 	gmailDraftPolicy        []config.GmailDraftSource
 	beeperDraftPolicy       []config.GmailDraftSource
 	gmailDraftClientFactory func(context.Context, *store.Source) (gmail.DraftAPI, error)
+	emailTagClientFactory   func(context.Context, *store.Source) (gmail.API, error)
 	// draftCacheRefresh rebuilds the analytics cache after a draft is durable,
 	// the same best-effort hook the meeting importer uses.
 	draftCacheRefresh     func(context.Context, string) error

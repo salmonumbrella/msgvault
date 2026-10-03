@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-09-15"
+last_edited: "2026-10-03"
 title: IMAP Sync and Repair
 description: Archive IMAP mail efficiently, choose folders, and repair stored labels.
 ---
@@ -143,6 +143,27 @@ without folder flags scans the complete account again.
 
 Folder filtering works the same whether the CLI uses a local daemon or a
 configured remote msgvault server.
+
+## Edit keyword tags
+
+Use [`message-tags`](../cli-reference.md#message-tags) to read, add, or remove
+custom keywords on a message's recorded server copy:
+
+```bash
+msgvault message-tags 42 --mailbox INBOX --json
+msgvault message-tags 42 --mailbox INBOX --add Next --remove Old
+```
+
+Keywords are separate from the folder labels shown in the archive. The daemon
+preserves system flags and other keywords, verifies the requested changes by
+readback, and saves the observed flags on that exact membership. Each folder
+copy has its own flags. Sync first if the stored UID or UIDVALIDITY is missing
+or stale. The server must advertise persistent keyword support.
+
+A dry run can check keyword syntax, identity, and advertised support. It cannot
+prove mailbox write access; the server's STORE response and readback decide
+whether a later edit succeeded. After a partial or uncertain write, read the
+current tags before retrying.
 
 ## Repair stored labels
 
