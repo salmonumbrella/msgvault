@@ -282,8 +282,9 @@ that `get_mcp_event` recovers a lost payload from the `eventId`.
 it with `list_thread` or reads it from any `get_message` / `list_messages`
 result. `calendar_source_id` is a calendar's `sources.id`, listed by the new
 `list_calendar_sources` tool. Subscribe validates existence, type, and that
-the scope's `(family, source type)` is enabled (`-32602`, `data.reason` one
-of `unknown_scope`, `wrong_scope_type`, `source_not_capable`). Subject,
+the scope's `(family, source type)` is enabled and produces every
+explicitly requested kind (`-32602`, `data.reason` one of `unknown_scope`,
+`wrong_scope_type`, `source_not_capable`, `kind_not_capable`). Subject,
 participant names, and bare provider IDs are never accepted. Account-wide
 scope is rejected: every mailbox message would wake the run, label and
 sender filters mean different things per source, and the run can filter
@@ -297,8 +298,9 @@ after a scoped wake.
 - Set-valued arguments (`kinds`) are canonicalized before hashing: sorted,
   deduplicated, empty rejected (`-32602`), unknown member rejected. An
   omitted `kinds` canonicalizes to the literal `["*"]`, meaning every kind
-  the server advertises at delivery time, so catalog growth never changes a
-  subscription's identity on refresh or unsubscribe.
+  enabled for the scope's `(family, source type)` at delivery time, so
+  catalog growth never changes a subscription's identity on refresh or
+  unsubscribe.
 - Every payload field is either required, nullable (`null` when the family
   has the field but this occurrence lacks a value), or omitted (field not
   defined for this kind); each family's payload table below says which.
@@ -320,11 +322,16 @@ entries:
 | `message_archived` | `gmail`, `imap` first; others as their persistence meets the ready boundary | `message`, `reaction` | `get_message`, `list_thread`, `get_attachment` |
 | `calendar_event_changed` | `gcal` | `created`, `updated`, `cancelled` | `get_message` with the calendar projection |
 | `draft_changed` | `gmail`, `imap` | `created`, `updated`, `deleted` | `get_message` on the archived draft row; `draft_get` when the MCP draft tools land |
-| `draft_changed` | `beeper`, `chat` | `created`, `updated`, `deleted` | gated on an owner HTTP MCP draft reader (`draft_get`); not advertised before |
+| `draft_changed` | `beeper`; local chat drafts (`draft_kind: chat`) on `slack`, `slackdump`, `teams`, `discord` | `created`, `updated`, `deleted` | gated on an owner HTTP MCP draft reader (`draft_get`); not advertised before |
 
 A Gmail message capability says nothing about drafts; a Beeper message
-boundary says nothing about transcripts. The matrix is ordinary code and
-configuration, not a schema.
+boundary says nothing about transcripts. Validation uses the actual source
+and the selected kinds: subscribe requires every explicitly requested kind
+to exist for the scope's `(family, source type)` and otherwise returns
+`-32602` with `data.reason: kind_not_capable`; the all-kinds marker means
+the kinds enabled for that scope's source, not every kind enabled anywhere;
+delivery and the coverage fingerprint apply the same interpretation. The
+matrix is ordinary code and configuration, not a schema.
 
 ### Phase 1: `msgvault.message_archived`
 
@@ -364,10 +371,15 @@ Arguments: `calendar_source_id` (required).
 Payload (all required unless noted): `kind` (`created` | `updated` |
 `cancelled`), `message_id`, `conversation_id` (the series conversation),
 `source_id`, `ical_uid` (nullable), `sequence` (nullable), `starts_at`
-(RFC 3339, or `YYYY-MM-DD` with `all_day: true`), `changed_at` (provider
-`updated` when present, else observation time), `from_me` (the owner is the
-organizer; it says nothing about who made this change, so the own-message
-filter and guard do not apply to this family).
+(nullable: RFC 3339, or `YYYY-MM-DD` when `all_day` is true; `null` for a
+cancellation of an object whose start was never seen — the observation
+time is never substituted for an unknown scheduled start, and a known
+start is preserved on cancellation), `all_day` (boolean; `null` when
+`starts_at` is `null`), `changed_at` (provider `updated` when present, else
+observation time), `from_me` (the owner is the organizer; it says nothing
+about who made this change, so the own-message filter and guard do not
+apply to this family). The current-state calendar projection on
+`get_message` uses the same nullability.
 
 Entity identity and occurrence identity are separate: the message ID names
 the object, each transition is a new journal sequence, and there is no
@@ -467,14 +479,23 @@ conversation), `created_by`, `changed_at`.
   `confirmed` and appends one occurrence per affected conversation,
   keyed `action:<action_id>:<conversation_id>` (a request citing several
   conversations fans out, each occurrence carrying that conversation's
-  references). A crash between the remote call and that transaction leaves
-  `pending`; the maintenance pass reconciles through #1104's marker lookup
-  (`FindActionTask`): marker found → confirm and append; marker absent →
-  stays `pending` (the call may be in flight, or the issue may have been
-  created and later deleted) and is retried through #1104's own idempotent
-  create, which returns the existing issue; only Kata's definitive
-  no-effect answer (an idempotency conflict naming no issue) moves it to
-  `abandoned`. Absence alone never abandons.
+  references). Recovery is lookup-only; the record stores no original
+  create input (`title`, `brief`, `list`, `person_id`) and the daemon never
+  retries a create in the background. A crash between the remote call and
+  the confirming transaction leaves `pending`; the maintenance pass looks
+  the marker up with `FindActionTask` and, exactly as #1104's `replay`
+  does, compares the issue's recorded request digest with the record's:
+  marker found and digest equal → `confirmed` plus the append; marker
+  found with a different digest → `unknown`, never confirmed against that
+  issue; marker absent, issue deleted, or invisible → `unknown` (the issue
+  may have existed, or the call may still be in flight); `abandoned` only
+  when Kata's answer to the original call was an explicit request
+  rejection that produced no issue. An `unknown` record is surfaced by the
+  status command; the caller retries explicitly through #1104 with the
+  original input, whose idempotency returns the existing issue, and that
+  call confirms the record. Recovery limit, stated plainly: a remote
+  success whose only receipt (the marked issue) disappears before
+  confirmation is not reconstructible and emits nothing.
 - `evidence_added` (#1104's link route) and the legacy task-link
   `linked`/`unlinked` have no operation receipt or marker upstream, and the
   reverse index cannot say which cycle completed. They are not advertised
@@ -630,18 +651,26 @@ replacement; only additions under live provenance emit, and a newly
 backfilled target gets a muted baseline. `UpsertReaction` becomes
 transactional with the same context.
 
-Event time per family: message `sent_at`; reaction real time or observation
-time; calendar provider `updated` or observation time; drafts and Phase 2
-families the transaction's observation time. No age cap is applied:
-provenance is the rule.
+Event time per family (the envelope `timestamp`, always present): message
+`sent_at` when the provider supplied one, otherwise `archived_at` (the
+recorded observation); reaction real time or observation time; calendar
+provider `updated` or observation time; drafts and Phase 2 families the
+transaction's observation time. Payload time fields keep their own
+nullability. No age cap is applied: provenance is the rule.
 
 ### Retention, epochs, and coverage
 
-- Retention is seven days of `recorded_at`, hard. Pruning deletes rows with
-  `recorded_at` older than that and advances `pruned_through_seq` to the
-  highest sequence below which no row remains (a contiguous floor), in the
-  same transaction, even when it deletes the final row. An old provider
-  `occurred_at` under live provenance therefore never expires immediately.
+- Retention is seven days of `recorded_at`, hard. `recorded_at` is not
+  monotonic in `seq` (a transaction can start earlier and take the clock
+  lock later), so pruning may delete holes. In the pruning transaction,
+  rows with `recorded_at` older than the cutoff are deleted and
+  `pruned_through_seq = max(previous floor, highest seq deleted)`, even when
+  the final row is deleted. Rows at or below the floor that survive remain
+  physically retained for `get_mcp_event`, but they never make an older
+  cursor safe: any cursor with `seq < pruned_through_seq` truncates. This
+  can truncate a scope that lost nothing, which the design permits; it
+  never crosses a deleted hole silently. An old provider `occurred_at`
+  under live provenance never expires immediately.
 - Cursors are bound to `(subscription_id, epoch, seq)`. A cursor from an
   older epoch, or with `seq < pruned_through_seq`, truncates: the
   subscription restarts at `head_seq` and the result says `truncated: true`.
@@ -661,10 +690,12 @@ provenance is the rule.
   require `cursor_epoch == capture_epoch` and select journal rows of that
   epoch only; a pending delivery from an older epoch is invalid and an old
   worker's success cannot cross the boundary.
-- A subscription whose settled cursor falls below `pruned_through_seq` is
-  stopped with reason `retention`, its cursor preserved; the next refresh
-  returns `truncated: true` and the head. The worker never skips to the
-  head on its own.
+- `PrepareMCPDelivery` re-reads the current floor before selecting each
+  occurrence; a subscription whose settled cursor is below
+  `pruned_through_seq` is stopped with reason `retention`, its cursor
+  preserved, and pruning stops such subscriptions under the same clock
+  fence. The next refresh returns `truncated: true` and the head. The
+  worker never skips to the head on its own.
 - Source removal deletes that source's log and admission rows and ends
   subscriptions in its scope with reason `scope_removed`. Expired and ended
   subscriptions are purged after the 24-hour read grace.
@@ -707,13 +738,28 @@ concurrent_update`; it never overwrites a newer rotation.
 
 | # | Existing row | Request | Result |
 |---|---|---|---|
-| 1 | none, or `unsubscribed`/`gone`/purged | no cursor | fresh activation: `generation = 1`, `cursor_epoch = capture_epoch`, `cursor_seq = head_seq`, pending empty, verification required |
-| 2 | none, or `unsubscribed`/`gone`/purged | cursor | as 1, then the cursor is validated (MAC, same subscription, epoch, floor, `seq ≤ head_seq`); invalid → `-32602`; below floor or old epoch → start at head with `truncated: true`; else `cursor_seq` = cursor. A receiver that answered `410` is revived only by this explicit re-subscribe with fresh verification |
+Generation invariant: `generation` is monotonically increasing for the
+lifetime of a retained row and is never reset or reused. It is 1 only when
+no row exists for the ID; every activation of a retained row, whatever its
+state, sets `generation = previous + 1`. A challenged candidate records the
+predecessor it was verified against — `(no row)` or `(state, generation,
+secret_revision)` — and activation requires that exact predecessor to still
+hold; otherwise `concurrent_update`. A candidate lives only for its subscribe
+request (seconds) and workers are cancelled and joined when their
+generation ends, while purge happens at least 24 h after a row ends, so no
+candidate or worker can span a purge and meet a recreated row at
+generation 1.
+
+| # | Existing row | Request | Result |
+|---|---|---|---|
+| 1 | none | no cursor | fresh activation: `generation = 1`, `cursor_epoch = capture_epoch`, `cursor_seq = head_seq`, pending empty, verification required |
+| 2 | none | cursor | as 1, then the cursor is validated (MAC, same subscription, epoch, floor, `seq ≤ head_seq`); invalid → `-32602`; below floor or old epoch → start at head with `truncated: true`; else `cursor_seq` = cursor |
 | 3 | `active`, same secret | no cursor (TTL renewal) | `expires_at` extended; generation, pending snapshot, attempts, due time, and worker untouched, even mid-send |
-| 4 | `active`, new secret | no cursor (rotation) | candidate verified against G; atomically `secret_revision + 1`, previous secret kept until +60 s, `generation = G + 1`, pending snapshot rebound to the new generation with identical envelope bytes, event ID, attempts, and due time; the old worker is cancelled and its completion is stale; only signatures change |
+| 4 | `active`, new secret | no cursor (rotation) | candidate verified against `(active, G, R)`; atomically `secret_revision = R + 1`, previous secret kept until +60 s, `generation = G + 1`, pending snapshot rebound to the new generation with identical envelope bytes, event ID, attempts, and due time; the old worker is cancelled and its completion is stale; only signatures change |
 | 5 | `active` | cursor (explicit replay) | validated as in 2; `generation + 1`, pending cleared, `cursor_seq` = cursor, worker restarted; combined with a new secret, rule 4's secret steps apply in the same transaction |
-| 6 | `expired` within the 24 h grace | any | reactivation: `generation + 1`, pending cleared, settled cursor resumed subject to epoch and floor checks (truncation possible); a supplied cursor is validated as in 2; attempts restart; the receiver sees the same bytes again because envelopes are deterministic |
-| 7 | `stopped`, reason `retention` or `capture_gap` | any | reactivation at `head_seq` in the current epoch with `truncated: true`; a supplied cursor is ignored because it is known-invalid |
+| 6 | `expired` within the 24 h grace | no cursor or cursor | reactivation: `generation + 1`, pending cleared, `expires_at` reset, settled cursor resumed subject to epoch and floor checks (truncation possible); a supplied cursor is validated as in 2; attempts restart; the receiver sees the same bytes again because envelopes are deterministic. A new secret is verified for this candidate and installed atomically with `secret_revision + 1` in the same transaction, and it signs the next request; an unchanged secret reuses its durable verification |
+| 7 | `stopped`, reason `retention` or `capture_gap` | no cursor or cursor | reactivation: `generation + 1`, pending cleared, `expires_at` reset, start at `head_seq` in the current epoch with `truncated: true`; a supplied cursor is ignored because it is known-invalid; secret handling as in rule 6 |
+| 7a | `unsubscribed` or `gone` (retained, within the 24 h grace) | no cursor or cursor | re-subscribe: `generation + 1`, pending cleared, `expires_at` reset, verification required for the supplied secret (a `410` receiver is revived only this way); the cursor is validated as in 2, else start at head |
 | 8 | `stopped`, reason `principal_revoked` or `scope_removed` | any | `-32012` or `-32602 unknown_scope`; a differently keyed, authorized request is a fresh activation under rule 1 or 2 |
 | 9 | any | `events/unsubscribe` | matches `(principal, name, arguments, url)`; ends the row (`unsubscribed`, `generation + 1`, pending cleared), cancels future attempts and an in-flight request, returns `{}`; succeeds when nothing matches |
 
@@ -734,13 +780,24 @@ persisted cursor stays behind N until settlement. Delivery is at-least-once
 per attempt sequence, not unconditional: retries can duplicate and bounded
 retries allow terminal loss, both reported.
 
-Cursor encoding: `c1.<epoch>.<seq>.<mac>`, where `mac` is the first 16 bytes
-of HMAC-SHA256(server key, `"c1" ‖ subscription_id ‖ epoch ‖ seq`),
-base64url. Event ID: `evt1.<subscription_id>.<seq>.<mac>` with
-`mac` = first 16 bytes of HMAC-SHA256(server key, `"evt1" ‖
-subscription_id ‖ seq`), base64url; the full subscription ID is embedded,
-so `get_mcp_event` resolves it without a mapping table. Both are stable
-across retries and restarts.
+Cursor encoding: `c1.<epoch>.<seq>.<mac>`. Event ID:
+`evt1.<subscription_id>.<seq>.<mac>`; the full subscription ID is embedded,
+so `get_mcp_event` resolves it without a mapping table. The authenticated
+bytes are canonical ASCII with explicit separators, so no two field
+combinations share an input:
+
+```text
+cursor MAC input: "c1." + subscription_id + "." + epoch_decimal + "." + seq_decimal
+event MAC input:  "evt1." + subscription_id + "." + seq_decimal
+```
+
+`mac` is the first 16 bytes of HMAC-SHA256(server key, input), base64url
+without padding. Decimal fields are canonical nonnegative integers (no
+sign, no leading zeros, `0` allowed, at most 19 digits, ≤ 2^63 − 1); the
+subscription ID is its exact `sub_` + 64 lowercase hex form. A token with a
+noncanonical field, wrong segment count, padding, or wrong length is
+rejected before the MAC is compared. Both encodings are stable across
+retries and restarts.
 
 ## MCP surface
 
@@ -972,17 +1029,17 @@ malformed cursor, secret, and argument fuzz targets are bounded.
 | Area | Required observable result |
 |---|---|
 | Journal ordering | Two PostgreSQL writers, activation, rollback, and pruning forced through controlled interleavings; no cursor skips a later-committing lower sequence; no false `created`. Repeated on SQLite for granular and composite entry points. |
-| Replay continuity | Empty retained log, cursor just before the first retained scope row, continuously refreshed slow subscriber, newly recorded live event with an old `occurred_at`; truncation stays honest and retention bounded. |
+| Replay continuity | Empty retained log, cursor just before the first retained scope row, continuously refreshed slow subscriber, newly recorded live event with an old `occurred_at`; pruning of deliberately nonmonotonic `recorded_at` (sequences 100 and 102 retained, 101 pruned: a cursor settled at 100 truncates or stops, never reads 102 silently) and an emptied log; truncation stays honest and retention bounded. |
 | Epoch and coverage | Disable/re-enable with an in-flight pending event, disable/re-enable between worker scans, restart through a disabled configuration, a source type removed from `sources` while the flag stays on, same-configuration restart; none resumes silently through a gap and the epoch increments exactly once per real change. |
 | Source provenance | Full recovery, mixed incremental/backfill phases, new reaction on an old target, replacement of an unchanged reaction set, calendar write-through followed by sync redelivery, backfill imported after the epoch started (no admission row). |
 | Archive readiness | Pause after header persistence and inject a later body/metadata failure; no premature notification; a delivered occurrence reads the committed body and the typed calendar status. |
 | Calendar transitions | Two updates of one object, unchanged sequence with changed time, cancel/restore/cancel, sparse tombstone, all-day dates, concurrent changes. |
 | Drafts | Per draft kind: each confirmed transition emits once with the advanced revision; claims, aborts, `Record*Outcome` codes, and sync observations emit nothing; a failed Beeper first write emits nothing; a Beeper chat without an archived conversation is not journaled; local deletion yields a retained occurrence with scope and last revision while `draft_get` returns not-found; an own draft's live Message-ID match produces no `sent` and no correlation; `created_by` reports `unknown` for legacy rows; an owner-created draft's sent copy is visible with `include_from_me: true`. |
-| Subscription lifecycle | Each transition rule 1–9 asserted on state and bytes: TTL renewal during an outstanding send and while a retry is due, rotation preserving the pending snapshot with identical bytes and new signatures, replay during a send, two candidates verified against one generation (one wins, one gets `concurrent_update`), two concurrent activations at 63/64 on real PostgreSQL, reactivation from each terminal state, late success after rules 4–9 discarded. |
+| Subscription lifecycle | Each transition rule 1–9 asserted on state and bytes: TTL renewal during an outstanding send and while a retry is due, rotation preserving the pending snapshot with identical bytes and new signatures, replay during a send, two candidates verified against one generation (one wins, one gets `concurrent_update`), two concurrent activations at 63/64 on real PostgreSQL, reactivation from each ended state with and without a new secret asserting which key signs the next request, a paused callback completion and a paused verified rotation candidate released after unsubscribe and re-subscribe-with-replay of the same identity (neither mutates the new activation), late success after rules 4–9 discarded. |
 | Delivery | One blocked receiver while a healthy one progresses; coalesced and lost wakes; restart preserves pending bytes and due time; 2xx, 429/503 with `Retry-After`, 5xx, timeout, 410, 413, twelfth failure; shutdown joins workers before Store closes. |
 | Security and reads | The real MCP → daemonclient → daemon path with an independent inbound key, no daemon key, a delegated token, a forged principal field, and owner-key rotation during a pending delivery; `get_mcp_event` for a lost payload, wrong principal, revocation, deleted draft; trusted-callback origin/pin pairing; private IPv4/IPv6, mapped and transition addresses, DNS rebinding, ports other than 443/8443, redirects refused; callback error redaction through the Store logger; missing or corrupt restored key fails closed. |
-| Wire rules | Equivalent set arguments produce one identity; omitted `kinds` keeps its identity across catalog growth; event IDs resolve unambiguously; every advertised `(family, source type, kind)` has a working read recipe in the fixtures. |
-| Phase 2 | Kata: crash before dispatch, after remote success before local confirmation, after confirmation, and with the call in flight (absence never abandons); multi-conversation evidence fans out once per conversation; repeated key with a different digest rejected. Attachments: two conversations sharing one blob, a new live attachment binding to an already-ready head, the publication/binding race, one media result referenced by several attachments, backfill after the epoch muted; `transcript_ready` only when the advertised recording read resolves ready evidence, with failed, cancelled, abandoned, and evidence-unavailable negatives. |
+| Wire rules | Equivalent set arguments produce one identity; omitted `kinds` keeps its identity across catalog growth and selects only the scope's enabled kinds; a transcript-only subscription on a text-only source is rejected with `kind_not_capable`; each enabled local-chat source type can subscribe to drafts once its reader gate opens; a cursor MAC for `(epoch 1, seq 23)` does not validate `(12, 3)`, and leading-zero, padded, overflowing, or field-mutated tokens are rejected; event IDs resolve unambiguously; a live message with no provider date and a never-seen cancellation carrying only identity and status both produce valid envelopes under the advertised schemas; every advertised `(family, source type, kind)` has a working read recipe in the fixtures. |
+| Phase 2 | Kata: crash before dispatch, after remote success before local confirmation, after confirmation, and with the call in flight (absence never abandons, no background create runs); create then delete or hide the issue before confirmation stays `unknown`; a marker found with a different digest is not confirmed; multi-conversation evidence fans out once per conversation; repeated key with a different digest rejected. Attachments: two conversations sharing one blob, a new live attachment binding to an already-ready head, the publication/binding race, one media result referenced by several attachments, backfill after the epoch muted; `transcript_ready` only when the advertised recording read resolves ready evidence, with failed, cancelled, abandoned, and evidence-unavailable negatives. |
 | Compatibility | Old daemon, flag off, 2025-06-18 HTTP, 2026-07-28 HTTP, unsupported version, stdio, delegated mode, independent inbound key; existing tools, instructions, cache metadata, and `no-store` unchanged; `events/list` validates against a pinned fixture of the ChatGPT profile in `testdata/mcp/`. |
 
 ## Adopted from Inline
