@@ -1,633 +1,928 @@
 # MCP Events — Design
 
-Status: proposal, 2026-10-05. Nothing here is implemented or approved. It
-describes native support for the MCP Events webhook profile that ChatGPT
-shipped on 2026-09-29 ([OpenAI guide](https://developers.openai.com/plugins/build/mcp-events)),
+Status: proposal, revised 2026-10-05 after a pre-implementation design review
+of the first draft. Nothing here is implemented or approved. It describes
+native support for the MCP Events webhook profile that ChatGPT shipped on
+2026-09-29 ([OpenAI guide](https://developers.openai.com/plugins/build/mcp-events)),
 built on the draft Triggers & Events extension. Source facts cite `main` at
-`aa411818`. Where this design copies a decision from Inline's shipped
-implementation (`inline-chat/inline`, read 2026-10-05) the file is named.
+`aa411818` plus the open pull requests named inline. Where a decision copies
+Inline's shipped implementation (`inline-chat/inline`, read 2026-10-05) the
+file is named.
 
 ## Summary
 
 An agent host (ChatGPT first) subscribes to one exactly-scoped slice of the
 archive — one conversation, one calendar — and is woken by a signed webhook
-each time msgvault durably commits a new item in that scope. Payloads carry
-identifiers only; the woken run reads content, including attachments, with the
-tools it already has (`get_message`, `list_thread`, `list_messages`,
-`get_attachment`).
+each time msgvault durably commits an occurrence in that scope: a new message
+or reaction, a calendar transition, a managed draft changing, and later a
+Kata issue filed from the archive or an attachment whose extracted text or
+transcript became readable. Payloads carry identifiers only; the woken run
+reads content, including attachments in chunks, with the tools it already
+has plus two small read tools this design adds.
 
-The daemon owns everything durable: a commit-time change log written in the
-same transaction as ingestion, one subscriptions table, and the delivery
-worker. The `msgvault mcp --http` process stays stateless: it advertises the
-`events` capability, validates the protocol surface, and proxies
-`events/list`, `events/subscribe`, and `events/unsubscribe` to new daemon
-routes, exactly as it already proxies every other capability through
-`daemonclient`.
+The daemon owns everything durable: a commit-ordered journal written inside
+the persistence transaction, one subscriptions table with generation fences,
+and a delivery service with one worker per active subscription. The
+`msgvault mcp --http` process stays a stateless protocol adapter: it
+advertises the `events` capability, validates the protocol surface, and
+proxies `events/list`, `events/subscribe`, and `events/unsubscribe` to new
+daemon routes through `daemonclient`, as it already does for every other
+capability.
 
-The feature is off by default and adds a new egress class (outbound HTTPS
-from the daemon to a caller-supplied public URL), so it needs the consents
-listed under [Consent and rollout](#consent-and-rollout).
+Work is phased. Phase 1 ships the families whose commit points and read
+paths exist today: `msgvault.message_archived`,
+`msgvault.calendar_event_changed`, `msgvault.draft_changed`. Phase 2 ships
+`msgvault.kata_issue_filed` and `msgvault.attachment_processed` behind
+explicit dependencies. The feature is off by default and adds a new egress
+class, so it needs the consents listed under [Consent and rollout](#consent-and-rollout).
 
 ## Goals
 
-- Wake a subscriber within seconds of the archive commit for a new message
-  or reaction in one conversation, or a created, updated, or cancelled
-  event in one calendar.
-- Never emit for historical backfill, re-sync, label, reindex, attachment, or
-  projection work on existing rows.
-- Keep every promise in the protocol honest: durable subscriptions across
-  restarts, stable event IDs on retry, a cursor that never skips an
-  undelivered event, `truncated: true` when history is gone.
+- Wake a subscriber within seconds of the archive commit of an occurrence in
+  one conversation or one calendar.
+- Never emit for historical backfill, re-sync, label, reindex, attachment
+  download, or projection work on existing rows.
+- Keep every protocol promise honest: subscriptions survive restarts, event
+  IDs and bytes are stable across retries, a cursor never skips an
+  unsettled occurrence, and `truncated: true` is returned whenever
+  continuity cannot be proven.
 - Work identically on SQLite and PostgreSQL.
+- Exclude an agent's own replies deterministically where the archive can
+  prove authorship, and bound the cost where it cannot.
 - Add no new content surface: webhooks carry IDs, timestamps, and flags only.
 
 ## Non-goals
 
-- Account-wide or inbox-wide subscriptions, filtered or not (see
-  [Scope](#scope-one-conversation-only)).
+- Account-wide or inbox-wide subscriptions, filtered or not.
 - Polling, push streaming, `gap`/`terminated` control envelopes, or terminal
   callbacks. ChatGPT supports none of them and they are not advertised.
-- An OAuth authorization server inside msgvault. The principal is whatever
-  the existing inbound bearer identifies; see [Principal](#principal).
-- Receivers other than ChatGPT. Any receiver that implements the profile
-  works, but none is tested or documented here.
-- RSVP changes and Kata issue state changes; both need data msgvault does not
-  hold today (see each family).
+- An OAuth authorization server inside msgvault, or treating a forwarded
+  bearer as a verified subject.
+- Sending messages. msgvault never sends (`docs/usage/chat.md` in #1092);
+  send-outcome events wait for #666's send path.
+- RSVP changes (no normalized attendee projection exists) and Kata issue
+  state changes (Kata holds the state and has no feed to msgvault).
 
 ## Existing behavior and invariants
 
-What the design relies on, verified on `main`:
+What the design relies on, verified on `main` unless a PR is named:
 
 - **Transport.** `internal/mcp/server.go` serves `/mcp` with go-sdk v1.7.0's
   `NewStreamableHTTPHandler` in `Stateless` + `JSONResponse` mode behind
-  `bearerAuthHandler`: one static token (`HTTPOptions.APIKey`, compared by
-  SHA-256 in constant time), or no auth at all when the token is empty.
-  Protocol `2026-07-28` and `server/discover` have been served since #566;
-  `cachePolicyMiddleware` already rewrites `*sdkmcp.DiscoverResult`. Requests
-  on a protocol older than `2026-07-28` lose the write tools. The SDK already
-  validates `Mcp-Method` and the other `Mcp-*` headers (`-32020`) and
-  rejects unsupported versions with `-32022`; v1.7.0 also provides
-  `AddReceivingCustomMethod`. `ServerCapabilities` has no `events` field
-  (go-sdk#1325 is open), so the top-level key must be injected.
+  `bearerAuthHandler`, which captures one static token at construction. The
+  inbound token defaults to the daemon's owner API key; `--http-token-file`
+  and `--http-token-env` substitute an independent one
+  (`cmd/msgvault/cmd/mcp.go`). Protocol `2026-07-28` and `server/discover`
+  have been served since #566; `cachePolicyMiddleware` type-switches on
+  `*sdkmcp.DiscoverResult` to set `TTLMs` and `CacheScope`. Requests on an
+  older protocol lose the write tools. The SDK validates `Mcp-Method` and
+  the other `Mcp-*` headers (`-32020`), rejects unsupported versions with
+  `-32022`, and provides `AddReceivingCustomMethod`. `ServerCapabilities`
+  has no `events` field (go-sdk#1325), so the top-level key must be injected.
 - **Process split.** `cmd/msgvault/cmd/mcp.go` builds `ServeOptions` from a
-  `daemonclient.Client`, gating each backend on
-  `APISchemaVersionAtLeast`. The MCP process never opens the archive.
-- **Canonical write path.** Every source — Gmail, IMAP, Beeper, iMessage,
-  WhatsApp, Signal/Telegram through Beeper, Slack, Discord, imports, and
-  Google Calendar — lands in `Store.UpsertMessage` →
-  `upsertMessageWith` (`internal/store/messages.go`), one transaction with
-  `ON CONFLICT (source_id, source_message_id)`. The function already reads
-  the prior row first (`bodylessMessageJournalState.found`), so "new versus
-  re-upserted" is known inside the transaction. On SQLite it first touches
-  `embedding_change_clock` to take the writer lock. Three commit-ordered
-  journals already exist (`embedding_changes`, `person_sweep_changes`,
-  `attachment_changes`); they are consumer-specific and pruned by their
-  consumers, so they are a precedent, not a reusable sequence.
+  `daemonclient.Client`, gating each backend on `APISchemaVersionAtLeast`.
+  `daemonclient` authenticates the second hop with its configured daemon API
+  key or agent token, never with the inbound MCP bearer. The daemon's
+  `humaAuthMiddleware` admits API-key, keyless-loopback, browser-session,
+  and delegated (`X-Msgvault-Agent-Token`, `AuthModeDelegated`) callers
+  (`internal/api/middleware.go`, `routes.go`).
+- **Agent grants.** `internal/agentgrant`: `Grant{ID, Label, Permissions
+  (draft.create|edit|delete, calendar.*), Sources []SourceRef{Type,
+  Identifier, SenderKeys}}`, issued and revoked through
+  `/api/v1/agent-tokens`. The registry is in-memory and process-scoped:
+  grants do not survive a daemon restart. #1092 (slice 9a of #666) serves
+  delegated MCP sessions over stdio only and refuses `--http`; #1023 is a
+  competing stacked wiring (`getMCPCapabilities`, typed receipts,
+  `--allow-draft-writes`). Both rely on the merged daemon-side grant model.
+- **Persistence.** The low-level upsert is `upsertMessageWith`
+  (`internal/store/messages.go`), but there is no universal call chain.
+  Composite persistence (`persistMessageWith` with `MessagePersistData`)
+  writes header, metadata, body, raw, recipients, and final attribution in
+  one transaction; the Beeper importer commits the header first and body,
+  raw, attachments, mentions, and reactions in later calls
+  (`internal/beeper/importer.go`). Final `from_me` attribution can change
+  within composite persistence. `UpsertReaction` is not transactional and
+  `ReplaceReactions` deletes the whole set before reinserting. The
+  `embedding_change_clock` singleton row is the repository's commit-ordering
+  pattern (`schema.sql`, `dialect_pg.go`, `embedding_changes.go`).
 - **Identity.** `messages.id` and `conversations.id` are integer primary
   keys; conversations are unique per `(source_id, source_conversation_id)`
   with `conversation_type` in `email_thread`, `group_chat`, `direct_chat`,
-  `channel`, `calendar`. `messages.is_from_me` is baked at write time.
-  Reactions are rows in `reactions` (`UpsertReaction`, `ReplaceReactions`),
-  unique per `(message_id, participant_id, reaction_type, reaction_value)`,
-  with `removed_at`.
+  `channel`, `calendar`. Reactions are rows in `reactions`, unique per
+  `(message_id, participant_id, reaction_type, reaction_value)`, with
+  `removed_at`; Beeper and Slack borrow the target message's timestamp for
+  embedded reactions.
 - **Calendar.** `internal/calsync` stores each Google Calendar event as a
   `messages` row (`message_type = calendar_event`, one source per calendar,
-  `source_message_id` = event ID or `recurringEventId|originalStart`) and
-  writes status, sequence, `ical_uid`, and series linkage to
-  `messages.metadata` through `SetMessageMetadata`; cancellations flip
-  `metadata.status` in `flagCancelled`. Attendee `responseStatus` is parsed
-  (`internal/gcal/models.go`) but not persisted. Emailed `.ics` invites are
-  not parsed; they are ordinary email messages with attachments.
-- **Kata.** The optional task integration (`[integrations.tasks]`,
-  `internal/taskclient`, API routes `POST/GET /api/v1/messages/{id}/tasks`,
-  `DELETE …/tasks/{task_id}`) writes `mail_links` metadata onto the Kata
-  task. msgvault keeps no durable link table; `internal/tasklinks` is a
-  disposable reverse-index cache. There is no feed from Kata back to
-  msgvault.
-- **Backfill versus live.** `sync_runs.sync_type` distinguishes `full`,
-  `import-mbox`, `import-emlx`, `import-pst`, and incremental runs, but
-  `Message` carries no provenance and `UpsertMessage` cannot tell a
-  historical row from a fresh arrival.
-- **Reusable pieces.** `internal/netguard` (prohibited IP/hostname policy,
-  `ValidateTrustedDestination`), the pinned-IP dialer in
-  `internal/remoteimage/fetch.go` and `internal/carddav/transport.go`,
-  `internal/httpretry.RetryAfter`, HMAC use in `internal/daemonauth`,
-  `providercredentials.EnsureServerKey` for a one-time owner-only key file,
-  the scheduler/job pattern in `internal/scheduler` and
-  `internal/api/scheduler_jobs.go`, and the modern-HTTP protocol tests in
-  `internal/mcp/protocol_test.go`.
-- **Read tools.** `get_message` returns the message and its attachment list;
-  `get_attachment {id, offset, length ≤ 4 MiB, sha256}` streams chunks (sha256
-  from the first chunk is required for every later offset; whole-object
-  embedding up to 50 MiB); `list_thread` resolves a conversation from a
-  msgvault message ID or a provider `thread_id` + `account`;
+  `sent_at` = event start) and writes status, sequence, `ical_uid`, and
+  series linkage to `messages.metadata`; `ingestEvent` persists message,
+  metadata, body, raw event, recipients, and FTS in separate calls, and
+  `flagCancelled` merges `status: cancelled` into existing metadata while
+  preserving the other fields. `gcal.Event` carries `Created` and `Updated`.
+  Attendee `responseStatus` is parsed but not persisted. Calendar
+  write-through (`internal/calcontrol`) has no sync run. Emailed `.ics`
+  invites are ordinary email attachments.
+- **Provenance.** `sync_runs.sync_type` distinguishes `full`, `import-*`, and
+  incremental runs, but Beeper and Slack runs contain mixed phases under one
+  type and `Message` carries no provenance.
+- **Drafts** (#880, #882, #1003, #1006, #1008 merged). Four tables share one
+  lifecycle (`internal/store/draft_lifecycle.go`): `gmail_drafts`,
+  `imap_drafts`, `beeper_drafts`, `chat_drafts` (local Slack/Teams/Discord
+  text). Each has a stable local `draft_id`, `revision`, `discarded_at`,
+  `pending_operation ∈ {edit, delete}`, and `pending_code` for an uncertain
+  provider outcome (`remote_unknown`; CLI receipts add
+  `operation_may_have_completed`). Gmail and IMAP drafts are archived
+  immediately as `messages` rows (`current_message_id`, `is_from_me`, label
+  `DRAFT`) carrying an RFC822 Message-ID. Beeper drafts live in the chat
+  composer; `chat_drafts` never reach a provider. No table records who
+  created a draft. There is no send path: `draft-send-as` only lists Gmail
+  aliases, and the operator sends from their own client.
+- **Kata.** The task-link integration (`[integrations.tasks]`,
+  `internal/taskclient`, `/api/v1/messages/{id}/tasks`) writes `mail_links`
+  metadata onto the Kata task after the remote call and keeps no local
+  record; `createOrLinkMessageTask` replies after the remote commit. #1104
+  (open) adds `[integrations.kata]`, `POST /api/v1/integrations/kata/issues`
+  with an `Idempotency-Key` whose action marker is written into the issue
+  metadata and looked up with `FindActionTask` on retry, `…/issues/{ref}/evidence`,
+  `…/evidence/prepare` with stable `PassageID`s, and MCP tools behind
+  `--allow-kata-writes`. msgvault keeps no local record of the issues.
+- **Docbank** (#876, #939, #999 merged; #1077, #1094 open). Document text
+  extraction publishes through `PublishDocumentExtraction` (atomic:
+  derivatives, `document_extractions.state = ready`, head switch, search
+  revision) and fails through `FailDocumentExtraction` (terminal or
+  scheduled retry); `document_occurrences` maps attachment → message →
+  source by canonical blob hash. Stored audio is routed to Docbank through
+  `beeper_media_occurrences` and `beeper_media_deliveries` (`phase ∈
+  {pending-artifact, pending-process, observing, done, blocked,
+  source_unavailable}`), with `FinishBeeperMediaOperation` as the commit
+  point; msgvault stores no transcript text. #1077 adds
+  `GET /api/v1/messages/{id}/recordings`, reading live from Docbank; no MCP
+  tool exposes it yet. MCP document tools are `search_document_attachments`
+  (`message_id`, `attachment_id`, `query`, …), `search_in_message`, and
+  `search_person_files`; no tool returns a whole extracted text.
+- **Read tools.** `get_message` returns the message and its attachment list
+  but neither `source_id`, `is_from_me`, nor calendar metadata
+  (`internal/mcp/handlers.go`); `get_attachment {id, offset, length ≤ 4 MiB,
+  sha256}` streams chunks (sha256 from the first chunk required for every
+  later offset; whole objects up to 50 MiB); `list_thread` resolves a
+  conversation from a message ID or a provider `thread_id` + `account`;
   `list_messages {conversation_id, …}` pages one conversation newest-first.
-  None of them exposes `is_from_me`.
+  Calendar control tools take Google calendar IDs, not archive sources.
+- **Reusable pieces.** `internal/netguard` (`ProhibitedIP`,
+  `ProhibitedHostname`, `ValidateTrustedDestination`: one origin paired with
+  its pins), the pinned-IP dialer in `internal/remoteimage/fetch.go` (which
+  follows redirects, so it is a pattern, not a drop-in),
+  `internal/httpretry.RetryAfter`, HMAC use in `internal/daemonauth`, the
+  owner-only key-file creation in `providercredentials`, the media scheduler
+  that keeps network work outside the archive gate, and the modern-HTTP
+  protocol tests in `internal/mcp/protocol_test.go`. `Scheduler.runJob`
+  holds its work tracker — which includes the archive operation gate — for
+  a whole job, so a delivery loop cannot be an ordinary scheduler job.
 
-## Architecture
+## Architecture and package ownership
 
 ```text
 ChatGPT ──events/subscribe──▶ msgvault mcp --http ──daemonclient──▶ daemon API
-   ▲                           (stateless; injects                   /api/v1/mcp/events/*
-   │                            capabilities.events)                     │
-   │                                                                     ▼
-   │                                               ingestion tx ─▶ mcp_event_log ──▶ delivery worker
-   └────────────── signed webhook (direct outbound HTTPS from the daemon) ◀──────────┘
-ChatGPT run ──get_message / list_thread / get_attachment──▶ msgvault mcp ──▶ daemon
+   ▲                           (stateless adapter)                /api/v1/mcp/events/*
+   │                                                                     │
+   │                      persistence tx ─▶ mcp_event_log ─▶ mcpevents.Service (workers)
+   └────────── signed webhook (direct outbound HTTPS from the daemon) ◀───┘
+ChatGPT run ──get_mcp_event / get_message / get_attachment──▶ msgvault mcp ──▶ daemon
 ```
 
-Everything stateful is in the daemon because the daemon owns archive access
-(`docs/architecture/overview.md`), the ingestion transaction is there, and a
-single daemon per archive makes delivery ownership trivial (no leases or
-`SKIP LOCKED` as in Inline's multi-process API, `server/src/modules/mcpEvents/repository.ts`).
+Dependency direction, kept narrow so Store never imports the service:
 
-## Events
+```text
+cmd / api wiring -> mcpevents -> store, netguard, httpretry
+internal/mcp -> EventsBackend interface <- daemonclient
+store -> archive values and SQL only; never mcpevents, the MCP SDK, or HTTP
+```
 
-Names are prefixed `msgvault.` so a gateway that nests several servers cannot
-collide. Argument schemas are closed objects (`additionalProperties: false`);
-IDs are decimal strings as Inline does (`catalog.ts`), because JSON numbers
-above 2^53 are unsafe and the tools already accept the same strings.
+- `internal/store/mcp_events.go` owns journal append, the clock, subscription
+  transitions, pruning, and backend-specific SQL. Journal collection and
+  finalization are explicit steps of the shared persistence transaction;
+  the transaction returns the appended sequences and the caller issues one
+  nonblocking after-commit wake. No Store method opens a second transaction
+  after a mutation to append an event.
+- `internal/mcpevents` (a few files, not a package per helper) owns
+  orchestration, callback transport and signing, retry decisions, secret
+  handling, and the one place that canonicalizes closed arguments
+  (defaults materialized before hashing, `encoding/json/v2`
+  conventions; the daemon revalidates at its trust boundary). It exposes a
+  blocking `Run(ctx) error`.
+- API handlers call the service; they assemble no transactions. Wire DTOs
+  go through the API schema and generated client (`Makefile` generate
+  target); protocol adaptation lives in `internal/mcp`.
+- Startup passes narrow options (enabled flag, retention, trusted
+  callbacks, key path), never the whole config.
+- No extraction to `go.kenn.io/kit` now. msgvault has two dialects,
+  transaction fences, and daemon auth that a shared engine would have to
+  abstract; after two real consumers exist, extract only pure signing and
+  verification or a narrowly specified callback transport. Test vectors and
+  synthetic conformance fixtures are shared immediately.
 
-### Scope: one conversation only
+## Principal and authorization
 
-`conversation_id` is the msgvault `conversations.id`, which already encodes
-source and account. A subscriber resolves it with `list_thread` (by message ID
-or provider `thread_id` + `account`) or reads it from any `get_message` /
-`list_messages` result; subscribe validates that the row exists and is not
-a calendar conversation, and returns `-32602` otherwise. Subject, participant
-names, and bare provider thread IDs are never accepted as scope.
+v1 is single-owner and the daemon is the only authority:
 
-A broader "one account's inbox with filters" family is rejected for v1. Every
-new message in a mailbox would become an event, a label or sender filter
-means different things per source (Gmail labels, IMAP folders, chats have
-neither), and the woken run would still need to triage; the cost and the
-privacy exposure are unbounded while the benefit is a filter the run can
-apply itself after a scoped wake. The schema reserves `scope_kind` so a later
-sender-scoped family (`person_id`, tracked people only) can be added without
-a migration, but that is a separate design.
+- Events requires the MCP inbound key to be the daemon's owner API key (the
+  default). When `--http-token-file` or `--http-token-env` is set, the MCP
+  process serves its existing tools but registers no `events/*` methods and
+  advertises no `events` capability. The MCP process forwards no principal;
+  the daemon derives it from the credential it authenticated.
+- The Events routes require `AuthModeAPIKey` explicitly. Keyless-loopback,
+  browser-session, and delegated callers receive `403` from the daemon and
+  `-32012` from MCP. Delegated calendar authority is not permission to
+  subscribe to the owner's archive.
+- `principal_id = "owner:" + hex(SHA-256(owner key))[:16]`, computed by the
+  daemon from the key it loaded at startup. Rotating the owner key is a
+  daemon restart; after it, a stale MCP process fails with `401` at the
+  daemon, every subscription of the old principal fails its next recheck
+  and ends with reason `principal_revoked`, and its pending delivery is
+  dropped.
+- Authorization is rechecked at subscribe and refresh, before every dial,
+  and before recording success: the principal matches the current owner
+  key, the scope row exists and its source is not removed, the source
+  family is still capable, and the feature is still enabled.
 
-### `msgvault.message_archived`
+Agent principals (`agent:<grant.ID>`) use the same column and vocabulary but
+are not served in Phase 1. Prerequisites, each a separate change: a
+persisted grant registry (today in-memory), an HTTP delegated session
+(neither #1092 nor #1023 provides one; #1092 refuses `--http`), an
+`events.subscribe` permission checked with `Grant.Allows` against the
+scope's source, and a decision between the #1092 and #1023 wirings. Until
+then delegated callers get `-32012`.
 
-A message or reaction newly committed to the archive in one conversation.
-"Archived", not "received": archive time lags provider arrival by the sync
-interval.
+A gateway or tunnel that forwards a user bearer does not create a principal:
+the static bearer checker rejects a different bearer, and hashing arbitrary
+bytes authenticates nothing. A verified OAuth subject needs a trusted
+verifier or a signed gateway assertion, which is additional scope.
+
+## Event families
+
+Names are prefixed `msgvault.`. Argument schemas are closed objects; IDs are
+decimal strings as in Inline's `catalog.ts`. Every `events/list` description
+names the read tools for its payload and says that `get_mcp_event` recovers
+a lost payload from the `eventId`.
+
+### Scope: one conversation or one calendar
+
+`conversation_id` is the msgvault `conversations.id`; a subscriber resolves
+it with `list_thread` or reads it from any `get_message` / `list_messages`
+result. `calendar_source_id` is a calendar's `sources.id`, listed by the new
+`list_calendar_sources` tool. Subscribe validates existence, type, and that
+the source's family is Events-capable (`-32602`, `data.reason` one of
+`unknown_scope`, `wrong_scope_type`, `source_not_capable`). Subject,
+participant names, and bare provider IDs are never accepted. Account-wide
+scope is rejected: every mailbox message would wake the run, label and
+sender filters mean different things per source, and the run can filter
+after a scoped wake.
+
+### Phase 1: `msgvault.message_archived`
+
+A message or reaction newly committed in one conversation. "Archived", not
+"received": archive time lags provider arrival by the sync interval.
 
 Arguments: `conversation_id` (required), `include_from_me` (default
 `false`), `include_reactions` (default `true`).
 
-Payload (`kind` is `message` or `reaction`; reactions add
-`target_message_id` and `reaction_value`, the emoji or tapback name):
+Payload:
 
 ```json
 {"kind":"message","message_id":"123456","conversation_id":"7890","source_id":"3",
  "from_me":false,"sent_at":"2026-10-05T09:12:44Z","archived_at":"2026-10-05T09:12:49Z"}
 ```
 
-`from_me` is `messages.is_from_me` for messages; for reactions it is whether
-the reacting participant is a confirmed owner identity of the source, the
-same predicate that sets `identity_is_from_me`. Edits, label changes, read
-flags, soft deletes, attachment downloads, FTS and projection updates, and
-reaction removals never emit. A message deleted before delivery is still
-delivered (the read tool reports the deletion), matching the "committed
-occurrence, not current state" rule in Inline's `source.ts`.
+```json
+{"kind":"reaction","target_message_id":"123456","reaction_key":"👍","reactor_participant_id":"88",
+ "conversation_id":"7890","source_id":"3","from_me":false,"reacted_at":"2026-10-05T09:13:02Z"}
+```
 
-### `msgvault.calendar_event_changed`
+- `kind: message` is appended once per archived message, at the ready
+  boundary below. Edits, labels, read flags, soft deletes, attachment
+  downloads, FTS, and projections never emit. A message deleted before
+  delivery is still delivered; the read tool reports the deletion.
+- `kind: reaction` has no `message_id` because a reaction row is not a
+  message. `reaction_key` is the emoji or tapback name (the relay's
+  vocabulary). One occurrence per `(target, reactor, type, value)` within
+  retention; a removal and re-add inside that window emits nothing again,
+  and removals never emit. `reacted_at` is the real reaction time when the
+  source gives one, else the observation time; borrowed target timestamps
+  are never used.
+- `from_me` is the message's final `is_from_me` or, for reactions, whether
+  the reactor is a confirmed owner identity of the source (the
+  `identity_is_from_me` predicate). Payloads of messages correlated to a
+  managed draft add `draft_id` and `draft_actor` (see `draft_changed`).
+- `archived_at` is the timestamp the persistence transaction recorded, not
+  an exact database commit time.
 
-A calendar event created, updated, or cancelled in one synced calendar.
+### Phase 1: `msgvault.calendar_event_changed`
 
-Arguments: `calendar_source_id` (required): the calendar's `sources.id`, as
-returned in the `source_id` of any `calendar_event` message or by the
-calendar tools. Subscribe checks the source exists and has
-`source_type = gcal`.
+A calendar object created, updated, or cancelled in one synced calendar.
+
+Arguments: `calendar_source_id` (required).
 
 Payload: `kind` (`created` | `updated` | `cancelled`), `message_id`,
 `conversation_id` (the series conversation), `source_id`, `ical_uid`,
-`sequence`, `starts_at`, `from_me` (the organizer is the owner). The woken
-run reads the full event with `get_message`.
+`sequence`, `starts_at` (RFC 3339, or `YYYY-MM-DD` with `all_day: true`),
+`changed_at` (provider `updated` when present, else observation time),
+`from_me` (the owner is the organizer; it says nothing about who made this
+change, so the own-message filter and guard do not apply to this family).
 
-`updated` requires a real change: `sequence` increased, or start, end, or
-status differ from the stored metadata. Google incremental sync only returns
-changed events, but a full sync (`sync_type = full`) re-delivers every event
-and is muted like any backfill. Attendee RSVP changes are not emitted because
-`responseStatus` is not stored; persisting it is a metadata change for a
-later proposal, and `kind: rsvp_changed` is reserved for it. "Invites from or
-to a person" is the sender-scoped family above, also deferred.
+Entity identity and occurrence identity are separate: the message ID names
+the object, each transition is a new journal sequence, and there is no
+uniqueness constraint on calendar rows. One Store operation,
+`PersistCalendarEvent`, owns the classification after an atomic old/new
+comparison under the object's row lock, and calendar rows are excluded from
+the generic message producer:
 
-### `msgvault.task_linked`
+- `created`: no prior row.
+- `updated`: prior row exists and at least one of status (other than to
+  `cancelled`), start, end, all-day flag, or time zone differs, or
+  `sequence` increased. A sequence decrease or reset alone is not an update.
+  Identical redelivery (incremental sync, write-through followed by sync)
+  emits nothing because the persisted state already equals the new state.
+- `cancelled`: status becomes `cancelled`. A cancellation for an object
+  never seen produces one `cancelled` occurrence, not `created` plus
+  `cancelled`, through the sparse-tombstone path that preserves prior
+  details. Cancel → restore → cancel produces three occurrences.
+- Full syncs are muted by provenance. RSVP is outside the comparison and
+  outside the advertised enum; "invites from or to a person" is a later,
+  person-scoped family.
 
-Optional, lowest value, and cheap: a task created or linked from a message
-in one conversation through msgvault's own API (`createOrLinkMessageTask`,
-`unlinkMessageTask`). Arguments: `conversation_id`. Payload: `kind`
-(`linked` | `unlinked`), `message_id`, `conversation_id`, `task_id`,
-`project`. The log row is written after Kata confirms the write, so it is an
-action log, not an ingestion event. Linked-issue state changes cannot be
-emitted: msgvault has no feed and the reverse-index cache is explicitly
-non-authoritative. They belong in a Kata-side events implementation, which
-can cite the `mail_links` metadata to scope by message. Ship this family
-only if the maintainers want it; nothing else depends on it.
+### Phase 1: `msgvault.draft_changed`
 
-### Own messages and the loop guard
+A managed draft in one conversation changed. This covers what msgvault can
+prove about outbound work today: drafts prepared through the CLI, Web UI, or
+MCP draft tools (#1092 or #1023), and the moment a Gmail or IMAP draft turns
+into an archived sent message.
 
-The owner writes in watched chats himself, and an agent may reply through
-msgvault drafts (`agentgrant` `draft.*` permissions) or another client; the
-archive cannot tell the two apart. `include_from_me` therefore defaults to
-`false`, as Inline's `excludeSelf` does, and the `events/list` description
-says that `from_me: true` is never a message to answer. The server
-`instructions` repeat it. On top, one counter per subscription: at most 6
-`from_me` deliveries per rolling 10 minutes; further `from_me` rows in the
-window are skipped (cursor advances, `loop_guard_skips` increments,
-reported by the status command). Inline has no guard and relies on skill
-text; the counter costs two columns and bounds a runaway loop to 36 runs an
-hour.
+Arguments: `conversation_id` (required), `include_actors` (array of
+`owner`, `session`, `agent`; default all).
 
-## Event production
+Payload: `kind` (`created` | `updated` | `deleted` | `uncertain` | `sent`),
+`draft_id`, `revision`, `draft_kind` (`gmail` | `imap` | `beeper` | `chat`),
+`conversation_id`, `source_id`, `message_id` (the archived draft row for
+Gmail and IMAP; for `sent`, the archived sent message), `actor`
+(`owner:<hash>` | `session` | `agent:<grant id>`), and for `uncertain`
+`pending_operation` and `pending_code`.
 
-### Commit-time change log
+Commit points are the existing lifecycle transactions, which already run
+inside Store (`inTx` in `draft_lifecycle.go`):
 
-`mcp_event_log` is the smallest durable, commit-ordered sequence that covers
-messages, reactions, calendar changes, and task links, since none of the
-existing journals does. It is written **inside** the ingestion transaction:
+| Kind | Gmail / IMAP | Beeper | Local chat |
+|---|---|---|---|
+| `created` | `PersistGmailDraft`, `PersistIMAPDraft` | `CreateBeeperDraft` | `CreateChatDraft` |
+| `updated` | `PublishGmailDraftReplacement`, `PublishIMAPDraftReplacement`, recovery that publishes | `FinishBeeperDraft` (edit) | `UpdateChatDraft` |
+| `deleted` | `FinishGmailDraftDelete`, `FinishIMAPDraftRemoval` | `FinishBeeperDraft` (delete) | `DeleteChatDraft` |
+| `uncertain` | `RecordGmailDraftOutcome`, `RecordIMAPDraftOutcome` with a `pending_code` | the Beeper equivalent | — |
+| `sent` | composite persistence of a `from_me` message whose `rfc822_message_id` equals the draft's | — | — |
 
-| Column | Note |
-|---|---|
-| `seq` | `INTEGER PRIMARY KEY AUTOINCREMENT` / `BIGINT GENERATED ALWAYS AS IDENTITY` |
-| `scope_kind`, `scope_id` | `conversation`/`conversations.id` or `calendar`/`sources.id` |
-| `kind`, `item_key` | `UNIQUE (scope_kind, scope_id, kind, item_key)`; message ID, `reaction:<msg>:<participant>:<type>:<value>`, `task:<task>:<msg>` |
-| `message_id`, `conversation_id`, `source_id`, `from_me` | filter and payload fields |
-| `occurred_at`, `committed_at` | provider time; commit time |
-| `data` | the payload JSON encoded once at commit |
+Occurrence key: `draft:<draft_id>:<revision>:<kind>` (`uncertain` adds the
+code), so every revision transition is a new occurrence and a retried
+lifecycle step that changes nothing emits nothing. Drafts are user actions,
+always live provenance.
 
-Rows are written only when an active subscription covers the scope
-(`EXISTS` on `mcp_event_subscriptions` by `(scope_kind, scope_id)`), so an
-archive with no subscribers pays one indexed read per new message when the
-flag is on and nothing when it is off. Retention is 7 days, pruned by the
-worker; a row is kept while any active subscription's cursor is behind it.
+`sent` is emitted only on exact correlation: inside the persistence
+transaction of a live `from_me` email, the Store looks up a non-discarded
+or recently discarded (≤ retention) managed draft of the same source with
+the same `rfc822_message_id`; on a match it appends `draft_changed/sent`
+and stamps the `message_archived` row with `draft_id` and `draft_actor`.
+Whether Gmail and IMAP clients preserve the Message-ID of a draft they send
+is verified per provider with synthetic fixtures before the family is
+enabled for that source; without a match the sent message is an ordinary
+`from_me` message. Beeper has no message identity for a sent draft (Beeper
+`Message` carries only `isSender`), so a composer-emptied-plus-equal-text
+match is documented as a heuristic and is not used for `sent` or for
+exclusion. Send-outcome kinds (`send_failed`, `send_uncertain`) are not in
+the enum: #666's send path must append them in its own transaction when it
+exists.
 
-Hook points, all in `internal/store`:
+The actor comes from a new `created_by_principal` column on the four draft
+tables, set by the daemon from the authenticated mode of the creating call:
+`owner:<hash>` for API-key callers (CLI and MCP), `session` for the Web UI,
+`agent:<grant id>` for delegated tokens. Read path: `draft_get` (#1092) or,
+until it lands, `get_message` on the Gmail/IMAP draft row.
 
-- `upsertMessageWith`: when `prior.found` is false, the row is not deleted,
-  and `msg.IngestMode == IngestLive`, append `kind: message` (or the
-  calendar `created`). The prior-row read runs for every upsert while the
-  flag is on; today it is skipped for deleted rows.
-- `UpsertReaction` / `ReplaceReactions`: append `kind: reaction` for each
-  reaction row that did not exist before and has no `removed_at`.
-- A new `UpsertCalendarEvent(msg, metadata)` that does the upsert, the
-  metadata write, and the log append in one transaction, computing `kind`
-  from the prior row and metadata diff; `calsync.ingestEvent` and
-  `flagCancelled` move onto it. Today they are two separate store calls.
-- The task-link API handler appends through a small store method after the
-  Kata write succeeds.
+### Phase 2: `msgvault.kata_issue_filed`
 
-Concurrency: SQLite serializes all writers, and `UpsertMessage` already
-reserves the writer before reading. On PostgreSQL the log append and
-subscription activation both take `pg_advisory_xact_lock` on one constant, so
-a message committed during activation is either behind the activation head
-(and replayed) or ahead of it (and delivered). Without that lock, an
-activation snapshot could miss a message whose upsert did not yet see the
-subscription row.
+An issue filed or evidence added from one conversation through msgvault
+(#1104), or a task linked or unlinked through the legacy
+`[integrations.tasks]` route. A remote write followed by a local append is
+not a transaction, so this family gets the smallest durable action record:
 
-### Live versus backfill
+- `mcp_action_records(id, kind, idempotency_key, conversation_id,
+  message_id, attachment_id, principal_id, state ∈ {pending, confirmed,
+  unknown, abandoned}, issue_ref, project, passage_id, created_at,
+  settled_at)`. The handler inserts the record as `pending` before the
+  remote call, reusing #1104's idempotency key as the marker.
+- After Kata confirms, one transaction marks the record `confirmed` and
+  appends the occurrence (key `action:<record id>`). A crash in between
+  leaves a `pending` record; the daemon's next maintenance pass resolves it
+  through #1104's `FindActionTask` marker lookup (or the task-link reverse
+  index for legacy links), then confirms or abandons it. Every link/unlink
+  cycle is its own record, so repeats are distinct occurrences.
+- Payload: `kind` (`created` | `evidence_added` | `linked` | `unlinked`),
+  `issue_ref`, `project`, `message_id`, `attachment_id`, `passage_id`,
+  `conversation_id`, `actor`. Read path: the issue lives in Kata; the
+  passage is read with `get_message` or `search_document_attachments`.
+- Dependencies: #1104 merged; the record table (consent). Issue state
+  changes remain a Kata-side events dependency; msgvault observes none.
 
-`Message` gains `IngestMode` (`IngestUnknown`, `IngestLive`,
-`IngestBackfill`), a Go field, not a column. Only `IngestLive` emits; unknown
-is treated as backfill. Each incremental path sets `IngestLive` explicitly —
-Gmail history sync (`internal/sync/incremental.go`), IMAP incremental, Beeper
-live import, iMessage and WhatsApp incremental, Slack reply sweep, calendar
-incremental sync. Full syncs, history-expired recovery, `import-*` runs,
-repairs, and re-derivations never set it. This is provenance, not an age
-heuristic: an old message arriving through a live path (a late IMAP move)
-still emits, and a fresh message in a full re-sync does not. As a cost bound
-only, rows whose `occurred_at` is older than `max_event_age` (default 24h)
-are also muted; the setting is documented as a bound, not a freshness proof.
+### Phase 2: `msgvault.attachment_processed`
 
-### Cursor and replay
+An attachment of a message in one conversation whose derived content became
+readable, or whose processing failed terminally. Use case: a voice note
+arrives (`message_archived`), and later its transcript exists
+(`attachment_processed`), so the agent reacts to the content.
 
-The cursor is `c1.<seq>.<mac>`: the acknowledged log `seq`, HMAC-SHA256 under
-the server key and bound to the subscription ID, truncated to 16 bytes. A
-cursor with a bad MAC, from another subscription, or ahead of the current
-log head is `-32602` (Inline rejects "one ahead of the head", `repository.ts`).
-`cursor: null` or absent starts at the head captured inside the activation
-transaction; an existing identity renewed without a cursor keeps its
-acknowledged position. If the requested `seq` is older than the oldest
-retained row for the scope, the subscription restarts at the head and the
-result carries `truncated: true`; the instructions tell the run to re-read
-the conversation and disclose the gap. Delivery is in log order, one event in
-flight per subscription, and the cursor advances only on acknowledgement, so
-it never passes an undelivered event.
+Arguments: `conversation_id` (required), `kinds` (array, default all
+advertised).
+
+Payload: `kind`, `message_id`, `attachment_id`, `conversation_id`,
+`source_id`, `profile`, and either `extraction_id` or `docbank_occurrence_id`
+and `job_id`.
+
+| Kind | Commit point | Occurrence key | Read path |
+|---|---|---|---|
+| `text_extracted` | `PublishDocumentExtraction`, one row per `document_occurrences` row of a live message in scope, in the same transaction | `extraction:<extraction_id>:<occurrence_key>` | `search_document_attachments {message_id, attachment_id, query}`; `get_attachment` for bytes |
+| `failed` | `FailDocumentExtraction` when the outcome is terminal (owner suppressed for the profile); media delivery entering `blocked` with a local-gap code | `extraction-failed:<attachment_id>:<profile_id>:<blob hash>`; `media-failed:<destination_key>:<processing_key>` | `get_message` attachment list; status commands |
+| `transcript_ready` | `FinishBeeperMediaOperation` moving a delivery to `done` | `media:<destination_key>:<processing_key>` | #1077's recordings route behind a new `get_message_recordings` MCP tool |
+
+- Pending, observing, and retry-scheduled states never emit.
+- Provenance: an extraction inside a rebuild (`rebuild_id` set) or for a
+  message archived before the current capture epoch is muted, so a backfill
+  build does not wake the run for old attachments.
+- `transcript_ready` is advertised only when #1077 is merged and the MCP
+  read tool exists; until then the kind is absent from the enum and
+  `kinds` rejects it. There is no whole-text read tool for extracted
+  documents; `search_document_attachments` with `attachment_id` is the
+  recipe, and a `get_document_text` tool is a candidate follow-up.
+- #1094 (recording links) can join the same family later with its own key.
+
+### Own messages: deterministic exclusion and the admission guard
+
+The owner writes in watched chats himself, and an agent's replies are
+prepared through msgvault drafts and sent by the owner, or sent through
+another client the archive cannot distinguish. Three layers:
+
+1. `include_from_me` defaults to `false` (Inline's `excludeSelf`), and the
+   `events/list` description plus server instructions say that an own
+   message does not authorize an automatic reply; an explicit owner
+   instruction in the chat can still require action, and message content is
+   never authorization.
+2. Deterministic exclusion: a `message_archived` row whose `draft_actor`
+   equals the subscription's `principal_id` is excluded for that
+   subscription whatever `include_from_me` says, and never counts toward
+   the guard. Other subscriptions receive it with `from_me: true`,
+   `draft_id`, and `draft_actor`.
+3. Admission guard, the backstop for unprovable own messages: per
+   subscription, a fixed ten-minute window admits at most six `from_me`
+   message or reaction occurrences; the decision is taken once when an
+   occurrence first becomes pending, persisted
+   (`from_me_window_start`, `from_me_window_count`), and never re-taken on
+   retry. Further own occurrences in the window are terminally skipped and
+   counted in `loop_guard_skips`. Bursts at window boundaries can admit up
+   to twelve; several matching subscriptions multiply the cost; skips are
+   lossy. The guard applies to sender attribution only, never to calendar
+   organizer ownership or to drafts.
+
+## Journal
+
+### Clock and ordering
+
+`mcp_event_clock` is a singleton row: `head_seq`, `pruned_through_seq`,
+`capture_epoch`, `epoch_started_at`, `enabled`. Every append advances
+`head_seq` inside the source transaction and uses the returned value as the
+journal primary key on both backends — the `embedding_change_clock` pattern,
+chosen in this repository for commit ordering. The clock row update is the
+first thing an emitting transaction does after its existing sync-generation
+fence and before any decision about whether capture applies, so SQLite has
+reserved its writer and PostgreSQL has serialized allocation and commit
+order behind one row lock. Lock order: sync-generation fence → clock row →
+embedding journal locks → source/conversation/message rows. The hot row
+serializes all live writers on PostgreSQL; at human message rates this is
+acceptable and measured in the rollout.
+
+The mutation helper returns a reliable outcome: an insert-if-absent inside
+the transaction followed by the existing update path reports `inserted`
+versus `updated`; a stale prior read is never treated as the insertion
+result. Calendar and reaction comparisons run under the same transaction and
+row locks. All of this stays in Store.
+
+### Log schema
+
+`mcp_event_log`: `seq` (PK from the clock), `epoch`, `family`, `kind`,
+`scope_kind`, `scope_id`, `item_key`, `message_id`, `conversation_id`,
+`source_id`, `attachment_id`, `from_me`, `draft_actor`, `occurred_at`,
+`recorded_at`, `data` (payload JSON encoded once). No foreign keys and no
+cascade: a retained occurrence outlives its message. Indexes:
+`(scope_kind, scope_id, seq)`, `(source_id)` for source removal, and a
+partial unique index on `(scope_kind, scope_id, item_key)` for
+`kind = 'reaction'` and for `family = 'draft'`; messages are deduplicated by
+the insert outcome and calendar transitions are intentionally repeatable.
+
+All eligible live occurrences are journaled while Events is enabled,
+filtered at delivery. This removes subscriber-dependent capture gaps and the
+per-write subscription lookup, at the cost of journaling every live message
+for seven days, which the consent list names.
+
+### Provenance and ready boundary
+
+Every emitting mutation receives an explicit immutable
+`IngestContext{Mode ∈ {live, backfill, unknown}, ObservedAt}` carried
+through each source phase and composite persistence; `unknown` is muted. It
+is never inferred from the currently running sync: Beeper and Slack runs
+mix history and live phases, calendar write-through has no run, and
+reconciliation inside an incremental run is not its live delta. `ScopedToSync`
+views keep their generation fence and may carry the context immutably.
+
+The ready boundary is the commit of the core archived message — header,
+body, relevant metadata, recipients, final attribution — in one
+transaction, with the journal append after those writes. Each source family
+becomes Events-capable only when its persistence meets that boundary:
+composite `MessagePersistData` sources first (Gmail incremental, IMAP
+incremental), calendar after `PersistCalendarEvent` exists (full projection
+in one transaction, sparse-cancellation merge under the same transaction,
+Google parsing kept in `calsync`), Beeper only after its header-first
+persistence is moved onto the composite boundary. Network requests and
+media downloads stay outside transactions; attachments are readable only
+when already archived, with the existing unavailable/retry behavior, and the
+design does not promise every attachment byte at the first wake.
+
+Reactions: the old and new sets are diffed inside one transaction before
+replacement; only additions under live provenance emit, and a newly
+backfilled target gets a muted baseline. `UpsertReaction` becomes
+transactional with the same context.
+
+Event time per family: message `sent_at`; reaction real time or observation
+time; calendar provider `updated` or observation time; drafts and Phase 2
+families the transaction's observation time. No age cap is applied:
+provenance is the rule.
+
+### Retention, epochs, and continuity
+
+- Retention is seven days, hard. Pruning deletes rows older than that and
+  advances `pruned_through_seq` in the same transaction, even when it
+  deletes the final row, so the boundary survives an empty log.
+- Cursors are bound to `(subscription_id, epoch, seq)`. A cursor from an
+  older epoch, or with `seq < pruned_through_seq`, truncates: the
+  subscription restarts at `head_seq` and the result says `truncated: true`.
+  A conservative global boundary may report an unnecessary gap; it never
+  conceals one.
+- Disabling capture ends the epoch (`capture_epoch + 1`); ordinary daemon
+  restarts do not.
+- An active subscription whose settled cursor falls below the boundary is
+  stopped with reason `retention`, its cursor and reason preserved; the next
+  refresh returns `truncated: true` and the head. The worker never skips to
+  the head on its own.
+- Source removal deletes that source's log rows and ends subscriptions in
+  its scope with reason `scope_removed`. Expired and revoked subscriptions
+  are purged after the 24-hour read grace.
+
+## Subscriptions and cursors
+
+### State machine
+
+All transitions are Store commands with private transactions, illustratively
+`ActivateMCPSubscription`, `PrepareMCPDelivery`, `FinishMCPDelivery`,
+`EndMCPSubscription`, each fenced by a `generation` on the subscription row.
+
+`events/subscribe`:
+
+1. Validate arguments against the closed schema (`-32602`); require
+   `delivery.mode: "webhook"` (`-32014`), an `https` URL on port 443 or
+   8443 with no credentials or fragment, a `whsec_` secret decoding to 24–64
+   bytes; authorize the principal and scope.
+2. Prepare a candidate `(subscription_id, secret_revision)`. The ID is
+   `sub_` + SHA-256 over length-prefixed `(principal, name, canonical
+   arguments, url)`.
+3. If no durable verification exists for exactly that subscription and
+   secret revision, challenge the callback outside any transaction: POST
+   `{"type":"verification","challenge":<32 random bytes, base64url>}` with
+   `webhook-id: msg_verification_<random>`, the Standard Webhooks headers,
+   and `X-MCP-Subscription-Id`; require 2xx, a body of at most 4 KiB, and a
+   constant-time match within 10 s. Failure returns `-32015` with
+   `data.reason` in `connection_refused`, `timeout`, `tls_error`,
+   `http_4xx`, `http_5xx`, `challenge_failed`, and leaves any existing
+   subscription and its secrets untouched. There is no cross-subscription
+   verification cache.
+4. Activate atomically: recheck authorization, identity, current
+   generation, the 64-active quota per principal (`-32013`, enforced under
+   the same transaction so concurrent subscribes cannot exceed it), expiry,
+   and the replay boundary; persist the verification for that revision;
+   bump the generation. Capture and replay start at activation, not at
+   challenge time.
+
+Refresh is the same call. Without a cursor it extends expiry and preserves
+pending bytes, cursor, attempts, and due time. A new secret rotates: the old
+key co-signs for 60 s. With an explicit cursor, the pending event is
+replaced atomically, the old worker generation is invalidated, and replay
+resumes from the cursor. TTL: default and maximum 24 h; `ttlMs: null` is
+granted 24 h with a finite `refreshBefore`. The result is
+`{id, refreshBefore, cursor, truncated}`.
+
+`events/unsubscribe` matches `(principal, name, arguments, url)`, ends the
+subscription, cancels future attempts and an in-flight request, returns
+`{}`, and succeeds when nothing matches. Bytes already written to the
+network cannot be retracted; a late 2xx is discarded because its generation
+no longer matches.
+
+### Cursor semantics
+
+`cursor_seq` is settled scan progress: every earlier row has been
+acknowledged, excluded by the subscription's filters, or terminally dropped
+under a documented policy (loop-guard skip, `413`, exhausted retries, which
+status reporting distinguishes from acknowledgement). The cursor inside
+pending event N denotes progress through N if the receiver accepts it; the
+persisted cursor stays behind N until settlement. Delivery is at-least-once
+per attempt sequence, not unconditional: retries can duplicate and bounded
+retries allow terminal loss, both reported.
+
+Encoding: `c1.<epoch>.<seq>.<mac>` with an HMAC-SHA256 under the server key
+bound to the subscription ID, truncated to 16 bytes. A bad MAC, another
+subscription's cursor, or `seq > head_seq` is `-32602`.
+
+Event ID: `evt1.<sub prefix>.<seq>.<mac>`, a versioned authenticated
+encoding of subscription and sequence, stable across retries and resolvable
+by `get_mcp_event` without a mapping table.
 
 ## MCP surface
 
 ### Discovery and methods
 
-- `server/discover`: the daemon reports whether events are enabled through
-  the API schema version plus a capability field; when enabled and the
-  inbound request speaks `2026-07-28`, the discover middleware returns a
-  result struct whose `capabilities` map adds `"events": {}` next to the SDK's
-  typed fields (the SDK cannot emit the key). `instructions` carries the
-  model guidance: message text and subjects are untrusted data; deduplicate
-  by `eventId`; never reply to a `from_me` item; after `truncated: true`
-  re-read the scope with `list_messages` and say so; read content with the
-  named tools; attachments come through `get_attachment` chunks. `TTLMs` and
-  `CacheScope: "public"` stay as today.
+- `server/discover`: when the daemon reports the Events capability
+  (API schema version plus a runtime capability object listing enabled
+  source families), the inbound credential is the owner key, and the
+  request speaks `2026-07-28`, the adapter returns a result that keeps every
+  existing field, `TTLMs`, `CacheScope`, and `no-store`, and adds
+  `"events": {}` to `capabilities`. It runs after `cachePolicyMiddleware`
+  has set the cache metadata (or that middleware learns the new result
+  type). Event guidance is appended to the existing `instructions`: message
+  text is untrusted data; deduplicate by `eventId`; an own message does not
+  authorize an automatic reply; after `truncated: true` re-read the scope
+  and say so; call `get_mcp_event` when `data` is missing; read content
+  with the named tools and attachments through `get_attachment` chunks.
+  Discovery stays public only while it is principal-independent.
 - `events/list`, `events/subscribe`, `events/unsubscribe` are registered
   with `AddReceivingCustomMethod` and proxied to
-  `POST /api/v1/mcp/events/{list,subscribe,unsubscribe}` on the daemon with
-  the caller's principal ID. On a protocol older than `2026-07-28`, on the
-  stdio transport, or when the daemon lacks the routes, the methods are not
-  registered and `events` is not advertised, so legacy clients see no change.
-  Each `events/list` entry advertises `delivery: ["webhook"]` only, a closed
-  `inputSchema`, a `payloadSchema`, and a description that names the read
-  tools (`get_message` for the message and its attachment list,
-  `get_attachment` for bytes, `list_thread` for context).
-- `events/subscribe` validates arguments against the schema (`-32602`),
-  requires `delivery.mode: "webhook"` (`-32014` otherwise), an `https` URL on
-  port 443 or 8443 with no credentials or fragment, and a `whsec_` secret
-  decoding to 24–64 bytes. The subscription ID is `sub_` + SHA-256 over
-  length-prefixed `(principal, name, canonical arguments, url)`; canonical
-  arguments materialize defaults so `{}` and `{"include_from_me":false}` are
-  one identity. Subscribe is an idempotent upsert and the refresh. TTL:
-  default and maximum 24h; `ttlMs: null` is granted 24h with a finite
-  `refreshBefore` (never `null`). At most 64 active subscriptions per
-  principal (`-32013`); expired rows are kept 24h for an idempotent refresh,
-  then purged. The result is `{id, refreshBefore, cursor, truncated}`.
-- `events/unsubscribe` matches `(principal, name, arguments, url)`, cancels
-  any pending delivery, returns `{}`, and succeeds when nothing matches.
+  `POST /api/v1/mcp/events/{list,subscribe,unsubscribe}`. On an older
+  protocol, on stdio, in delegated mode, with an independent inbound key,
+  or when the daemon lacks the routes or the flag, the methods are not
+  registered and the capability is absent; existing initialization never
+  fails because of Events. Each `events/list` entry advertises
+  `delivery: ["webhook"]` only, a closed `inputSchema`, a `payloadSchema`,
+  and the read-tool recipe. Families and kinds whose dependencies are unmet
+  are omitted from the catalog, and subscribe rejects a scope whose source
+  family is not yet capable.
 
-### Principal
+### Read tools
 
-The principal is the identity the existing bearer check establishes:
-`principal_id = "token:" + hex(SHA-256(token))[:32]`. With no inbound token
-(`--http-allow-insecure` without a token file) there is no principal and the
-subscribe and unsubscribe methods return `-32012`, which the draft requires.
-Rotating the token changes the principal, so every old subscription stops at
-its next authorization recheck and is purged after the grace period. Nothing
-in the schema assumes one principal: a future OAuth front (a tunnel or gateway
-that forwards a user bearer, or an identity provider in msgvault) maps a
-token subject into the same column.
-
-Authorization is rechecked at discovery, at subscribe and refresh, before
-every dial, and before recording success: the principal matches the current
-token, the scope row still exists, the source is not removed, and the
-feature flag is still on. A failed recheck moves the subscription to
-`expired` and clears the pending delivery.
-
-### Reading the event, including attachments
-
-The webhook names a `message_id`. The run calls `get_message` for the
-message and its attachment list (`id`, `filename`, `mime_type`,
-`size_bytes`, `content_hash`), then `get_attachment` with the attachment ID:
-whole objects up to 50 MiB embedded, or chunks of 1–4 MiB by `offset` and
-`length`, passing the first chunk's `sha256` on every later call. Calendar
-events have no archived attachments (calsync stores none), and an emailed
-invite is an email whose `.ics` is a normal attachment. No new read tool is
-added. ChatGPT runs have been observed without the event `data`
-(openai/codex#49665); the instructions tell such a run to call
-`list_messages {conversation_id, limit: 5}` instead, which is what the event
-would have pointed to.
+- `get_mcp_event {event_id}`: resolves the retained occurrence for the
+  caller's subscription (identifiers, kind, timestamps, flags, never
+  content) under current authorization, with a 24-hour read grace after
+  expiry and immediate denial after revocation or unsubscribe. This is the
+  native equivalent of the relay's read-event lookup and replaces any
+  "latest five messages" fallback.
+- `list_calendar_sources {}`: the subscribable calendar sources
+  (`source_id`, calendar summary, account), the one recipe for resolving
+  `calendar_source_id`.
+- `get_message` gains `source_id`, `is_from_me`, and a typed calendar
+  projection (`status`, `sequence`, `start`, `end`, `all_day`,
+  `time_zone`, `ical_uid`) populated from archive state, so a run can read
+  the current state of a cancelled event instead of a body that omits it.
+  Occurrence facts (from the event) and current state (from the read) stay
+  distinguishable.
+- `get_message_recordings {message_id}` (Phase 2) wraps #1077's route.
+- Attachments: `get_message` lists `id`, `filename`, `mime_type`,
+  `size_bytes`, `content_hash`; `get_attachment` returns whole objects up to
+  50 MiB or chunks of 1–4 MiB by `offset` and `length`, passing the first
+  chunk's `sha256` on every later call. Calendar objects carry no archived
+  attachments; an emailed invite's `.ics` is a normal email attachment.
 
 ## Delivery
 
-The worker lives in the daemon (`internal/mcpevents`) and follows the
-scheduler job conventions: one loop, ticked every second and woken by a
-non-blocking channel send after each log commit, that re-reads due
-subscriptions from the store on every pass. Per subscription, per pass:
+`mcpevents.Service.Run(ctx) error` is started and joined by daemon lifecycle
+wiring, not registered as a scheduler job. A supervisor reconciles the set
+of active subscriptions, starts one worker goroutine per active
+subscription with one in-flight event each, cancels workers whose
+generation ended, and runs a bounded maintenance pass (expiry sweep every
+minute, pruning hourly, Phase 2 action-record reconciliation). Workers drain
+ready occurrences until a retry deadline, expiry, or an empty queue, then
+wait on a coalesced wake or timer; one subscriber's I/O never stalls
+another. Wakes are nonblocking hints sent after a successful outer commit;
+startup and the one-second reconciliation scan recover lost hints. Callback
+verification and delivery run outside Store transactions and outside the
+archive operation gate, which is taken only around the short Store steps.
+Workers are cancelled and joined before Store closes. The runbook preserves
+the single-daemon-per-archive invariant that makes leases unnecessary.
 
-1. Recheck authorization. If there is no pending event, read the next log
-   row with `seq > cursor_seq` in the scope that passes the subscription's
-   filters; rows that fail a filter or the loop guard advance `cursor_seq`
-   without delivery. Build the envelope `{eventId, name, timestamp, data,
-   cursor}` with `eventId = "evt_" + SHA-256(subscription_id ‖ seq)`,
-   `timestamp = occurred_at`, and persist it as the pending event. The bytes
-   are stored once, so every retry sends an identical body.
-2. Verify the callback first if it was never verified for this identity or
-   the secret changed: POST `{"type":"verification","challenge":<32 random
-   bytes, base64url>}` with `webhook-id: msg_verification_<random>`, the
-   Standard Webhooks headers, and `X-MCP-Subscription-Id`; require 2xx, a
-   body of at most 4 KiB, and a constant-time challenge match within 10 s.
-   Failures surface from subscribe as `-32015` with `data.reason` in
-   `connection_refused`, `timeout`, `tls_error`, `http_4xx`, `http_5xx`,
-   `challenge_failed`. A successful verification is cached per
-   `(principal, url)` for 60 s so a burst of refreshes does not re-challenge.
-3. POST the envelope, at most 262144 bytes, with `Content-Type:
-   application/json`, `webhook-id` = `eventId`, `webhook-timestamp` in Unix
-   seconds, `webhook-signature` = `v1,` + base64 HMAC-SHA256 over
-   `id.timestamp.body` under the decoded `whsec_` key, and
-   `X-MCP-Subscription-Id`. After a rotation both the new and the previous
-   key sign, space-separated, for 60 s. Receipt is decided from the status
-   line: any 2xx is success.
-4. On success, recheck authorization, then acknowledge: `cursor_seq =
-   pending_seq`, clear the pending event, reset attempts. On `410`, end the
-   subscription (`gone`, pending cleared), as the protocol says. On `413`,
-   dead-letter that event and advance. Otherwise retry with
+Per occurrence:
+
+1. `PrepareMCPDelivery`: recheck authorization, read the next journal row
+   after `cursor_seq` in scope, apply the filters and the exclusion and
+   admission policies (settling skipped rows), build the envelope
+   `{eventId, name, timestamp, data, cursor}` with `timestamp` = the
+   family's event time, and persist its bytes as the pending event with the
+   current generation. Every retry sends identical bytes.
+2. POST at most 262144 bytes with `Content-Type: application/json`,
+   `webhook-id` = `eventId`, `webhook-timestamp` in Unix seconds,
+   `webhook-signature` = `v1,` + base64 HMAC-SHA256 over
+   `id.timestamp.body` under the decoded `whsec_` key (two space-separated
+   signatures for 60 s after rotation), and `X-MCP-Subscription-Id`.
+   Receipt is decided from the status line: any 2xx is success.
+3. `FinishMCPDelivery` applies only when generation and pending sequence
+   still match; a stale result is discarded. Success: recheck
+   authorization, settle the cursor, clear the pending event, reset
+   attempts. `410`: end the subscription (`gone`). `413`: terminal drop of
+   that event (dead-lettered). Otherwise retry with
    `min(15m, 1s × 2^(attempt-1))` plus jitter, honoring `Retry-After` on
-   429 and 503 through `httpretry.RetryAfter` capped at 1h. After 12
-   attempts the event is dead-lettered (`mcp_event_dead_letters`: subscription,
-   seq, attempts, last status) and the subscription continues with the next
-   row; a subscriber that is down for an hour loses one stale wake-up, not
-   its subscription.
+   429 and 503 through `httpretry.RetryAfter` capped at 1 h. Twelve total
+   attempts including the first; on the twelfth failure the event is
+   dead-lettered (`mcp_event_dead_letters`: subscription, seq, attempts,
+   last status class) and the subscription continues.
 
-Outbound client: HTTPS only; DNS resolved by msgvault; every resolved address
-must pass `netguard.ProhibitedIP` (private, loopback, link-local, CGNAT,
-multicast, unspecified, IPv6 ULA/link-local/mapped/transition ranges) and the
-connection dials the validated address with the original hostname for TLS,
-the pinned-dialer pattern from `internal/remoteimage/fetch.go`; redirects are
-refused; 10 s per request. Operators who run the receiver on a private
-network set `[mcp.events] trusted_callback_origins` and
-`trusted_callback_addresses`, validated by `netguard.ValidateTrustedDestination`
-exactly as `[carddav] trusted_origin` is; this is how the synthetic
-end-to-end test and a self-hosted receiver work.
+Outbound transport: a dedicated webhook client with `Proxy: nil`; HTTPS
+only; DNS resolved by msgvault with every resolved address required to pass
+`netguard.ProhibitedIP`; the connection dials the validated address with the
+original hostname as TLS server name; redirects refused; bounded response
+reads with bodies closed; 10 s per request. Private receivers are an
+operator exception: `[mcp.events] trusted_callbacks = [{origin, addresses}]`
+repeated objects validated with `netguard.ValidateTrustedDestination`,
+matched by the complete normalized origin including port before its pins
+are selected; the 443/8443 port policy still applies. Tests inject a
+resolver, dialer, or transport for `httptest` receivers without widening
+production policy.
 
 Secrets: the `whsec_` value and its predecessor are stored AES-256-GCM
-encrypted under a 32-byte key in `<data_dir>/mcp-events.key`, created once
-with the `providercredentials.EnsureServerKey` pattern (owner-only file,
-never in config or the database). Secrets, keys, signatures, and callback
-URLs never appear in logs; log fields are the subscription ID, scope, event
-seq, attempt, status class, and error class.
+encrypted under exactly 32 key bytes read from `<data_dir>/mcp-events.key`,
+created with the owner-only file pattern only when Events is first enabled,
+with a fresh nonce per write and the subscription ID and secret role as
+associated data. If encrypted subscription state exists and the key is
+missing or corrupt, Events fails closed and the status command says so; no
+replacement key is generated silently. Restoring subscriptions needs the
+matching key, and an archive clone must not resume callbacks automatically.
 
-Observability: `msgvault mcp events status` (through the daemon API) lists
-the caller's subscriptions with state, `refreshBefore`, cursor seq, last
-delivery outcome, dead-letter and loop-guard counts, without payloads or
-secrets. The daemon logs one line per state transition and one per outage
-window, not per attempt.
+Failures are classified at their boundary. Logs carry allowlisted fields
+(subscription ID, scope, seq, attempt, status class, error class); raw
+`url.Error` values, callback URLs, secrets, and signatures never reach
+generic logs or protocol responses, including the Store's driver-error and
+rollback log sites, which the tests probe with synthetic markers.
+
+`msgvault mcp events status` lists the caller's subscriptions with state and
+stop reason, `refreshBefore`, settled cursor, pending attempt, last
+delivery outcome, dead-letter and loop-guard counts.
 
 ## Reaching the server from ChatGPT
 
-ChatGPT connects from OpenAI's cloud and needs OAuth (it cannot present a
-static bearer). Two routes exist today; neither is verified end to end.
+Experimental until demonstrated. ChatGPT connects from OpenAI's cloud and
+needs OAuth; neither route below has a verified auth bridge or event
+forwarding.
 
-- **Through a nesting MCP gateway.** A gateway that exposes msgvault's tools
-  as nested tools must forward `server/discover` with the top-level
-  `events` capability, forward `events/*` with the `Mcp-Method` header
-  intact, and keep a per-user principal; one that collapses users onto a
-  shared backend credential also collapses their subscriptions. The gateway
-  in use today does not forward `events/*`; its vendor has said support is
-  planned. Until it ships, backend support is verifiable only by calling
-  msgvault's `/mcp` directly.
-- **Through OpenAI's Secure MCP Tunnel.** The tunnel client forwards raw
-  JSON-RPC and the connector's bearer unchanged, and `server/discover`
-  already crosses it, but whether OpenAI's hosted end accepts `events/*` for
-  a tunnel-backed plugin is undocumented. Webhook deliveries never traverse
-  the tunnel: the daemon host needs ordinary outbound HTTPS (observed
-  callback host: `connectors.api.openai.com`).
+- **Nesting MCP gateway.** Must forward `server/discover` with the top-level
+  `events` capability and `events/*` with `Mcp-Method` intact, and present
+  the owner key to msgvault. The gateway in use today does not forward
+  `events/*`; its vendor has said support is planned. Users collapsed onto
+  the owner key share one principal.
+- **OpenAI Secure MCP Tunnel.** Forwards raw JSON-RPC and the connector's
+  bearer unchanged; whether the hosted end accepts `events/*` for a
+  tunnel-backed plugin is undocumented, and a forwarded ChatGPT bearer is
+  rejected by the static checker. Deliveries never traverse the tunnel.
 
-What is verifiable now, with no host involved: run the daemon with the flag
-on, call `server/discover`, `events/list`, and `events/subscribe` against a
-self-hosted receiver allowed through `trusted_callback_origins`, and watch a
-synthetic message in a watched conversation arrive as a signed POST. The
-protocol tests below do the same against `httptest`.
+Native protocol conformance ships first and is verifiable directly against
+`/mcp` with the owner key and a self-hosted receiver allowed through
+`trusted_callbacks`. A usable ChatGPT connection is claimed only after its
+auth bridge and forwarding are demonstrated.
 
-## Schema, configuration, and compatibility
+## Schema, configuration, consent, and rollout
 
-Three new tables in both `internal/store/schema.sql` and `schema_pg.sql`
+New tables in both `internal/store/schema.sql` and `schema_pg.sql`
 (`CREATE TABLE IF NOT EXISTS`, applied by `InitSchemaContext`; no ledger
-migration is needed because no existing row changes):
+migration, since no existing row is rewritten):
 
-- `mcp_event_log` as above.
-- `mcp_event_subscriptions`: `id`, `principal_id`, `name`, `arguments`
-  (canonical JSON), `scope_kind`, `scope_id`, `callback_url`, `secret_enc`,
-  `previous_secret_enc`, `previous_secret_until`, `verified_at`,
-  `expires_at`, `state` (`active`, `expired`, `unsubscribed`, `gone`, with a
-  `CHECK`), `cursor_seq`, `pending_seq`, `pending_envelope`,
-  `attempt_count`, `next_attempt_at`, `from_me_window_start`,
-  `from_me_window_count`, `loop_guard_skips`, `dead_letter_count`,
-  `created_at`, `updated_at`. Indexes on `(scope_kind, scope_id)` for active
-  rows and on `(state, next_attempt_at)`. This is Inline's one-table model
-  (`server/drizzle/0153_mcp-events.sql`): cursor, one pending event, attempt
-  state, and both secrets on the subscription row.
-- `mcp_event_dead_letters`: `subscription_id`, `seq`, `attempts`,
-  `last_status`, `failed_at`; pruned with the log.
+- `mcp_event_clock` (singleton), `mcp_event_log`, `mcp_event_subscriptions`,
+  `mcp_event_dead_letters`; Phase 2 adds `mcp_action_records`.
+- `mcp_event_subscriptions`: `id`, `principal_id`, `name`, `arguments`,
+  `scope_kind`, `scope_id`, `callback_url`, `secret_enc`,
+  `previous_secret_enc`, `previous_secret_until`, `secret_revision`,
+  `verified_revision`, `verified_at`, `generation`, `state` (`active`,
+  `expired`, `unsubscribed`, `gone`, `stopped`, with a `CHECK`),
+  `stop_reason`, `expires_at`, `cursor_epoch`, `cursor_seq`,
+  `pending_seq`, `pending_envelope`, `pending_generation`, `attempt_count`,
+  `next_attempt_at`, `from_me_window_start`, `from_me_window_count`,
+  `loop_guard_skips`, `dead_letter_count`, `created_at`, `updated_at`, with
+  `CHECK`s tying the pending columns together. Indexes: active rows by
+  `(scope_kind, scope_id)`, due rows by `(state, next_attempt_at)`,
+  dead-letter cleanup by `failed_at`.
+- Column additions: `created_by_principal` on `gmail_drafts`, `imap_drafts`,
+  `beeper_drafts`, `chat_drafts` (`ADD COLUMN`, legacy-migration style, NULL
+  for existing rows).
 
-No existing table changes. `Message.IngestMode` is a struct field. The daemon
-API gains the three routes plus a status route and an API schema version
-bump; `daemonclient` gains the matching methods. go-sdk stays at v1.7.0.
-
-Configuration:
+Daemon API: the three Events routes, `get_mcp_event`,
+`list_calendar_sources`, status, the `get_message` projection fields, and a
+runtime capability object; API schema version bump and generated client
+regenerated through the existing workflow. go-sdk stays at v1.7.0.
 
 ```toml
 [mcp.events]
-enabled = false                 # default off; daemon refuses subscribe with -32014 when off
-max_event_age = "24h"           # cost bound on live rows, not a provenance test
+enabled = false            # off: no capture reads or locks, no key, no worker, no DNS, no egress
 retention = "168h"
-trusted_callback_origins = []   # operator-approved private receivers, as [carddav] trusted_origin
-trusted_callback_addresses = []
+sources = ["gmail", "imap"]  # families that passed the ready-boundary gate on this build
+trusted_callbacks = []     # [{ origin = "https://receiver.example.net:8443", addresses = ["10.0.0.5"] }]
 ```
 
-Compatibility: with the flag off, nothing is advertised and the ingestion
-path is unchanged. Legacy protocol clients and stdio never see the methods.
-Payload and argument schemas change only additively; a breaking change takes
-a new event name.
+Consent, each recorded in the PR that makes it:
 
-## Consent and rollout
+1. The new tables and indexes on both backends, the clock row touched by
+   every live mutation, and the journal's coverage of every live message
+   for seven days.
+2. A new egress class: the daemon POSTs to caller-supplied public HTTPS
+   URLs, opt-in by `[mcp.events] enabled`, documented on the configuration
+   and security pages.
+3. The key file and encrypted secrets at rest.
+4. `IngestContext` plumbing through source phases and composite persistence,
+   per source family; the Beeper persistence-boundary correction; the
+   `PersistCalendarEvent` and reaction-diff refactors.
+5. `created_by_principal` on the four draft tables.
+6. The daemon API additions and read-projection changes.
+7. Phase 2: `mcp_action_records`, the Docbank hook points, and the
+   `get_message_recordings` tool.
 
-Explicit maintainer consent is required for, and recorded in the PR that
-makes, each of these:
-
-1. Three new tables on both backends and the `pg_advisory_xact_lock` in the
-   upsert path.
-2. A new egress class: the daemon POSTs to caller-supplied public HTTPS URLs.
-   Opt-in by `[mcp.events] enabled`, documented in the configuration and
-   security pages.
-3. A key file in the data directory and encrypted secrets at rest.
-4. The calsync persistence refactor onto `UpsertCalendarEvent`.
-5. Marking each incremental sync path `IngestLive`, one source family per
-   change, starting with Gmail incremental, Beeper, and calendar incremental.
-6. New daemon API routes and the schema version bump.
-
-Rollout order: store and log with the flag off; daemon routes and worker;
-MCP proxy and discovery; calendar; task links if wanted; documentation
-(`docs/usage/chat.md`, `docs/configuration.md`, `docs/api-server.md`).
+Rollout: schema and clock with the flag off; Store commands and the
+service; MCP adapter and discovery; Gmail and IMAP incremental as the first
+capable families; drafts; calendar; the remaining proven sources and
+Beeper after its boundary fix; Phase 2 families as their dependencies
+merge. Documentation lands with each step (`docs/usage/chat.md`,
+`docs/configuration.md`, `docs/api-server.md`).
 
 ## Testing
 
-Synthetic only: fake sources, synthetic names and reserved example
-addresses, `httptest` TLS receivers, injected resolver and allowlist. No live
-provider, no real ChatGPT, no private content. testify, table-driven,
-against SQLite (`make test`) and PostgreSQL (`make test-pg`).
+Synthetic only: real importer code with synthetic provider responses,
+synthetic names and reserved example addresses, `httptest` TLS receivers
+with injected resolver and transport, no live provider, no real ChatGPT, no
+private content. testify with `(want, got)`, `make test` (`fts5 sqlite_vec`
+tags) and `make test-pg` with an explicit database. Races use barriers and
+channels with deadlines that bound completion; pure retry, TTL, and state
+logic uses virtual time and an in-memory transport; real PostgreSQL and TLS
+never run inside a fake-time bubble. Property tests cover cursor and
+state-machine transitions and canonical argument identity; signature
+reference vectors from the Standard Webhooks repository are the oracle;
+malformed cursor, secret, and argument fuzz targets are bounded.
 
-- Store: a new message in a watched conversation writes exactly one log row
-  in the same transaction and a rolled-back upsert writes none; a re-upsert,
-  label, body, attachment, FTS, or projection change writes none; `full`,
-  `import-*`, and unknown-mode upserts write none; the same provider thread
-  ID in two accounts yields two scopes; reactions emit once per (target,
-  participant, type, value) and removals never; calendar created / updated
-  (sequence or time change) / cancelled / unchanged re-delivery; activation
-  racing a commit on both backends never loses the message.
-- Protocol (extending `protocol_test.go` and `conformance_endpoint_test.go`):
-  discover carries `events: {}` and the instructions only on `2026-07-28`;
-  `events/list` entries validate against a pinned fixture of the ChatGPT
-  profile checked into `testdata/mcp/`, the way Inline's
-  `scripts/ci/check-chatgpt-plugin.mjs` pins a `2026-07-28` schema;
-  header mismatch is `-32020` and an unsupported version `-32022`; canonical
-  argument idempotency; principal isolation and the missing-principal
-  `-32012`; TTL omitted / finite / null; the 64-subscription cap; refresh
-  with rotation dual-signs for 60 s; a cursor with a bad MAC, from another
-  subscription, or ahead of the head is rejected; unsubscribe racing a
-  queued send.
-- Webhook: signatures match the Standard Webhooks reference vectors over the
-  exact bytes; challenge success, mismatch, replayed challenge, timeout, each
-  `-32015` reason; verification body cap; private IPv4/IPv6, mapped and
-  transition addresses, DNS rebinding (public then private), ports other
-  than 443/8443, and redirects refused; allowlisted private origin accepted.
-- Delivery: 2xx, 429 and 503 with `Retry-After`, 5xx, timeout, 410 ends the
-  subscription, 413 and the 13th attempt dead-letter and continue; event B
-  stays unsent while A retries; restart mid-retry keeps event ID, attempt
-  count, and identical body bytes; `include_from_me` and `include_reactions`
-  filters; the 7th `from_me` row within 10 minutes is skipped and counted;
-  authorization loss before dial and before acknowledgement; retention
-  truncation returns `truncated: true` and restarts at the head.
-- End to end: fake source → store → worker → `httptest` receiver verifies
-  the signature and payload, then the test calls `get_message` and
-  `get_attachment` chunks for the delivered `message_id` and reassembles to
-  the stored sha256.
+| Area | Required observable result |
+|---|---|
+| Journal ordering | Two PostgreSQL writers, activation, rollback, and pruning forced through controlled interleavings; no cursor skips a later-committing lower sequence; no false `created`. Repeated on SQLite for granular and composite entry points. |
+| Replay continuity | Empty retained log, cursor just before the first retained scope row, disable/re-enable (epoch), continuously refreshed slow subscriber; truncation stays honest and retention bounded. |
+| Source provenance | Full recovery, mixed incremental/backfill phases, new reaction on an old target, replacement of an unchanged reaction set, calendar write-through followed by sync redelivery. |
+| Archive readiness | Pause after header persistence and inject a later body/metadata failure; no premature notification; a delivered occurrence reads the committed body and the typed calendar status. |
+| Calendar transitions | Two updates of one object, unchanged sequence with changed time, cancel/restore/cancel, sparse tombstone, all-day dates, concurrent changes. |
+| Drafts | Each lifecycle transition emits once per revision; uncertain outcome carries its code; Message-ID correlation per provider fixture; the creating principal's subscription never receives its own sent reply while another does; Beeper heuristic documented, not asserted. |
+| Subscription lifecycle | Failed rotation preserves old state; two concurrent rotations and activations; quota race; replay during pending send; late success cannot resurrect or overwrite a newer generation. |
+| Delivery | One blocked receiver while a healthy one progresses; coalesced and lost wakes; restart preserves pending bytes and due time; 2xx, 429/503 with `Retry-After`, 5xx, timeout, 410, 413, twelfth failure; shutdown joins workers before Store closes. |
+| Security and reads | The real MCP → daemonclient → daemon path with an independent inbound key, no daemon key, a delegated token, a forged principal field, and owner-key rotation during a pending delivery; `get_mcp_event` for a lost payload, wrong principal, revocation; trusted-callback origin/pin pairing; private IPv4/IPv6, mapped and transition addresses, DNS rebinding, ports other than 443/8443, redirects refused; callback error redaction through the Store logger; missing or corrupt restored key fails closed. |
+| Phase 2 | Action record pending → confirmed and the crash-then-reconcile path; extraction publish inside and outside a rebuild; terminal versus retried failure; media delivery reaching `done`. |
+| Compatibility | Old daemon, flag off, 2025-06-18 HTTP, 2026-07-28 HTTP, unsupported version, stdio, delegated mode, independent inbound key; existing tools, instructions, cache metadata, and `no-store` unchanged; `events/list` validates against a pinned fixture of the ChatGPT profile in `testdata/mcp/`. |
 
 ## Adopted from Inline
 
 | Inline decision (file) | msgvault |
 |---|---|
-| Cursor over an existing durable journal, no outbox (`source.ts`, `worker.ts`) | Same model over a new commit-time `mcp_event_log`, because no existing msgvault journal covers messages, reactions, and calendar together |
-| One subscriptions table: cursor, one pending occurrence, attempts, both secrets (`server/drizzle/0153_mcp-events.sql`) | Adopted; no deliveries table; a small dead-letter ledger added for observability |
-| Reference-only payloads, read tool named in the description (`catalog.ts`, `source.ts` `referenceData`) | Adopted; `get_message`, `get_attachment`, `list_thread` |
-| Per-scope events only (`catalog.ts` `parseSelector`) | Adopted; inbox-wide scope rejected |
-| `excludeSelf` on message events (`catalog.ts`) | `include_from_me`, default false, plus a counter loop guard Inline lacks |
-| Reactions excluded (no journal) (`server/docs/mcp-events.md`) | Differs: reactions are durable rows here and a customer's thumbs-up is a signal, so `kind: reaction` is emitted |
-| Retry `1s × 2^n` capped 15 min, `Retry-After` on 429/503, 12 attempts, receipt by status, 410/413 settle one occurrence (`worker.ts`) | Adopted, except 410 ends the subscription as the OpenAI guide states; 413 settles one event |
+| Cursor over an existing durable journal, no outbox (`source.ts`, `worker.ts`) | Same model over a new commit-ordered `mcp_event_log` of all live occurrences, since no existing journal covers messages, reactions, calendar, and drafts |
+| One subscriptions table: cursor, one pending occurrence, attempts, both secrets, generation fence (`server/drizzle/0153_mcp-events.sql`, `repository.ts`) | Adopted, including the generation fence; a clock row and a dead-letter ledger added; no leases (one daemon per archive) |
+| Reference-only payloads, read tool named in the description (`catalog.ts`, `source.ts` `referenceData`) | Adopted; `get_mcp_event` added for lost payloads |
+| Per-scope events only (`catalog.ts` `parseSelector`) | Adopted |
+| `excludeSelf` on message events (`catalog.ts`) | `include_from_me` default false, plus deterministic draft-based exclusion and a fixed-window admission guard Inline lacks |
+| Reactions excluded (`server/docs/mcp-events.md`) | Differs: reactions are durable rows here and emit as `kind: reaction` |
+| Retry `1s × 2^n` capped 15 min, `Retry-After` on 429/503, 12 attempts, receipt by status (`worker.ts`) | Adopted; 410 ends the subscription per the OpenAI guide; 413 drops one event |
 | Re-authorize before connect and before acknowledge (`worker.ts`, `authorization.ts`) | Adopted |
-| Rotation overlap 1 min; TTL max 1 day; 64 active per grant; cursor ahead of head rejected; encrypted bound cursor (`service.ts`, `crypto.ts`) | Adopted; TTL default also 24h; cursor is HMAC-bound rather than encrypted |
-| SSRF: public IPs only, ports 443/8443, pinned dial, no redirects, 10 s (`webhook.ts`) | Adopted via `netguard` and the pinned-dialer precedent; operator allowlist added for private receivers |
-| Stateless MCP proxy, durable state in the API (`events-proxy.ts`, `server/docs/mcp-events.md`) | Adopted; the MCP process proxies to daemon routes through `daemonclient` |
-| Discover advertises `events` and `instructions`; `Mcp-*` header checks; `-32022` (`modern.ts`) | Adopted; the SDK already enforces headers and versions, the instructions are new |
-| Pinned-schema CI check (`scripts/ci/check-chatgpt-plugin.mjs`) | Adopted as a fixture in `testdata/mcp/` exercised by the existing protocol tests |
-| Multi-process claims with `SKIP LOCKED` and leases (`repository.ts`) | Not needed: one daemon per archive |
-| `conversations.ask` captures a cursor before sending one question (`server.ts`) | Not adopted in v1; a later `ask` tool could return the exact subscription recipe |
+| Rotation overlap 1 min; TTL max 1 day; 64 active per grant; cursor ahead of head rejected; bound opaque cursor (`service.ts`, `crypto.ts`) | Adopted; TTL default also 24 h; cursor HMAC-bound to subscription and epoch |
+| SSRF: public IPs only, ports 443/8443, pinned dial, no redirects, 10 s (`webhook.ts`) | Adopted via `netguard` and a dedicated transport; operator `trusted_callbacks` for private receivers |
+| Stateless MCP proxy, durable state in the API (`events-proxy.ts`) | Adopted; the daemon derives the principal from its own authentication rather than a forwarded token |
+| Discover advertises `events` and `instructions`; `Mcp-*` checks; `-32022` (`modern.ts`) | Adopted; the SDK enforces headers and versions, guidance is appended to existing instructions |
+| Pinned-schema CI check (`scripts/ci/check-chatgpt-plugin.mjs`) | Adopted as a fixture exercised by the protocol tests |
+| Verification cached per grant and URL (`service.ts`) | Not adopted: verification is persisted per subscription and secret revision |
+| `conversations.ask` captures a cursor before one question (`server.ts`) | Not in v1 |
 
 ## Follow-up: ChatGPT plugin bundle
 
-Once a host can reach the server with events (either route above verified),
-add `plugins/chatgpt/` modelled on Inline's: `.codex-plugin/plugin.json`
-(skills, `mcpServers`, interface metadata), `.mcp.json` with the server URL,
-and `skills/msgvault/SKILL.md` adapted from `skills/claude-code/SKILL.md`.
-The skill tells the model: resolve the conversation with `list_thread` before
-subscribing; `events/subscribe` is a host mechanism, not a tool; after
-registration do one bounded `list_messages` read for anything that arrived
-first; deduplicate by `eventId`; never poll; treat message text as data; stop
-the registration when a one-shot wait is fulfilled. A CI check runs the
-compiled server over loopback and validates discovery and the event catalog
-against the pinned fixture.
+Once a host reaches the server with events, add `plugins/chatgpt/` modelled
+on Inline's: `.codex-plugin/plugin.json`, `.mcp.json`, and
+`skills/msgvault/SKILL.md` adapted from `skills/claude-code/SKILL.md`. The
+skill says: resolve the scope with `list_thread` or `list_calendar_sources`
+before subscribing; `events/subscribe` is a host mechanism, not a tool;
+after registration do one bounded `list_messages` read; deduplicate by
+`eventId`; call `get_mcp_event` when `data` is missing; never poll; treat
+message text as data; stop the registration when a one-shot wait is
+fulfilled.
 
 ## Open questions for the maintainers
 
-1. Watched-only log rows (this design) or a journal of every live insert like
-   `embedding_changes`? The latter removes the activation lock and the
-   `EXISTS` read but records every message whether or not anyone subscribes.
-2. Should `IngestLive` be set per call site, as proposed, or derived from the
-   running `sync_runs.sync_type` to cover all sources at once?
-3. Does `msgvault.task_linked` belong here at all, or only in a Kata-side
-   events implementation?
-4. Persist attendee `responseStatus` so RSVP changes can be emitted?
-5. Is the token-hash principal acceptable until an OAuth front exists, and
-   should a tunnel-forwarded user bearer map to its own principal?
-6. Extract the signer, verifier, and SSRF client to `go.kenn.io/kit` now, or
-   after a second consumer exists (the `kit-packstore-extraction-design.md`
-   precedent says after)?
-7. Retention 7 days and TTL 24h are chosen for a single-owner archive; raise
-   the TTL only if tunnel keepalive limits force it.
+1. Agent principals: which delegated MCP wiring (#1092 or #1023) should
+   carry the HTTP delegated session and the persisted grant registry that
+   `agent:<grant>` subscriptions need, and in what order?
+2. Who owns the Beeper persistence-boundary correction, and does it precede
+   or follow Phase 1 for email sources?
+3. Should `draft_changed` include `chat_drafts` (local-only text) in v1, or
+   only drafts that reach a provider?
+4. For `text_extracted`, is a `get_document_text` read tool wanted alongside
+   `search_document_attachments`, or is search-by-attachment enough?
