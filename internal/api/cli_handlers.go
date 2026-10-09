@@ -842,6 +842,11 @@ type cliAccountResponse struct {
 	MessageCount       int64      `json:"message_count"`
 	SourceDeletedCount int64      `json:"source_deleted_count"`
 	LastSync           *time.Time `json:"last_sync"`
+	Identifier         string     `json:"identifier"`
+	Alias              string     `json:"alias"`
+	HistoryOnly        bool       `json:"history_only"`
+	ReanchorRequired   bool       `json:"reanchor_required"`
+	MergedIntoSourceID int64      `json:"merged_into_source_id"`
 }
 
 type cliMessageResponse struct {
@@ -2758,6 +2763,8 @@ func (s *Server) handleCLIAccounts(w http.ResponseWriter, r *http.Request) {
 
 func newCLIAccountResponse(src *store.Source, count, sourceDeleted int64) cliAccountResponse {
 	account := cliAccountResponse{
+		Identifier: src.Identifier, Alias: src.Alias, HistoryOnly: src.HistoryOnly,
+		ReanchorRequired: src.ReanchorRequired, MergedIntoSourceID: src.MergedIntoSourceID,
 		ID:                 src.ID,
 		Email:              src.Identifier,
 		Type:               src.SourceType,
@@ -2787,7 +2794,13 @@ func (s *Server) updateCLIAccount(
 	}
 	cliStore = bindCLIStoreContext(ctx, cliStore)
 
-	result, err := accountops.UpdateDisplayName(cliStore, req)
+	var result accountops.UpdateResult
+	var err error
+	if settings, ok := s.store.(accountops.SettingsStore); ok {
+		result, err = accountops.UpdateAccount(ctx, settings, req)
+	} else {
+		result, err = accountops.UpdateDisplayName(cliStore, req)
+	}
 	if err != nil {
 		return accountops.UpdateResult{}, s.operationError(
 			err,

@@ -4016,7 +4016,7 @@ func runScheduledSync(ctx context.Context, identifier string, s *store.Store, ge
 	ctx = withInvocation(ctx, state)
 	logger.Info("starting scheduled sync", "identifier", identifier)
 
-	srcs, srcErr := findScheduledSyncSources(s, identifier)
+	srcs, retiredMatch, srcErr := findScheduledSyncSources(s, identifier)
 	if srcErr != nil {
 		return fmt.Errorf("look up sources for %s: %w", identifier, srcErr)
 	}
@@ -4025,6 +4025,10 @@ func runScheduledSync(ctx context.Context, identifier string, s *store.Store, ge
 	// (preserves behaviour for tokens uploaded via API before the source
 	// row exists).
 	if len(srcs) == 0 {
+		if retiredMatch {
+			logger.Info("skipping scheduled sync for retired source", "identifier", identifier)
+			return nil
+		}
 		startTime := time.Now()
 		summary, syncErr := runScheduledGmailSync(ctx, identifier, nil, s, getOAuthMgr, state)
 		if scheduledSyncYielded(ctx) {
@@ -4149,19 +4153,28 @@ func logScheduledDiscordIssues(identifier string, summary *discord.ImportSummary
 // (gmail, imap, msmail, teams, discord), in that stable order. Non-syncable types
 // (mbox, apple-mail, etc.) are skipped.
 //
-// Returns an empty slice (not nil) when no syncable source matches —
-// callers should fall back to the Gmail token-first workflow.
+// Returns an empty slice (not nil) when no active syncable source matches.
+// retiredMatch distinguishes a merged source from an identifier with no
+// registered row, which alone is eligible for the Gmail token-first fallback.
 //
 // Matches against both sources.identifier and sources.display_name.
-func findScheduledSyncSources(s *store.Store, identifier string) ([]*store.Source, error) {
+func findScheduledSyncSources(s *store.Store, identifier string) ([]*store.Source, bool, error) {
 	rows, err := s.GetSourcesByIdentifierOrDisplayName(identifier)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	// Collect first occurrence of each syncable type.
 	seen := make(map[string]*store.Source, 4)
+	retiredMatch := false
 	for _, src := range rows {
+		if src.MergedIntoSourceID != 0 {
+			switch src.SourceType {
+			case "", sourceTypeGmail, sourceTypeIMAP, sourceTypeMSMail, sourceTypeTeams, sourceTypeDiscord:
+				retiredMatch = true
+			}
+			continue
+		}
 		switch src.SourceType {
 		case sourceTypeGmail, sourceTypeIMAP, sourceTypeMSMail, sourceTypeTeams:
 			if _, dup := seen[src.SourceType]; !dup {
@@ -4183,7 +4196,7 @@ func findScheduledSyncSources(s *store.Store, identifier string) ([]*store.Sourc
 			result = append(result, src)
 		}
 	}
-	return result, nil
+	return result, retiredMatch, nil
 }
 
 // scheduledSyncPreemptible disables scheduler-job preemption when an account
@@ -4191,7 +4204,7 @@ func findScheduledSyncSources(s *store.Store, identifier string) ([]*store.Sourc
 // after the syncer stops. An unavailable source lookup also takes the safe
 // path and lets the current pass finish.
 func scheduledSyncPreemptible(s *store.Store, identifier string, logger *slog.Logger) bool {
-	sources, err := findScheduledSyncSources(s, identifier)
+	sources, _, err := findScheduledSyncSources(s, identifier)
 	if err != nil {
 		logger.Warn("could not determine scheduled sync preemption safety; allowing current pass to finish",
 			"identifier", identifier,
@@ -4301,7 +4314,8 @@ func runScheduledGmailSync(ctx context.Context, email string, src *store.Source,
 	}
 	cfg := state.cfg
 	logger := state.logger
-	client, _, err := newDaemonGmailClient(ctx, email, src, getOAuthMgr, state)
+	accountEmail := scheduledGmailAccountIdentifier(email, src)
+	client, _, err := newDaemonGmailClient(ctx, accountEmail, src, getOAuthMgr, state)
 	if err != nil {
 		return nil, err
 	}
@@ -4312,7 +4326,7 @@ func runScheduledGmailSync(ctx context.Context, email string, src *store.Source,
 
 	syncer := newMessageSyncer(client, s, opts, state).WithLogger(logger)
 
-	source, err := s.GetOrCreateSource(sourceTypeGmail, email)
+	source, err := s.GetOrCreateSource(sourceTypeGmail, accountEmail)
 	if err != nil {
 		return nil, fmt.Errorf("get source: %w", err)
 	}
@@ -4320,7 +4334,7 @@ func runScheduledGmailSync(ctx context.Context, email string, src *store.Source,
 	// — see comment in account_identity.go. serve is a daemon, so the
 	// confirmation message has no terminal; discard it. Helper logs any
 	// failure path through its own logger.Warn.
-	confirmDefaultIdentity(io.Discard, s, source.ID, email, email, "account-identifier", logger)
+	confirmDefaultIdentity(io.Discard, s, source.ID, accountEmail, accountEmail, "account-identifier", logger)
 	if err := runPostSourceCreateMigrationsForInvocation(s, state); err != nil {
 		return nil, fmt.Errorf("post-source-create migrations: %w", err)
 	}
@@ -4336,6 +4350,16 @@ func runScheduledGmailSync(ctx context.Context, email string, src *store.Source,
 		return nil, fmt.Errorf("gmail sync failed: %w", err)
 	}
 	return summary, nil
+}
+
+// scheduledGmailAccountIdentifier resolves archive selectors to the provider
+// identifier used for credentials and source creation. With no source, the
+// selector remains the token-first account key.
+func scheduledGmailAccountIdentifier(selector string, src *store.Source) string {
+	if src != nil && src.Identifier != "" {
+		return src.Identifier
+	}
+	return selector
 }
 
 // runScheduledIMAPSync runs a full IMAP sync for the daemon. IMAP has
