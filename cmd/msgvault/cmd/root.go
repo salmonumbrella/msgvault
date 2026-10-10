@@ -676,52 +676,80 @@ func authorizeManualForReauth(ctx context.Context, mgr tokenReauthorizer, email 
 // oauthManagerCache returns a resolver function that lazily creates and
 // caches oauth.Manager instances keyed by app name. The cache is safe
 // for concurrent use (serve runs scheduled syncs in goroutines).
-//
-// Creating a manager can run client_secrets_command, so the mutex guards only
-// the map. Concurrent callers for one app share a single load, and each caller
-// stops waiting when its own context ends.
 func oauthManagerCache(state *invocation) func(ctx context.Context, appName string) (*oauth.Manager, error) {
-	var mu sync.Mutex
-	var loads singleflight.Group
-	managers := map[string]*oauth.Manager{}
-	return func(ctx context.Context, appName string) (*oauth.Manager, error) {
-		for {
-			mu.Lock()
-			mgr, ok := managers[appName]
-			mu.Unlock()
-			if ok {
-				return mgr, nil
+	cache := &oauthManagers{state: state, managers: map[string]*oauth.Manager{}}
+	return cache.get
+}
+
+// oauthManagers creates a manager per app. Creating one can run
+// client_secrets_command, so the mutex guards only the map. Concurrent callers
+// for one app share a single load, and each caller stops waiting when its own
+// context ends.
+type oauthManagers struct {
+	state    *invocation
+	mu       sync.Mutex
+	loads    singleflight.Group
+	managers map[string]*oauth.Manager
+}
+
+// loaderContextEndedError marks a shared load that stopped because the caller
+// that started it was cancelled or ran out of time, not because loading failed.
+type loaderContextEndedError struct{ err error }
+
+func (e *loaderContextEndedError) Error() string { return e.err.Error() }
+func (e *loaderContextEndedError) Unwrap() error { return e.err }
+
+func (c *oauthManagers) cached(appName string) (*oauth.Manager, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	mgr, ok := c.managers[appName]
+	return mgr, ok
+}
+
+func (c *oauthManagers) get(ctx context.Context, appName string) (*oauth.Manager, error) {
+	for {
+		if mgr, ok := c.cached(appName); ok {
+			return mgr, nil
+		}
+		result := c.loads.DoChan(appName, func() (any, error) { return c.load(ctx, appName) })
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case loaded := <-result:
+			// The load ran under another caller's context. If that context
+			// ended, this caller loads again under its own.
+			if _, ended := errors.AsType[*loaderContextEndedError](loaded.Err); ended && ctx.Err() == nil {
+				continue
 			}
-			result := loads.DoChan(appName, func() (any, error) {
-				mgr, err := loadOAuthManager(ctx, state, appName)
-				if err != nil {
-					return nil, err
-				}
-				mu.Lock()
-				managers[appName] = mgr
-				mu.Unlock()
-				return mgr, nil
-			})
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case loaded := <-result:
-				// The load ran under another caller's context; if that caller
-				// was cancelled, this caller loads again under its own.
-				if errors.Is(loaded.Err, context.Canceled) && ctx.Err() == nil {
-					continue
-				}
-				if loaded.Err != nil {
-					return nil, loaded.Err
-				}
-				mgr, ok := loaded.Val.(*oauth.Manager)
-				if !ok {
-					return nil, fmt.Errorf("load OAuth manager for %q: unexpected result %T", appName, loaded.Val)
-				}
-				return mgr, nil
+			if loaded.Err != nil {
+				return nil, loaded.Err
 			}
+			mgr, ok := loaded.Val.(*oauth.Manager)
+			if !ok {
+				return nil, fmt.Errorf("load OAuth manager for %q: unexpected result %T", appName, loaded.Val)
+			}
+			return mgr, nil
 		}
 	}
+}
+
+// load runs once per app at a time. It checks the map again because a load
+// that finished just before this one began may already have published.
+func (c *oauthManagers) load(ctx context.Context, appName string) (*oauth.Manager, error) {
+	if mgr, ok := c.cached(appName); ok {
+		return mgr, nil
+	}
+	mgr, err := loadOAuthManager(ctx, c.state, appName)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, &loaderContextEndedError{err: err}
+		}
+		return nil, err
+	}
+	c.mu.Lock()
+	c.managers[appName] = mgr
+	c.mu.Unlock()
+	return mgr, nil
 }
 
 func loadOAuthManager(ctx context.Context, state *invocation, appName string) (*oauth.Manager, error) {

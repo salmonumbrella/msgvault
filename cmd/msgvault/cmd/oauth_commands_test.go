@@ -539,3 +539,52 @@ func TestOAuthManagerCacheLoadsAppsIndependently(t *testing.T) {
 		require.Fail("the remaining caller did not finish loading")
 	}
 }
+
+// A sync that started the shared load and then ran out of time must not fail
+// other syncs still waiting for the same app.
+func TestOAuthManagerCacheRetriesAfterLoaderDeadline(t *testing.T) {
+	require := require.New(t)
+	_, state := setupCommandOAuth(t)
+	state.cfg.OAuth.Apps = map[string]config.OAuthApp{
+		"slow": {ClientSecretsCommand: testutil.SecretCommand(t, "client-after-wait")},
+	}
+	cache := oauthManagerCache(state)
+	const budget = 15 * time.Second
+	started := filepath.Join(os.Getenv("MSGVAULT_TEST_SECRET_ROOT"), "client-after-wait.started")
+
+	loaderCtx, cancelLoader := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelLoader()
+	loader := make(chan error, 1)
+	go func() { _, err := cache(loaderCtx, "slow"); loader <- err }()
+	require.Eventually(func() bool {
+		_, err := os.Stat(started)
+		return err == nil
+	}, budget, 10*time.Millisecond)
+	survivor := make(chan error, 1)
+	go func() { _, err := cache(t.Context(), "slow"); survivor <- err }()
+
+	select {
+	case err := <-loader:
+		require.ErrorIs(err, context.DeadlineExceeded)
+	case <-time.After(budget):
+		require.Fail("the loader did not stop at its deadline")
+	}
+	select {
+	case err := <-survivor:
+		require.NoError(err, "the waiting caller must retry under its own context")
+	case <-time.After(budget):
+		require.Fail("the waiting caller did not finish loading")
+	}
+}
+
+// A load that starts just after another one published must reuse that manager
+// instead of running client_secrets_command again.
+func TestOAuthManagerLoadReusesPublishedManager(t *testing.T) {
+	require := require.New(t)
+	mgr, state := setupCommandOAuth(t)
+	state.cfg.OAuth.ClientSecretsCommand = testutil.SecretCommand(t, "fail")
+	cache := &oauthManagers{state: state, managers: map[string]*oauth.Manager{"": mgr}}
+	loaded, err := cache.load(t.Context(), "")
+	require.NoError(err)
+	require.Same(mgr, loaded)
+}
