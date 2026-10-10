@@ -185,31 +185,38 @@ func TestShowThreadInvalidPaginationShowsUsage(t *testing.T) {
 
 func TestShowThreadProviderResolution(t *testing.T) {
 	for _, tc := range []struct {
-		name, code, wantError string
-		status                int
-		wantCalls             int
+		name, ref, queryKey, code, wantError string
+		status                               int
+		wantCalls                            int
 	}{
-		{name: "numeric provider fallback", code: "message_not_found", status: 404, wantCalls: 2},
-		{name: "ambiguous reference", code: "message_ambiguous", status: 409, wantError: "use an internal message ID", wantCalls: 1},
-		{name: "server failure", code: "search_failed", status: 500, wantError: "get thread", wantCalls: 1},
+		{name: "numeric provider fallback", ref: "123", queryKey: "id", code: "message_not_found", status: 404, wantCalls: 2},
+		{name: "ambiguous reference", ref: "provider-123", queryKey: "source_message_id", code: "message_ambiguous", status: 409, wantError: "use an internal message ID", wantCalls: 1},
+		{name: "server failure", ref: "123", queryKey: "id", code: "search_failed", status: 500, wantError: "get thread", wantCalls: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			assertions := assert.New(t)
+			requirements := require.New(t)
 			calls := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				if r.URL.Path == "/api/v1/health" {
-					assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"status": "ok", "api_schema_version": "3.3.0"}))
+					assertions.NoError(json.NewEncoder(w).Encode(map[string]any{"status": "ok", "api_schema_version": "3.3.0"}))
 					return
 				}
+				assertions.Equal("/api/v1/cli/message/thread", r.URL.Path)
 				calls++
 				if calls == 1 {
-					assert.Equal(t, "123", r.URL.Query().Get("id"))
+					assertions.Equal(tc.ref, r.URL.Query().Get(tc.queryKey))
+					if tc.queryKey == "source_message_id" {
+						assertions.Empty(r.URL.Query().Get("id"))
+					}
 					w.WriteHeader(tc.status)
-					assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"error": tc.code, "message": "Synthetic reference response"}))
+					assertions.NoError(json.NewEncoder(w).Encode(map[string]any{"error": tc.code, "message": "Synthetic reference response"}))
 					return
 				}
-				assert.Equal(t, "123", r.URL.Query().Get("source_message_id"))
-				assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"conversation_id": 7, "total": 0, "messages": []any{}}))
+				assertions.Empty(r.URL.Query().Get("id"))
+				assertions.Equal("123", r.URL.Query().Get("source_message_id"))
+				assertions.NoError(json.NewEncoder(w).Encode(map[string]any{"conversation_id": 7, "total": 0, "messages": []any{}}))
 			}))
 			t.Cleanup(srv.Close)
 			cfg := &config.Config{}
@@ -218,16 +225,16 @@ func TestShowThreadProviderResolution(t *testing.T) {
 			root := newTestRootCmd()
 			root.SetContext(testInvocationContext(t.Context(), cfg, invocationOptions{}))
 			root.AddCommand(newShowThreadCmd())
-			root.SetArgs([]string{"show-thread", "123", "--json"})
+			root.SetArgs([]string{"show-thread", tc.ref, "--json"})
 			done := captureStdout(t)
 			err := root.Execute()
 			_ = done()
 			if tc.wantError != "" {
-				require.ErrorContains(t, err, tc.wantError)
+				requirements.ErrorContains(err, tc.wantError)
 			} else {
-				require.NoError(t, err)
+				requirements.NoError(err)
 			}
-			assert.Equal(t, tc.wantCalls, calls)
+			assertions.Equal(tc.wantCalls, calls)
 		})
 	}
 }

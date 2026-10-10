@@ -859,6 +859,8 @@ func TestAgentReadSnapshotPoolPressure(t *testing.T) {
 					requirements.FailNow("scoped reads did not release their snapshots")
 				}
 			}
+			// Owner searches can keep checking the index after their responses return.
+			requirements.Eventually(func() bool { return !srv.ftsEnsureRunning.Load() }, 10*time.Second, time.Millisecond)
 			requirements.Eventually(func() bool { return st.DB().Stats().InUse == 0 }, 10*time.Second, time.Millisecond)
 			canceled, cancel := context.WithCancel(t.Context())
 			cancel()
