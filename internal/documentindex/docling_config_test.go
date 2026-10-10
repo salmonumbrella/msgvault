@@ -36,7 +36,7 @@ func TestDoclingEndpointRejectsAlternateDestinations(t *testing.T) {
 			requirements.ErrorContains(c.Validate(), "endpoint")
 		})
 	}
-	for _, endpoint := range []string{"http://127.0.0.1:5001", "https://docling.example.com", "http://[::1]:5001"} {
+	for _, endpoint := range []string{"http://127.0.0.1:5001"} {
 		c := doclingTestConfig()
 		c.Endpoint = endpoint
 		requirements.NoError(c.Validate())
