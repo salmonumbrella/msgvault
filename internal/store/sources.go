@@ -395,14 +395,16 @@ const packedBlobHashesUniqueToSourceSQL = `
 func (s *Store) removeSourceExec(
 	ctx context.Context, tx *loggedTx, sourceID int64,
 ) error {
-	if err := s.requireSourceRemovalAllowed(ctx, tx, sourceID); err != nil {
-		return err
-	}
 	// Identity candidate writes take this lock before validating and writing
 	// their polymorphic endpoints. Taking the same lock before source cleanup
 	// prevents a candidate from being inserted after cleanup but before the
 	// source cascade removes its observation endpoint.
 	if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
+		return err
+	}
+	// A merge holds the same lock through retirement and journal commit.
+	// Check eligibility only after any earlier merge has finished.
+	if err := s.requireSourceRemovalAllowed(ctx, tx, sourceID); err != nil {
 		return err
 	}
 	if err := s.lockProfileIdentityKeyTxContext(

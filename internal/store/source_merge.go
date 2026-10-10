@@ -79,16 +79,15 @@ func (s *Store) MergeSourcesContext(ctx context.Context, req MergeSourcesRequest
 	if second < first {
 		first, second = second, first
 	}
-	for _, id := range []int64{first, second} {
-		lock, err := s.acquireSyncExecutionLock(ctx, id)
-		if err != nil {
-			if previous, recorded, journalErr := s.sourceMergeRecorded(ctx, req); recorded || journalErr != nil {
-				return previous, journalErr
-			}
-			return result, err
+	lockIDs := []int64{first, second}
+	lock, err := s.acquireSyncExecutionLocks(ctx, lockIDs)
+	if err != nil {
+		if previous, recorded, journalErr := s.sourceMergeRecorded(ctx, req); recorded || journalErr != nil {
+			return previous, journalErr
 		}
-		defer func() { retErr = errors.Join(retErr, s.abandonSyncExecutionLock(id, lock)) }()
+		return result, err
 	}
+	defer func() { retErr = errors.Join(retErr, s.abandonSyncExecutionLocks(lockIDs, lock)) }()
 	if previous, recorded, err := s.sourceMergeRecorded(ctx, req); recorded || err != nil {
 		return previous, err
 	}
