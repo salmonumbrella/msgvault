@@ -690,6 +690,8 @@ type oauthManagers struct {
 	mu       sync.Mutex
 	loads    singleflight.Group
 	managers map[string]*oauth.Manager
+	// joined lets tests wait until a caller is attached to the in-flight load.
+	joined func(appName string)
 }
 
 // loaderContextEndedError marks a shared load that stopped because the caller
@@ -712,6 +714,9 @@ func (c *oauthManagers) get(ctx context.Context, appName string) (*oauth.Manager
 			return mgr, nil
 		}
 		result := c.loads.DoChan(appName, func() (any, error) { return c.load(ctx, appName) })
+		if c.joined != nil {
+			c.joined(appName)
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

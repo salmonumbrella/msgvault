@@ -887,12 +887,19 @@ func TestClientReportsRejectedBearerToken(t *testing.T) {
 		w.WriteHeader(status)
 	}))
 	t.Cleanup(server.Close)
-	client := newFixtureClient(t, server.URL, "", "")
-	client.bearerToken = func(context.Context) (string, error) { return "synthetic-token", nil }
+	origin, err := url.Parse(server.URL)
+	require.NoError(err)
 	rejected := 0
-	client.bearerRejected = func() { rejected++ }
+	client, err := NewClient(ClientOptions{
+		CredentialOrigin:         origin,
+		BearerToken:              func(context.Context) (string, error) { return "synthetic-token", nil },
+		BearerTokenRejected:      func() { rejected++ },
+		AllowInsecureCredentials: true,
+	})
+	require.NoError(err)
+	client.allowPrivateOrigin = true
 
-	_, err := client.Do(t.Context(), Request{Method: "PROPFIND", URL: server.URL})
+	_, err = client.Do(t.Context(), Request{Method: "PROPFIND", URL: server.URL})
 	require.Error(err)
 	assert.Equal(1, rejected)
 

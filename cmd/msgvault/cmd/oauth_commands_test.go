@@ -479,64 +479,108 @@ func TestHeadlessCommandsPreserveNativeArguments(t *testing.T) {
 	}
 }
 
-// A slow client_secrets_command for one OAuth app must not hold up managers
-// for other apps, and every caller can stop waiting for its own reasons.
-func TestOAuthManagerCacheLoadsAppsIndependently(t *testing.T) {
-	require := require.New(t)
+const sharedLoadBudget = 15 * time.Second
+
+// slowOAuthManagers returns a cache whose "slow" app blocks in
+// client_secrets_command on its first run and succeeds afterwards. The channel
+// reports each time a caller attaches to a "slow" load.
+func slowOAuthManagers(t *testing.T) (*oauthManagers, <-chan struct{}) {
+	t.Helper()
 	_, state := setupCommandOAuth(t)
 	state.cfg.OAuth.Apps = map[string]config.OAuthApp{
 		"slow": {ClientSecretsCommand: testutil.SecretCommand(t, "client-after-wait")},
 	}
-	cache := oauthManagerCache(state)
-	const budget = 15 * time.Second
-	started := filepath.Join(os.Getenv("MSGVAULT_TEST_SECRET_ROOT"), "client-after-wait.started")
+	joined := make(chan struct{}, 8)
+	cache := &oauthManagers{state: state, managers: map[string]*oauth.Manager{}, joined: func(appName string) {
+		if appName == "slow" {
+			joined <- struct{}{}
+		}
+	}}
+	return cache, joined
+}
 
-	loaderCtx, cancelLoader := context.WithCancel(t.Context())
-	defer cancelLoader()
-	loader := make(chan error, 1)
-	go func() { _, err := cache(loaderCtx, "slow"); loader <- err }()
-	require.Eventually(func() bool {
+func awaitSharedLoad(t *testing.T, joined <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-joined:
+	case <-time.After(sharedLoadBudget):
+		require.Fail(t, "caller did not attach to the shared load")
+	}
+}
+
+func awaitLoadResult(t *testing.T, result <-chan error, what string) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(sharedLoadBudget):
+		require.Fail(t, what+" did not return")
+		return nil
+	}
+}
+
+// awaitSlowCommand waits until the first "slow" credential command is running.
+func awaitSlowCommand(t *testing.T) {
+	t.Helper()
+	started := filepath.Join(os.Getenv("MSGVAULT_TEST_SECRET_ROOT"), "client-after-wait.started")
+	require.Eventually(t, func() bool {
 		_, err := os.Stat(started)
 		return err == nil
-	}, budget, 10*time.Millisecond)
+	}, sharedLoadBudget, 10*time.Millisecond)
+}
+
+func startSlowLoad(ctx context.Context, t *testing.T, cache *oauthManagers, joined <-chan struct{}) <-chan error {
+	t.Helper()
+	result := make(chan error, 1)
+	go func() { _, err := cache.get(ctx, "slow"); result <- err }()
+	awaitSharedLoad(t, joined)
+	return result
+}
+
+// A slow client_secrets_command for one OAuth app must not hold up managers
+// for other apps, and every caller can stop waiting for its own reasons.
+func TestOAuthManagerCacheLoadsAppsIndependently(t *testing.T) {
+	require := require.New(t)
+	cache, joined := slowOAuthManagers(t)
+	loaderCtx, cancelLoader := context.WithCancel(t.Context())
+	defer cancelLoader()
+	loader := startSlowLoad(loaderCtx, t, cache, joined)
+	awaitSlowCommand(t)
 
 	// Another app loads while the slow command is still running.
 	other := make(chan error, 1)
-	go func() { _, err := cache(t.Context(), ""); other <- err }()
-	select {
-	case err := <-other:
-		require.NoError(err)
-	case <-time.After(budget):
-		require.Fail("the default app waited for another app's credential command")
-	}
+	go func() { _, err := cache.get(t.Context(), ""); other <- err }()
+	require.NoError(awaitLoadResult(t, other, "the default app"))
 
 	// A waiter for the slow app stops when its own context ends.
 	waiterCtx, cancelWaiter := context.WithCancel(t.Context())
-	waiter := make(chan error, 1)
-	go func() { _, err := cache(waiterCtx, "slow"); waiter <- err }()
+	waiter := startSlowLoad(waiterCtx, t, cache, joined)
 	cancelWaiter()
-	select {
-	case err := <-waiter:
-		require.ErrorIs(err, context.Canceled)
-	case <-time.After(budget):
-		require.Fail("a cancelled caller kept waiting for the shared load")
-	}
+	require.ErrorIs(awaitLoadResult(t, waiter, "a cancelled waiter"), context.Canceled)
 
-	// When the loading caller is cancelled, a remaining caller loads again.
-	survivor := make(chan error, 1)
-	go func() { _, err := cache(t.Context(), "slow"); survivor <- err }()
+	// When the loading caller is cancelled, a caller still attached loads again.
+	survivor := startSlowLoad(t.Context(), t, cache, joined)
 	cancelLoader()
+	require.ErrorIs(awaitLoadResult(t, loader, "the cancelled loader"), context.Canceled)
+	require.NoError(awaitLoadResult(t, survivor, "the remaining caller"))
+}
+
+// expiringContext reaches its deadline when the test says so, so a shared load
+// can be shown to end by deadline without depending on timing.
+type expiringContext struct {
+	context.Context
+
+	done chan struct{}
+}
+
+func (c expiringContext) Done() <-chan struct{} { return c.done }
+
+func (c expiringContext) Err() error {
 	select {
-	case err := <-loader:
-		require.ErrorIs(err, context.Canceled)
-	case <-time.After(budget):
-		require.Fail("the cancelled loader did not return")
-	}
-	select {
-	case err := <-survivor:
-		require.NoError(err, "the remaining caller must retry under its own context")
-	case <-time.After(budget):
-		require.Fail("the remaining caller did not finish loading")
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
 	}
 }
 
@@ -544,37 +588,16 @@ func TestOAuthManagerCacheLoadsAppsIndependently(t *testing.T) {
 // other syncs still waiting for the same app.
 func TestOAuthManagerCacheRetriesAfterLoaderDeadline(t *testing.T) {
 	require := require.New(t)
-	_, state := setupCommandOAuth(t)
-	state.cfg.OAuth.Apps = map[string]config.OAuthApp{
-		"slow": {ClientSecretsCommand: testutil.SecretCommand(t, "client-after-wait")},
-	}
-	cache := oauthManagerCache(state)
-	const budget = 15 * time.Second
-	started := filepath.Join(os.Getenv("MSGVAULT_TEST_SECRET_ROOT"), "client-after-wait.started")
+	cache, joined := slowOAuthManagers(t)
+	loaderCtx := expiringContext{Context: t.Context(), done: make(chan struct{})}
+	loader := startSlowLoad(loaderCtx, t, cache, joined)
+	awaitSlowCommand(t)
+	survivor := startSlowLoad(t.Context(), t, cache, joined)
 
-	loaderCtx, cancelLoader := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancelLoader()
-	loader := make(chan error, 1)
-	go func() { _, err := cache(loaderCtx, "slow"); loader <- err }()
-	require.Eventually(func() bool {
-		_, err := os.Stat(started)
-		return err == nil
-	}, budget, 10*time.Millisecond)
-	survivor := make(chan error, 1)
-	go func() { _, err := cache(t.Context(), "slow"); survivor <- err }()
-
-	select {
-	case err := <-loader:
-		require.ErrorIs(err, context.DeadlineExceeded)
-	case <-time.After(budget):
-		require.Fail("the loader did not stop at its deadline")
-	}
-	select {
-	case err := <-survivor:
-		require.NoError(err, "the waiting caller must retry under its own context")
-	case <-time.After(budget):
-		require.Fail("the waiting caller did not finish loading")
-	}
+	close(loaderCtx.done)
+	require.ErrorIs(awaitLoadResult(t, loader, "the expired loader"), context.DeadlineExceeded)
+	require.NoError(awaitLoadResult(t, survivor, "the waiting caller"),
+		"the waiting caller must retry under its own context")
 }
 
 // A load that starts just after another one published must reuse that manager
