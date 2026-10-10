@@ -115,7 +115,7 @@ func postgresChatMemberTriggers() []string {
 		     INSERT INTO chat_members_dirty (conversation_id)
 		     SELECT id FROM conversations
 		     WHERE id = p_conversation_id AND conversation_type IN ` + chatConversationTypesSQL + `
-		     ON CONFLICT (conversation_id) DO NOTHING;
+		     ON CONFLICT (conversation_id) DO UPDATE SET conversation_id = excluded.conversation_id;
 		 END;
 		 $$ LANGUAGE plpgsql`,
 		`CREATE OR REPLACE FUNCTION chat_members_messages_changed() RETURNS trigger AS $$
@@ -142,7 +142,7 @@ func postgresChatMemberTriggers() []string {
 		`CREATE OR REPLACE FUNCTION chat_members_conversation_type_changed() RETURNS trigger AS $$
 		 BEGIN
 		     INSERT INTO chat_members_dirty (conversation_id) VALUES (NEW.id)
-		     ON CONFLICT (conversation_id) DO NOTHING;
+		     ON CONFLICT (conversation_id) DO UPDATE SET conversation_id = excluded.conversation_id;
 		     RETURN NEW;
 		 END;
 		 $$ LANGUAGE plpgsql`,
@@ -178,11 +178,13 @@ func postgresChatMemberTriggers() []string {
 }
 
 // enqueueChatMembers queues a chat after UpsertMessage writes one of its
-// messages. Non-chat conversations are ignored.
+// messages. Non-chat conversations are ignored. Enqueues update an existing
+// marker instead of ignoring it, so the writer holds the marker's row lock
+// until it commits and a PostgreSQL refresh cannot claim the chat early.
 func enqueueChatMembers(q querier, conversationID int64) error {
 	if _, err := q.Exec(`INSERT INTO chat_members_dirty (conversation_id)
 		SELECT id FROM conversations WHERE id = ? AND conversation_type IN `+chatConversationTypesSQL+`
-		ON CONFLICT (conversation_id) DO NOTHING`, conversationID); err != nil {
+		ON CONFLICT (conversation_id) DO UPDATE SET conversation_id = excluded.conversation_id`, conversationID); err != nil {
 		return fmt.Errorf("enqueue chat members for conversation %d: %w", conversationID, err)
 	}
 	return nil
@@ -194,7 +196,7 @@ func enqueueChatMembersForMessage(q querier, messageID int64) error {
 	if _, err := q.Exec(`INSERT INTO chat_members_dirty (conversation_id)
 		SELECT c.id FROM messages m JOIN conversations c ON c.id = m.conversation_id
 		WHERE m.id = ? AND c.conversation_type IN `+chatConversationTypesSQL+`
-		ON CONFLICT (conversation_id) DO NOTHING`, messageID); err != nil {
+		ON CONFLICT (conversation_id) DO UPDATE SET conversation_id = excluded.conversation_id`, messageID); err != nil {
 		return fmt.Errorf("enqueue chat members for message %d: %w", messageID, err)
 	}
 	return nil
@@ -266,9 +268,17 @@ func (s *Store) refreshChatMembersBatchTx(ctx context.Context, tx *loggedTx) (in
 			return 0, fmt.Errorf("lock chat members refresh: %w", err)
 		}
 	}
+	// Writers row-lock a queued chat until they commit (see enqueueChatMembers).
+	// PostgreSQL skips those chats instead of rebuilding them from data that
+	// does not yet include the write; they stay queued for the next refresh.
+	// SQLite's single writer cannot overlap an open write.
+	skipLocked := ""
+	if s.IsPostgreSQL() {
+		skipLocked = " FOR UPDATE SKIP LOCKED"
+	}
 	rows, err := tx.QueryContext(ctx, s.dialect.Rebind(`DELETE FROM chat_members_dirty
 		WHERE conversation_id IN (
-			SELECT conversation_id FROM chat_members_dirty ORDER BY conversation_id LIMIT ?
+			SELECT conversation_id FROM chat_members_dirty ORDER BY conversation_id LIMIT ?`+skipLocked+`
 		) RETURNING conversation_id`), chatMembersRefreshBatch)
 	if err != nil {
 		return 0, fmt.Errorf("claim dirty chat members: %w", err)

@@ -51,3 +51,38 @@ func TestChatMembersRefreshVsSourceRemovalPG(t *testing.T) {
 	assertNoDeadlock(t, waitResult(t, searchDone, "chat discovery refresh"))
 	assertNoDeadlock(t, waitResult(t, removeDone, "source removal"))
 }
+
+// A writer that changes an already queued chat must leave it queued until a
+// refresh can see the change, even when a refresh runs before it commits.
+func TestChatMembersWriterCommittingAfterRefreshPG(t *testing.T) {
+	requirements := require.New(t)
+	st := requirePostgreSQLStore(t)
+	chat := newAttrFixtureOn(t, st, "beeper", "writer-account")
+	conversation, err := st.EnsureConversationWithType(chat.source.ID, "writer-room", "group_chat", "")
+	requirements.NoError(err)
+	message, err := st.UpsertMessage(&store.Message{SourceID: chat.source.ID, SourceMessageID: "writer", ConversationID: conversation,
+		MessageType: "beeper", SentAt: sql.NullTime{Time: time.Unix(100, 0), Valid: true}})
+	requirements.NoError(err)
+	member, err := st.EnsureParticipant("member@example.net", "Plain Member", "example.net")
+	requirements.NoError(err)
+	requirements.NoError(st.ReplaceMessageRecipients(message, "to", []int64{member}, []string{"Kilo Alias"}))
+
+	writer, err := st.DB().BeginTx(t.Context(), nil)
+	requirements.NoError(err)
+	t.Cleanup(func() { _ = writer.Rollback() })
+	_, err = writer.ExecContext(t.Context(), `UPDATE message_recipients SET display_name = 'Lima Alias' WHERE message_id = $1`, message)
+	requirements.NoError(err)
+
+	searchDone := make(chan error, 1)
+	go func() {
+		_, err := st.SearchChatsContext(context.Background(), store.ChatDiscoveryQuery{Query: "Kilo"})
+		searchDone <- err
+	}()
+	requirements.NoError(waitResult(t, searchDone, "chat discovery during an open write"))
+	requirements.NoError(writer.Commit())
+
+	page, err := st.SearchChatsContext(t.Context(), store.ChatDiscoveryQuery{Query: "Lima"})
+	requirements.NoError(err)
+	requirements.Len(page.Results, 1, "the committed alias must reach discovery")
+	requirements.Equal(conversation, page.Results[0].ConversationID)
+}

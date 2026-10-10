@@ -117,7 +117,7 @@ var (
 	schemaContractPostgresDigests = []string{
 		1: "7c554ff06468af9bf30950e6e4f2954b52f84d7dd0e6708f4fdd932fda007ed3",
 		2: "7f207ef54527a376aebc79ee9c2217e3af0bfb1171ed98af2ef5504ea7dec7ca",
-		3: "b270dfa3ae2aceb1dfca8170afe00f94726ec90a7c1dc2944398729ca8c9d326",
+		3: "268babb52f0ddae9bf872b52a02d7de064f453d07afb60cf8f1384089811309e",
 	}
 )
 
