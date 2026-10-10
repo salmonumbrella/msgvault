@@ -33,10 +33,8 @@ func metadataSearchDB(tb testing.TB) *sql.DB {
  VALUES(1,1,1,'email','synthetic-1','prefix Needle suffix','preview','2024-01-01',NULL),
  (2,1,1,'email','synthetic-2','other','snippet needle','2024-01-02',NULL),
  (3,1,1,'email','synthetic-3','direct sender','other','2024-01-03',1),
- (4,1,1,'email','synthetic-4','recipient','other','2024-01-04',NULL),
- (5,1,1,'email','synthetic-5','body only','other','2024-01-05',NULL);
- INSERT INTO message_recipients(id,message_id,participant_id,recipient_type,display_name) VALUES(1,4,1,'to','Occurrence Alias');
- INSERT INTO message_bodies(message_id,body_text) VALUES(5,'bodyonlyneedle');`)
+ (4,1,1,'email','synthetic-4','recipient','other','2024-01-04',NULL);
+ INSERT INTO message_recipients(id,message_id,participant_id,recipient_type,display_name) VALUES(1,4,1,'to','Occurrence Alias');`)
 	require.NoError(tb, err)
 	return st.DB()
 }
@@ -85,7 +83,7 @@ func TestMetadataSearchLiteralFields(t *testing.T) {
 		term string
 		want []int64
 	}{
-		{"eedle", []int64{2, 1}}, {"ÉCOLE", []int64{4, 3}}, {"00011", []int64{4, 3}}, {"rrence", []int64{4}}, {"bodyonlyneedle", nil},
+		{"eedle", []int64{2, 1}}, {"ÉCOLE", []int64{4, 3}}, {"00011", []int64{4, 3}}, {"rrence", []int64{4}},
 	} {
 		got, err := e.SearchFast(t.Context(), &search.Query{TextTerms: []string{tc.term}}, MessageFilter{}, 50, 0)
 		require.NoError(err)

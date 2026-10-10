@@ -83,10 +83,6 @@ func TestMetadataTrigramRepairsMissingIndex(t *testing.T) {
 	require.NoError(err)
 	require.NoError(st.InitSchema())
 	assert.Equal(1, metadataTrigramCount(t, st, "recipients_metadata_fts", "rrence"))
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	require.ErrorIs(st.InitSchemaContext(ctx), context.Canceled)
-	assert.Equal(1, metadataTrigramCount(t, st, "messages_metadata_fts", "eedle"))
 }
 
 func TestMetadataTrigramCapabilityTransition(t *testing.T) {

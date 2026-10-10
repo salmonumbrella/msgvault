@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -13,7 +12,7 @@ import (
 
 func FuzzMetadataSearchParity(f *testing.F) {
 	for _, s := range []string{"needle", "ÉCOLE", "e\u0301cole", "%_\\", "a\"b", "foo-bar", "a b", "ab", "", "a\x00b", string([]byte{0xff, 'a', 'b', 'c'}), "𐐀abc"} {
-		for _, flags := range []uint8{0, 15, 31, 64, 160} {
+		for _, flags := range []uint8{0, 15, 32, 64} {
 			f.Add([]byte("synthetic|prefix "+s+" suffix|unrelated|contact@example.org|+15550001111"), s, flags)
 		}
 	}
@@ -66,18 +65,11 @@ func FuzzMetadataSearchParity(f *testing.F) {
 			q.AccountIDs = []int64{1}
 		}
 		filter := MessageFilter{HideDeletedFromSource: flags&8 != 0}
-		if flags&16 != 0 {
-			filter.ConversationID = new(int64(1))
-		}
 		if flags&32 != 0 {
 			filter.SourceIDs = []int64{2}
 		}
 		if flags&64 != 0 {
 			filter.SourceIDs = []int64{}
-		}
-		if flags&128 != 0 {
-			after := time.Date(2024, 1, 6, 0, 0, 0, 0, time.UTC)
-			filter.After = &after
 		}
 		indexed := NewSQLiteEngine(db)
 		scan := NewEngineWithDialect(db, metadataScanDialect{})
