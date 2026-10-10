@@ -94,7 +94,7 @@ func TestMessagingRoutesFailClosedOnEvidenceProblems(t *testing.T) {
 		mutate       func(*store.MessagingRouteEvidence)
 	}{
 		{"incomplete", "membership_incomplete", func(e *store.MessagingRouteEvidence) { e.MembershipComplete = false }},
-		{"account mismatch", "account_binding_mismatch", func(e *store.MessagingRouteEvidence) { e.AccountID = "wrong"; e.Failure = "account_binding_mismatch" }},
+		{"account mismatch", "account_binding_mismatch", func(e *store.MessagingRouteEvidence) { e.AccountID = "wrong" }},
 		{"chat mismatch", "chat_binding_mismatch", func(e *store.MessagingRouteEvidence) { e.ChatID = "wrong" }},
 		{"network label only", "network_unverified", func(e *store.MessagingRouteEvidence) {
 			e.Network = ""
@@ -315,8 +315,8 @@ func TestMessagingRoutesMissingMetadataStaleSourceAndReadOnly(t *testing.T) {
 	assertions.Contains(page.Routes.Items[0].Reasons, "source_stale")
 	if !f.Store.IsPostgreSQL() {
 		requirements.NoError(f.Store.DB().QueryRow(`SELECT total_changes()`).Scan(&after))
+		assertions.Equal(before, after, "route discovery must not write")
 	}
-	assertions.Equal(before, after)
 	_, err = f.Store.DB().ExecContext(t.Context(), f.Store.Rebind(`DELETE FROM sources WHERE id=?`), src)
 	requirements.NoError(err)
 	page, err = f.Store.GetPersonMessagingRoutesContext(t.Context(), store.PersonMessagingRouteQuery{PersonUID: p.VCardUID})
@@ -481,4 +481,39 @@ func TestMessagingRoutesNetworkFilterMatchesNativeAndBeeperRoutes(t *testing.T) 
 	assertions.Equal(bridged, next.Routes.Items[0].ConversationID)
 	assertions.Equal("discord", next.Routes.Items[0].Network)
 	assertions.Equal("archive_verified", next.Routes.Items[0].Status)
+}
+
+func TestMessagingRoutesKeepDeletionSignalAfterArchiveGC(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+
+	st := testutil.NewSQLiteTestStore(t)
+	person, peer := messagingPerson(t, st, "gc-peer")
+	sourceID, conversationID := messagingConversation(t, st, "account", "!gc:example.test", "direct_chat", peer)
+	_, err := st.DB().Exec(`INSERT INTO messages (conversation_id, source_id, source_message_id, message_type)
+		VALUES (?, ?, 'gc-message', 'email')`, conversationID, sourceID)
+	requirements.NoError(err)
+	query := store.PersonMessagingRouteQuery{PersonUID: person.VCardUID}
+	verified, err := st.GetPersonMessagingRoutesContext(t.Context(), query)
+	requirements.NoError(err)
+	requirements.Len(verified.Routes.Items, 1)
+	requirements.Equal("archive_verified", verified.Routes.Items[0].Status)
+
+	requirements.NoError(st.MarkMessageDeleted(sourceID, "gc-message"))
+	deleted, err := st.GetPersonMessagingRoutesContext(t.Context(), query)
+	requirements.NoError(err)
+	requirements.Len(deleted.Routes.Items, 1)
+	assertions.Equal("unresolved", deleted.Routes.Items[0].Status)
+	assertions.Contains(deleted.Routes.Items[0].Reasons, "source_messages_deleted")
+
+	plan, err := st.PlanGCContext(t.Context())
+	requirements.NoError(err)
+	purged, err := st.ExecuteGCContext(t.Context(), plan)
+	requirements.NoError(err)
+	requirements.Equal(int64(1), purged)
+	collected, err := st.GetPersonMessagingRoutesContext(t.Context(), query)
+	requirements.NoError(err)
+	requirements.Len(collected.Routes.Items, 1)
+	assertions.Equal("unresolved", collected.Routes.Items[0].Status)
+	assertions.Contains(collected.Routes.Items[0].Reasons, "source_messages_deleted")
 }

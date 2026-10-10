@@ -312,8 +312,7 @@ func (s *Store) readMessagingRoutes(
 	}
 	query := `SELECT c.id,COALESCE(c.source_conversation_id,''),c.source_id,src.source_type,src.identifier,
  c.conversation_type,
- COALESCE(src.last_sync_at,(SELECT MAX(sr.completed_at) FROM sync_runs sr
-  WHERE sr.source_id=src.id AND sr.status='completed' AND sr.errors_count=0)),
+ src.last_sync_at,
  CASE WHEN ` + metadataBytes + `<=65536 THEN COALESCE(CAST(c.metadata AS TEXT),'') ELSE '' END,
  COALESCE(` + metadataBytes + `,0)>65536,
  EXISTS(SELECT 1 FROM messages m WHERE m.conversation_id=c.id)
@@ -473,7 +472,7 @@ func applyRouteEvidence(
 	switch e.Failure {
 	case "":
 	case "account_lookup_failed", "account_not_connected", "account_binding_mismatch",
-		"chat_binding_mismatch", "membership_fetch_failed", "network_unverified":
+		"chat_binding_mismatch", "membership_fetch_failed", "network_unverified", "source_messages_deleted":
 		r.Reasons = append(r.Reasons, e.Failure)
 	default:
 		r.Reasons = append(r.Reasons, "provider_metadata_unavailable")

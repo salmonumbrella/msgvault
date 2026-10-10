@@ -88,26 +88,46 @@ func (s *Store) InvalidateConversationMessagingRouteEvidence(ctx context.Context
 
 func (s *Store) invalidateConversationMessagingRouteEvidence(ctx context.Context, conversationID int64, failure string) error {
 	return s.withSyncConversationWriteContext(ctx, conversationID, func(q querier) error {
-		var raw sql.NullString
-		if err := q.QueryRow(`SELECT metadata FROM conversations WHERE id=?`, conversationID).Scan(&raw); err != nil {
-			return fmt.Errorf("read route metadata: %w", err)
-		}
-		metadata := map[string]jsontext.Value{}
-		if raw.Valid && raw.String != "" {
-			if err := json.Unmarshal([]byte(raw.String), &metadata); err != nil {
-				return fmt.Errorf("decode route metadata: %w", err)
-			}
-		}
-		if err := invalidateMessagingRouteMembership(metadata, failure); err != nil {
-			return err
-		}
-		encoded, err := json.Marshal(metadata, json.Deterministic(true))
-		if err != nil {
-			return err
-		}
-		_, err = q.Exec(`UPDATE conversations SET metadata=`+s.dialect.JSONBindExpr()+` WHERE id=?`, string(encoded), conversationID)
-		return err
+		return s.invalidateMessagingRouteEvidenceWith(q, conversationID, failure)
 	})
+}
+
+func (s *Store) invalidateMessagingRouteEvidenceWith(q querier, conversationID int64, failure string) error {
+	var raw sql.NullString
+	if err := q.QueryRow(`SELECT metadata FROM conversations WHERE id=?`, conversationID).Scan(&raw); err != nil {
+		return fmt.Errorf("read route metadata: %w", err)
+	}
+	metadata := map[string]jsontext.Value{}
+	if raw.Valid && raw.String != "" {
+		if err := json.Unmarshal([]byte(raw.String), &metadata); err != nil {
+			return fmt.Errorf("decode route metadata: %w", err)
+		}
+	}
+	if err := invalidateMessagingRouteMembership(metadata, failure); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(metadata, json.Deterministic(true))
+	if err != nil {
+		return err
+	}
+	_, err = q.Exec(`UPDATE conversations SET metadata=`+s.dialect.JSONBindExpr()+` WHERE id=?`, string(encoded), conversationID)
+	return err
+}
+
+// invalidateEmptiedConversationRouteWith keeps the source-deletion signal after
+// archive GC removes a conversation's last messages. Route discovery derives
+// that signal from the deleted rows, so without this marker an emptied chat
+// would read as verified until a sync captures fresh evidence.
+func (s *Store) invalidateEmptiedConversationRouteWith(q querier, conversationID int64) error {
+	var remaining bool
+	if err := q.QueryRow(`SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id=?)`, conversationID).
+		Scan(&remaining); err != nil {
+		return fmt.Errorf("check remaining messages: %w", err)
+	}
+	if remaining {
+		return nil
+	}
+	return s.invalidateMessagingRouteEvidenceWith(q, conversationID, "source_messages_deleted")
 }
 
 // InvalidateSourceConversationMessagingRouteEvidenceContext marks route proof

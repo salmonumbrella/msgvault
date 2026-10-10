@@ -538,8 +538,9 @@ func (imp *Importer) Import(ctx context.Context, opts ImportOptions) (sum *Impor
 		return sum, err
 	}
 	blob, _ := state.Marshal()
-	// Partial runs keep their resume state without advancing source freshness.
-	if sum.Errors == 0 {
+	// Partial and stopped runs keep their resume state without advancing source
+	// freshness. Route freshness may rely only on a complete, error-free pass.
+	if sum.Errors == 0 && !sum.Stopped {
 		err = imp.store.CompleteSyncAndPreserveSourceCursorContext(finalizeCtx, syncID, src.ID, blob)
 	} else {
 		err = imp.store.CompleteSyncContext(finalizeCtx, syncID, blob)

@@ -364,23 +364,29 @@ type chatRefresh struct {
 // archived conversation type and membership record with it, so this backfill
 // and every later policy evaluation weigh the source's current truth rather
 // than a type or roster the archive predates. The returned error is fatal
-// (store failure); a fetch failure is carried in the result instead. Route
-// proof survives an unchanged refresh: route evaluation compares the written
-// type and member count with the captured roster snapshot.
+// (store failure); a fetch failure is carried in the result instead.
 func (imp *Importer) refreshChatContext(
 	ctx context.Context, syncID, sourceID, conversationID int64, chatID string, sum *ImportSummary,
 ) (*chatRefresh, error) {
+	// Media refresh does not reconcile the archived roster. Clear earlier route
+	// proof before the provider read so an interruption, a failed read, or a
+	// membership change cannot leave it verified. The next sync that visits the
+	// chat captures fresh proof.
+	if err := imp.store.InvalidateConversationMessagingRouteEvidence(ctx, conversationID); err != nil {
+		return nil, err
+	}
 	chat, gerr := imp.client.GetChat(ctx, chatID)
 	if errors.Is(gerr, ErrNotFound) {
-		// Route proof for a chat Beeper no longer has cannot stay verified.
-		if err := imp.store.InvalidateConversationMessagingRouteEvidence(ctx, conversationID); err != nil {
-			return nil, err
-		}
 		return &chatRefresh{}, nil
 	}
 	if gerr != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		if err := imp.store.InvalidateSourceConversationMessagingRouteEvidenceWithFailureContext(
+			ctx, sourceID, chatID, "membership_fetch_failed",
+		); err != nil {
+			return nil, err
 		}
 		imp.recordItem(syncID, chatID, "fetch", store.SyncRunItemStatusError, "beeper_fetch_error", gerr)
 		sum.FetchErrors++

@@ -126,9 +126,6 @@ func TestCopySubsetPreservesImportedMessagingRouteFreshness(t *testing.T) {
 	account, err := source.GetSourceByTypeAndIdentifier("beeper", "account-a")
 	requirements.NoError(err)
 	requirements.True(account.LastSyncAt.Valid)
-	// Older Beeper imports recorded freshness only in sync history.
-	_, err = source.DB().Exec(`UPDATE sources SET last_sync_at=NULL WHERE id=?`, account.ID)
-	requirements.NoError(err)
 	var peer int64
 	requirements.NoError(source.DB().QueryRow(`SELECT id FROM participants WHERE display_name='Avery Example'`).Scan(&peer))
 	person, _, err := source.CreatePersonFromParticipant(peer)
@@ -863,29 +860,18 @@ func TestUnfinishedChatRosterFetchInterruptionInvalidatesMessagingRoute(t *testi
 	}
 }
 
-func TestMediaChatRefreshKeepsRouteProofOnlyForUnchangedRoster(t *testing.T) {
+// Media refresh does not reconcile the roster, so it clears route proof
+// whatever it reads. Only a later sync that visits the chat restores it.
+func TestMediaChatRefreshInvalidatesPriorRouteProof(t *testing.T) {
 	for _, test := range []struct {
-		name         string
-		participants []map[string]any
-		gone         bool
-		wantStatus   string
-		wantReason   string
+		name       string
+		chat       bool
+		fail       bool
+		wantReason string
 	}{
-		{
-			name:         "unchanged roster",
-			participants: []map[string]any{{"id": "@avery:example.test", "fullName": "Avery Example"}},
-			wantStatus:   "archive_verified",
-		},
-		{
-			name: "member added",
-			participants: []map[string]any{
-				{"id": "@avery:example.test", "fullName": "Avery Example"},
-				{"id": "@blake:example.test", "fullName": "Blake Example"},
-			},
-			wantStatus: "unresolved",
-			wantReason: "roster_changed",
-		},
-		{name: "chat gone", gone: true, wantStatus: "unresolved", wantReason: "membership_incomplete"},
+		{name: "unchanged chat", chat: true, wantReason: "membership_incomplete"},
+		{name: "failed refresh", chat: true, fail: true, wantReason: "membership_fetch_failed"},
+		{name: "chat gone", wantReason: "membership_incomplete"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			assertions := assert.New(t)
@@ -893,9 +879,13 @@ func TestMediaChatRefreshKeepsRouteProofOnlyForUnchangedRoster(t *testing.T) {
 
 			f := newFakeBeeper(t)
 			chatID := "!media-refresh:example.test"
-			if !test.gone {
-				f.addChat(&fakeChat{ID: chatID, AccountID: "account-a", Type: "single", Participants: test.participants})
+			if test.chat {
+				f.addChat(&fakeChat{
+					ID: chatID, AccountID: "account-a", Type: "single",
+					Participants: []map[string]any{{"id": "@avery:example.test", "fullName": "Avery Example"}},
+				})
 			}
+			f.setChatGetFailure(chatID, test.fail)
 
 			st := testutil.NewSQLiteTestStore(t)
 			source, err := st.GetOrCreateSource("beeper", "account-a")
@@ -933,15 +923,14 @@ func TestMediaChatRefreshKeepsRouteProofOnlyForUnchangedRoster(t *testing.T) {
 			refresh, err := imp.refreshChatContext(t.Context(), 0, source.ID, conversationID, chatID, &ImportSummary{})
 			requirements.NoError(err)
 			requirements.NotNil(refresh)
-			assertions.Equal(!test.gone, refresh.found)
+			assertions.Equal(test.chat && !test.fail, refresh.found)
 
 			after, err := st.GetPersonMessagingRoutesContext(t.Context(), query)
 			requirements.NoError(err)
 			requirements.Len(after.Routes.Items, 1)
-			assertions.Equal(test.wantStatus, after.Routes.Items[0].Status)
-			if test.wantReason != "" {
-				assertions.Contains(after.Routes.Items[0].Reasons, test.wantReason)
-			}
+			assertions.Equal("unresolved", after.Routes.Items[0].Status)
+			assertions.False(after.Routes.Items[0].MembershipComplete)
+			assertions.Contains(after.Routes.Items[0].Reasons, test.wantReason)
 		})
 	}
 }

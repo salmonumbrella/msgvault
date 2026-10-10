@@ -1230,7 +1230,10 @@ func createTestSourceDB(t *testing.T, dir string, msgCount int) string {
 	return dbPath
 }
 
-func TestCopySubsetPreservesEffectiveSourceSyncTime(t *testing.T) {
+// Route freshness reads only sources.last_sync_at, which an importer sets after
+// a complete pass. Sync history can include stopped runs, so a subset must not
+// derive freshness from it.
+func TestCopySubsetCopiesStoredSourceSyncTimeOnly(t *testing.T) {
 	stored := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	completed := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
 	for _, test := range []struct {
@@ -1239,9 +1242,9 @@ func TestCopySubsetPreservesEffectiveSourceSyncTime(t *testing.T) {
 		completedRuns bool
 		want          sql.NullTime
 	}{
-		{"latest successful run", nil, true, sql.NullTime{Time: completed, Valid: true}},
-		{"stored timestamp takes precedence", &stored, true, sql.NullTime{Time: stored, Valid: true}},
-		{"no successful run", nil, false, sql.NullTime{}},
+		{"stored timestamp is copied", &stored, true, sql.NullTime{Time: stored, Valid: true}},
+		{"completed runs do not set freshness", nil, true, sql.NullTime{}},
+		{"no stored timestamp", nil, false, sql.NullTime{}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			requirements := require.New(t)
