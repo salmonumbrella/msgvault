@@ -198,6 +198,9 @@ func TestDaemonMessageTagsReleaseFailureKeepsSavedResult(t *testing.T) {
 	assert.Equal([]string{"Label_next"}, result.Tags)
 	assert.Equal([]string{"Next"}, cachedLabels)
 	assert.Contains(logs.String(), "release source")
+	execution, err := st.AcquireSyncExecutionContext(t.Context(), source.ID)
+	require.NoError(err, "a disconnected lock session must not leave the source busy")
+	require.NoError(execution.Release())
 }
 
 func TestDaemonMessageTagsRevokedGrantUsesDefaultFactory(t *testing.T) {
