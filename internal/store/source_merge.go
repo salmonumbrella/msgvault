@@ -6,6 +6,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"log/slog"
 )
 
 var ErrSourceMergeInvalid = errors.New("invalid source merge")
@@ -69,6 +70,17 @@ func (s *Store) MergeSourcesContext(ctx context.Context, req MergeSourcesRequest
 	if req.FromSourceID <= 0 || req.IntoSourceID <= 0 || req.FromSourceID == req.IntoSourceID {
 		return result, invalidSourceMerge("two distinct positive source IDs are required")
 	}
+	defer func() {
+		if retErr != nil || req.DryRun {
+			return
+		}
+		// The merge is already committed. Leave failed pages pending for the
+		// next sync, repair-derived, or retry of this merge.
+		if _, err := s.RepairAccountAttributionContext(ctx, req.IntoSourceID, nil); err != nil {
+			slog.Warn("derive account attribution after source merge failed; the rows stay pending",
+				"source_id", req.IntoSourceID, "error", err)
+		}
+	}()
 	if previous, recorded, err := s.sourceMergeRecorded(ctx, req); recorded || err != nil {
 		return previous, err
 	}

@@ -115,6 +115,13 @@ func (s *Store) applySourceMergePlan(ctx context.Context, tx *loggedTx, from, in
 	if err := refreshSourceMessageAttributionContext(ctx, tx, into, ""); err != nil {
 		return err
 	}
+	// Moved mail uses a new mailbox, and incoming aliases or a Sent folder can
+	// change attribution for existing destination mail too. Mark these rows in
+	// the merge transaction; derive them in pages after it commits.
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET account_address = NULL, account_path = NULL
+ WHERE source_id = ? AND COALESCE(message_type, '') IN ('', 'email', 'calendar_event')`, into); err != nil {
+		return fmt.Errorf("mark merged account attribution pending: %w", err)
+	}
 	// Source-local receipts, sync runs, cursors, re-anchor markers, import receipts
 	// and Beeper media endpoint records remain on the retired source for audit.
 	for _, statement := range []string{

@@ -700,7 +700,8 @@ func TestMergeSourcesDoesNotHideLastLiveCopy(t *testing.T) {
 	old, _ := mergeFixtureMessage(t, st, into.ID, "shared", "1", "same", 1)
 	live, _ := mergeFixtureMessage(t, st, from.ID, "shared", "2", "same", 1)
 	deleted, _ := mergeFixtureMessage(t, st, from.ID, "shared", "3", "deleted", 2)
-	_, err = st.DB().Exec(st.Rebind(`UPDATE messages SET deleted_at = ?, delete_batch_id = 'original-batch' WHERE id IN (?, ?)`), time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC), old, deleted)
+	deletedAt := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, err = st.DB().Exec(st.Rebind(`UPDATE messages SET deleted_at = ?, delete_batch_id = 'original-batch' WHERE id IN (?, ?)`), deletedAt, old, deleted)
 	require.NoError(err)
 	result, err := st.MergeSourcesContext(context.Background(), store.MergeSourcesRequest{FromSourceID: from.ID, IntoSourceID: into.ID})
 	require.NoError(err)
@@ -713,7 +714,7 @@ func TestMergeSourcesDoesNotHideLastLiveCopy(t *testing.T) {
 		var stamp time.Time
 		require.NoError(st.DB().QueryRow(st.Rebind(`SELECT delete_batch_id, deleted_at FROM messages WHERE id = ?`), id).Scan(&batch, &stamp))
 		assert.Equal("original-batch", batch)
-		assert.Equal(2021, stamp.Year())
+		assert.Equal(deletedAt, stamp.UTC())
 	}
 }
 
