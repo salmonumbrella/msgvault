@@ -672,3 +672,45 @@ func TestLastModified_NoInfiniteRecursion(t *testing.T) {
 		require.NoError(t, err, "repeated update must not recurse/hang")
 	}
 }
+
+// TestSetEmbedGenIfUnchanged_BodyEditAfterReadMisses is the repair race: the
+// worker reads content and captures last_modified, then a body rewrite lands
+// before the stamp. The stamp must miss so the row still needs embedding.
+func TestSetEmbedGenIfUnchanged_BodyEditAfterReadMisses(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	st := testutil.NewTestStore(t)
+	id := seedMessageForLM(t, st)
+	tokenAtRead := baselineLM(t, st, id)
+
+	_, err := st.DB().Exec(
+		st.Rebind(`UPDATE message_bodies SET body_text = ? WHERE message_id = ?`),
+		"corrected body", id)
+	require.NoError(err, "rewrite body")
+
+	missed, covered, err := st.SetEmbedGenIfUnchanged(context.Background(),
+		[]store.EmbedGenStamp{{ID: id, LastModified: tokenAtRead}}, 7)
+	require.NoError(err)
+	assert.Equal([]int64{id}, missed)
+	assert.Zero(covered)
+	assert.False(readEmbedGen(t, st, id).Valid, "a stale token must not stamp the row")
+}
+
+// TestSetEmbedGenIfUnchanged_StampsDespiteItsOwnBump checks that the stamp's
+// own UPDATE, which the trigger turns into a last_modified bump, still matches
+// the token captured before it.
+func TestSetEmbedGenIfUnchanged_StampsDespiteItsOwnBump(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	st := testutil.NewTestStore(t)
+	id := seedMessageForLM(t, st)
+	tokenAtRead := baselineLM(t, st, id)
+
+	missed, covered, err := st.SetEmbedGenIfUnchanged(context.Background(),
+		[]store.EmbedGenStamp{{ID: id, LastModified: tokenAtRead}}, 7)
+	require.NoError(err)
+	assert.Empty(missed)
+	assert.Equal(1, covered)
+	assert.Equal(sql.NullInt64{Int64: 7, Valid: true}, readEmbedGen(t, st, id))
+	assert.NotEqual(tokenAtRead, readLM(t, st, id), "the stamp bumped last_modified")
+}

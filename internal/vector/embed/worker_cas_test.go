@@ -13,14 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"go.kenn.io/msgvault/internal/store"
 )
-
-// stamps builds a single-item EmbedGenStamp slice for a CAS stamp call.
-func stamps(id int64, lastModified any) []store.EmbedGenStamp {
-	return []store.EmbedGenStamp{{ID: id, LastModified: lastModified}}
-}
 
 // lmOf reads a message's last_modified as the literal stored text (CAST AS
 // TEXT defeats go-sqlite3's DATETIME coercion, matching the worker).
@@ -106,54 +99,6 @@ func TestWorker_CASRepairRace(t *testing.T) {
 	assert.Equal(1, res.Succeeded, "raced row re-embedded on recovery")
 	assert.Equal(0, countMissing(t, f.MainDB, int64(f.BuildingGen)),
 		"coverage complete after recovery")
-}
-
-// TestWorker_CASRepairRace_OldCodeWouldFail proves the OLD behavior was
-// buggy: an UNCONDITIONAL stamp (the pre-fix Store.SetEmbedGen) applied after
-// the same race marks the row covered-with-stale-content — exactly the defect
-// the CAS fix removes.
-func TestWorker_CASRepairRace_OldCodeWouldFail(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-
-	ctx := context.Background()
-	f := newWorkerFixture(t, 1)
-	setBaselineLM(t, f.MainDB, 1)
-
-	// Simulate the worker having read content (token captured), then the race
-	// edit landing (body rewrite bumps last_modified; embed_gen reset to NULL).
-	_, err := f.MainDB.Exec(
-		`UPDATE message_bodies SET body_text = 'corrected content' WHERE message_id = 1`)
-	require.NoError(
-		err, "race: rewrite body")
-
-	_, err = f.MainDB.Exec(`UPDATE messages SET embed_gen = NULL WHERE id = 1`)
-	require.NoError(
-		err, "race: reset embed_gen")
-
-	require.NoError(
-
-		f.Store.SetEmbedGen(ctx, []int64{1}, int64(f.BuildingGen)),
-		"old unconditional stamp")
-
-	assert.Equal(0, countMissing(t, f.MainDB, int64(f.BuildingGen)),
-		"OLD code: row wrongly marked covered (the bug)")
-
-	// NEW path: a CAS stamp with the STALE token (captured before the race)
-	// does NOT mark it covered — the desired behavior.
-	_, err = f.MainDB.Exec(`UPDATE messages SET embed_gen = NULL WHERE id = 1`)
-	require.NoError(
-		err, "reset for CAS check")
-
-	staleToken := "2000-01-01 00:00:00"
-	missed, _, err := f.Store.SetEmbedGenIfUnchanged(ctx,
-		stamps(1, staleToken), int64(f.BuildingGen))
-	require.NoError(
-		err, "CAS with stale token")
-
-	assert.Equal([]int64{1}, missed, "stale-token CAS returns the missed id")
-	assert.Equal(1, countMissing(t, f.MainDB, int64(f.BuildingGen)),
-		"NEW code: CAS with stale token leaves row needing embedding")
 }
 
 // TestWorker_CASNormalPath verifies the happy path: when last_modified is
@@ -260,32 +205,6 @@ func TestWorker_CASMissAccounting(t *testing.T) {
 	assert.Equal(1, bres.Succeeded, "backstop re-embeds the CAS-missed row")
 	assert.Equal(0, countMissing(t, f.MainDB, int64(f.BuildingGen)),
 		"coverage complete after backstop")
-}
-
-// TestWorker_CASSelfBumpDoesNotBlockStamp pins the self-bump invariant: the
-// stamp UPDATE itself fires the AFTER-UPDATE trigger and bumps last_modified,
-// but because the WHERE compares the PRE-trigger value the stamp still
-// matches its row. Verified directly against the store CAS method.
-func TestWorker_CASSelfBumpDoesNotBlockStamp(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-
-	ctx := context.Background()
-	f := newWorkerFixture(t, 1)
-	token := setBaselineLM(t, f.MainDB, 1)
-
-	missed, _, err := f.Store.SetEmbedGenIfUnchanged(ctx,
-		stamps(1, token), int64(f.BuildingGen))
-	require.NoError(
-		err, "CAS stamp")
-
-	assert.Empty(missed, "self-bump stamp succeeds (no CAS miss)")
-
-	v, isNull := embedGenOf(t, f.MainDB, 1)
-	require.False(isNull, "row stamped despite self-bump")
-	assert.Equal(int64(f.BuildingGen), v, "embed_gen set")
-	assert. // The stamp's own UPDATE bumped last_modified off the baseline.
-		NotEqual(token, lmOf(t, f.MainDB, 1), "self-bump moved last_modified")
 }
 
 // TestWorker_Downshift_EmptySkipCASMissNotSkippedPastWatermark is the
