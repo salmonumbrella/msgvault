@@ -354,6 +354,43 @@ func TestEmailTagsGmailPreservesCrossRenamedLabelIdentities(t *testing.T) {
 	}
 }
 
+func TestEmailTagsGmailPreservesSystemLabelNames(t *testing.T) {
+	for _, tc := range []struct {
+		id, name, role string
+	}{
+		{"SENT", "Envoyes", "sent"},
+		{"DRAFT", "Brouillons", "drafts"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			f := newAttrFixture(t, "gmail", "owner@example.test")
+			labels, err := f.st.EnsureLabelsBatch(f.source.ID, map[string]store.LabelInfo{
+				tc.id: {Name: tc.name, Type: "system"},
+			})
+			require.NoError(err)
+			first := f.persist(attrMail{labels: []int64{labels[tc.id]}, sourceMsgKey: "first"})
+			second := f.persist(attrMail{labels: []int64{labels[tc.id]}, sourceMsgKey: "second"})
+			require.ElementsMatch([]int64{first, second}, searchIDs(t, f.st, "label:"+tc.name))
+			target, err := f.st.EmailTagTargetContext(t.Context(), first, "")
+			require.NoError(err)
+
+			require.NoError(f.st.SaveEmailTagsContext(t.Context(), target, &emailtags.MessageTagResult{
+				Provider: "gmail", Tags: []string{tc.id, "Label_new"}, Verified: true,
+				AvailableTags: []emailtags.MessageTag{{ID: "Label_new", Name: "Next"}},
+			}))
+
+			message, err := f.st.GetMessage(first)
+			require.NoError(err)
+			assert.ElementsMatch([]string{tc.name, "Next"}, message.Labels)
+			assert.ElementsMatch([]int64{first, second}, searchIDs(t, f.st, "label:"+tc.name))
+			var role string
+			require.NoError(f.st.DB().QueryRow(f.st.Rebind(`SELECT system_role FROM labels WHERE id=?`), labels[tc.id]).Scan(&role))
+			assert.Equal(tc.role, role)
+		})
+	}
+}
+
 func TestEmailTagsGmailKeepsDraftRole(t *testing.T) {
 	for _, existing := range []bool{false, true} {
 		t.Run(map[bool]string{false: "new label", true: "existing label"}[existing], func(t *testing.T) {

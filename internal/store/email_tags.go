@@ -152,6 +152,11 @@ func (s *Store) SaveEmailTagsContext(ctx context.Context, target EmailTagTarget,
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
+			if err == nil && IsSystemLabel(tag) {
+				// Tag readback carries system IDs, not provider display names.
+				info.Name = name
+				descriptors[tag] = info
+			}
 			if errors.Is(err, sql.ErrNoRows) || name != info.Name || kind.String != info.Type || !labelSystemRoleMatches(role, info.SystemRole) {
 				catalogChanged = true
 			}
