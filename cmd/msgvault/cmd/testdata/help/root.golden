@@ -150,6 +150,7 @@ Indexes, embeddings, and analytics cache:
 Maintenance and repair:
   backup               Back up the archive to a snapshot repository
   init-db              Initialize the database schema
+  migrate              Apply this binary's archive schema migrations offline
   pack-attachments     Pack loose attachment files into sealed pack files
   purge-excluded-media Reclaim locally stored media excluded by current policy
   repack-attachments   Reclaim dead bytes from sparse attachment packs
@@ -161,6 +162,7 @@ Maintenance and repair:
   repair-list-ids      Repair archived email List-Id values from raw MIME
   repair-message       Repair one Gmail message snapshot or audit stored Gmail MIME
   repair-senders       Restore missing email senders from archived MIME
+  schema-version       Print the binary's expected archive schema version
   unpack-attachments   Restore packed attachments to loose files
 
 Setup, daemon, and integrations:
