@@ -2,6 +2,7 @@ package mime
 
 import (
 	"encoding/base64"
+	"slices"
 	"strings"
 	"testing"
 
@@ -9,7 +10,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestParse_AppleContentLengthHeaders(t *testing.T) {
+func hasApplePlaceholder(parts []PartFingerprint) bool {
+	return slices.ContainsFunc(parts, func(part PartFingerprint) bool {
+		return part.HasAppleContentLength
+	})
+}
+
+func TestPartFingerprints_AppleContentLengthHeaders(t *testing.T) {
 	marker := "X-Apple-Content-Length: 12"
 	attachment := "Content-Type: application/octet-stream\n" +
 		"Content-Disposition: attachment; filename=notes.bin\n"
@@ -35,40 +42,36 @@ func TestParse_AppleContentLengthHeaders(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert := assert.New(t)
-			require := require.New(t)
 			for _, newline := range []string{"\n", "\r\n"} {
 				raw := []byte(strings.ReplaceAll(tc.raw, "\n", newline))
-				parsed, err := Parse(raw)
-				require.NoError(err)
-				assert.Equal(tc.want, parsed.HasAppleContentLength)
-				recovered, err := ParseWithRecovery(raw, "")
-				require.NoError(err)
-				assert.Equal(tc.want, recovered.HasAppleContentLength)
+				_, parts, err := ParseWithRecoveryAndPartFingerprints(raw, "")
+				require.NoError(t, err)
+				require.NotEmpty(t, parts)
+				assert.Equal(t, tc.want, hasApplePlaceholder(parts))
 			}
 		})
 	}
 }
 
-func TestParseWithRecovery_AppleInspectionUnknownAfterFatalError(t *testing.T) {
-	parsed, err := ParseWithRecovery([]byte("Message-ID: <recovered@example.test>\n"+
+func TestPartFingerprints_UnavailableAfterFatalError(t *testing.T) {
+	parsed, parts, err := ParseWithRecoveryAndPartFingerprints([]byte("Message-ID: <recovered@example.test>\n"+
 		"X-Apple-Content-Length: 12\n"+
 		"Content-Type: multipart mixed; boundary=outer\n\n--outer--\n"), "")
 	require.Error(t, err)
 	assert.Equal(t, "<recovered@example.test>", parsed.MessageID)
-	assert.False(t, parsed.HasAppleContentLength, "recovery cannot inspect the full MIME tree")
+	assert.Empty(t, parts, "recovery cannot inspect the full MIME tree")
 }
 
-func TestParse_AppleContentLengthWithNonfatalDiagnostic(t *testing.T) {
-	parsed, err := ParseWithRecovery([]byte("Content-Type: multipart/mixed; boundary=outer\n\n"+
+func TestPartFingerprints_AppleContentLengthWithNonfatalDiagnostic(t *testing.T) {
+	parsed, parts, err := ParseWithRecoveryAndPartFingerprints([]byte("Content-Type: multipart/mixed; boundary=outer\n\n"+
 		"--outer\nContent-Type: text plain\nX-Apple-Content-Length: 12\n\n\n--outer--\n"), "")
 	require.NoError(t, err)
 	require.NotEmpty(t, parsed.Errors, "fixture must exercise tolerated MIME diagnostics")
-	assert.True(t, parsed.HasAppleContentLength)
+	assert.True(t, hasApplePlaceholder(parts))
 }
 
 // Header placement supplies the oracle; payload bytes cannot create a header.
-func FuzzParse_AppleContentLength(f *testing.F) {
+func FuzzPartFingerprints_AppleContentLength(f *testing.F) {
 	f.Add(uint32(0), false, false, false, []byte("body"))
 	f.Add(^uint32(0), true, true, true, []byte("body"))
 	f.Fuzz(func(t *testing.T, mask uint32, inHeader, nested, crlf bool, content []byte) {
@@ -91,8 +94,9 @@ func FuzzParse_AppleContentLength(f *testing.F) {
 		if crlf {
 			raw = strings.ReplaceAll(raw, "\n", "\r\n")
 		}
-		parsed, err := Parse([]byte(raw))
+		_, parts, err := ParseWithRecoveryAndPartFingerprints([]byte(raw), "")
 		require.NoError(t, err)
-		assert.Equal(t, inHeader, parsed.HasAppleContentLength)
+		require.NotEmpty(t, parts)
+		assert.Equal(t, inHeader, hasApplePlaceholder(parts))
 	})
 }

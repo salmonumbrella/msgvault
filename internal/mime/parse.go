@@ -50,9 +50,6 @@ type Message struct {
 	BodyHTML      string
 	Attachments   []Attachment
 	Errors        []string // Non-fatal parsing errors
-	// HasAppleContentLength marks MIME part headers left by Apple Mail when
-	// attachment bytes are stored outside the raw message.
-	HasAppleContentLength bool
 }
 
 // Address represents an email address with optional display name.
@@ -117,10 +114,6 @@ func parse(raw []byte, inspect func(*enmime.Part)) (*Message, error) {
 		ListID:    NormalizeListID(env.GetHeader("List-Id")),
 		BodyText:  env.Text,
 		BodyHTML:  env.HTML,
-		HasAppleContentLength: root.DepthMatchFirst(func(part *enmime.Part) bool {
-			_, present := part.Header["X-Apple-Content-Length"]
-			return present
-		}) != nil,
 	}
 
 	// Parse date

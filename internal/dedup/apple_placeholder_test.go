@@ -2,6 +2,8 @@ package dedup_test
 
 import (
 	"encoding/base64"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/dedup"
+	"go.kenn.io/msgvault/internal/emlx"
 	msgmime "go.kenn.io/msgvault/internal/mime"
 	"go.kenn.io/msgvault/internal/testutil/storetest"
 )
@@ -72,6 +75,60 @@ func TestEngine_ApplePlaceholderRestoredCopy(t *testing.T) {
 	assert.Equal(int64(1), count)
 	assertSoftDeleted(t, f.Store, partialID, false)
 	assertSoftDeleted(t, f.Store, restoredID, false)
+}
+
+// The emlx importer restores only top-level parts whose cached file exists,
+// so a restored copy can keep placeholders and must still beat the original.
+func TestEngine_ApplePlaceholderImporterRestoration(t *testing.T) {
+	placeholder := func(name string) string {
+		return "--outer\nContent-Transfer-Encoding: base64\nContent-Disposition: attachment;\n" +
+			"\tfilename=\"" + name + "\"\nContent-Type: application/pdf\nX-Apple-Content-Length: 60\n\n\n"
+	}
+	header := "Message-ID: <apple-copy@example.test>\nFrom: sender@example.test\n" +
+		"Subject: Attachment restoration\nMIME-Version: 1.0\n" +
+		"Content-Type: multipart/mixed; boundary=\"outer\"\n\n"
+	text := "--outer\nContent-Type: text/plain\n\nPlease read the attachment.\n\n"
+	inline := "--outer\nContent-Type: multipart/related; boundary=\"inner\"\n\n--inner\n" +
+		"Content-Type: text/html\n\n<p>See the image.</p>\n\n" +
+		strings.Replace(placeholder("image.pdf"), "--outer", "--inner", 1) + "--inner--\n\n"
+	for _, tc := range []struct {
+		name, mime string
+	}{
+		{"all placeholders restored", header + text + placeholder("a.pdf") + "--outer--\n"},
+		{"cached file missing", header + text + placeholder("a.pdf") + placeholder("b.pdf") + "--outer--\n"},
+		{"nested placeholder kept", header + inline + placeholder("a.pdf") + "--outer--\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require := require.New(t)
+			root := t.TempDir()
+			emlxData := []byte(fmt.Sprintf("%d\n%s", len(tc.mime), tc.mime))
+			path := filepath.Join(root, "Messages", "7.partial.emlx")
+			attachment := filepath.Join(root, "Attachments", "7", "2", "a.pdf")
+			require.NoError(os.MkdirAll(filepath.Dir(path), 0o755))
+			require.NoError(os.MkdirAll(filepath.Dir(attachment), 0o755))
+			require.NoError(os.WriteFile(path, emlxData, 0o600))
+			require.NoError(os.WriteFile(attachment, []byte("synthetic pdf"), 0o600))
+			partial, err := emlx.Parse(emlxData)
+			require.NoError(err)
+			restored, err := emlx.ParseFile(path, 1<<20)
+			require.NoError(err)
+			require.Equal(1, restored.RestoredAttachments)
+
+			f := storetest.New(t)
+			older := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+			partialID := ingestRawMessage(t, f.Store, f.Source, "partial", partial.Raw, older)
+			restoredID := ingestRawMessage(t, f.Store, f.Source, "restored", restored.Raw, older.Add(time.Hour))
+			setArchivedAt(t, f.Store, partialID, older)
+			setArchivedAt(t, f.Store, restoredID, older.Add(time.Hour))
+			linkLabel(t, f.Store, f.Source.ID, partialID, "old-label", "Old label", "user")
+			engine := dedup.NewEngine(f.Store, dedup.Config{AccountSourceIDs: []int64{f.Source.ID}}, nil)
+			report, err := engine.Scan(t.Context())
+			require.NoError(err)
+			require.Len(report.Groups, 1)
+			group := report.Groups[0]
+			assert.Equal(t, restoredID, group.Messages[group.Survivor].ID)
+		})
+	}
 }
 
 func TestEngine_ApplePlaceholderUnknownMIME(t *testing.T) {
