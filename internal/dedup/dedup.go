@@ -324,6 +324,10 @@ func (e *Engine) Scan(ctx context.Context) (*Report, error) {
 		}
 	}
 
+	report.Groups, err = e.groupsPreservingHistory(ctx, report.Groups)
+	if err != nil {
+		return nil, err
+	}
 	e.finalizeScanReport(report, started)
 	return report, nil
 }
@@ -419,7 +423,6 @@ func (e *Engine) appendMessageIDGroups(
 		}
 		e.selectSurvivor(&group)
 		report.Groups = append(report.Groups, group)
-		report.BySourcePair[sourcePairKey(group.Messages)]++
 	}
 	return nil
 }
@@ -470,8 +473,6 @@ func (e *Engine) appendContentHashGroups(report *Report) error {
 		}
 		preserveMessageIDSurvivor(&group, messageIDSurvivors)
 		report.Groups = append(report.Groups, group)
-		report.ContentHashGroups++
-		report.BySourcePair[sourcePairKey(group.Messages)]++
 	}
 	return nil
 }
@@ -504,6 +505,10 @@ func (e *Engine) finalizeScanReport(report *Report, started time.Time) {
 	report.DuplicateGroups = len(report.Groups)
 	for _, group := range report.Groups {
 		report.DuplicateMessages += len(group.Messages) - 1
+		report.BySourcePair[sourcePairKey(group.Messages)]++
+		if group.KeyType == "normalized-hash" {
+			report.ContentHashGroups++
+		}
 	}
 	maxSamples := min(10, len(report.Groups))
 	report.SampleGroups = append([]DuplicateGroup(nil), report.Groups[:maxSamples]...)
@@ -1134,6 +1139,13 @@ func (e *Engine) Execute(
 	if err != nil {
 		return summary, err
 	}
+	// Extraction can add historical content after the user reviewed this plan.
+	current := *report
+	current.Groups, err = e.groupsPreservingHistory(ctx, report.Groups)
+	if err != nil {
+		return summary, err
+	}
+	report = &current
 
 	remoteByKey := make(map[remoteKey][]string)
 	if e.config.DeleteDupsFromSourceServer {
@@ -1219,6 +1231,26 @@ func planChangedAfterBackfillError(backfilled int64) error {
 		derivationNoun,
 		derivationVerb,
 	)
+}
+
+func (e *Engine) groupsPreservingHistory(ctx context.Context, groups []DuplicateGroup) ([]DuplicateGroup, error) {
+	preserved := make([]DuplicateGroup, 0, len(groups))
+	for _, group := range groups {
+		duplicates := make([]int64, 0, len(group.Messages)-1)
+		for i, message := range group.Messages {
+			if i != group.Survivor {
+				duplicates = append(duplicates, message.ID)
+			}
+		}
+		keep, err := e.store.DuplicateMergePreservesHistoryContext(ctx, group.Messages[group.Survivor].ID, duplicates)
+		if err != nil {
+			return nil, fmt.Errorf("check duplicate group %s history: %w", group.Key, err)
+		}
+		if keep {
+			preserved = append(preserved, group)
+		}
+	}
+	return preserved, nil
 }
 
 func (e *Engine) mergeGroups(

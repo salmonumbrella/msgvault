@@ -522,6 +522,13 @@ func (s *Store) MergeDuplicates(
 		}
 	}
 	err := s.withAttributionTxContext(ctx, lock, func(tx *loggedTx) error {
+		preserved, err := duplicateMergePreservesHistory(ctx, tx, survivorID, duplicateIDs)
+		if err != nil {
+			return err
+		}
+		if !preserved {
+			return fmt.Errorf("duplicate merge into %d would hide historical content", survivorID)
+		}
 		for _, dupID := range duplicateIDs {
 			res, err := tx.Exec(unionLabelsSQL, survivorID, dupID)
 			if err != nil {
