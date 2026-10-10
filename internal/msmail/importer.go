@@ -29,7 +29,8 @@ const SourceType = "msmail"
 const walkPrefix = "walk:"
 
 // categoryDeltaPrefix identifies cursors created with categories in $select.
-// Old opaque cursors cannot gain fields, so their folders rewalk once.
+// Old opaque cursors cannot gain fields, so their folders rewalk once. The old
+// cursor covers content changes until the replacement walk finishes.
 const categoryDeltaPrefix = "categories-v1:"
 
 // retryPrefix marks a saved-state key that names a message to download again.
@@ -141,6 +142,8 @@ func Import(ctx context.Context, st *store.Store, c *Client, opts Options, log *
 		// archived messages it does not return can be looked up at its end.
 		var seen map[string]bool
 		restarted := false
+		oldCursor, replacementCursor := "", ""
+		freshRound := false
 		switch {
 		case link == "":
 			link, seen = DeltaStartURL(f.ID), map[string]bool{}
@@ -149,10 +152,16 @@ func Import(ctx context.Context, st *store.Store, c *Client, opts Options, log *
 		case strings.HasPrefix(link, categoryDeltaPrefix):
 			link = strings.TrimPrefix(link, categoryDeltaPrefix)
 		default:
+			oldCursor = link
 			link, seen = DeltaStartURL(f.ID), map[string]bool{}
 		}
 		for {
 			page, perr := c.DeltaPage(ctx, link)
+			if errors.Is(perr, msgraph.ErrGone) && replacementCursor != "" {
+				// The old cursor expired, but the replacement walk is complete.
+				link, replacementCursor = replacementCursor, ""
+				continue
+			}
 			if errors.Is(perr, msgraph.ErrGone) && !restarted {
 				// The token expired. Walk the folder again; messages already
 				// in the vault are not downloaded again.
@@ -176,14 +185,35 @@ func Import(ctx context.Context, st *store.Store, c *Client, opts Options, log *
 			} else {
 				link = page.DeltaLink
 			}
+			if oldCursor != "" && page.NextLink == "" {
+				// Drain the old cursor after the walk so changes during the walk
+				// refresh MIME before the replacement cursor becomes active.
+				replacementCursor = link
+				link, seen, oldCursor = oldCursor, nil, ""
+				continue
+			}
 			cursors[f.ID] = categoryDeltaPrefix + link
-			if seen != nil && page.NextLink != "" {
+			switch {
+			case oldCursor != "":
+				cursors[f.ID] = oldCursor
+			case replacementCursor != "":
+				cursors[f.ID] = link
+				if page.NextLink == "" && freshRound {
+					cursors[f.ID] = categoryDeltaPrefix + replacementCursor
+				}
+			case seen != nil && page.NextLink != "":
 				cursors[f.ID] = walkPrefix + link
 			}
 			if err = st.UpdateSyncCheckpoint(syncID, checkpoint()); err != nil {
 				return sum, err
 			}
 			if page.NextLink == "" {
+				if replacementCursor != "" && !freshRound {
+					// A saved nextLink can finish a round from before this walk.
+					// Start a fresh round to cover changes since that snapshot.
+					freshRound = true
+					continue
+				}
 				break
 			}
 		}
