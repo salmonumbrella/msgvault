@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/agentgrant"
 	"go.kenn.io/msgvault/internal/api"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/daemonclient"
@@ -45,9 +46,17 @@ func TestMCPFindChatRealArchiveAndCapability(t *testing.T) {
 	tools := toolsByName(t, rawListTools(t, opts, true))
 	requirements.Contains(tools, "find_chat")
 	assertions.NotContains(toolsByName(t, rawListTools(t, ServeOptions{Engine: &querytest.MockEngine{}}, true)), "find_chat")
+	// A delegated session with every read grant still cannot discover chats:
+	// discovery searches all sources, so it stays owner-only.
 	delegated := opts
 	delegated.DelegatedOnly = true
-	assertions.NotContains(toolsByName(t, rawListTools(t, delegated, true)), "find_chat")
+	for _, permission := range []agentgrant.Permission{agentgrant.PermissionSearchRead, agentgrant.PermissionMessageRead,
+		agentgrant.PermissionAttachmentRead, agentgrant.PermissionStatsRead} {
+		delegated.GrantPermissions = append(delegated.GrantPermissions, string(permission))
+	}
+	delegatedTools := toolsByName(t, rawListTools(t, delegated, true))
+	requirements.Contains(delegatedTools, ToolSearchMessages, "the delegated session must list granted read tools")
+	assertions.NotContains(delegatedTools, ToolFindChat)
 	for _, tc := range []struct{ sourceType, account, provider string }{{"beeper", "", ""}, {"apple_messages", "fixture-account", "provider-chat"}} {
 		other, err := st.GetOrCreateSource(tc.sourceType, tc.account)
 		requirements.NoError(err)

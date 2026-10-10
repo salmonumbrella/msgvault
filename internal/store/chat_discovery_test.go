@@ -110,8 +110,8 @@ func TestChatDiscoveryFindsDifferentNamesAcrossNetworks(t *testing.T) {
 	for _, result := range page.Results {
 		assertions.Positive(result.MessageID)
 		var visible int64
-		requirements.NoError(st.DB().QueryRow(st.Rebind("SELECT id FROM messages WHERE id = ? AND conversation_id = ? AND deleted_at IS NULL"), result.MessageID, result.ConversationID).Scan(&visible))
-		assertions.Equal(result.MessageID, visible)
+		requirements.NoError(st.DB().QueryRow(st.Rebind("SELECT id FROM messages WHERE id = ? AND conversation_id = ? AND deleted_at IS NULL"),
+			result.MessageID, result.ConversationID).Scan(&visible), "the anchor must be a visible message in its chat")
 	}
 }
 
