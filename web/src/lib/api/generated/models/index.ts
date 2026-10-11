@@ -666,6 +666,7 @@ export * from "./personContactPointInputRequest";
 export * from "./personContactPointPatchRequest";
 export * from "./personCreateContact";
 export * from "./personCreateInput";
+export * from "./personCreateInputSource";
 export * from "./personDate";
 export * from "./personDateInputRequest";
 export * from "./personDatePatchRequest";

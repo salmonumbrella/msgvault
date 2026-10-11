@@ -47,6 +47,7 @@ func TestStandalonePersonValidationAndObservedDuplicates(t *testing.T) {
 		`{"name":"Alex","phones":[{"value":"bad"}]}`, `{"name":"Alex","unexpected":true}`,
 		`{"name":"Alex","title":"Engineer"}`,
 		`{"name":"Alex","emails":[{"value":"alex@example.com","type":"x y"}]}`,
+		`{"name":"Alex","source":"extraction"}`,
 		`{"name":"Alex","org":"Example Company","title":"` + strings.Repeat("t", 281) + `"}`,
 	} {
 		response := personRequest(t, srv, http.MethodPost, peoplePath+"/create", []byte(body), "")
@@ -99,4 +100,21 @@ func TestStandalonePersonContactLimits(t *testing.T) {
 			assert.Len(points, 400)
 		})
 	}
+}
+
+func TestStandalonePersonEnrichmentSource(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	t.Parallel()
+	srv, st := newIdentityLinkTestServer(t)
+	body := []byte(`{"name":"Alex Example","org":"Example Company","note":"Met at a conference","source":"enrichment"}`)
+	response := personRequest(t, srv, http.MethodPost, peoplePath+"/create", body, "")
+	require.Equal(http.StatusCreated, response.Code, response.Body.String())
+	var person store.Person
+	require.NoError(json.Unmarshal(response.Body.Bytes(), &person))
+	notes, err := st.ListPersonAttributeValuesContext(t.Context(), person.ID,
+		store.PersonAttributeQuery{DefinitionSlug: store.AttributeSlugNotes})
+	require.NoError(err)
+	require.Len(notes, 1)
+	assert.Equal(store.ProvenanceEnrichment, notes[0].Source)
 }

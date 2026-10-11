@@ -85,14 +85,19 @@ reports how to retry publication or review its preview.
 
 API clients use `POST /api/v1/people/create` with `name`, optional `emails` and
 `phones` arrays of `{ "value": "...", "type": "work" }`, and optional `org`,
-`title`, `address`, and `note`. Success returns the person with HTTP 201 and its
+`title`, `address`, and `note`. Optional `source` is `user` (the default) or
+`enrichment`; enrichment values need [publication review](people-carddav.md#review-inferred-changes-before-they-are-exported)
+before CardDAV publishes them. Success returns the person with HTTP 201 and its
 ETag; invalid input returns 400 and an existing contact returns 409. The endpoint
 does not publish. Publish separately through the CardDAV publication API.
 `POST /api/v1/people` continues to promote observed participants.
 
-The MCP `create_person` tool accepts the same creation fields. It requires both
-MCP writes and profile writes to be enabled, like `promote_person`, and is absent
-from the read-only catalog. It creates user-curated data without publishing.
+The MCP `create_person` tool accepts the same creation fields except `source`.
+It requires both MCP writes and profile writes to be enabled, like
+`promote_person`, and is absent from the read-only catalog and from daemons
+older than API schema 3.11.0. It records every value with enrichment
+provenance, like other MCP profile writes, so CardDAV publication requires
+review. It never publishes.
 
 Each saved profile also has a vCard UID. A new profile imported from a subscribed
 CardDAV book adopts the card's UID when it is a UUID that no other profile uses

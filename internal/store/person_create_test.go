@@ -12,41 +12,44 @@ import (
 )
 
 func TestStandalonePersonDuplicateRefusal(t *testing.T) {
+	email, phone := store.ContactAddressEmail, store.ContactAddressPhone
+	identifier := func(identifierType string) func(*storetest.Fixture, store.ContactAddressKind, string) int64 {
+		return func(f *storetest.Fixture, _ store.ContactAddressKind, value string) int64 {
+			_, err := f.Store.EnsureParticipantByIdentifier(identifierType, value, "Existing Example")
+			require.NoError(f.T, err)
+			return 0
+		}
+	}
 	for _, tc := range []struct {
 		name             string
 		kind             store.ContactAddressKind
 		value, duplicate string
-		promoted         bool
+		existing         func(f *storetest.Fixture, kind store.ContactAddressKind, value string) int64
 	}{
-		{"curated email", store.ContactAddressEmail, "alex@example.com", "ALEX@example.com", true},
-		{"curated phone", store.ContactAddressPhone, "+12025550123", "+1 (202) 555-0123", true},
-		{"observed email", store.ContactAddressEmail, "alex@example.com", "ALEX@example.com", false},
-		{"observed phone", store.ContactAddressPhone, "+12025550123", "+1 (202) 555-0123", false},
-		{"observed sms identifier", store.ContactAddressPhone, "+12025550124", "+1 (202) 555-0124", false},
+		{"curated email", email, "alex@example.com", "ALEX@example.com", curatedContact},
+		{"curated phone", phone, "+12025550123", "+1 (202) 555-0123", curatedContact},
+		{"observed email", email, "alex@example.com", "ALEX@example.com",
+			func(f *storetest.Fixture, _ store.ContactAddressKind, value string) int64 {
+				f.EnsureParticipant(value, "Existing Example", "example.com")
+				return 0
+			}},
+		{"observed phone", phone, "+12025550123", "+1 (202) 555-0123",
+			func(f *storetest.Fixture, _ store.ContactAddressKind, value string) int64 {
+				_, err := f.Store.EnsurePhoneParticipantContext(f.T.Context(), value, "Existing Example")
+				require.NoError(f.T, err)
+				return 0
+			}},
+		{"sms phone identifier", phone, "+12025550124", "+1 (202) 555-0124", identifier("synctech_sms")},
+		{"mms email identifier", email, "mms@example.com", "MMS@example.com", identifier("synctech_sms")},
+		{"beeper phone alias", phone, "+12025550125", "+1 202 555 0125", identifier("beeper")},
+		{"observation-only email", email, "observed@example.com", "Observed@Example.com", observedContact},
+		{"observation-only phone", phone, "+12025550126", "+1 (202) 555-0126", observedContact},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert := assert.New(t)
 			require := require.New(t)
 			f := storetest.New(t)
-			var existingID int64
-			if tc.promoted {
-				existing, err := f.Store.CreateStandalonePersonContext(t.Context(), store.PersonCreateInput{Name: "Existing Example"})
-				require.NoError(err)
-				existingID = existing.ID
-				_, err = f.Store.AddPersonContactPointContext(t.Context(), existing.ID, store.PersonContactPointInput{AddressKind: tc.kind, OriginalValue: tc.value, Envelope: store.ValueEnvelopeInput{Source: store.ProvenanceUser}})
-				require.NoError(err)
-			} else {
-				switch {
-				case strings.HasPrefix(tc.name, "observed sms"):
-					_, err := f.Store.EnsureParticipantByIdentifier("synctech_sms", tc.value, "Existing Example")
-					require.NoError(err)
-				case tc.kind == store.ContactAddressPhone:
-					_, err := f.Store.EnsurePhoneParticipantContext(t.Context(), tc.value, "Existing Example")
-					require.NoError(err)
-				default:
-					f.EnsureParticipant(tc.value, "Existing Example", "example.com")
-				}
-			}
+			existingID := tc.existing(f, tc.kind, tc.value)
 			input := store.PersonCreateInput{Name: "Duplicate Example"}
 			if tc.kind == store.ContactAddressEmail {
 				input.Emails = []store.PersonCreateContact{{Value: tc.duplicate}}
@@ -168,6 +171,9 @@ func TestValidatePersonCreateInput(t *testing.T) {
 			Title: strings.Repeat("t", store.MaxPersonCreateTitleLength+1)}, "title exceeds"},
 		{"title without org", store.PersonCreateInput{Name: "Alex", Title: "Engineer"},
 			"title requires org"},
+		{"enrichment source", store.PersonCreateInput{Name: "Alex", Source: store.ProvenanceEnrichment}, ""},
+		{"extraction source", store.PersonCreateInput{Name: "Alex", Source: store.ProvenanceExtraction},
+			"source must be user or enrichment"},
 		{"type with space", store.PersonCreateInput{Name: "Alex", Emails: email("a@example.com", "x y")},
 			"must be 1-64 letters"},
 		{"type with quote", store.PersonCreateInput{Name: "Alex", Emails: email("a@example.com", `w"`)},
@@ -187,4 +193,71 @@ func TestValidatePersonCreateInput(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
+}
+
+// curatedContact saves value on an existing person and returns that person.
+func curatedContact(f *storetest.Fixture, kind store.ContactAddressKind, value string) int64 {
+	existing, err := f.Store.CreateStandalonePersonContext(f.T.Context(),
+		store.PersonCreateInput{Name: "Existing Example"})
+	require.NoError(f.T, err)
+	_, err = f.Store.AddPersonContactPointContext(f.T.Context(), existing.ID, store.PersonContactPointInput{
+		AddressKind: kind, OriginalValue: value,
+		Envelope: store.ValueEnvelopeInput{Source: store.ProvenanceUser},
+	})
+	require.NoError(f.T, err)
+	return existing.ID
+}
+
+// observedContact records value only as a contact observation on a
+// participant whose primary address is something else, as Beeper does.
+func observedContact(f *storetest.Fixture, kind store.ContactAddressKind, value string) int64 {
+	participantID := f.EnsureParticipant("primary@example.org", "Existing Example", "example.org")
+	_, err := f.Store.RecordContactObservationContext(f.T.Context(), participantID,
+		store.ParticipantContactObservationInput{
+			AddressKind: kind, OriginalValue: value,
+			Envelope: store.ValueEnvelopeInput{Source: store.ProvenanceArchiveObservation},
+		})
+	require.NoError(f.T, err)
+	return 0
+}
+
+func TestStandalonePersonEnrichmentSourceRequiresExportReview(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	f := storetest.New(t)
+	person, err := f.Store.CreateStandalonePersonContext(t.Context(), store.PersonCreateInput{
+		Name: "Alex Example", Emails: []store.PersonCreateContact{{Value: "alex@example.com"}},
+		Org: "Example Company", Title: "Engineer", Note: "Met at a conference",
+		Source: store.ProvenanceEnrichment,
+	})
+	require.NoError(err)
+	notes, err := f.Store.ListPersonAttributeValuesContext(t.Context(), person.ID,
+		store.PersonAttributeQuery{DefinitionSlug: store.AttributeSlugNotes})
+	require.NoError(err)
+	require.Len(notes, 1)
+	assert.Equal(store.ProvenanceEnrichment, notes[0].Source)
+	employments, err := f.Store.ListEmploymentsContext(t.Context(), store.EmploymentFilter{PersonID: person.ID})
+	require.NoError(err)
+	require.Len(employments, 1)
+	assert.Equal(store.ProvenanceEnrichment, employments[0].Source)
+	points, err := f.Store.ListPersonContactPointsContext(t.Context(), person.ID, true)
+	require.NoError(err)
+	require.Len(points, 1)
+	assert.Equal(store.ProvenanceEnrichment, points[0].Envelope.Source)
+	assert.Equal(int64(1), inferenceRevision(t, f.Store, person.ID))
+
+	user, err := f.Store.CreateStandalonePersonContext(t.Context(), store.PersonCreateInput{
+		Name: "Sam Example", Org: "Example Company", Note: "Met at a meetup",
+	})
+	require.NoError(err)
+	assert.Equal(int64(0), inferenceRevision(t, f.Store, user.ID))
+}
+
+func inferenceRevision(t *testing.T, st *store.Store, personID int64) int64 {
+	t.Helper()
+	var revision int64
+	err := st.DB().QueryRow(st.Rebind(`SELECT COALESCE(MAX(inference_revision), 0)
+		FROM person_carddav_inference_state WHERE person_id = ?`), personID).Scan(&revision)
+	require.NoError(t, err)
+	return revision
 }

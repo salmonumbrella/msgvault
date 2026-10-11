@@ -9542,6 +9542,9 @@ type PersonCreateInput struct {
 	Org     *string               `json:"org,omitzero" validate:"omitempty,max=256"`
 	Phones  []PersonCreateContact `json:"phones,omitempty"`
 
+	// Source Provenance of every created value; defaults to user
+	Source *PersonCreateInputSource `json:"source,omitempty"`
+
 	// Title Job title at org; requires org
 	Title *string `json:"title,omitzero" validate:"omitempty,max=280"`
 }
@@ -9577,6 +9580,13 @@ func (p PersonCreateInput) Validate() error {
 		if v, ok := any(item).(runtime.Validator); ok {
 			if err := v.Validate(); err != nil {
 				errors = errors.Append(fmt.Sprintf("Phones[%d]", i), err)
+			}
+		}
+	}
+	if p.Source != nil {
+		if v, ok := any(p.Source).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("Source", err)
 			}
 		}
 	}

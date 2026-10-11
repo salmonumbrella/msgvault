@@ -50,6 +50,7 @@ type PersonCreateInput struct {
 	Title   string                `json:"title,omitzero" maxLength:"280" doc:"Job title at org; requires org"`
 	Address string                `json:"address,omitzero" maxLength:"1000"`
 	Note    string                `json:"note,omitzero" maxLength:"10000"`
+	Source  Provenance            `json:"source,omitzero" enum:"user,enrichment" doc:"Provenance of every created value; defaults to user"`
 }
 
 // PersonContactExistsError identifies a match and the explicit existing-person
@@ -112,6 +113,11 @@ func validatePersonCreateInput(input PersonCreateInput) ([]personCreateContactPo
 	}
 	if strings.TrimSpace(input.Title) != "" && strings.TrimSpace(input.Org) == "" {
 		return nil, fmt.Errorf("%w: title requires org", ErrPersonCreateInvalid)
+	}
+	switch input.Source {
+	case "", ProvenanceUser, ProvenanceEnrichment:
+	default:
+		return nil, fmt.Errorf("%w: source must be user or enrichment", ErrPersonCreateInvalid)
 	}
 	points := make([]personCreateContactPoint, 0, len(input.Emails)+len(input.Phones))
 	for _, group := range []struct {
@@ -195,7 +201,7 @@ func (s *Store) CreateStandalonePersonContext(
 		).Scan(&id); err != nil {
 			return fmt.Errorf("create standalone person: %w", err)
 		}
-		if err := s.addStandalonePersonDetailsTx(ctx, tx, id, input, points); err != nil {
+		if err := s.addStandalonePersonValuesTx(ctx, tx, id, input, points); err != nil {
 			return err
 		}
 		if err := s.bumpPersonDisplayNameRevisionContext(ctx, tx); err != nil {
@@ -213,12 +219,36 @@ func (s *Store) CreateStandalonePersonContext(
 	return person, nil
 }
 
-func (s *Store) addStandalonePersonDetailsTx(
+// addStandalonePersonValuesTx stores the curated values under input.Source.
+// Inferred values advance the person's export review revision, so CardDAV
+// publishes them only after exact-card approval.
+func (s *Store) addStandalonePersonValuesTx(
 	ctx context.Context, tx *loggedTx, personID int64,
 	input PersonCreateInput, points []personCreateContactPoint,
 ) error {
+	source := input.Source
+	if source == "" {
+		source = ProvenanceUser
+	}
+	if !provenanceIsInferred(source) {
+		return s.addStandalonePersonDetailsTx(ctx, tx, personID, input, source, points)
+	}
+	before, err := s.captureInferenceExportPeopleTx(ctx, tx, personID)
+	if err != nil {
+		return fmt.Errorf("load inference export projection before person creation: %w", err)
+	}
+	if err := s.addStandalonePersonDetailsTx(ctx, tx, personID, input, source, points); err != nil {
+		return err
+	}
+	return s.invalidateInferenceExportChangesTx(ctx, tx, before)
+}
+
+func (s *Store) addStandalonePersonDetailsTx(
+	ctx context.Context, tx *loggedTx, personID int64,
+	input PersonCreateInput, source Provenance, points []personCreateContactPoint,
+) error {
 	for _, point := range points {
-		envelope := ValueEnvelopeInput{Source: ProvenanceUser}
+		envelope := ValueEnvelopeInput{Source: source}
 		if point.typeToken != "" {
 			envelope.TypeTokens = []string{point.typeToken}
 		}
@@ -231,7 +261,7 @@ func (s *Store) addStandalonePersonDetailsTx(
 	if address := strings.TrimSpace(input.Address); address != "" {
 		if _, err := s.addPersonAddressTx(ctx, tx, personID, PersonAddressInput{
 			AddressKind: PersonAddressPostal, StreetAddress: &address, OriginalValue: address,
-			Envelope: ValueEnvelopeInput{Source: ProvenanceUser},
+			Envelope: ValueEnvelopeInput{Source: source},
 		}); err != nil {
 			return err
 		}
@@ -245,13 +275,13 @@ func (s *Store) addStandalonePersonDetailsTx(
 		if _, err := s.setPersonAttributeValueTx(ctx, tx, *definition, PersonAttributeValueInput{
 			PersonID: personID, DefinitionSlug: definition.Slug,
 			Value:  AttributeValue{Type: AttributeValueText, Text: &note},
-			Source: ProvenanceUser,
+			Source: source,
 		}, now, now); err != nil {
 			return err
 		}
 	}
 	if org := strings.TrimSpace(input.Org); org != "" {
-		return s.createPersonEmploymentTx(ctx, tx, personID, org, input.Title)
+		return s.createPersonEmploymentTx(ctx, tx, personID, org, input.Title, source)
 	}
 	return nil
 }
@@ -260,7 +290,7 @@ func (s *Store) addStandalonePersonDetailsTx(
 // resolver, so creation reuses the same company rows and aliases that sweeps
 // and employment facts match.
 func (s *Store) createPersonEmploymentTx(
-	ctx context.Context, tx *loggedTx, personID int64, org, title string,
+	ctx context.Context, tx *loggedTx, personID int64, org, title string, source Provenance,
 ) error {
 	ref := personfacts.OrganizationReference{Name: org}
 	prepared, err := s.preparePersonFactOrganizationTx(ctx, tx, ref)
@@ -278,22 +308,15 @@ func (s *Store) createPersonEmploymentTx(
 	}
 	input := EmploymentInput{
 		PersonID: personID, OrganizationID: organization.ID, Title: trimmedOrNil(&title),
-		IsCurrent: new(true), IsPrimary: new(true), Source: ProvenanceUser,
+		IsCurrent: new(true), IsPrimary: new(true), Source: source,
 	}
 	if _, err := s.addEmploymentTx(ctx, tx, input); err != nil {
 		return err
 	}
-	return s.appendManualPersonFactEmploymentPinTx(ctx, tx, personID, string(ProvenanceUser))
-}
-
-// personCreateIdentifierTypes lists participant_identifiers types whose values
-// hold an email address or a phone number, in the spellings importers write.
-var personCreateIdentifierTypes = map[ContactAddressKind][]string{
-	ContactAddressEmail: {"email", "apple_id", "imessage"},
-	ContactAddressPhone: {
-		"phone", "whatsapp", "imessage", "apple_id", "sms", "synctech-sms", "synctech_sms",
-		"google_voice", "google-voice",
-	},
+	if !source.IsDeclared() {
+		return nil
+	}
+	return s.appendManualPersonFactEmploymentPinTx(ctx, tx, personID, string(source))
 }
 
 func (s *Store) refusePersonContactDuplicateTx(
@@ -336,7 +359,10 @@ func (s *Store) refusePersonContactDuplicateTx(
 }
 
 // findObservedContactParticipantTx looks up the lowest participant observed
-// with value through the participant and identifier lookup indexes.
+// with value: as its primary address, as an identifier of any type (merge
+// aliases and service identifiers, matched like EmailParticipantContext and
+// PhoneParticipantContext), or as a current contact observation. Each arm
+// reads through an index.
 func (s *Store) findObservedContactParticipantTx(
 	ctx context.Context, tx *loggedTx, kind ContactAddressKind, value string,
 	match *PersonContactExistsError,
@@ -345,20 +371,17 @@ func (s *Store) findObservedContactParticipantTx(
 	if kind == ContactAddressPhone {
 		participantLookup = `SELECT id FROM participants WHERE phone_number = ?`
 	}
-	types := personCreateIdentifierTypes[kind]
-	args := []any{value, value}
-	for _, identifierType := range types {
-		args = append(args, identifierType)
-	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(types)), ",")
 	err := tx.QueryRowContext(ctx, `
 		SELECT p.id, COALESCE(p.display_name, '') FROM participants p
 		WHERE p.id IN (`+participantLookup+`
 			UNION
 			SELECT i.participant_id FROM participant_identifiers i
 			WHERE LOWER(i.identifier_value) = ?
-			  AND LOWER(i.identifier_type) IN (`+placeholders+`))
-		ORDER BY p.id LIMIT 1`, args...).Scan(&match.ParticipantID, &match.Name)
+			UNION
+			SELECT o.participant_id FROM participant_contact_observations o
+			WHERE o.address_kind = ? AND o.normalized_value = ?
+			  AND o.active_until IS NULL AND o.superseded_at IS NULL)
+		ORDER BY p.id LIMIT 1`, value, value, kind, value).Scan(&match.ParticipantID, &match.Name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

@@ -54,6 +54,7 @@ type catalogCapabilities struct {
 	kata            bool
 	identityReview  bool
 	personCardDAV   bool
+	personCreate    bool
 }
 
 func visualSearchAvailable(capabilities catalogCapabilities) bool {
@@ -138,6 +139,7 @@ func capabilitiesFor(opts ServeOptions) catalogCapabilities {
 		kata:            opts.Kata != nil,
 		identityReview:  opts.IdentityReview != nil,
 		personCardDAV:   opts.PersonCardDAV != nil,
+		personCreate:    opts.PersonCreator != nil,
 	}
 }
 

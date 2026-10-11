@@ -171,6 +171,7 @@ func prepareMCPHTTP(cmd *cobra.Command, cfg *config.Config) (string, string, err
 // Views through POST /api/v1/saved-views/{id}/run.
 const savedViewsMinAPISchemaVersion = "2.21.0"
 const personCardDAVMinAPISchemaVersion = "2.32.0"
+const personCreateMinAPISchemaVersion = "3.11.0"
 const identityReviewMinAPISchemaVersion = "3.0.0"
 const identityScoringMinAPISchemaVersion = "3.0.0"
 const draftsMinAPISchemaVersion = "3.0.0"
@@ -276,6 +277,9 @@ func daemonMCPServeOptions(ctx context.Context, st *daemonclient.Client, state *
 			opts.DirectoryBackend = people
 		}
 		opts.PeopleBackend = people
+		if daemonclient.APISchemaVersionAtLeast(schemaVersion, personCreateMinAPISchemaVersion) {
+			opts.PersonCreator = people
+		}
 	}
 	// The daemon executes Saved Views itself, so the tools need a daemon that
 	// serves the run endpoint; an older daemon simply omits them.
