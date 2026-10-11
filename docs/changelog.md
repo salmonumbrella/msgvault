@@ -17,7 +17,6 @@ All notable changes to msgvault, grouped by release.
   recovery scans stay silent. Events are off by default; enable them with
   [`[mcp.events]`](configuration.md#mcpevents). They need the daemon owner's
   API key on `msgvault mcp --http` and API schema 3.11.0.
-- Remote edits update source-owned values on published CardDAV imports while preserving unrelated local values. Edits that would overwrite another owner create a conflict.
 
 - Go programs can use msgvault as a library through `go.kenn.io/msgvault/pkg/archive`.
   It sets up and opens SQLite or PostgreSQL archives, runs the Slack and Discord

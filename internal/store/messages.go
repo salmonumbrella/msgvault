@@ -93,6 +93,9 @@ type MessageDeliveryEvidence struct {
 // MessagePersistData bundles everything needed to atomically
 // persist a message and its related rows in a single transaction.
 type MessagePersistData struct {
+	// NativeScopes is mandatory adapter evidence when supplied. Validate it and
+	// replace its current membership with the complete snapshot in one transaction.
+	NativeScopes    *NativeMessageScopeMembership
 	DiscordSnapshot *DiscordMessageSnapshot
 	Message         *Message
 	Conversation    *ConversationPersistData
@@ -2314,7 +2317,14 @@ func (s *Store) persistMessageWithParticipantsTx(
 	if s.captureMCPEnabled() && s.ingestContext().Mode == IngestLive {
 		outcome = []*bool{&inserted}
 	}
+	nativeScopes, err := s.resolveNativeMessageScopesTx(ctx, tx.Tx, data)
+	if err != nil {
+		return 0, err
+	}
 	id, err := s.persistMessageWith(ctx, tx, data, outcome...)
+	if err == nil && data.NativeScopes != nil {
+		err = s.replaceNativeMessageScopesTx(ctx, tx.Tx, id, nativeScopes)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -6050,10 +6060,44 @@ func (s *Store) ReplaceReactions(messageID int64, reactions []ReactionRef) error
 	return s.ReplaceReactionsContext(context.Background(), messageID, reactions)
 }
 
-// ReplaceReactionsContext honors cancellation during ReplaceReactions.
+func (s *Store) insertReactionTx(ctx context.Context, tx *loggedTx, messageID int64, r ReactionRef, emit bool) error {
+	result, err := tx.ExecContext(ctx, s.dialect.InsertOrIgnore(`INSERT OR IGNORE INTO reactions (message_id, participant_id, reaction_type, reaction_value, created_at) VALUES (?, ?, ?, ?, ?)`), messageID, r.ParticipantID, r.Type, r.Value, r.CreatedAt)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count > 0 && emit {
+		return s.appendReactionTx(ctx, tx, messageID, r)
+	}
+	return nil
+}
+
+// ReplaceReactionsContext compares additions against the prior set inside the mutation transaction.
 func (s *Store) ReplaceReactionsContext(ctx context.Context, messageID int64, reactions []ReactionRef) error {
 	return s.withTxContext(ctx, func(tx *loggedTx) error {
 		if err := s.requireSyncMessageSourceTx(tx, messageID); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT participant_id, reaction_type, reaction_value FROM reactions WHERE message_id = ?`, messageID)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		old := map[reactionIdentity]bool{}
+		for rows.Next() {
+			var key reactionIdentity
+			if err := rows.Scan(&key.ParticipantID, &key.Type, &key.Value); err != nil {
+				return err
+			}
+			old[key] = true
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if err := rows.Close(); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM reactions WHERE message_id = ?`, messageID); err != nil {
@@ -6063,8 +6107,7 @@ func (s *Store) ReplaceReactionsContext(ctx context.Context, messageID int64, re
 			if r.ParticipantID == 0 {
 				continue
 			}
-			if _, err := tx.ExecContext(ctx, s.dialect.InsertOrIgnore(`INSERT OR IGNORE INTO reactions (message_id, participant_id, reaction_type, reaction_value, created_at)
-				VALUES (?, ?, ?, ?, ?)`), messageID, r.ParticipantID, r.Type, r.Value, r.CreatedAt); err != nil {
+			if err := s.insertReactionTx(ctx, tx, messageID, r, !old[reactionIdentity{r.ParticipantID, r.Type, r.Value}]); err != nil {
 				return err
 			}
 		}
@@ -6297,10 +6340,10 @@ func (s *Store) replaceMessageAttachmentsWhereContext(ctx context.Context,
 }
 
 func (s *Store) replaceMessageAttachmentsWhereTx(
-	tx *loggedTx, messageID int64, deleteWhere string, requireHash bool,
+	tx *loggedTx, messageID int64, deleteWhere string,
 	refs []AttachmentRef, deleteArgs ...any,
 ) error {
-	return s.replaceMessageAttachmentsWhereTxContext(context.Background(), tx, messageID, deleteWhere, requireHash, refs, deleteArgs...)
+	return s.replaceMessageAttachmentsWhereTxContext(context.Background(), tx, messageID, deleteWhere, false, refs, deleteArgs...)
 }
 
 // replaceMessageAttachmentsWhereTxContext honors cancellation during replaceMessageAttachmentsWhereTx.
@@ -6407,7 +6450,7 @@ func (s *Store) ReplaceMessageInlineAttachments(messageID int64, refs []Attachme
 		)`
 	}
 	return s.withTx(func(tx *loggedTx) error {
-		if err := s.replaceMessageAttachmentsWhereTx(tx, messageID, deleteWhere, false, refs); err != nil {
+		if err := s.replaceMessageAttachmentsWhereTx(tx, messageID, deleteWhere, refs); err != nil {
 			return err
 		}
 		var body sql.NullString
@@ -6445,7 +6488,7 @@ func (s *Store) ReplaceMessageBeeperAttachments(messageID int64, refs []Attachme
 		if err != nil {
 			return err
 		}
-		if err := s.replaceMessageAttachmentsWhereTx(tx, messageID, `source_attachment_id LIKE ?`, false, refs, "beeper:%"); err != nil {
+		if err := s.replaceMessageAttachmentsWhereTx(tx, messageID, `source_attachment_id LIKE ?`, refs, "beeper:%"); err != nil {
 			return err
 		}
 		if metadataChanged {

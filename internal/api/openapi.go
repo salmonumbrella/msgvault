@@ -356,7 +356,8 @@ import (
 // 3.10.0 adds person UID lookup and exposes current vCard UIDs and CardDAV
 // bindings on person and directory responses.
 // 3.11.0 adds owner-only native MCP Events and typed calendar message projections.
-const APISchemaVersion = "3.11.0"
+// 3.12.0 adds native resource discovery and source/inbox Events subscriptions.
+const APISchemaVersion = "3.12.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.

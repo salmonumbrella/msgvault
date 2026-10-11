@@ -17,6 +17,7 @@ import (
 	"go.kenn.io/msgvault/internal/daemonclient"
 	"go.kenn.io/msgvault/internal/deletion"
 	mcpserver "go.kenn.io/msgvault/internal/mcp"
+	"go.kenn.io/msgvault/internal/mcpevents"
 	"go.kenn.io/msgvault/internal/providercredentials"
 	"go.kenn.io/msgvault/internal/vector/visual"
 	"go.kenn.io/msgvault/pkg/client/generated"
@@ -327,6 +328,13 @@ func daemonMCPServeOptions(ctx context.Context, st *daemonclient.Client, state *
 		opts.DraftCommands = mcpDraftCommands(false)
 	}
 
+	// Prove the owner-only native route independently of delivery opt-in. An
+	// older daemon or non-owner credential cannot enable this read tool.
+	if capabilityErr == nil && daemonclient.APISchemaVersionAtLeast(schemaVersion, mcpEventsMinAPISchemaVersion) && st.MCPEventsOwnerCredential() {
+		if _, err := st.DiscoverMCPEventResources(ctx, mcpevents.ResourceQuery{Kind: "source", Limit: 1}); err == nil {
+			opts.EventResources = st
+		}
+	}
 	if capabilityErr == nil && health != nil && health.McpEvents != nil && *health.McpEvents &&
 		daemonclient.APISchemaVersionAtLeast(schemaVersion, mcpEventsMinAPISchemaVersion) && st.MCPEventsOwnerCredential() {
 		if catalog, err := st.MCPEventsList(ctx); err == nil && len(catalog.Events) > 0 {

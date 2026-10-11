@@ -64,7 +64,7 @@ func (s *Store) persistDiscordMessageSnapshotTx(ctx context.Context, tx *loggedT
 		}
 	}
 	refs = normalizeDiscordAttachmentRefs(refs)
-	if err := s.replaceMessageAttachmentsWhereTx(tx, messageID, `source_attachment_id LIKE 'discord:%'`, false, refs); err != nil {
+	if err := s.replaceMessageAttachmentsWhereTx(tx, messageID, `source_attachment_id LIKE 'discord:%'`, refs); err != nil {
 		return fmt.Errorf("persist Discord attachment snapshot: %w", err)
 	}
 	if err := recomputeMessageAttachmentStatsWith(q, messageID); err != nil {
