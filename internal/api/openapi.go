@@ -376,7 +376,8 @@ import (
 // 3.23.0 adds the Docbank attachment mirror routes, receipts and status states.
 // 3.24.0 adds owner-only native MCP Events and typed calendar message projections.
 // 3.25.0 adds owner-only MCP resource discovery and source/inbox subscriptions.
-const APISchemaVersion = "3.25.0"
+// 3.26.0 adds separately opted-in native import notifications.
+const APISchemaVersion = "3.26.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.

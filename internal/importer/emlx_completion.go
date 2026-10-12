@@ -35,8 +35,8 @@ func defaultEmlxImportIO(opts EmlxImportOptions) emlxImportIO {
 			ctx context.Context, st *store.Store, sid int64, identifier, dest string, labels []int64,
 			target, hash string, raw []byte, date time.Time, log *slog.Logger,
 		) error {
-			return ingestRawMessageWithCompletion(ctx, st, sid, identifier, dest, labels, target, hash,
-				raw, date, log, opts.RemoteImages, "", true)
+			return ingestRawMessageMode(ctx, st, sid, identifier, dest, labels, target, hash,
+				raw, date, log, opts.RemoteImages, "", opts.NotifyImports, true)
 		}
 	}
 	raw := func(ctx context.Context, st *store.Store, id int64) ([]byte, error) {

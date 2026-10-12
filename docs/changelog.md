@@ -32,11 +32,13 @@ All notable changes to msgvault, grouped by release.
   conversation, calendar, native source, or inbox and receive signed HTTPS
   callbacks when msgvault archives a live Gmail or IMAP message, a Google
   Calendar event changes, or a managed draft is created, updated, or deleted.
-  Imports, full syncs, and recovery scans stay silent. Events are off by
-  default; enable them with [`[mcp.events]`](configuration.md#mcpevents). They
-  need the daemon owner's API key on `msgvault mcp --http` and API schema
+  Imports stay silent unless native import notifications are enabled with
+  `import_notifications` on the daemon and `--notify-imports` on the import
+  command; both settings default off. Full syncs and recovery scans stay silent.
+  Events are off by default; enable them with [`[mcp.events]`](configuration.md#mcpevents).
+  They need the daemon owner's API key on `msgvault mcp --http` and API schema
   3.24.0. API schema 3.25.0 adds owner-only resource discovery and source/inbox
-  subscription families.
+  subscription families; 3.26.0 adds import notifications.
 
 - Go programs can use msgvault as a library through `go.kenn.io/msgvault/pkg/archive`.
   It sets up and opens SQLite or PostgreSQL archives, runs the Slack and Discord
