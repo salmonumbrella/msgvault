@@ -9,6 +9,7 @@ All notable changes to msgvault, grouped by release.
 ## Unreleased
 
 - Remote edits update source-owned values on published CardDAV imports while preserving unrelated local values. Edits that would overwrite another owner create a conflict.
+- [Everything search](web-ui.md#recording-matches) shows recording transcript matches for plain-word Full text queries and supports one Person filter. API schema 3.11.0 adds `participant_id` to media search, `GET /media/search/status`, source filename, title and date to media search results and optional `conversation_title` to message detail.
 
 - Opt-in [MCP Events](usage/chat.md#events) let an MCP client subscribe to one
   conversation or calendar and receive signed HTTPS callbacks when msgvault
@@ -33,6 +34,10 @@ All notable changes to msgvault, grouped by release.
 - Applications can compare a candidate binary's expected archive version with
   the stored version using `schema-version`, then run `migrate` before replacing
   the executable. See [the upgrade procedure](setup.md#migrate-before-replacing-the-executable).
+
+- Owned-address changes recheck only matching messages. SQLite upgrades may
+  take several minutes to build a one-time From-address index. See
+  [startup progress](guides/daemon-migration.md#what-you-will-see).
 
 - msgvault sends anonymous usage telemetry: a daemon ping at startup and once
   each later UTC day, and an `app_opened` event the web UI reports through the
@@ -88,7 +93,11 @@ All notable changes to msgvault, grouped by release.
   their recordings saved locally.
 - [Kata issues](usage/kata-issues.md) can quote an exact passage from a
   message, transcript, or file, from the Web UI, `msgvault kata`, HTTP, or MCP
-  (`--allow-kata-writes`). Retrying a create returns the original issue.
+  (`--allow-kata-writes`). Retrying a create returns the original issue, and
+  `msgvault kata issues` finds the issues, open or closed, that already cite
+  a message or file. `msgvault kata context` reads back each passage an issue
+  cites, with its state in the archive today and the text around it.
+  Agents can also cite the Docbank transcript of a delivered voice note.
   Person agenda writes now work with a static Kata token.
 - Adding Calendar to a Gmail token recognizes Google's short and expanded
   `email`/`profile` scope names, avoiding false missing-scope errors on re-consent.
@@ -104,7 +113,7 @@ All notable changes to msgvault, grouped by release.
   See [Microsoft contacts](usage/people-carddav.md#microsoft-contacts).
 - A CardDAV update or unpublish attempted while the Google sign-in is missing
   goes out after sign-in, instead of turning into a conflict to review.
-
+- **Recording references:** Route Loom/Cap links and native Teams recording pointers to Docbank in the background with separate reference consent, including existing messages. Self-hosted Cap requires an exact configured origin.
 - **Transcripts beside recordings:** the Web reader shows each recording's
   Docbank transcript, or why there isn't one, under the expanded message.
   `GET /api/v1/messages/{id}/recordings` serves the same list (API schema 3.6.0).

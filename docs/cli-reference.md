@@ -2225,7 +2225,7 @@ msgvault media search "quarterly numbers" --person 7 --direction from_person --l
 
 `--mode lexical` is the default. Semantic and hybrid are unavailable. `--limit` accepts 1 to 100 message occurrences. `--direction` accepts `from_person`, `to_person` or `group` and requires `--person`.
 
-The table shows message, conversation and attachment IDs, supplied or generated origin, plain excerpt, and recorded timing. An empty result proves no match only with complete coverage and `partial=false`. Its coverage line reports pending media, unavailable attribution, partial coverage and truncated results. JSON preserves the same fields. Search requires Docbank's source-selected search contract. Shared audio searches the currently selected transcript; different supplied captions can leave some messages unavailable even when no excerpt matches. A recording with more than 64 distinct current caption inputs is left out; its occurrences count in `unavailable_occurrences`, with `partial=true`. See [the API scope limits](api-server.md#media-transcript-search) for the version and source ceilings; narrow the person scope if it exceeds a ceiling. Use `msgvault show-message <message_id>` to read a result in context. Browser search-result presentation follows separately.
+The table shows message, conversation and attachment IDs, supplied or generated origin, plain excerpt, and recorded timing. An empty result proves no match only with complete coverage and `partial=false`. Its coverage line reports pending media, unavailable attribution, partial coverage and truncated results. JSON preserves the same fields and adds optional `filename`, `containing_title` and `occurred_at`. Search requires Docbank's source-selected search contract. Shared audio searches the currently selected transcript; different supplied captions can leave some messages unavailable even when no excerpt matches. A recording with more than 64 distinct current caption inputs is left out; its occurrences count in `unavailable_occurrences`, with `partial=true`. See [the API scope limits](api-server.md#media-transcript-search) for the version and source ceilings; narrow the person scope if it exceeds a ceiling. Use `msgvault show-message <message_id>` to read a result in context. See [browser recording search](web-ui.md#recording-matches) for transcript matches in Everything.
 
 ## documents
 
@@ -2471,8 +2471,9 @@ msgvault export-token <email> [flags]
 | `--to <url>` | Remote msgvault URL (or `MSGVAULT_REMOTE_URL`) |
 | `--api-key <key>` | API key (or `MSGVAULT_REMOTE_API_KEY`) |
 | `--allow-insecure` | Allow HTTP for trusted networks (for example Tailscale) |
+| `--upload-only` | Upload the token without registering an enabled Gmail sync account |
 
-`export-token` uploads `~/.msgvault/tokens/<email>.json` to `/api/v1/auth/token/<email>`, saves it in the remote token store, and posts account metadata to `/api/v1/accounts`.
+`export-token` reads the configured local token backend, uploads the token to `/api/v1/auth/token/<email>`, and saves it through the daemon's configured token backend. Each end uses credential commands when configured, or `~/.msgvault/tokens/<email>.json` otherwise. By default, it also posts account metadata to `/api/v1/accounts`, enabling a daily Gmail sync. Use `--upload-only` when you only need to store a token, such as for Calendar-only access.
 
 ---
 
@@ -2963,15 +2964,21 @@ Create Kata issues that quote exact message or file text. Configure
 msgvault kata evidence prepare [--input FILE]
 msgvault kata create --idempotency-key KEY [--input FILE] [--json]
 msgvault kata link <ref> [--input FILE] [--json]
+msgvault kata issues --message ID [--attachment ID] [--json]
+msgvault kata context <ref> [--offset N] [--json]
 ```
 
-Each command reads one JSON request from `--input`, or stdin by default.
-`prepare` prints exact excerpts and the references that `create` and `link`
+`prepare`, `create`, and `link` each read one JSON request from `--input`, or
+stdin by default. `prepare` prints exact excerpts and the references that `create` and `link`
 accept. `create` requires `--idempotency-key`, a key you choose to name the
 issue; running it again with the same key and input returns the issue it filed
 instead of a duplicate.
-`link` adds evidence to an existing issue in the configured project, given
-as `project#ref` or a bare ref. See [Kata issues](usage/kata-issues.md) for request shapes and limits.
+`link` adds evidence to an existing issue in the configured project, given as `project#ref` or a bare
+ref. `issues` lists the issues, open or closed, that already cite a message
+or one of its files, one `ref<TAB>status<TAB>title` line each. It checks the newest 500 evidence-bearing issues, or 20 if the listing exceeds 16 MiB, and warns on stderr when the list may be incomplete; check Kata before filing again. JSON reports this as `truncated`. `context`
+shows each passage an issue cites, its state in the archive today, and the
+text around it, up to 10 passages at a time; `--offset` reads the next page. See
+[Kata issues](usage/kata-issues.md) for request shapes and limits.
 
 ---
 
@@ -3737,7 +3744,7 @@ msgvault mcp [flags]
 | `--http-allow-insecure` | `false` | Allow non-loopback HTTP binding without an effective inbound key. A configured key is still enforced; without one, use only behind a trusted network boundary or authenticated reverse proxy. |
 | `--http-allow-writes` | `false` | Expose Saved View management, attachment export, deletion staging, and managed draft writes over StreamableHTTP. Calendar event mutations also require `--allow-calendar-writes`, and Kata issue writes `--allow-kata-writes`. Enable only for trusted, authenticated clients. |
 | `--allow-calendar-writes` | `false` | Expose calendar event mutation tools. HTTP also requires `--http-allow-writes`; only enable for sessions where the user explicitly authorizes calendar writes. |
-| `--allow-kata-writes` | `false` | Expose `create_kata_issue` and `link_kata_evidence`. HTTP also requires `--http-allow-writes`; archive text is untrusted input, so only enable for sessions where the user explicitly authorizes Kata issue writes. See [Kata issues](usage/kata-issues.md). |
+| `--allow-kata-writes` | `false` | Expose `create_kata_issue` and `link_kata_evidence`; `find_kata_issues` and `get_kata_issue_context` need no flag. HTTP also requires `--http-allow-writes`; archive text is untrusted input, so only enable for sessions where the user explicitly authorizes Kata issue writes. See [Kata issues](usage/kata-issues.md). |
 
 See [MCP Server](/docs/usage/chat/) for configuration and tool reference.
 

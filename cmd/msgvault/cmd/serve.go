@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.kenn.io/kit/telemetry/posthog"
 	"go.kenn.io/msgvault/internal/api"
+	"go.kenn.io/msgvault/internal/beeper"
 	"go.kenn.io/msgvault/internal/carddav"
 	"go.kenn.io/msgvault/internal/circleback"
 	"go.kenn.io/msgvault/internal/config"
@@ -439,7 +440,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	cardDAVController.SetConnectionScheduleReconciler(func(name string, cardDAVConfig config.CardDAVConfig, service api.CardDAVOperations) error {
 		return reconcileCardDAVSchedulerJob(sched, cardDAVConfig, service, logger, name)
 	})
-	if err := cardDAVController.ReconcileSchedule(); err != nil {
+	if err := cardDAVController.ReconcileSchedule(ctx); err != nil {
 		return err
 	}
 
@@ -530,6 +531,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if err := configureBeeperMediaJob(ctx, mediaSched, operationGate, s, blobStore,
 		filepath.Join(cfg.Data.DataDir, "tmp", "beeper-media"), cfg.Integrations.Docbank, logger); err != nil {
 		logger.Warn("Beeper media submission unavailable", "error", err)
+	}
+	if err := configureRecordingReferenceJob(ctx, mediaSched, operationGate, s, cfg.Integrations.Docbank, logger); err != nil {
+		logger.Warn("Recording reference submission unavailable", "error", err)
 	}
 	if err := registerActivityProjectionJob(
 		sched, s, cfg.Activity, logger); err != nil {
@@ -1909,6 +1913,25 @@ func (a *storeAPIAdapter) LoadKataEvidenceSource(ctx context.Context, selector k
 
 func (a *storeAPIAdapter) ReadKataEvidenceSource(ctx context.Context, ref kataevidence.Reference) (kataevidence.SourceRecord, error) {
 	return a.store.ReadKataEvidenceSource(ctx, ref)
+}
+
+func (a *storeAPIAdapter) KataCitationSource(ctx context.Context, messageID, attachmentID int64) ([]kataevidence.Reference, error) {
+	return a.store.KataCitationSource(ctx, messageID, attachmentID)
+}
+
+func (a *storeAPIAdapter) KataDocbankBinding(ctx context.Context, destination string, attachmentID int64) (kataevidence.DocbankBinding, error) {
+	return a.store.KataDocbankBinding(ctx, destination, attachmentID)
+}
+
+func (a *storeAPIAdapter) MediaRevision(ctx context.Context, attachmentID int64) (string, error) {
+	revision, err := beeper.MediaRevision(ctx, a.store, attachmentID)
+	if beeper.MediaRevisionUnavailable(err) {
+		return "", kataevidence.ErrUnavailable
+	}
+	if beeper.MediaRevisionChanged(err) {
+		return "", kataevidence.ErrChanged
+	}
+	return revision, err
 }
 
 // ListPersonUIDsContext forwards to the store so the daemon's adapter, not a
@@ -4080,7 +4103,7 @@ func (a *schedulerAdapter) StartJob(name string) (scheduler.JobDisposition, erro
 // this is the email address, for IMAP it's the full
 // `imaps://user@host:port` URL recorded by `add-imap`, for Teams it is
 // the UPN/email recorded by `add-o365`.
-func runScheduledSync(ctx context.Context, identifier string, s *store.Store, getOAuthMgr func(string) (*oauth.Manager, error), state *invocation) error {
+func runScheduledSync(ctx context.Context, identifier string, s *store.Store, getOAuthMgr func(ctx context.Context, _ string) (*oauth.Manager, error), state *invocation) error {
 	if state == nil {
 		state = invocationFromContext(ctx)
 	}
@@ -4286,7 +4309,7 @@ func scheduledSyncPreemptible(s *store.Store, identifier string, logger *slog.Lo
 // serviceAccount reports which credentials the returned client uses.
 func newDaemonGmailClient(
 	ctx context.Context, email string, src *store.Source,
-	getOAuthMgr func(string) (*oauth.Manager, error), state *invocation,
+	getOAuthMgr func(ctx context.Context, _ string) (*oauth.Manager, error), state *invocation,
 ) (client gmail.API, serviceAccount bool, err error) {
 	if state == nil {
 		state = invocationFromContext(ctx)
@@ -4321,8 +4344,11 @@ func newDaemonGmailClient(
 			)
 		}
 	} else {
-		oauthMgr, oaErr := getOAuthMgr(appName)
+		oauthMgr, oaErr := getOAuthMgr(ctx, appName)
 		if oaErr != nil {
+			if !errors.Is(oaErr, oauth.ErrClientConfig) {
+				return nil, false, fmt.Errorf("resolve OAuth credentials for %s: %w", email, oaErr)
+			}
 			return nil, false, provideridentity.NewGmailCredentialError(
 				provideridentity.GmailOAuthConfiguration,
 				fmt.Errorf("resolve OAuth credentials for %s: %w", email, oaErr),
@@ -4339,19 +4365,14 @@ func newDaemonGmailClient(
 					"get token source: %w (transient network error; will retry on next schedule)", tsErr,
 				)
 			}
-			if oauthMgr.HasToken(email) {
-				return nil, false, provideridentity.ClassifyGmailProfileError(fmt.Errorf(
-					"get token source: %w (token may be expired; %s)",
-					tsErr, gmailReauthHint(email, accountIsNarrowed(oauthMgr, email)),
-				), false)
-			}
-			missing := fmt.Errorf("get token source: %w (run 'msgvault add-account %s' first)", tsErr, email)
 			if errors.Is(tsErr, os.ErrNotExist) {
-				return nil, false, provideridentity.NewGmailCredentialError(
-					provideridentity.GmailTokenMissing, missing,
-				)
+				return nil, false, provideridentity.NewGmailCredentialError(provideridentity.GmailTokenMissing,
+					fmt.Errorf("get token source: %w (run 'msgvault add-account %s' first)", tsErr, email))
 			}
-			return nil, false, missing
+			if isAuthInvalidError(tsErr) || errors.Is(tsErr, oauth.ErrTokenUnrefreshable) || errors.Is(tsErr, oauth.ErrInvalidTokenJSON) {
+				return nil, false, provideridentity.NewGmailCredentialError(provideridentity.GmailAuthorizationRevoked, fmt.Errorf("get token source: %w (token may be expired; %s)", tsErr, gmailReauthHint(email, accountIsNarrowed(ctx, oauthMgr, email))))
+			}
+			return nil, false, fmt.Errorf("get token source: %w", tsErr)
 		}
 	}
 
@@ -4367,7 +4388,7 @@ func newDaemonGmailClient(
 // getTokenSourceWithReauth) because serve runs as a daemon and cannot
 // open a browser for OAuth — the error path tells the user how to
 // re-authorize from a terminal.
-func runScheduledGmailSync(ctx context.Context, email string, src *store.Source, s *store.Store, getOAuthMgr func(string) (*oauth.Manager, error), state *invocation) (*gmail.SyncSummary, error) {
+func runScheduledGmailSync(ctx context.Context, email string, src *store.Source, s *store.Store, getOAuthMgr func(ctx context.Context, _ string) (*oauth.Manager, error), state *invocation) (*gmail.SyncSummary, error) {
 	if state == nil {
 		state = invocationFromContext(ctx)
 	}

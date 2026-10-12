@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -23,7 +22,7 @@ import (
 	"go.kenn.io/msgvault/internal/daemonclient"
 	"go.kenn.io/msgvault/internal/deletion"
 	msgexport "go.kenn.io/msgvault/internal/export"
-	"go.kenn.io/msgvault/internal/fileutil"
+	"go.kenn.io/msgvault/internal/oauth"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/scheduler"
 	"go.kenn.io/msgvault/internal/search"
@@ -340,7 +339,8 @@ type MessageSummary struct {
 type MessageDetail struct {
 	MessageSummary
 
-	Calendar *store.CalendarProjection `json:"calendar,omitempty"`
+	Calendar          *store.CalendarProjection `json:"calendar,omitempty"`
+	ConversationTitle string                    `json:"conversation_title,omitempty" doc:"Conversation title, when available."`
 
 	Body     string `json:"body"`
 	BodyHTML string `json:"body_html,omitempty"`
@@ -565,6 +565,8 @@ func messageDetailFromQuery(qMsg *query.MessageDetail) MessageDetail {
 	}
 
 	return MessageDetail{
+		ConversationTitle: qMsg.ConversationTitle,
+
 		ID:              qMsg.ID,
 		SourceID:        qMsg.SourceID,
 		SourceMessageID: qMsg.SourceMessageID,
@@ -802,11 +804,12 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail := MessageDetail{
-		MessageSummary: toMessageSummary(*msg),
-		Body:           msg.Body,
-		BodyHTML:       msg.BodyHTML,
-		IsFromMe:       msg.IsFromMe,
-		Calendar:       msg.Calendar,
+		MessageSummary:    toMessageSummary(*msg),
+		ConversationTitle: msg.ConversationTitle,
+		Body:              msg.Body,
+		BodyHTML:          msg.BodyHTML,
+		IsFromMe:          msg.IsFromMe,
+		Calendar:          msg.Calendar,
 	}
 
 	attachments := make([]AttachmentInfo, 0, len(msg.Attachments))
@@ -1881,28 +1884,13 @@ func (s *Server) handleUploadToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get tokens directory from config
-	tokensDir := s.cfg.TokensDir()
-
-	// Create tokens directory if needed
-	if err := fileutil.SecureMkdirAll(tokensDir, 0700); err != nil {
-		s.logger.Error("failed to create tokens directory", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create tokens directory")
-		return
-	}
-
-	// Sanitize email for filename
-	tokenPath := sanitizeTokenPath(tokensDir, email)
-
-	// Marshal token back to JSON (normalized)
 	data, err := json.Marshal(tf, jsontext.WithIndent("  "), json.Deterministic(true))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to serialize token")
 		return
 	}
-
-	if err := fileutil.SecureReplaceFile(tokenPath, data, 0o600); err != nil {
-		s.logger.Error("failed to save token", "error", err)
+	if err := oauth.NewTokenStore(s.cfg.TokensDir(), s.cfg.OAuth.Tokens).Write(r.Context(), email, data); err != nil {
+		s.logger.Error("failed to save uploaded token", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to save token")
 		return
 	}
@@ -1912,29 +1900,6 @@ func (s *Server) handleUploadToken(w http.ResponseWriter, r *http.Request) {
 		Status:  "created",
 		Message: "Token saved for " + email,
 	})
-}
-
-// sanitizeTokenPath returns a safe file path for the token.
-func sanitizeTokenPath(tokensDir, email string) string {
-	// Remove dangerous characters
-	safe := strings.Map(func(r rune) rune {
-		if r == '/' || r == '\\' || r == '\x00' {
-			return -1
-		}
-		return r
-	}, email)
-
-	// Build path and verify it's within tokensDir
-	path := filepath.Join(tokensDir, safe+".json")
-	cleanPath := filepath.Clean(path)
-	cleanTokensDir := filepath.Clean(tokensDir)
-
-	// If path escapes tokensDir, use hash-based fallback
-	if !strings.HasPrefix(cleanPath, cleanTokensDir+string(os.PathSeparator)) {
-		return filepath.Join(tokensDir, fmt.Sprintf("%x.json", sha256.Sum256([]byte(email))))
-	}
-
-	return cleanPath
 }
 
 // AddAccountRequest represents a request to add an account to the config.

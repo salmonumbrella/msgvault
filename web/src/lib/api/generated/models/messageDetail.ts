@@ -13,6 +13,8 @@ export interface MessageDetail {
   calendar?: CalendarProjection;
   cc?: string[];
   conversation_id?: number;
+  /** Conversation title, when available. */
+  conversation_title?: string;
   deleted_at?: string;
   from: string;
   from_email?: string;

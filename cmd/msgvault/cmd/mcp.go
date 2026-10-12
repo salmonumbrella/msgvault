@@ -230,8 +230,12 @@ const calendarControlMinAPISchemaVersion = "3.1.0"
 // kataIssuesMinAPISchemaVersion adds Kata issues that quote archive evidence.
 const kataIssuesMinAPISchemaVersion = "3.4.0"
 
+// kataLookupMinAPISchemaVersion adds issue lookup and context reads.
+const kataLookupMinAPISchemaVersion = "3.12.0"
+const kataDocbankMinAPISchemaVersion = "3.13.0"
+
 // mcpEventsMinAPISchemaVersion adds owner-only native MCP Events.
-const mcpEventsMinAPISchemaVersion = "3.12.0"
+const mcpEventsMinAPISchemaVersion = "3.14.0"
 
 // Schema 2.28.0 adds independent configured-lane facts to authenticated
 // health. Older health responses cannot distinguish text from visual search.
@@ -311,6 +315,10 @@ func daemonMCPServeOptions(ctx context.Context, st *daemonclient.Client, state *
 	}
 	if capabilityErr == nil && daemonclient.APISchemaVersionAtLeast(schemaVersion, kataIssuesMinAPISchemaVersion) {
 		opts.Kata = st
+		opts.KataLookup = daemonclient.APISchemaVersionAtLeast(schemaVersion, kataLookupMinAPISchemaVersion)
+		if daemonclient.APISchemaVersionAtLeast(schemaVersion, kataDocbankMinAPISchemaVersion) {
+			opts.KataDocbank = probeKataDocbank(ctx, st, log)
+		}
 	}
 	if capabilityErr == nil && daemonclient.APISchemaVersionAtLeast(schemaVersion, archiveSQLMinAPISchemaVersion) &&
 		(health.AnalyticsEngine == nil || *health.AnalyticsEngine != api.AnalyticsModePostgres) {
@@ -336,6 +344,26 @@ func daemonMCPServeOptions(ctx context.Context, st *daemonclient.Client, state *
 		}
 	}
 	return opts
+}
+
+// probeKataDocbank reports whether the daemon can cite Docbank transcripts.
+// A failed probe leaves transcript citations out of the tool description.
+func probeKataDocbank(ctx context.Context, st *daemonclient.Client, log *slog.Logger) bool {
+	client, err := st.GeneratedClient()
+	if err != nil {
+		log.Warn("Kata transcript citations hidden because the daemon client failed", "error", err)
+		return false
+	}
+	status, err := client.GetMediaSearchStatusWithResponse(ctx)
+	if err != nil {
+		log.Warn("Kata transcript citations hidden because the Docbank status probe failed", "error", err)
+		return false
+	}
+	if status.JSON200 == nil {
+		log.Warn("Kata transcript citations hidden because the Docbank status probe failed", "status", status.StatusCode)
+		return false
+	}
+	return status.JSON200.Configured
 }
 
 type daemonMCPPersonFileSearcher struct{ client *daemonclient.Client }
