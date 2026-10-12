@@ -125,6 +125,9 @@ schema fail before issuing archive requests. The HTTP prefix remains `/api/v1`.
 This schema also adds consented identity scoring. See
 [identity match review and scoring](#identity-match-review-and-scoring).
 
+Schema 3.13.0 adds the `docbank_rendition` evidence kind, which
+[cites a Docbank transcript](usage/kata-issues.md#cite-a-docbank-transcript).
+
 Schema 3.12.0 adds `GET /api/v1/integrations/kata/issues/{ref}/context`, which
 [reads an issue's evidence back](usage/kata-issues.md#read-an-issues-evidence-back),
 and the `ContextPassage` schema with optional `before` and `after` text.
@@ -2152,7 +2155,7 @@ This endpoint is used by `msgvault export-token` during remote/headless deployme
 
 Register or ensure an account is scheduled for sync on the remote server.
 
-`msgvault export-token` posts to this endpoint automatically after uploading a token.
+`msgvault export-token` posts to this endpoint automatically after uploading a token. With `--upload-only`, it skips this request and does not create a Gmail sync schedule.
 
 ```json
 {

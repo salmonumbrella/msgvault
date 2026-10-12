@@ -3056,6 +3056,7 @@ components:
           description: Quoted words recovered from the issue body or comments when archive evidence is not available
           type: string
         state:
+          description: available, changed, unavailable, unprocessed, failed, unsupported, or unreachable
           type: string
       required:
         - state
@@ -3735,6 +3736,41 @@ components:
         timestamp:
           format: date-time
           type: string
+      type: object
+    DocbankReference:
+      additionalProperties: false
+      properties:
+        build_id:
+          type: string
+        content_sha256:
+          type: string
+        content_version_id:
+          type: string
+        end_rune:
+          format: int64
+          type: integer
+        node_id:
+          format: int64
+          type: integer
+        rendition_attachment_id:
+          type: string
+        rendition_sha256:
+          type: string
+        start_rune:
+          format: int64
+          type: integer
+        vault_uid:
+          type: string
+      required:
+        - vault_uid
+        - node_id
+        - content_version_id
+        - content_sha256
+        - rendition_attachment_id
+        - build_id
+        - rendition_sha256
+        - start_rune
+        - end_rune
       type: object
     DocumentFailureDiagnostic:
       additionalProperties: true
@@ -12603,12 +12639,15 @@ components:
         attachment_id:
           format: int64
           type: integer
+        docbank_rendition:
+          $ref: "#/components/schemas/DocbankReference"
         document_chunk:
           $ref: "#/components/schemas/DocumentReference"
         kind:
           enum:
             - message
             - document_chunk
+            - docbank_rendition
           type: string
         message:
           $ref: "#/components/schemas/MessageReference"
@@ -13586,6 +13625,7 @@ components:
           enum:
             - message
             - document_chunk
+            - docbank_rendition
           type: string
         max_chars:
           format: int64
