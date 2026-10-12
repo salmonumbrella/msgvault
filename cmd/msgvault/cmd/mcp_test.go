@@ -348,7 +348,11 @@ func TestDaemonMCPVectorReadinessIsCheckedAtRequestTime(t *testing.T) {
 	require.ErrorAs(err, &coded)
 	assert.Equal("vector_initializing", coded.APIErrorCode())
 	path := <-requests
-	assert.Equal("/api/v1/health", path, "startup should only probe health")
+	assert.Equal("/api/v1/health", path, "startup probes vector capability")
+	path = <-requests
+	assert.Equal("/api/v1/health", path, "scoped discovery verifies schema without redirects")
+	path = <-requests
+	assert.Equal("/api/v1/mcp/capabilities", path, "startup probes scoped operation admission")
 	path = <-requests
 	assert.Equal("/api/v1/search", path, "vector readiness belongs to the request")
 }

@@ -2738,6 +2738,9 @@ book; see the [CardDAV guide](/docs/usage/people-carddav/).
 | `person publish <person-id>` / `person unpublish <person-id>` | Publish a saved profile or remove its remote card |
 | `person publish <person-id> --preview` | Print the exact vCard and approval token as JSON without publishing |
 | `person publish <person-id> --approve <token>` | Approve reviewed changes; conflict previews also need explicit `keep_local` resolution |
+| `person publish <person-id> --scoped --preview` | Preview a mapped CardDAV update with current person and book authority |
+| `person publish <person-id> --scoped --approve <token> --idempotency-key <key>` | Apply the exact reviewed update or return its saved receipt |
+| `person publish <person-id> --scoped --approve <token> --idempotency-key <key> --reconcile` | Recover the original receipt; pending recovery uses GET and never replays PUT |
 | `carddav books [--connection <name>]` | List discovered books, owning connection names and roles |
 | `carddav books set-role <book-id> [--write-target] [--subscribed] [--lookup-source]` | Replace all three roles; omitted flags become false |
 | `carddav conflicts list` | List unresolved conflicts |
@@ -2754,7 +2757,12 @@ network operations use the owning connection's credentials.
 Directory and integrations can also use the
 [publication API](/docs/usage/people-carddav/#sync-and-publish-selected-people).
 CardDAV commands do not expose a general `--json` flag; role changes,
-publication previews, and conflict list/show commands already print JSON.
+publication previews and scoped receipts, and conflict list/show commands already print JSON.
+Scoped publication requires API 3.14 or newer on `main` and supports existing
+native CardDAV mappings. Keep the original approval token and a caller-chosen
+idempotency key (1–256 UTF-8 bytes) for retries after timeout or lost output. See
+[publication recovery](/docs/usage/people-carddav/#recover-a-reviewed-mapped-update)
+for receipt states and current authorization requirements.
 
 ---
 
@@ -4543,7 +4551,7 @@ msgvault --agent-url https://archive.example.test \
 | `person.read` | Read the selected person's edit context, structured profile, and attributes |
 | `person.edit` | Rename selected people and patch their structured profile or attribute values; also requires `person.read` |
 | `person.merge` | Merge selected people; also requires `person.read` and `--allow-person-merges` in MCP |
-| `carddav.write` | Authorize edits that affect the selected address books; this permission alone exposes no publication or sync tools |
+| `carddav.write` | Authorize edits that affect selected address books; with `person.read`, preview, approve, and recover reviewed mapped CardDAV updates |
 
 The daemon resolves person UIDs and address-book ownership at issuance. Callers
 cannot supply that evidence. Person grants match both the ID and UID. Book
@@ -4567,7 +4575,13 @@ references. MCP asks for confirmation before a contact write. Scope denial
 returns 403, stale revisions or slots return 409, and an affected set over 100
 resources returns 413. An adapter without native scoped authorization returns
 501. Contact creation, deletion, splitting, broad people discovery, identity
-operations, and publication workflows remain owner-only.
+operations, sync, and unscoped publication workflows remain owner-only.
+Scoped publication also requires the person’s current mapped address book to
+remain subscribed and selected as the write target. MCP exposes the three
+scoped publication tools only when the daemon admits their exact contracts.
+Approval and recovery require `--allow-carddav-writes` and explicit confirmation.
+Revoked, expired, or narrowed grants cannot read saved receipts. See
+[publication recovery](/docs/usage/people-carddav/#recover-a-reviewed-mapped-update).
 
 ### agent-token issue
 

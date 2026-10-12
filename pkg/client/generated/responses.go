@@ -321,6 +321,56 @@ type ListCardDAVRunsErrorResponseJSON = ErrorResponse
 
 type ListCardDAVRunsErrorResponseJSON503 = ErrorResponse
 
+type ApproveScopedCardDAVPublicationResponse = CardDAVScopedPublicationReceiptResponse
+
+type ApproveScopedCardDAVPublicationResponseJSON = CardDAVScopedPublicationReceiptResponse
+
+type ApproveScopedCardDAVPublicationErrorResponse = ErrorResponse
+
+type ApproveScopedCardDAVPublicationErrorResponseJSON = ErrorResponse
+
+type ApproveScopedCardDAVPublicationErrorResponseJSON404 = ErrorResponse
+
+type ApproveScopedCardDAVPublicationErrorResponseJSON409 = ErrorResponse
+
+type ApproveScopedCardDAVPublicationErrorResponseJSON500 = ErrorResponse
+
+type ApproveScopedCardDAVPublicationErrorResponseJSON502 = ErrorResponse
+
+type ApproveScopedCardDAVPublicationErrorResponseJSON503 = ErrorResponse
+
+type PreviewScopedCardDAVPublicationResponse = CardDAVPublicationPreviewResponse
+
+type PreviewScopedCardDAVPublicationErrorResponse = ErrorResponse
+
+type PreviewScopedCardDAVPublicationErrorResponseJSON = ErrorResponse
+
+type PreviewScopedCardDAVPublicationErrorResponseJSON404 = ErrorResponse
+
+type PreviewScopedCardDAVPublicationErrorResponseJSON409 = ErrorResponse
+
+type PreviewScopedCardDAVPublicationErrorResponseJSON500 = ErrorResponse
+
+type PreviewScopedCardDAVPublicationErrorResponseJSON503 = ErrorResponse
+
+type ReconcileScopedCardDAVPublicationResponse = CardDAVScopedPublicationReceiptResponse
+
+type ReconcileScopedCardDAVPublicationResponseJSON = CardDAVScopedPublicationReceiptResponse
+
+type ReconcileScopedCardDAVPublicationErrorResponse = ErrorResponse
+
+type ReconcileScopedCardDAVPublicationErrorResponseJSON = ErrorResponse
+
+type ReconcileScopedCardDAVPublicationErrorResponseJSON404 = ErrorResponse
+
+type ReconcileScopedCardDAVPublicationErrorResponseJSON409 = ErrorResponse
+
+type ReconcileScopedCardDAVPublicationErrorResponseJSON500 = ErrorResponse
+
+type ReconcileScopedCardDAVPublicationErrorResponseJSON502 = ErrorResponse
+
+type ReconcileScopedCardDAVPublicationErrorResponseJSON503 = ErrorResponse
+
 type GetCardDAVStatusResponse = CardDAVStatusResponse
 
 type GetCardDAVStatusErrorResponse = ErrorResponse
@@ -1640,6 +1690,10 @@ type GetTaskIntegrationStatusErrorResponse = ErrorResponse
 type TestTaskIntegrationResponse = TaskIntegrationStatusResponse
 
 type TestTaskIntegrationErrorResponse = ErrorResponse
+
+type GetMCPCapabilitiesResponse = MCPCapabilities
+
+type GetMCPCapabilitiesErrorResponse = ErrorResponse
 
 type SearchMediaResponse = MediaSearchResponse
 
@@ -4004,6 +4058,64 @@ type ListCardDAVRunsResp struct {
 	JSON503      *ListCardDAVRunsErrorResponseJSON503
 }
 
+type ApproveScopedCardDAVPublicationResp503Headers struct {
+	RetryAfter string `header:"Retry-After"`
+}
+
+type ApproveScopedCardDAVPublicationResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ApproveScopedCardDAVPublicationResponse
+	JSON202      *ApproveScopedCardDAVPublicationResponseJSON
+	JSON400      *ApproveScopedCardDAVPublicationErrorResponse
+	JSON403      *ApproveScopedCardDAVPublicationErrorResponseJSON
+	JSON404      *ApproveScopedCardDAVPublicationErrorResponseJSON404
+	JSON409      *ApproveScopedCardDAVPublicationErrorResponseJSON409
+	JSON500      *ApproveScopedCardDAVPublicationErrorResponseJSON500
+	JSON502      *ApproveScopedCardDAVPublicationErrorResponseJSON502
+	JSON503      *ApproveScopedCardDAVPublicationErrorResponseJSON503
+	Headers503   *ApproveScopedCardDAVPublicationResp503Headers
+}
+
+type PreviewScopedCardDAVPublicationResp503Headers struct {
+	RetryAfter string `header:"Retry-After"`
+}
+
+type PreviewScopedCardDAVPublicationResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *PreviewScopedCardDAVPublicationResponse
+	JSON400      *PreviewScopedCardDAVPublicationErrorResponse
+	JSON403      *PreviewScopedCardDAVPublicationErrorResponseJSON
+	JSON404      *PreviewScopedCardDAVPublicationErrorResponseJSON404
+	JSON409      *PreviewScopedCardDAVPublicationErrorResponseJSON409
+	JSON500      *PreviewScopedCardDAVPublicationErrorResponseJSON500
+	JSON503      *PreviewScopedCardDAVPublicationErrorResponseJSON503
+	Headers503   *PreviewScopedCardDAVPublicationResp503Headers
+}
+
+type ReconcileScopedCardDAVPublicationResp503Headers struct {
+	RetryAfter string `header:"Retry-After"`
+}
+
+type ReconcileScopedCardDAVPublicationResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ReconcileScopedCardDAVPublicationResponse
+	JSON202      *ReconcileScopedCardDAVPublicationResponseJSON
+	JSON400      *ReconcileScopedCardDAVPublicationErrorResponse
+	JSON403      *ReconcileScopedCardDAVPublicationErrorResponseJSON
+	JSON404      *ReconcileScopedCardDAVPublicationErrorResponseJSON404
+	JSON409      *ReconcileScopedCardDAVPublicationErrorResponseJSON409
+	JSON500      *ReconcileScopedCardDAVPublicationErrorResponseJSON500
+	JSON502      *ReconcileScopedCardDAVPublicationErrorResponseJSON502
+	JSON503      *ReconcileScopedCardDAVPublicationErrorResponseJSON503
+	Headers503   *ReconcileScopedCardDAVPublicationResp503Headers
+}
+
 type GetCardDAVStatusResp503Headers struct {
 	RetryAfter string `header:"Retry-After"`
 }
@@ -4995,6 +5107,13 @@ type TestTaskIntegrationResp struct {
 	Body         []byte
 	StatusCode   int
 	JSON200      *TestTaskIntegrationResponse
+}
+
+type GetMCPCapabilitiesResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *GetMCPCapabilitiesResponse
 }
 
 type SearchMediaResp struct {

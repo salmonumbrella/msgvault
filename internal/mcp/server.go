@@ -92,6 +92,12 @@ const (
 	ToolListIdentityJudgments     = "list_identity_judgments"
 )
 
+const (
+	ToolPreviewScopedCardDAVPublication   = "preview_scoped_carddav_publication"
+	ToolApproveScopedCardDAVPublication   = "approve_scoped_carddav_publication"
+	ToolReconcileScopedCardDAVPublication = "reconcile_scoped_carddav_publication"
+)
+
 // search_message_bodies/search_in_message mode values (wire format).
 const (
 	searchModeKeyword = "keyword"
@@ -174,6 +180,11 @@ type ServeOptions struct {
 	// PersonCardDAV is present only when the daemon serves revision-guarded
 	// person merge and token-guarded CardDAV publication routes.
 	PersonCardDAV PersonCardDAVBackend
+
+	ScopedCardDAVPreview   ScopedCardDAVPreviewBackend
+	ScopedCardDAVApprove   ScopedCardDAVApproveBackend
+	ScopedCardDAVReconcile ScopedCardDAVReconcileBackend
+
 	// PersonMerge and PersonRecords expose only native contact routes.
 	PersonMerge   PersonMergeBackend
 	PersonRecords PersonRecordsBackend
@@ -385,10 +396,15 @@ func newMCPServerWithPolicy(
 		kata:                opts.Kata,
 		identityReview:      opts.IdentityReview,
 		personCardDAV:       opts.PersonCardDAV,
-		personMerge:         opts.PersonMerge,
-		personRecords:       opts.PersonRecords,
-		identityScoring:     opts.IdentityScoring,
-		drafts:              opts.Drafts,
+
+		scopedCardDAVPreview:   opts.ScopedCardDAVPreview,
+		scopedCardDAVApprove:   opts.ScopedCardDAVApprove,
+		scopedCardDAVReconcile: opts.ScopedCardDAVReconcile,
+
+		personMerge:     opts.PersonMerge,
+		personRecords:   opts.PersonRecords,
+		identityScoring: opts.IdentityScoring,
+		drafts:          opts.Drafts,
 	}
 
 	if h.personMerge == nil {

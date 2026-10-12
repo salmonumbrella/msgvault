@@ -13,6 +13,7 @@ import type {
   AppendPersonNotePathParameters,
   AppendPersonNoteRequest,
   ApproveCardDAVPublicationPathParameters,
+  ApproveScopedCardDAVPublicationPathParameters,
   AttachmentInfo,
   AttributeDefinition,
   AttributeDefinitionsResponse,
@@ -58,6 +59,8 @@ import type {
   CardDAVPublicationResponse,
   CardDAVResolveRequest,
   CardDAVRunsResponse,
+  CardDAVScopedPublicationApprovalRequest,
+  CardDAVScopedPublicationReceiptResponse,
   CardDAVStatusResponse,
   CardDAVSyncRequest,
   Catalog,
@@ -265,6 +268,7 @@ import type {
   ListTextConversationMessagesParams,
   ListTextConversationMessagesPathParameters,
   ListTextConversationsParams,
+  MCPCapabilities,
   Manifest,
   MediaSearchResponse,
   MediaSearchStatusResponse,
@@ -362,6 +366,7 @@ import type {
   PersonSummary,
   PersonTracking,
   PreviewCardDAVPublicationPathParameters,
+  PreviewScopedCardDAVPublicationPathParameters,
   ProviderCredentialResponse,
   ProviderCredentialWriteRequest,
   PublishCardDAVPersonPathParameters,
@@ -375,6 +380,7 @@ import type {
   PutSettingsProviderCredentialPathParameters,
   QueryRequest,
   QueryResult,
+  ReconcileScopedCardDAVPublicationPathParameters,
   RejectPersonBriefPathParameters,
   RejectPersonBriefRequest,
   RelationshipReviewsResponse,
@@ -982,6 +988,63 @@ export const listCardDAVRuns = (
 ) => {
   return orvalFetch<CardDAVRunsResponse>(
     { url: `/api/v1/carddav/runs`, method: "GET", params },
+    options,
+  );
+};
+/**
+ * @summary Approve one mapped CardDAV update with a durable receipt
+ */
+export const approveScopedCardDAVPublication = (
+  { personId }: ApproveScopedCardDAVPublicationPathParameters,
+  cardDAVScopedPublicationApprovalRequest: CardDAVScopedPublicationApprovalRequest,
+  options?: SecondParameter<
+    typeof orvalFetch<CardDAVScopedPublicationReceiptResponse>
+  >,
+) => {
+  return orvalFetch<CardDAVScopedPublicationReceiptResponse>(
+    {
+      url: `/api/v1/carddav/scoped/publications/${encodeURIComponent(String(personId))}/approve`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: cardDAVScopedPublicationApprovalRequest,
+    },
+    options,
+  );
+};
+/**
+ * @summary Preview one authorized mapped CardDAV update
+ */
+export const previewScopedCardDAVPublication = (
+  { personId }: PreviewScopedCardDAVPublicationPathParameters,
+  options?: SecondParameter<
+    typeof orvalFetch<CardDAVPublicationPreviewResponse>
+  >,
+) => {
+  return orvalFetch<CardDAVPublicationPreviewResponse>(
+    {
+      url: `/api/v1/carddav/scoped/publications/${encodeURIComponent(String(personId))}/preview`,
+      method: "GET",
+    },
+    options,
+  );
+};
+/**
+ * @summary Observe an existing reviewed CardDAV update without replaying it
+ */
+export const reconcileScopedCardDAVPublication = (
+  { personId }: ReconcileScopedCardDAVPublicationPathParameters,
+  cardDAVScopedPublicationApprovalRequest: CardDAVScopedPublicationApprovalRequest,
+  options?: SecondParameter<
+    typeof orvalFetch<CardDAVScopedPublicationReceiptResponse>
+  >,
+) => {
+  return orvalFetch<CardDAVScopedPublicationReceiptResponse>(
+    {
+      url: `/api/v1/carddav/scoped/publications/${encodeURIComponent(String(personId))}/reconcile`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: cardDAVScopedPublicationApprovalRequest,
+    },
     options,
   );
 };
@@ -2116,6 +2179,17 @@ export const testTaskIntegration = (
 ) => {
   return orvalFetch<TaskIntegrationStatusResponse>(
     { url: `/api/v1/integrations/tasks/test`, method: "POST" },
+    options,
+  );
+};
+/**
+ * @summary Describe admitted scoped CardDAV MCP operations
+ */
+export const getMCPCapabilities = (
+  options?: SecondParameter<typeof orvalFetch<MCPCapabilities>>,
+) => {
+  return orvalFetch<MCPCapabilities>(
+    { url: `/api/v1/mcp/capabilities`, method: "GET" },
     options,
   );
 };

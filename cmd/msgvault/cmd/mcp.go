@@ -210,6 +210,9 @@ func delegatedMCPServeOptions(ctx context.Context, st *daemonclient.Client) (mcp
 	if daemonclient.APISchemaVersionAtLeast(schemaVersion, calendarControlMinAPISchemaVersion) {
 		opts.Calendar = st
 	}
+	if err := applyMCPDiscovery(ctx, st, &opts, schemaVersion, true); err != nil {
+		slog.Warn("scoped CardDAV tools disabled because discovery failed", "error", err)
+	}
 	return opts, nil
 }
 
@@ -328,6 +331,9 @@ func daemonMCPServeOptions(ctx context.Context, st *daemonclient.Client, state *
 		opts.DraftCommands = mcpDraftCommands(false)
 	}
 
+	if err := applyMCPDiscovery(ctx, st, &opts, schemaVersion, false); err != nil {
+		log.Warn("scoped CardDAV tools disabled because discovery failed", "error", err)
+	}
 	return opts
 }
 

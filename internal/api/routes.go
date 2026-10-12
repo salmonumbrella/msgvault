@@ -304,6 +304,7 @@ func (s *Server) registerHumaRoutes(api huma.API, apiV1 huma.API) {
 	s.registerImportJobRoutes(apiV1)
 	s.registerSettingsRoutes(apiV1)
 	s.registerCardDAVRoutes(apiV1)
+	s.registerMCPCapabilitiesRoute(apiV1)
 	s.registerSavedViewRoutes(apiV1)
 	s.registerExploreRoutes(apiV1)
 	s.registerFilesRoutes(apiV1)

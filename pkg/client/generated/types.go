@@ -1866,6 +1866,29 @@ func (c CardDAVPublicationPreviewResponse) Validate() error {
 	return errors
 }
 
+type CardDAVPublicationReceipt struct {
+	AccountID            int64      `json:"account_id"`
+	AddressBookID        int64      `json:"address_book_id"`
+	BodySha256           string     `json:"body_sha256" validate:"required"`
+	ConnectionGeneration int64      `json:"connection_generation"`
+	CreatedAt            time.Time  `json:"created_at" validate:"required"`
+	ErrorCode            *string    `json:"error_code,omitzero"`
+	ID                   string     `json:"id" validate:"required"`
+	MutationRevision     int64      `json:"mutation_revision"`
+	Noop                 bool       `json:"noop"`
+	PersonID             int64      `json:"person_id"`
+	PersonRevision       int64      `json:"person_revision"`
+	PersonUID            string     `json:"person_uid" validate:"required"`
+	RemoteEtag           string     `json:"remote_etag" validate:"required"`
+	RetryAfter           *time.Time `json:"retry_after,omitempty"`
+	State                string     `json:"state" validate:"required"`
+	VerifiedAt           *time.Time `json:"verified_at,omitempty"`
+}
+
+func (c CardDAVPublicationReceipt) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(c))
+}
+
 type CardDAVPublicationResponse struct {
 	AddressBook             *CardDAVAddressBookIdentityResponse         `json:"address_book,omitempty"`
 	ConflictID              *int64                                      `json:"conflict_id,omitempty" validate:"omitempty,gte=1"`
@@ -1985,6 +2008,32 @@ func (c CardDAVRunsResponse) Validate() error {
 			if err := v.Validate(); err != nil {
 				errors = errors.Append(fmt.Sprintf("Runs[%d]", i), err)
 			}
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
+type CardDAVScopedPublicationApprovalRequest struct {
+	ApprovalToken  string `json:"approval_token" validate:"required,max=256,min=1"`
+	IdempotencyKey string `json:"idempotency_key" validate:"required,max=256,min=1"`
+}
+
+func (c CardDAVScopedPublicationApprovalRequest) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(c))
+}
+
+type CardDAVScopedPublicationReceiptResponse struct {
+	Receipt CardDAVPublicationReceipt `json:"receipt"`
+}
+
+func (c CardDAVScopedPublicationReceiptResponse) Validate() error {
+	var errors runtime.ValidationErrors
+	if v, ok := any(c.Receipt).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Receipt", err)
 		}
 	}
 	if len(errors) == 0 {
@@ -6282,6 +6331,39 @@ func (l ListDeletionsResponse) Validate() error {
 		return nil
 	}
 	return errors
+}
+
+type MCPCapabilities struct {
+	Delegated bool                 `json:"delegated"`
+	Routes    []MCPRouteDescriptor `json:"routes" validate:"required"`
+	Version   int64                `json:"version"`
+}
+
+func (m MCPCapabilities) Validate() error {
+	var errors runtime.ValidationErrors
+	for i, item := range m.Routes {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("Routes[%d]", i), err)
+			}
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
+type MCPRouteDescriptor struct {
+	Method            string   `json:"method" validate:"required"`
+	OperationID       string   `json:"operation_id" validate:"required"`
+	Path              string   `json:"path" validate:"required"`
+	QueryParameters   []string `json:"query_parameters" validate:"required"`
+	RequestProperties []string `json:"request_properties" validate:"required"`
+}
+
+func (m MCPRouteDescriptor) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(m))
 }
 
 type Manifest struct {
