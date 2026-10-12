@@ -357,7 +357,8 @@ import (
 // bindings on person and directory responses.
 // 3.11.0 adds structured account scopes, the explore account filter, the virtual account catalog on /cli/accounts, GET /api/v1/media/search/status, participant_id to media search, source filename, title and date to media search results, and optional conversation_title to message detail.
 // 3.12.0 adds Kata source lookup and issue evidence context.
-const APISchemaVersion = "3.12.0"
+// 3.13.0 adds explicit contact resource grants and delegated native person edits.
+const APISchemaVersion = "3.13.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.
@@ -423,6 +424,7 @@ func baseOpenAPIDocument(includeHidden bool) *huma.OpenAPI {
 	hardenActivitySchemas(doc)
 	hardenMeetingSchemas(doc)
 	hardenCalendarControlSchemas(doc)
+	hardenContactGrantSchemas(doc)
 	return doc
 }
 

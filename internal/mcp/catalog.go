@@ -55,6 +55,7 @@ type catalogCapabilities struct {
 	kataLookup      bool
 	identityReview  bool
 	personCardDAV   bool
+	personMerge     bool
 }
 
 func visualSearchAvailable(capabilities catalogCapabilities) bool {
@@ -140,6 +141,7 @@ func capabilitiesFor(opts ServeOptions) catalogCapabilities {
 		kataLookup:      opts.Kata != nil && opts.KataLookup,
 		identityReview:  opts.IdentityReview != nil,
 		personCardDAV:   opts.PersonCardDAV != nil,
+		personMerge:     opts.PersonMerge != nil || opts.PersonCardDAV != nil,
 	}
 }
 
@@ -180,6 +182,19 @@ func operationCatalog(opts ServeOptions, _ *handlers) []toolDefinition {
 			if permission, ok := agentReadToolPermission(definition.name); ok && slices.Contains(opts.GrantPermissions, string(permission)) {
 				definitions = append(definitions, definition)
 			}
+		}
+	}
+	if opts.PersonRecords != nil && (!opts.DelegatedOnly || slices.Contains(opts.GrantPermissions, "person.read")) {
+		for _, definition := range stablePersonRecordDefinitions {
+			if !opts.DelegatedOnly || definition.security == toolSecurityRead || slices.Contains(opts.GrantPermissions, "person.edit") {
+				definitions = append(definitions, definition)
+			}
+		}
+	}
+	if opts.DelegatedOnly && opts.PersonMerge != nil && slices.Contains(opts.GrantPermissions, "person.read") {
+		definitions = append(definitions, getPersonMergeContextDefinition())
+		if slices.Contains(opts.GrantPermissions, "person.merge") {
+			definitions = append(definitions, mergePersonDefinition())
 		}
 	}
 	if opts.Calendar != nil {
