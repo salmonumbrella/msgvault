@@ -107,3 +107,11 @@ func mcpEventsDelivery(delivery mcpevents.Delivery) generated.Delivery {
 	}
 	return out
 }
+
+// DiscoverMCPEventResources resolves one known source through the owner route.
+func (c *Client) DiscoverMCPEventResources(ctx context.Context, query mcpevents.ResourceQuery) (mcpevents.ResourcePage, error) {
+	var out mcpevents.ResourcePage
+	body := &generated.DiscoverMCPEventResourcesBody{Kind: generated.ResourceQueryKind(query.Kind), SourceID: query.SourceID}
+	err := c.mcpEventsRequest(ctx, http.MethodPost, "/api/v1/mcp/events/resources", &generated.DiscoverMCPEventResourcesRequestOptions{Body: body}, &out)
+	return out, err
+}

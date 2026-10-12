@@ -65,10 +65,7 @@ func TestMCPEventsRenewalPreservesPendingGeneration(t *testing.T) {
 	assert.False(truncated)
 	require.NotNil(active)
 	assert.Equal(clock.HeadSeq, active.CursorSeq)
-	_, err = f.Store.DB().Exec(f.Store.Rebind(`UPDATE mcp_event_clock SET head_seq = 1 WHERE singleton = 1`))
-	require.NoError(err)
-	_, err = f.Store.DB().Exec(f.Store.Rebind(`INSERT INTO mcp_event_log (seq,epoch,family,kind,scope_kind,scope_id,item_key,message_id,conversation_id,source_id,from_me,occurred_at,recorded_at,data) VALUES (1,?,'msgvault.message_archived','message','conversation',?,'message:1',1,?,?,FALSE,?,?,?)`), clock.Epoch, f.ConvID, f.ConvID, f.Source.ID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), `{"kind":"message","from_me":false}`)
-	require.NoError(err)
+	appendMCPSubscriptionFixture(t, f, clock.Epoch, now)
 	pending, err := f.Store.PrepareMCPDelivery(t.Context(), active.ID, active.Generation, now, func(_ store.MCPSubscription, _ store.MCPEvent) ([]byte, error) {
 		return []byte(`{"eventId":"stable"}`), nil
 	})
@@ -241,12 +238,14 @@ func TestMCPEventsPruningHoleStopsLaggingSubscriber(t *testing.T) {
 	assert.Equal(2, count)
 }
 
-func appendMCPSubscriptionFixture(t *testing.T, f *storetest.Fixture, epoch int64, now time.Time) {
+func appendMCPSubscriptionFixture(t *testing.T, f *storetest.Fixture, epoch int64, now time.Time) int64 {
 	t.Helper()
-	_, err := f.Store.DB().Exec(f.Store.Rebind(`INSERT INTO mcp_event_log (seq,epoch,family,kind,scope_kind,scope_id,item_key,message_id,conversation_id,source_id,from_me,occurred_at,recorded_at,data) VALUES (1,?,'msgvault.message_archived','message','conversation',?,'message:1',1,?,?,FALSE,?,?,?)`), epoch, f.ConvID, f.ConvID, f.Source.ID, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), `{"kind":"message","from_me":false}`)
+	id, err := f.Store.WithIngestContext(store.IngestContext{Mode: store.IngestLive, ObservedAt: now}).PersistMessageContext(t.Context(), &store.MessagePersistData{Message: f.NewMessage().Build()})
 	Require.NoError(t, err)
-	_, err = f.Store.DB().Exec(`UPDATE mcp_event_clock SET head_seq=1 WHERE singleton=1`)
-	Require.NoError(t, err)
+	var capturedEpoch int64
+	Require.NoError(t, f.Store.DB().QueryRow(f.Store.Rebind(`SELECT epoch FROM mcp_event_log WHERE message_id=? AND kind='message'`), id).Scan(&capturedEpoch))
+	Require.Equal(t, epoch, capturedEpoch)
+	return id
 }
 
 func TestMCPEventsRotationRebindsPendingAndRejectsOldCompletion(t *testing.T) {

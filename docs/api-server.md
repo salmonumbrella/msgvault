@@ -100,13 +100,13 @@ recurrence limits, notification behavior, and reconciliation instructions.
 The API publishes its generated OpenAPI contract at `/openapi.json`.
 `msgvault openapi` prints the checked-in contract without starting a daemon or
 opening an archive. OpenAPI `info.version` is the **API schema version**;
-it is separate from the binary release version. The current schema is **3.14.0**.
+it is separate from the binary release version. The current schema is **3.15.0**.
 Upgrade clients and daemon together across incompatible schema versions,
 including remote deployments.
 
 Schema 3.11.0 adds `GET /media/search/status` to report whether Docbank transcript search is configured. It also adds source filename, title and date to transcript search results and optional `conversation_title` to `GET /messages/{id}`.
 
-Schema 3.12.0 adds Kata source lookup and issue evidence context. Schema 3.13.0 adds Docbank transcript evidence. Schema 3.14.0 adds owner-only [MCP Events](#mcp-events) and typed calendar projections on message details.
+Schema 3.12.0 adds Kata source lookup and issue evidence context. Schema 3.13.0 adds Docbank transcript evidence. Schema 3.14.0 adds owner-only [MCP Events](#mcp-events) and typed calendar projections on message details. Schema 3.15.0 adds separately opted-in native import notifications, opaque import-run results and the meeting request's `notify_imports` field.
 
 Schema 3.9.0 adds source-scoped agent read permissions and optional `expires_at`. Admitted FTS search responses, including aggregates, filtered messages and total statistics with search text, carry optional `index_state`. Agent checks are bounded; owner CLI searches retain automatic verification and repair.
 See [scoped archive reads](cli-reference.md#scoped-archive-reads).
@@ -482,13 +482,15 @@ There is no dedicated cancellation endpoint for these jobs.
 
 ## MCP Events
 
-Schema 3.12.0 adds these owner-key-only endpoints. They accept no
+Schema 3.14.0 adds these owner-key-only endpoints. Schema 3.15.0 adds exact import source-reference resolution and opt-in import notifications.
+These endpoints accept no
 caller-supplied principal. Browser sessions, delegated agent tokens, and keyless
 access cannot use them. Disabled Events has no advertised capability.
 
 | Method | Path under `/api/v1/mcp/events` | Result |
 |---|---|---|
 | POST | `/list` | Runtime catalog; request body `{}` |
+| POST | `/resources` | One known source's import reference; request body `{"kind":"source","source_id":"42"}` |
 | POST | `/subscribe` | Verified subscription ID, cursor, refresh deadline, and truncation flag |
 | POST | `/unsubscribe` | End the selected subscription; `204` on success |
 | GET | `/status` | Safe subscription delivery state |
@@ -2126,6 +2128,22 @@ date, description, and source ID. An empty array means supported with no actions
 omission means unsupported; `null` is rejected. See the
 [complete import example](usage/meetings.md#import-from-any-meeting-source).
 Unknown fields are rejected except within `meeting.metadata`.
+
+
+Import notifications are separately opted in. Set
+[`mcp.events.import_notifications`](configuration.md#mcpevents) on the daemon
+and include `"notify_imports": true` at the request's top level. Omitting the
+field or passing `false` keeps this import silent. The field accepts only JSON
+booleans; `null`, numbers and strings are rejected. A requested notification
+with daemon permission disabled fails before any source or message is written.
+
+A successful response also includes an opaque `import_run_id`. Every request
+creates a fresh logical run, including an idempotent retry. Reimporting an
+existing message does not emit a second notification or notify a message that
+was previously imported silently. The endpoint accepts no caller-supplied
+retry or run ID. Subscribe before importing; see
+[import notifications](usage/chat.md#import-notifications) for scopes, receipt
+reads and retained identity limits.
 
 Each organizer or attendee needs an `email`, a `phone`, or both. `phone` must be
 international (a leading `+` or `00`) and is normalized to E.164. An optional

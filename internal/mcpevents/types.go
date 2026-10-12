@@ -11,11 +11,12 @@ import (
 )
 
 type Options struct {
-	Enabled           bool
-	Retention         time.Duration
-	Sources           []string
-	TrustedCallbacks  []TrustedCallback
-	KeyPath, OwnerKey string
+	ImportNotifications bool
+	Enabled             bool
+	Retention           time.Duration
+	Sources             []string
+	TrustedCallbacks    []TrustedCallback
+	KeyPath, OwnerKey   string
 	// WithOperation takes the daemon's archive gate for a short Store operation.
 	// Callback resolution, verification and delivery never run in this callback.
 	WithOperation func(context.Context, func() error) error
@@ -111,7 +112,7 @@ func SafeError(code int, reason string) (*Error, bool) {
 	switch code {
 	case -32602:
 		switch reason {
-		case "invalid_request", "invalid_arguments", "unknown_argument", "unknown_event", "invalid_scope", "invalid_identifier", "invalid_boolean", "invalid_kinds", "invalid_cursor", "invalid_event_id", "invalid_secret", "invalid_callback", "invalid_trusted_callback", "invalid_ttl", "invalid_retention", "invalid_subscription", "unknown_scope", "wrong_scope_type", "source_not_capable", "kind_not_capable", "event_unavailable", "message_unavailable", "payload_too_large":
+		case "invalid_resource_reference", "invalid_resource_query", "resource_unavailable", "invalid_request", "invalid_arguments", "unknown_argument", "unknown_event", "invalid_scope", "invalid_identifier", "invalid_boolean", "invalid_kinds", "invalid_cursor", "invalid_event_id", "invalid_secret", "invalid_callback", "invalid_trusted_callback", "invalid_ttl", "invalid_retention", "invalid_subscription", "unknown_scope", "wrong_scope_type", "source_not_capable", "kind_not_capable", "event_unavailable", "message_unavailable", "payload_too_large":
 			allowed = true
 		}
 	case -32012:

@@ -824,6 +824,7 @@ listener keys cannot use Events.
 ```toml
 [mcp.events]
 enabled = false
+import_notifications = false
 retention = "168h"
 sources = ["gmail", "imap", "gcal"]
 ```
@@ -831,6 +832,7 @@ sources = ["gmail", "imap", "gcal"]
 | Key | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Capture occurrences and run daemon callback workers. Read at startup; restart after changes. |
+| `import_notifications` | `false` | Permit separately opted-in native imports to emit `msgvault.import_message_archived`. Requires Events and the daemon owner key; each command still needs `--notify-imports`, or `notify_imports: true` for a meeting request. |
 | `retention` | `"168h"` | Positive journal retention duration, at most seven days, measured from recording time. Expired occurrences become unavailable immediately; cleanup runs at half the configured duration, capped at one hour and floored at one second. |
 | `sources` | `["gmail", "imap", "gcal"]` | Allowed source types, further limited by implemented producers and readable projections. An empty array advertises no families. |
 | `trusted_callbacks` | `[]` | Explicit private receiver exceptions: objects with an HTTPS `origin` and fixed private IP `addresses`. |
@@ -838,6 +840,9 @@ sources = ["gmail", "imap", "gcal"]
 Accepted `sources` values are `gmail`, `imap`, `gcal`, `beeper`, `slack`,
 `slackdump`, `teams`, and `discord`. When Events is enabled, the daemon refuses
 to start if `sources` lists any other source type.
+
+Offline imports, including Slackdump, stay silent unless separately opted into
+[import notifications](usage/chat.md#import-notifications).
 
 Callbacks normally require public HTTPS on port 443 or 8443. The daemon rejects
 redirects, reserved destinations, and DNS answers containing an unsafe address.

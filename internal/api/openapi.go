@@ -359,7 +359,8 @@ import (
 // 3.12.0 adds Kata source lookup and issue evidence context.
 // 3.13.0 adds Docbank transcript evidence.
 // 3.14.0 adds owner-only native MCP Events and typed calendar message projections.
-const APISchemaVersion = "3.14.0"
+// 3.15.0 adds explicit native import notifications and durable import results.
+const APISchemaVersion = "3.15.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.

@@ -45,10 +45,11 @@ func StoreCaptureConfig(opts Options) store.MCPEventsConfig {
 		principal = Principal(opts.OwnerKey)
 	}
 	return store.MCPEventsConfig{
-		Enabled:      opts.Enabled,
-		Principal:    principal,
-		Capabilities: capabilities(opts.Enabled, opts.Sources),
-		Retention:    retention,
+		ImportNotifications: opts.ImportNotifications,
+		Enabled:             opts.Enabled,
+		Principal:           principal,
+		Capabilities:        configuredCapabilities(opts),
+		Retention:           retention,
 	}
 }
 
@@ -67,7 +68,7 @@ func New(ctx context.Context, st *store.Store, opts Options) (*Service, error) {
 			return nil, err
 		}
 	}
-	s := &Service{st: st, opts: opts, principal: Principal(opts.OwnerKey), caps: capabilities(opts.Enabled, opts.Sources), wake: make(chan struct{}, 1), deliveryHints: make(chan struct{}, 1), workers: make(map[string]*worker)}
+	s := &Service{st: st, opts: opts, principal: Principal(opts.OwnerKey), caps: configuredCapabilities(opts), wake: make(chan struct{}, 1), deliveryHints: make(chan struct{}, 1), workers: make(map[string]*worker)}
 	if opts.Enabled {
 		var rows []store.MCPSubscription
 		err := s.operation(ctx, func() error { var err error; rows, err = st.ListMCPSubscriptionsForStartup(ctx); return err })
@@ -146,7 +147,7 @@ func safeStoreError(err error) error {
 		return nil
 	}
 	switch err.Error() {
-	case "unknown_scope", "wrong_scope_type", "source_not_capable", "kind_not_capable", "invalid_cursor", "invalid_subscription", "event_unavailable", "message_unavailable":
+	case "invalid_resource_reference", "invalid_resource_query", "resource_unavailable", "unknown_scope", "wrong_scope_type", "source_not_capable", "kind_not_capable", "invalid_cursor", "invalid_subscription", "event_unavailable", "message_unavailable":
 		return invalid(err.Error())
 	case "subscription_limit", "concurrent_update":
 		return &Error{Code: -32013, Reason: err.Error()}
@@ -182,10 +183,19 @@ func (s *Service) Subscribe(ctx context.Context, principal string, req Subscribe
 	var old *store.MCPSubscription
 	activation := store.MCPActivation{Subscription: store.MCPSubscription{ID: id, Principal: principal, Name: req.Name, Arguments: args.bytes, ScopeKind: args.scopeKind, ScopeID: args.scopeID, CallbackURL: req.Delivery.URL, SecretRevision: 1, VerifiedRevision: 1}}
 	err = s.operation(ctx, func() error {
+		sourceID, binding, resolveErr := s.st.ResolveMCPSubscriptionResource(ctx, req.Name, args.scopeKind, args.scopeID, requestedKinds(args.kinds), args.reference)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		activation.ResourceBinding = binding
+		activation.Subscription.SourceID = sourceID
 		if err := s.st.BindMCPSubscriptionScope(ctx, &activation.Subscription); err != nil {
 			return err
 		}
 		old, err = s.st.GetMCPSubscription(ctx, id)
+		if err == nil && old != nil {
+			err = s.st.ValidateMCPSubscriptionResource(ctx, old)
+		}
 		return err
 	})
 	if err != nil {
@@ -225,6 +235,9 @@ func (s *Service) Subscribe(ctx context.Context, principal string, req Subscribe
 			return err
 		}
 		return s.operation(ctx, func() error {
+			if err := s.st.CheckMCPResourceBinding(ctx, activation.ResourceBinding); err != nil {
+				return safeStoreError(err)
+			}
 			_, _, err := s.st.ValidateMCPEventScope(ctx, req.Name, args.scopeKind, args.scopeID, requestedKinds(args.kinds))
 			return safeStoreError(err)
 		})

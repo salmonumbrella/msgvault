@@ -627,16 +627,15 @@ func TestCallbackNetworkRunsOutsideOperationGate(t *testing.T) {
 	Require.NoError(t, err)
 }
 
-func appendReceipt(t *testing.T, s *Service, f *storetest.Fixture, seq int64) {
+func appendReceipt(t *testing.T, s *Service, f *storetest.Fixture, seq int64) int64 {
 	t.Helper()
-	var epoch int64
-	Require.NoError(t, f.Store.DB().QueryRow(`SELECT capture_epoch FROM mcp_event_clock WHERE singleton=1`).Scan(&epoch))
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := f.Store.DB().Exec(f.Store.Rebind(`INSERT INTO mcp_event_log(seq,epoch,family,kind,scope_kind,scope_id,item_key,conversation_id,source_id,from_me,occurred_at,recorded_at,data) VALUES(?,?,'msgvault.message_archived','message','conversation',?,?,?, ?,FALSE,?,?,?)`), seq, epoch, f.ConvID, fmt.Sprintf("synthetic:%d", seq), f.ConvID, f.Source.ID, now, now, `{"kind":"message","from_me":false}`)
+	id, err := f.Store.WithIngestContext(store.IngestContext{Mode: store.IngestLive, ObservedAt: time.Now().UTC()}).PersistMessageContext(t.Context(), &store.MessagePersistData{Message: f.NewMessage().WithSourceMessageID(fmt.Sprintf("synthetic:%d", seq)).Build()})
 	Require.NoError(t, err)
-	_, err = f.Store.DB().Exec(f.Store.Rebind(`UPDATE mcp_event_clock SET head_seq=? WHERE singleton=1`), seq)
-	Require.NoError(t, err)
+	var capturedSeq int64
+	Require.NoError(t, f.Store.DB().QueryRow(f.Store.Rebind(`SELECT seq FROM mcp_event_log WHERE message_id=? AND kind='message' AND family=?`), id, messageFamily).Scan(&capturedSeq))
+	Require.Equal(t, seq, capturedSeq)
 	s.Wake()
+	return id
 }
 
 func TestIndependentWorkersAndShutdownJoin(t *testing.T) {

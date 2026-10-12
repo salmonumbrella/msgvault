@@ -10,18 +10,27 @@ import (
 	"go.kenn.io/msgvault/internal/store"
 )
 
+const sourceIDArgument = "source_id"
+
+const importFamily = "msgvault.import_message_archived"
+
 const messageFamily = "msgvault.message_archived"
+const messageKind = "message"
 const calendarFamily = "msgvault.calendar_event_changed"
 const draftFamily = "msgvault.draft_changed"
 
 type arguments struct {
 	bytes     []byte
+	reference string
 	scopeKind string
 	scopeID   int64
 	kinds     []string
 }
 
 func canonicalArguments(name string, input map[string]any) (arguments, error) {
+	if name == importFamily {
+		return canonicalImportArguments(input)
+	}
 	var a arguments
 	key := "conversation_id"
 	a.scopeKind = "conversation"
@@ -104,8 +113,8 @@ func canonicalArguments(name string, input map[string]any) (arguments, error) {
 // sourceFamilies lists every source type Events can capture and the families
 // and kinds each one produces. SourceType is filled in by capabilities.
 var sourceFamilies = map[string][]store.MCPEventCapability{
-	"gmail":     {{Family: messageFamily, Kinds: []string{"message"}}, {Family: draftFamily, Kinds: []string{"created", "updated", "deleted"}}},
-	"imap":      {{Family: messageFamily, Kinds: []string{"message"}}, {Family: draftFamily, Kinds: []string{"created", "updated", "deleted"}}},
+	"gmail":     {{Family: messageFamily, Kinds: []string{messageKind}}, {Family: draftFamily, Kinds: []string{"created", "updated", "deleted"}}},
+	"imap":      {{Family: messageFamily, Kinds: []string{messageKind}}, {Family: draftFamily, Kinds: []string{"created", "updated", "deleted"}}},
 	"beeper":    {{Family: draftFamily, Kinds: []string{"created", "updated", "deleted"}}},
 	"slack":     {{Family: draftFamily, Kinds: []string{"created", "updated", "deleted"}}},
 	"slackdump": {{Family: draftFamily, Kinds: []string{"created", "updated", "deleted"}}},
@@ -161,7 +170,7 @@ func closedObject(properties map[string]any, required []string) map[string]any {
 }
 func (s *Service) Catalog() ListResult {
 	result := ListResult{Events: make([]Definition, 0)}
-	for _, family := range []string{messageFamily, calendarFamily, draftFamily} {
+	for _, family := range []string{messageFamily, calendarFamily, draftFamily, importFamily} {
 		var kinds, draftKinds []string
 		for _, cap := range s.caps {
 			if cap.Family == family {
@@ -185,8 +194,8 @@ func (s *Service) Catalog() ListResult {
 		draftKinds = slices.Compact(draftKinds)
 		props := map[string]any{"conversation_id": schemaID()}
 		required := []string{"conversation_id"}
-		payload := map[string]any{"kind": map[string]any{schemaTypeProperty: "string", "enum": kinds}, "conversation_id": schemaID(), "source_id": schemaID()}
-		payloadRequired := []string{"kind", "conversation_id", "source_id"}
+		payload := map[string]any{"kind": map[string]any{schemaTypeProperty: "string", "enum": kinds}, "conversation_id": schemaID(), sourceIDArgument: schemaID()}
+		payloadRequired := []string{"kind", "conversation_id", sourceIDArgument}
 		description := "A newly archived message in one conversation. Read content with get_message and list_thread; read attachments with get_attachment. get_mcp_event recovers a lost payload from eventId."
 		switch family {
 		case messageFamily:
@@ -196,6 +205,22 @@ func (s *Service) Catalog() ListResult {
 			payload["sent_at"] = schemaNullable("string")
 			payload["archived_at"] = schemaString()
 			payloadRequired = append(payloadRequired, "from_me", "message_id", "sent_at", "archived_at")
+		case importFamily:
+			props = map[string]any{
+				sourceIDArgument:  map[string]any{"anyOf": []any{map[string]any{"const": "*"}, schemaID()}, "default": "*"},
+				"source_ref":      schemaResourceReference(),
+				"include_from_me": map[string]any{schemaTypeProperty: "boolean", "default": false},
+			}
+			required = []string{}
+			payload["from_me"] = map[string]any{schemaTypeProperty: "boolean"}
+			payload["message_id"] = schemaID()
+			payload["sent_at"] = schemaNullable("string")
+			payload["archived_at"] = schemaString()
+			payload["ingestion_mode"] = map[string]any{"const": "import"}
+			payload["import_format"] = schemaString()
+			payload["import_run_id"] = schemaString()
+			payloadRequired = append(payloadRequired, "from_me", "message_id", "sent_at", "archived_at", "ingestion_mode", "import_format", "import_run_id")
+			description = "A newly committed message from an explicitly notifying native import. source_id defaults to * for future imports from any source; an exact source ID requires its current source_ref. Read content with get_message and list_thread. get_mcp_event recovers a lost payload from eventId."
 		case calendarFamily:
 			props = map[string]any{"calendar_source_id": schemaID()}
 			required = []string{"calendar_source_id"}
@@ -230,7 +255,76 @@ func (s *Service) Catalog() ListResult {
 			payloadSchema["then"] = map[string]any{"required": []string{"message_id"}}
 			payloadSchema["else"] = map[string]any{"not": map[string]any{"required": []string{"message_id"}}}
 		}
-		result.Events = append(result.Events, Definition{Name: family, Description: description, Delivery: []string{"webhook"}, InputSchema: closedObject(props, required), PayloadSchema: payloadSchema})
+		inputSchema := closedObject(props, required)
+		if family == importFamily {
+			inputSchema["oneOf"] = []any{
+				map[string]any{"properties": map[string]any{sourceIDArgument: map[string]any{"const": "*"}}, "not": map[string]any{"required": []string{"source_ref"}}},
+				map[string]any{"properties": map[string]any{sourceIDArgument: schemaID()}, "required": []string{sourceIDArgument, "source_ref"}},
+			}
+		}
+		result.Events = append(result.Events, Definition{Name: family, Description: description, Delivery: []string{"webhook"}, InputSchema: inputSchema, PayloadSchema: payloadSchema})
 	}
 	return result
+}
+
+func canonicalImportArguments(input map[string]any) (arguments, error) {
+	a := arguments{scopeKind: "archive"}
+	for field := range input {
+		if !slices.Contains([]string{sourceIDArgument, "source_ref", "include_from_me"}, field) {
+			return a, invalid("unknown_argument")
+		}
+	}
+	id := "*"
+	if raw, exists := input[sourceIDArgument]; exists {
+		var ok bool
+		id, ok = raw.(string)
+		if !ok {
+			return a, invalid("invalid_scope")
+		}
+	}
+	canonical := map[string]any{sourceIDArgument: id, "include_from_me": false}
+	if raw, exists := input["include_from_me"]; exists {
+		value, ok := raw.(bool)
+		if !ok {
+			return a, invalid("invalid_boolean")
+		}
+		canonical["include_from_me"] = value
+	}
+	reference, exists := input["source_ref"]
+	if id == "*" {
+		if exists {
+			return a, invalid("invalid_resource_reference")
+		}
+	} else {
+		var err error
+		a.scopeID, err = decimal(id)
+		if err != nil || a.scopeID == 0 {
+			return a, invalid("invalid_scope")
+		}
+		ref, ok := reference.(string)
+		if !exists || !ok || !store.CanonicalMCPResourceReference(ref) {
+			return a, invalid("invalid_resource_reference")
+		}
+		a.scopeKind = "source"
+		a.reference = ref
+		canonical["source_ref"] = ref
+	}
+	var err error
+	a.bytes, err = json.Marshal(canonical, json.Deterministic(true))
+	return a, err
+}
+
+func configuredCapabilities(opts Options) []store.MCPEventCapability {
+	caps := capabilities(opts.Enabled, opts.Sources)
+	if opts.Enabled && opts.ImportNotifications {
+		// These native import consumers provide a coherent receipt snapshot.
+		for _, format := range []string{"eml", "maildir", "mbox", "apple-mail", "imazing_csv", "synctech_sms", "google_voice", "apple_messages", "facebook_messenger", "whatsapp", "slackdump", "meeting_import", "pst"} {
+			caps = append(caps, store.MCPEventCapability{Family: importFamily, SourceType: format, Kinds: []string{messageKind}})
+		}
+	}
+	return caps
+}
+
+func schemaResourceReference() map[string]any {
+	return map[string]any{schemaTypeProperty: "string", "pattern": `^mcp1\.[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$`}
 }

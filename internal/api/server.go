@@ -1590,6 +1590,8 @@ func (s *Server) handleAuthenticatedHealth(w http.ResponseWriter, r *http.Reques
 			for _, capability := range s.mcpEvents.Capabilities() {
 				tools := []string{"get_message"}
 				switch capability.Family {
+				case "msgvault.import_message_archived":
+					tools = append(tools, "list_thread")
 				case "msgvault.message_archived":
 					tools = append(tools, "list_thread", "get_attachment")
 				case "msgvault.draft_changed":

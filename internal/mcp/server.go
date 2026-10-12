@@ -431,6 +431,9 @@ func newMCPServerWithPolicy(
 		registerAttachmentResources(s, h)
 	}
 	if opts.Events != nil {
+		if resources, ok := opts.Events.(EventsResourceBackend); ok && !opts.DelegatedOnly {
+			registerEventResources(s, resources)
+		}
 		s.AddReceivingMiddleware(eventsCapabilityMiddleware)
 		registerEvents(s, opts.Events)
 	}

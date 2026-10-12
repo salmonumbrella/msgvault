@@ -2257,6 +2257,22 @@ func (r RemoveResultCacheState) Validate() error {
 	}
 }
 
+type ResourceQueryKind string
+
+const (
+	ResourceQueryKindSource ResourceQueryKind = "source"
+)
+
+// Validate checks if the ResourceQueryKind value is valid
+func (r ResourceQueryKind) Validate() error {
+	switch r {
+	case ResourceQueryKindSource:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid ResourceQueryKind value, got: %v", r))
+	}
+}
+
 type RunSavedViewResponseResultKind string
 
 const (
