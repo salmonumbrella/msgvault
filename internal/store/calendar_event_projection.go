@@ -16,7 +16,11 @@ import (
 	"go.kenn.io/msgvault/internal/gcal/gcalmodel"
 )
 
-const calendarEventProjectionVersion = 1
+// v2 recomputes all-day bounds when local midnight is skipped by a zone.
+const (
+	calendarEventProjectionVersion       = 2
+	calendarEventProjectionLedgerVersion = 1
+)
 
 // Decode failures have no provider status. Keep a marker while retaining the
 // single kind so unknown bounds remain candidates for the occurrence reader.
