@@ -81,6 +81,8 @@ describe('CardDAVController', () => {
     });
     const controller = new CardDAVController(client);
     await controller.load();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(statusReads).toBe(1);
     Object.defineProperty(document, 'hidden', { configurable: true, value: true });
     document.dispatchEvent(new Event('visibilitychange'));
     stage = 'active';
@@ -98,25 +100,6 @@ describe('CardDAVController', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(statusReads).toBe(2);
     expect([bookReads, runReads]).toEqual([2, 2]);
-    controller.destroy();
-  });
-
-  it('leaves a visible scheduled idle page at rest', async () => {
-    vi.useFakeTimers();
-    let statusReads = 0;
-    const client = createAPIClient(async (input) => {
-      const path = new URL(requestOf(input).url).pathname;
-      if (path.endsWith('/status')) {
-        statusReads++;
-        return Response.json({ ...idleStatus, scheduled: true });
-      }
-      if (path.endsWith('/books')) return Response.json({ books: [] });
-      return Response.json({ runs: [] });
-    });
-    const controller = new CardDAVController(client);
-    await controller.load();
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(statusReads).toBe(1);
     controller.destroy();
   });
 
