@@ -440,10 +440,9 @@ func TestCardDAVStatusReportsSelectedAndAggregateSchedules(t *testing.T) {
 		{"", true, next, next.Add(-time.Minute), false}, {"?connection=work", true, next, next.Add(-time.Minute), false}, {"?connection=personal", true, next.Add(time.Hour), next, false}, {"?connection=default", false, time.Time{}, time.Time{}, false},
 		{"", true, next, next, true}, {"?connection=work", true, next, time.Time{}, true},
 	} {
-		if tc.schedulerRunning {
-			sched.jobStatuses[0].Running = true
-			sched.jobStatuses[0].Queued = false
-			sched.jobStatuses[0].QueuedAt = time.Time{}
+		sched.jobStatuses[0] = JobStatus{Name: "carddav:work", NextRun: next, Running: tc.schedulerRunning, Queued: !tc.schedulerRunning}
+		if !tc.schedulerRunning {
+			sched.jobStatuses[0].QueuedAt = next.Add(-time.Minute)
 		}
 		response := getCardDAVRead(t, server, "/api/v1/carddav/status"+tc.query)
 		require.Equal(http.StatusOK, response.Code, response.Body.String())

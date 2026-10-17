@@ -236,9 +236,11 @@ END;`)
 	require.NoError(err, "un-stamp stragglers")
 	now := time.Now()
 	clock := &now
+	var logs strings.Builder
 	job := &EmbedJob{
 		Worker: worker, Backend: backend, Store: &e2eCoverage{db: mainDB}, Fingerprint: "fake:4",
 		BackstopInterval: 24 * time.Hour, Now: func() time.Time { return *clock },
+		Log: slog.New(slog.NewTextHandler(&logs, nil)),
 	}
 
 	ctx, cancel := context.WithCancelCause(jobctx.WithProgress(ctx))
@@ -247,6 +249,7 @@ END;`)
 	_ = job.Run(ctx)
 	ws.afterStamp = nil
 	assert.True(jobctx.HasProgress(ctx), "the first repair batch committed before the yield")
+	assert.NotContains(logs.String(), "embed backstop complete")
 	require.Equal(2, countMissingE2E(t, mainDB, int64(gen)), "the yield left two stragglers")
 
 	*clock = now.Add(time.Minute)

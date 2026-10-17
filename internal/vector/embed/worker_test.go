@@ -462,7 +462,7 @@ func TestWorker_RuntimeBudgetLeavesInFlightBatchResumable(t *testing.T) {
 		select {
 		case <-client.started:
 		default:
-			t.Fatal("the runtime limit must interrupt an in-flight provider call")
+			require.FailNow("the runtime limit must interrupt an in-flight provider call")
 		}
 		require.NoError(err, "a scheduled pass boundary is not a provider failure")
 		assert.Equal(RunResult{Claimed: 1}, res)
