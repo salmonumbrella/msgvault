@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -35,6 +36,9 @@ type WorkStore interface {
 	// for target (embed_gen IS NULL OR embed_gen <> target), scanning
 	// forward from afterID in id order.
 	ScanForEmbedding(ctx context.Context, target int64, afterID int64, limit int) ([]int64, error)
+	// ScanEmbeddingBackstop bounds examined rows and returns the last examined ID,
+	// including pages containing only covered or out-of-scope messages.
+	ScanEmbeddingBackstop(ctx context.Context, target, afterID int64, limit int, messageTypes []string, sourceIDs []int64) ([]int64, int64, error)
 	// SetEmbedGen stamps embed_gen=target on ids (idempotent). Used by the
 	// BACKFILL path, which has no content read→stamp window to guard.
 	SetEmbedGen(ctx context.Context, ids []int64, target int64) error
@@ -129,8 +133,9 @@ type ProgressReport struct {
 // upserts the vectors, then stamps embed_gen so they drop out of the next
 // scan. A single Worker is safe for sequential use.
 type Worker struct {
-	deps WorkerDeps
-	wm   *Watermark
+	deps           WorkerDeps
+	wm             *Watermark
+	backstopCursor map[vector.GenerationID]int64
 	// rebind translates ?-placeholders to the driver's native form for
 	// queries the worker issues directly against MainDB (embedBatch's
 	// IN-clause). nil is normalized to the identity.
@@ -292,7 +297,8 @@ func (w *Worker) RunOnce(
 // (a message that was unstamped but already swept past by the optimistic
 // watermark — e.g. dropped during a transient failure, or a legacy row
 // whose id sits below where a prior run advanced). It reuses the same
-// scan/embed/stamp path with the scan cursor pinned at 0. Idempotent:
+// scan/embed/stamp path, retaining each generation's cursor across passes
+// until its repair finishes. Each new repair starts at 0. Idempotent:
 // already-covered rows are skipped by the scan predicate, so re-running it
 // is cheap once the corpus is embedded.
 func (w *Worker) RunBackstop(
@@ -345,10 +351,11 @@ func (w *Worker) run(
 		w.finalizeEmbedRun(fctx, runID, res, retErr, time.Now().Unix())
 	}()
 
-	// Seed the forward-scan cursor. The backstop ignores the watermark and
-	// scans from the beginning so it catches sub-watermark stragglers.
+	// Repairs resume their own cursor without changing the forward watermark.
 	var afterID int64
-	if !backstop {
+	if backstop {
+		afterID = w.backstopCursor[gen]
+	} else {
 		wm, err := w.wm.GetWatermark(ctx, gen)
 		if err != nil {
 			if w.stopIfInterrupted(ctx, gen) {
@@ -374,7 +381,15 @@ func (w *Worker) run(
 		// Close the previous batch so this scan is not charged to it.
 		diagnosticRun(ctx).completeBatch()
 		batchStart := time.Now()
-		ids, err := w.scanForEmbedding(ctx, int64(gen), afterID)
+		var ids []int64
+		var examinedID int64
+		var err error
+		if backstop {
+			ids, examinedID, err = w.deps.Store.ScanEmbeddingBackstop(ctx, int64(gen), afterID, w.deps.BatchSize,
+				w.deps.BuildScope.MessageTypes, w.deps.BuildScope.SourceIDs)
+		} else {
+			ids, err = w.scanForEmbedding(ctx, int64(gen), afterID)
+		}
 		if err != nil {
 			if w.stopIfInterrupted(ctx, gen) {
 				return res, nil
@@ -382,21 +397,35 @@ func (w *Worker) run(
 			return res, fmt.Errorf("scan for embedding: %w", err)
 		}
 		if len(ids) == 0 {
+			if backstop && examinedID > afterID {
+				afterID = examinedID
+				w.advanceWatermark(ctx, gen, afterID, true)
+				jobctx.RecordProgress(ctx)
+				continue
+			}
 			res.RepairSettled = backstop
+			if backstop {
+				delete(w.backstopCursor, gen)
+			}
 			if err := pruneEmbeddingJournal(ctx, w.deps.Backend, w.deps.Store); err != nil {
 				return res, err
 			}
 			return res, nil
 		}
-		res.Claimed += len(ids)
 		diagnosticRun(ctx).beginBatch(len(ids), batchStart)
-		outcomes.attempt(ids)
-		// batchMax is the highest id in this scan slice; once the batch is
-		// stamped these rows drop out of the predicate, but advancing the
-		// cursor past them avoids re-scanning the covered prefix.
+		batch := w.loadBatch(ctx, ids)
+		// batchMax ends this commit unit; once it is stamped, advancing the
+		// cursor past it avoids re-scanning the covered prefix.
 		batchMax := ids[len(ids)-1]
-
-		eb, err := w.embedBatch(ctx, ids)
+		if unit := batch.commitUnit(ids, w.deps.BatchSize); len(unit) < len(ids) {
+			ids, batchMax = unit, unit[len(unit)-1]
+			diagnosticRun(ctx).setAttempted(len(ids))
+		} else if backstop {
+			batchMax = examinedID
+		}
+		res.Claimed += len(ids)
+		outcomes.attempt(ids)
+		eb, err := w.embedLoaded(ctx, batch)
 		if err != nil {
 			if w.stopIfInterrupted(ctx, gen) {
 				return res, nil
@@ -595,8 +624,7 @@ func (w *Worker) run(
 			}
 		}
 
-		// Safe to stamp after the upsert: the upsert is idempotent, so a crash
-		// before this stamp just re-does the embedded rows next scan.
+		// The upsert is idempotent, so a crash before this stamp redoes these rows.
 		missed, serr := w.stampCovered(ctx, gen, eb.embeddedIDs, eb.lastModified)
 		if serr != nil {
 			if w.stopIfInterrupted(ctx, gen) {
@@ -610,8 +638,7 @@ func (w *Worker) run(
 				return res, fmt.Errorf("embed worker aborting after %d consecutive failures: %w",
 					consecutiveFailures, lastErr)
 			}
-			// Do not advance the cursor: next scan re-finds the unstamped rows
-			// (the upsert already ran, so re-embedding is idempotent).
+			// Keep the cursor so the next scan retries these idempotent rows.
 			continue
 		}
 		missed = append(missed, skipMissed...)
@@ -673,12 +700,16 @@ func (w *Worker) scanForEmbedding(ctx context.Context, gen int64, afterID int64)
 }
 
 // advanceWatermark persists the per-gen forward-scan cursor to id after a
-// batch made forward progress. The backstop never persists (it scans from
-// 0 by design and must not push the optimistic watermark backward or
-// forward). Failure is non-critical — the watermark is a pure
+// batch made forward progress. Backstops retain a separate in-memory cursor
+// so continuations skip completed batches without changing the watermark.
+// Failure is non-critical — the watermark is a pure
 // optimization — so it is logged, not returned.
 func (w *Worker) advanceWatermark(ctx context.Context, gen vector.GenerationID, id int64, backstop bool) {
 	if backstop {
+		if w.backstopCursor == nil {
+			w.backstopCursor = make(map[vector.GenerationID]int64)
+		}
+		w.backstopCursor[gen] = id
 		return
 	}
 	if err := w.wm.SetWatermark(ctx, gen, id); err != nil {
@@ -708,12 +739,63 @@ type embedBatchResult struct {
 	lastModified map[int64]any
 }
 
+// loadedBatch is a scanned batch after fetch, preprocessing and chunking,
+// before any provider request. err reports a fetch failure.
+type loadedBatch struct {
+	msgs         []msgText
+	pieces       []inputChunk
+	missing      []int64
+	empty        []int64
+	lastModified map[int64]any
+	err          error
+}
+
+// commitUnit keeps the scanned prefix whose complete messages share one
+// provider request of requestSize spans. A message with more spans starts a
+// unit by itself, so its ceil(spans/requestSize) requests stay atomic while
+// earlier messages are already saved.
+func (b *loadedBatch) commitUnit(ids []int64, requestSize int) []int64 {
+	if b.err != nil || requestSize <= 0 {
+		return ids
+	}
+	spans := make(map[int64]int, len(ids))
+	for _, p := range b.pieces {
+		spans[p.ID]++
+	}
+	used, end := 0, len(ids)
+	for i, id := range ids {
+		if used > 0 && used+spans[id] > requestSize {
+			end = i
+			break
+		}
+		used += spans[id]
+	}
+	if end == len(ids) {
+		return ids
+	}
+	deferred := make(map[int64]struct{}, len(ids)-end)
+	for _, id := range ids[end:] {
+		deferred[id] = struct{}{}
+	}
+	isDeferred := func(id int64) bool { _, ok := deferred[id]; return ok }
+	b.msgs = slices.DeleteFunc(b.msgs, func(m msgText) bool { return isDeferred(m.ID) })
+	b.pieces = slices.DeleteFunc(b.pieces, func(p inputChunk) bool { return isDeferred(p.ID) })
+	b.missing = slices.DeleteFunc(b.missing, isDeferred)
+	b.empty = slices.DeleteFunc(b.empty, isDeferred)
+	return ids[:end]
+}
+
 // embedBatch fetches subject/body for ids, preprocesses each, calls the
 // embedding client, and assembles the resulting chunks. Messages that
 // vanished between scan and fetch (e.g. the sync deleted them) are
 // reported in the returned result's missing slice rather than causing
 // a failure — the caller skip-marks them.
 func (w *Worker) embedBatch(ctx context.Context, ids []int64) (embedBatchResult, error) {
+	return w.embedLoaded(ctx, w.loadBatch(ctx, ids))
+}
+
+// loadBatch fetches, preprocesses and chunks ids without calling the provider.
+func (w *Worker) loadBatch(ctx context.Context, ids []int64) loadedBatch {
 	placeholders := make([]string, len(ids))
 	args := make([]any, len(ids))
 	for i, id := range ids {
@@ -728,7 +810,7 @@ func (w *Worker) embedBatch(ctx context.Context, ids []int64) (embedBatchResult,
 
 	rows, err := w.deps.MainDB.QueryContext(ctx, query, args...)
 	if err != nil {
-		return embedBatchResult{}, fmt.Errorf("fetch bodies: %w", err)
+		return loadedBatch{err: fmt.Errorf("fetch bodies: %w", err)}
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -746,7 +828,7 @@ func (w *Worker) embedBatch(ctx context.Context, ids []int64) (embedBatchResult,
 		var subject, bodyText, bodyHTML string
 		var lm any
 		if err := rows.Scan(&id, &subject, &bodyText, &bodyHTML, &lm); err != nil {
-			return embedBatchResult{}, fmt.Errorf("scan message row: %w", err)
+			return loadedBatch{err: fmt.Errorf("scan message row: %w", err)}
 		}
 		lastModified[id] = lm
 		// Fall back to HTML-to-text when the plaintext body is empty —
@@ -781,7 +863,7 @@ func (w *Worker) embedBatch(ctx context.Context, ids []int64) (embedBatchResult,
 		msgs = append(msgs, msgText{ID: id, Text: txt, Chars: utf8.RuneCountInString(txt), BodyTruncated: bodyTrunc})
 	}
 	if err := rows.Err(); err != nil {
-		return embedBatchResult{}, fmt.Errorf("iterate message rows: %w", err)
+		return loadedBatch{err: fmt.Errorf("iterate message rows: %w", err)}
 	}
 
 	// Identify scanned ids that had no row in messages; we'll report
@@ -793,12 +875,6 @@ func (w *Worker) embedBatch(ctx context.Context, ids []int64) (embedBatchResult,
 		}
 	}
 
-	if len(msgs) == 0 {
-		// All scanned ids are missing/empty — return an empty result (no
-		// chunks, no error). Caller skip-marks them.
-		return embedBatchResult{missing: missing, empty: empty, lastModified: lastModified}, nil
-	}
-
 	// Chunk every message into windows of at most MaxInputChars runes.
 	// Short messages produce exactly one chunk; long ones produce N.
 	// Each chunk becomes one input to the embedder. The per-message
@@ -808,7 +884,6 @@ func (w *Worker) embedBatch(ctx context.Context, ids []int64) (embedBatchResult,
 	// blow the batch past the embedder's request-time budget.
 	chunkPolicy := EmbeddingChunkPolicy(w.deps.MaxInputChars)
 	var pieces []inputChunk
-	var inputs []string
 	for _, m := range msgs {
 		spans, chunkTail := chunkPolicy.Chunk(m.Text)
 		// A message is "truncated" if any of its content was dropped:
@@ -834,8 +909,26 @@ func (w *Worker) embedBatch(ctx context.Context, ids []int64) (embedBatchResult,
 					(chunkPolicy.MaxRunes > 0 && (sp.CharEnd-sp.CharStart) == chunkPolicy.MaxRunes && j < len(spans)-1),
 			}
 			pieces = append(pieces, ic)
-			inputs = append(inputs, sp.Text)
 		}
+	}
+	return loadedBatch{msgs: msgs, pieces: pieces, missing: missing, empty: empty, lastModified: lastModified}
+}
+
+// embedLoaded calls the embedding client for a loaded batch and assembles
+// the resulting chunks.
+func (w *Worker) embedLoaded(ctx context.Context, b loadedBatch) (embedBatchResult, error) {
+	if b.err != nil {
+		return embedBatchResult{}, b.err
+	}
+	msgs, pieces, missing, empty, lastModified := b.msgs, b.pieces, b.missing, b.empty, b.lastModified
+	if len(msgs) == 0 {
+		// All scanned ids are missing/empty — return an empty result (no
+		// chunks, no error). Caller skip-marks them.
+		return embedBatchResult{missing: missing, empty: empty, lastModified: lastModified}, nil
+	}
+	inputs := make([]string, len(pieces))
+	for i, p := range pieces {
+		inputs[i] = p.Text
 	}
 
 	// Split chunk inputs into sub-batches of at most BatchSize so a
@@ -1385,6 +1478,15 @@ const rawBodyMultiplier = 16
 // addresses is universal across embedding backends, not a tuning
 // knob users are expected to touch.
 const maxSpansPerMessage = 64
+
+// MessageCommitUnitRequests is the most provider requests one Worker commit
+// unit sends: a message at the span cap, split into batchSize-span requests.
+func MessageCommitUnitRequests(batchSize int) int {
+	if batchSize < 1 {
+		batchSize = 32
+	}
+	return (maxSpansPerMessage + batchSize - 1) / batchSize
+}
 
 // ChunkPolicy is the production message chunking boundary shared by the
 // Worker and controlled evaluation adapters.

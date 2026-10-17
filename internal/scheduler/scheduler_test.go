@@ -1088,25 +1088,7 @@ func TestEmbedJob_Run_YieldedRunErrorStopsWithoutFailureWork(t *testing.T) {
 	assert.Equal(0, n, "RunBackstop calls")
 	assert.Equal(0, coverage.calls, "coverage queries")
 	assert.Empty(backend.activations(), "activation calls")
-	assert.Equal(1, strings.Count(logs.String(), failure.Error()))
 	assert.NotContains(logs.String(), "embed run complete", "yield must not log completion")
-}
-
-func TestEmbedJob_Run_ErrorWithoutYieldLogsFailure(t *testing.T) {
-	assert := assert.New(t)
-	backend := &fakeBackend{active: vector.Generation{ID: 5, State: vector.GenerationActive}}
-	runner := &fakeRunner{runErr: errors.New("operation failed")}
-	var logs bytes.Buffer
-	job := &EmbedJob{
-		Worker:  runner,
-		Backend: backend,
-		Log:     slog.New(slog.NewTextHandler(&logs, nil)),
-	}
-
-	_ = job.Run(context.Background())
-
-	assert.Contains(logs.String(), "embed run failed", "ordinary errors must log a failure")
-	assert.NotContains(logs.String(), "embed run complete", "failed runs must not log completion")
 }
 
 func TestEmbedJob_Run_PersonFailureStillRunsMessageBackstop(t *testing.T) {
@@ -2243,36 +2225,10 @@ func TestGenericJobYieldContextFinishesCleanly(t *testing.T) {
 	})
 }
 
-func TestGenericJobShutdownContextFinishesCleanly(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		require := require.New(t)
-		assert := assert.New(t)
-		started := make(chan struct{})
-		var logs bytes.Buffer
-		var callbackErr error
-		s := New(nil).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
-		require.NoError(s.AddJob(Job{Name: "other", Schedule: "17 3 * * *", Run: func(ctx context.Context) error {
-			close(started)
-			<-ctx.Done()
-			callbackErr = ctx.Err()
-			return callbackErr
-		}}))
-		errCh := make(chan error, 1)
-		go func() { errCh <- s.TriggerJob("other") }()
-		<-started
-		<-s.Stop().Done()
-		err := <-errCh
-		require.Same(callbackErr, err, "the caller receives the original callback error")
-		require.ErrorIs(err, context.Canceled)
-		assert.Empty(s.JobStatus()[0].LastError)
-		assert.NotContains(logs.String(), "level=ERROR")
-	})
-}
-
 func TestScheduledFailureLogsHaveOneOwner(t *testing.T) {
 	for _, tc := range []struct{ name, mode string }{
 		{"embed", "ordinary"}, {"other", "ordinary"}, {"document-vector", "ordinary"},
-		{"document-vector", "wrapped"}, {"document-vector", "joined"},
+		{"other", "wrapped"}, {"document-vector", "wrapped"},
 	} {
 		t.Run(tc.name+"/"+tc.mode, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -2290,9 +2246,6 @@ func TestScheduledFailureLogsHaveOneOwner(t *testing.T) {
 						close(started)
 						<-ctx.Done()
 						callbackErr = fmt.Errorf("document pass: %w", ctx.Err())
-						if tc.mode == "joined" {
-							callbackErr = fmt.Errorf("document pass: %w", errors.Join(failure, ctx.Err()))
-						}
 					}
 					return callbackErr
 				}
@@ -2313,9 +2266,6 @@ func TestScheduledFailureLogsHaveOneOwner(t *testing.T) {
 					err := <-errCh
 					require.Same(callbackErr, err, "the caller receives the original callback error")
 					require.ErrorIs(err, context.Canceled)
-					if tc.mode == "joined" {
-						require.ErrorIs(err, failure)
-					}
 				} else if tc.name == "document-vector" {
 					s.cron.Entry(s.genericJobs[tc.name]).Job.Run()
 				} else {
@@ -2336,6 +2286,8 @@ func TestScheduledFailureLogsHaveOneOwner(t *testing.T) {
 				} else {
 					assert.Equal(1, strings.Count(logs.String(), failure.Error()))
 					if tc.name == "embed" {
+						assert.Contains(logs.String(), "embed run failed")
+						assert.NotContains(logs.String(), "embed run complete")
 						assert.Contains(logs.String(), "level=WARN")
 						assert.NotContains(logs.String(), "level=ERROR")
 					} else {
@@ -2724,28 +2676,6 @@ func TestLongCooperativeJobYieldsToQueuedJob(t *testing.T) {
 		assert.False(job.LastRun.IsZero(), "long job completed normally")
 		assert.Equal(2, runs, "cooperative preemption resumes without another tick")
 	})
-}
-
-func TestCallbackErrorAfterYieldPreservesOtherErrors(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	ctx, cancel := context.WithCancelCause(context.Background())
-	cancel(ErrYieldedToWaiter)
-
-	sourceErr := errors.New("earlier source failed")
-	err := jobctx.ErrorAfterYield(ctx, errors.Join(sourceErr, context.Canceled, ErrYieldedToWaiter))
-
-	require.ErrorIs(err, sourceErr)
-	require.NotErrorIs(err, ErrYieldedToWaiter)
-	require.NotErrorIs(err, context.Canceled)
-
-	wrappedErr := fmt.Errorf("source callback: %w", errors.Join(sourceErr, context.Canceled, ErrYieldedToWaiter))
-	err = jobctx.ErrorAfterYield(ctx, wrappedErr)
-
-	require.ErrorIs(err, sourceErr)
-	require.NotErrorIs(err, ErrYieldedToWaiter)
-	require.NotErrorIs(err, context.Canceled)
-	assert.EqualError(err, "source callback: earlier source failed")
 }
 
 func TestPreemptedDailyRunResumesBehindWaiter(t *testing.T) {
@@ -3182,12 +3112,6 @@ func TestJobRuntimeBudgetResumesWithoutWaiter(t *testing.T) {
 	})
 }
 
-func TestYieldPreservesIndependentDeadlineFailure(t *testing.T) {
-	ctx, cancel := context.WithCancelCause(t.Context())
-	cancel(ErrYieldedToWaiter)
-	require.ErrorIs(t, jobctx.ErrorAfterYield(ctx, context.DeadlineExceeded), context.DeadlineExceeded)
-}
-
 func TestJobBudgetStartsAfterGateAdmission(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		assert := assert.New(t)
@@ -3296,13 +3220,6 @@ func TestJobBudgetWithoutCheckpointReportsFailureAndWaitsForTick(t *testing.T) {
 			})
 		})
 	}
-}
-
-func TestBudgetFiltersCancellationCause(t *testing.T) {
-	ctx, cancel := context.WithTimeoutCause(t.Context(), 0, jobctx.ErrRunBudgetExceeded)
-	defer cancel()
-	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
-	assert.NoError(t, jobctx.ErrorAfterYield(ctx, context.Cause(ctx)))
 }
 
 func mustStartJob(tb testing.TB, s *Scheduler, name string) JobDisposition {

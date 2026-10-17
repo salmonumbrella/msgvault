@@ -52,42 +52,6 @@ func (activeGenerationBackend) ActiveGeneration(context.Context) (vector.Generat
 	return vector.Generation{ID: 1}, nil
 }
 
-func TestEmbeddingYieldsDaemonGateToQueuedSync(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		require := require.New(t)
-		assert := assert.New(t)
-		gate := api.NewSerialOperationGate()
-		var holders []string
-		record := func() {
-			label, _, _ := gate.Holder()
-			holders = append(holders, label)
-		}
-		s := scheduler.New(func(context.Context, string) error { record(); return nil }).WithWorkTracker(gate)
-		defer func() { <-s.Stop().Done() }()
-		job := &scheduler.EmbedJob{Worker: &backfillRunner{record: record}, Backend: activeGenerationBackend{}, BackstopInterval: -1}
-		require.NoError(s.SetEmbedJob(job, "", false, 5*time.Minute))
-		require.NoError(s.AddAccount("sync@example.com", "0 0 1 1 *"))
-
-		_, err := s.StartJob("embed")
-		require.NoError(err)
-		synctest.Wait()
-		require.Equal("running", s.EmbeddingStatus().Job.State)
-		require.NoError(s.TriggerSync("sync@example.com"))
-		synctest.Wait()
-
-		time.Sleep(time.Minute + 10*time.Second)
-		synctest.Wait()
-		assert.Equal([]string{"scheduled embedding", "scheduled sync of sync@example.com", "scheduled embedding"}, holders,
-			"embedding yields the gate to the sync, then continues")
-		assert.False(s.Status()[0].LastRun.IsZero(), "the sync completed")
-		embedding := s.JobStatus()[0]
-		assert.False(embedding.Running)
-		assert.False(embedding.Pending)
-		assert.Empty(embedding.LastError)
-		assert.False(embedding.LastRun.IsZero(), "the continuation completed")
-	})
-}
-
 // delayedEmbeddingGate holds a fresh embed goroutine before real gate admission.
 // This makes the post-sync goroutine race reproducible without replacing the gate.
 type delayedEmbeddingGate struct {
@@ -149,6 +113,12 @@ func TestPostSyncEmbeddingAdmission(t *testing.T) {
 				synctest.Wait()
 				time.Sleep(3 * time.Millisecond)
 				synctest.Wait()
+				assert.False(s.Status()[0].LastRun.IsZero(), "the sync completed")
+				embedding := s.JobStatus()[0]
+				assert.False(embedding.Running)
+				assert.False(embedding.Pending)
+				assert.Empty(embedding.LastError)
+				assert.False(embedding.LastRun.IsZero(), "the continuation completed")
 				if alreadyRunning {
 					require.Len(holders, 5)
 					assert.Equal([]string{"scheduled embedding", "scheduled sync of sync@example.com"}, holders[:2])

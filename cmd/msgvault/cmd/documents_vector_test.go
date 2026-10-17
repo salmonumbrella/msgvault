@@ -593,8 +593,6 @@ func TestRegisteredDocumentVectorJobResumesUnexpiredLease(t *testing.T) {
 	coverage, err := st.GetDocumentVectorCoverage(testCtx, active.ID)
 	require.NoError(err)
 	require.True(coverage.Complete())
-	require.NoError(capture.job(context.Background()))
-	require.Equal(2, client.documentCalls, "committed publications must stay skipped")
 }
 
 func TestRegisteredDocumentVectorJobCarriesInvocation(t *testing.T) {

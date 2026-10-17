@@ -4,6 +4,7 @@
 package embed
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -59,6 +60,27 @@ type Client struct {
 	http *http.Client
 }
 
+// maxComputedBackoff caps the backoff both clients compute between attempts.
+// Kit adds up to 50% jitter to the OpenAI-compatible wait; Voyage waits
+// 100ms*2^attempt with the exponent capped at 8. Retry-After may be longer.
+const maxComputedBackoff = 25600 * time.Millisecond
+
+// durablePublishReserve leaves time after the last provider response to
+// persist the unit's result and progress. It matches the store pool's 30s
+// PostgreSQL statement_timeout, the bound a durable write already accepts.
+const durablePublishReserve = 30 * time.Second
+
+// RequestBudget is the longest one provider request can take when every
+// attempt runs to timeout and every computed backoff reaches its jittered cap,
+// plus the reserve to publish its result durably. It mirrors the clients'
+// defaults for zero values. Retry-After waits, which both clients honor up to
+// an hour each, are not included.
+func RequestBudget(timeout time.Duration, attempts int) time.Duration {
+	timeout = cmp.Or(timeout, 30*time.Second)
+	attempts = max(cmp.Or(attempts, 3), 1)
+	return time.Duration(attempts)*timeout + time.Duration(attempts-1)*maxComputedBackoff*3/2 + durablePublishReserve
+}
+
 // NewClient constructs a Client, applying defaults for Timeout and MaxRetries.
 func NewClient(cfg Config) *Client {
 	if cfg.Timeout == 0 {
@@ -112,7 +134,7 @@ func (c *Client) embed(ctx context.Context, role embedconfig.Role, inputs []stri
 		Retry: embedclient.Retry{
 			MaxAttempts:    c.cfg.MaxRetries,
 			InitialBackoff: 200 * time.Millisecond,
-			MaxBackoff:     25600 * time.Millisecond,
+			MaxBackoff:     maxComputedBackoff,
 			MaxRetryAfter:  time.Hour,
 		},
 	})

@@ -470,7 +470,7 @@ func (j *EmbedJob) missingCount(ctx context.Context, target vector.GenerationID)
 //
 // Only a finished repair starts the interval, even when a later person or
 // cleanup step fails. An interrupted or failed legacy scan retries after the
-// next forward pass; its coverage predicate skips rows already committed. A
+// next forward pass, resuming its cursor after completed batches. A
 // contextual repair whose cursor exists or whose reset committed keeps the
 // interval, so the forward pass resumes that cursor instead of resetting it.
 // maybeRunBackstop reports whether it invoked RunBackstop, so the caller

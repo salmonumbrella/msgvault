@@ -44,6 +44,19 @@ type VoyageClient struct {
 
 // NewVoyageClient constructs a contextualized embeddings client.
 func NewVoyageClient(cfg VoyageConfig) *VoyageClient {
+	cfg = cfg.withDefaults()
+	return &VoyageClient{cfg: cfg, http: newHTTPClient(cfg.Timeout, cfg.BeforeRequest, cfg.RejectRedirects)}
+}
+
+// DocumentRequests reports how many requests EmbedDocuments sends for
+// documents under this configuration, or the oversize error it returns.
+func (cfg VoyageConfig) DocumentRequests(documents []DocumentInput) (int, error) {
+	cfg = cfg.withDefaults()
+	batches, err := PackDocuments(prependDocumentPrefix(documents, cfg.DocumentPrefix), cfg.Limits)
+	return len(batches), err
+}
+
+func (cfg VoyageConfig) withDefaults() VoyageConfig {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
@@ -60,7 +73,7 @@ func NewVoyageClient(cfg VoyageConfig) *VoyageClient {
 		cfg.Limits.MaxUTF8Bytes = defaultVoyageRequestLimits.MaxUTF8Bytes
 	}
 	cfg.Limits = capVoyageRequestLimits(cfg.Limits)
-	return &VoyageClient{cfg: cfg, http: newHTTPClient(cfg.Timeout, cfg.BeforeRequest, cfg.RejectRedirects)}
+	return cfg
 }
 
 type voyageRequest struct {

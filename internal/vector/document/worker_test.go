@@ -234,6 +234,44 @@ func TestWorkerRunContextualBoundariesDoNotDependOnLimit(t *testing.T) {
 	assertions.Equal(wantInputs, unboundedProvider.calls[0])
 }
 
+func TestWorkerRunClaimsOneProviderRequestAndIsolatesOversizeDocument(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	ledger := newFakeDocumentVectorLedger(
+		workerClaim("extract-a", 1, strings.Repeat("x", 200), "token-a"),
+		workerClaim("extract-a", 2, "two", "token-b"),
+		workerClaim("extract-a", 3, "three", "token-c"),
+		workerClaim("extract-a", 4, "four", "token-d"),
+	)
+	voyage := embed.VoyageConfig{Limits: embed.RequestLimits{MaxDocuments: 2, MaxChunks: 10, MaxUTF8Bytes: 150}}
+	provider := &fakeDocumentVectorProvider{call: func(_ context.Context, inputs []embed.DocumentInput) ([][][]float32, error) {
+		if _, err := voyage.DocumentRequests(inputs); err != nil {
+			return nil, err
+		}
+		vectors := make([][][]float32, len(inputs))
+		for i := range vectors {
+			vectors[i] = [][]float32{{1, 2, 3}}
+		}
+		return vectors, nil
+	}}
+	worker := newFakeWorker(ledger, provider, &fakeDocumentVectorBackend{})
+	worker.deps.ContextualDocuments = true
+	worker.deps.ProviderRequests = voyage.DocumentRequests
+
+	first, err := worker.Run(t.Context(), 1, 10)
+	requirements.ErrorIs(err, embed.ErrDocumentTooLarge)
+	assertions.Equal(1, first.Claimed, "an oversize document is sent alone")
+	requirements.Len(ledger.failures, 1)
+	assertions.Equal("token-a", ledger.failures[0].token)
+	second, err := worker.Run(t.Context(), 1, 10)
+	requirements.NoError(err)
+	assertions.Equal(2, second.Claimed, "a run claims only what fits one provider request")
+	assertions.False(second.Exhausted)
+	requirements.Len(provider.calls, 2)
+	assertions.Equal([]embed.DocumentInput{{Chunks: []string{"two"}}, {Chunks: []string{"three"}}}, provider.calls[1])
+	assertions.Equal([]string{"token-b", "token-c"}, ledger.committed)
+}
+
 func TestWorkerRunBoundsScanningAndCarriesCursorWithoutStarvation(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)

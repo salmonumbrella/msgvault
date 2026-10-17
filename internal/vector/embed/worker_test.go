@@ -448,41 +448,77 @@ func TestWorker_YieldCancellationDuringEmbedStopsCleanly(t *testing.T) {
 }
 
 func TestWorker_RuntimeBudgetLeavesInFlightBatchResumable(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		require := require.New(t)
-		assert := assert.New(t)
-		f := newWorkerFixture(t, 2)
-		recorder := testutil.NewTestStore(t)
-		client := &blockedDiagnosticClient{inner: f.FakeClient, started: make(chan struct{})}
-		w := NewWorker(WorkerDeps{Backend: f.Backend, VectorsDB: f.VectorsDB, MainDB: f.MainDB,
-			Store: f.Store, Client: client, BatchSize: 1, MaxConsecutiveFailures: 1, Recorder: recorder})
-		ctx, cancel := context.WithTimeoutCause(t.Context(), time.Second, jobctx.ErrRunBudgetExceeded)
-		defer cancel()
-		res, err := w.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
-		select {
-		case <-client.started:
-		default:
-			require.FailNow("the runtime limit must interrupt an in-flight provider call")
-		}
-		require.NoError(err, "a scheduled pass boundary is not a provider failure")
-		assert.Equal(RunResult{Claimed: 1}, res)
-		assert.Equal(2, countMissing(t, f.MainDB, int64(f.BuildingGen)))
-		runs := messageEmbeddingOperationRuns(t, recorder)
-		require.Len(runs, 1)
-		assert.Equal(operations.StateCancelled, runs[0].State)
-		require.NotNil(runs[0].Error)
-		assert.Equal(operations.PublicErrorInvocationCancelled, runs[0].Error.Code)
-		var failed int
-		require.NoError(f.VectorsDB.QueryRow("SELECT failed FROM embed_runs ORDER BY id DESC LIMIT 1").Scan(&failed))
-		assert.Zero(failed, "the persisted batch counters exclude interrupted work")
+	t.Run("committed requests", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			f := newWorkerFixture(t, 3)
+			_, err := f.MainDB.Exec(`UPDATE message_bodies SET body_text = ?`, strings.Repeat("word ", 30))
+			require.NoError(t, err)
+			w := newTestWorker(f, 3)
+			w.deps.MaxInputChars = 64
+			var passCtx context.Context
+			f.FakeClient.OnEmbed = func(inputs []string) ([][]float32, error) {
+				select {
+				case <-time.After(400 * time.Millisecond):
+					vectors := make([][]float32, len(inputs))
+					for i := range vectors {
+						vectors[i] = []float32{1, 0, 0, 0}
+					}
+					return vectors, nil
+				case <-passCtx.Done():
+					return nil, passCtx.Err()
+				}
+			}
+			for attempt := range 2 {
+				ctx, cancel := context.WithTimeoutCause(jobctx.WithProgress(t.Context()), time.Second, jobctx.ErrRunBudgetExceeded)
+				passCtx = ctx
+				scope := testEmbeddingPassScope()
+				scope.Key = fmt.Sprintf("test:slow-unit:%d", attempt)
+				res, err := w.RunOnce(ctx, f.BuildingGen, scope)
+				cancel()
+				require.NoError(t, err)
+				assert.Positive(t, res.Succeeded, "each pass must stamp a message before its runtime limit")
+				assert.True(t, jobctx.HasProgress(ctx), "a saved message makes the scheduled pass eligible for continuation")
+			}
+			assert.Zero(t, countMissing(t, f.MainDB, int64(f.BuildingGen)), "continuations drain the messages instead of repeating an uncommitted batch")
+		})
+	})
+	t.Run("in-flight request", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			f := newWorkerFixture(t, 2)
+			recorder := testutil.NewTestStore(t)
+			client := &blockedDiagnosticClient{inner: f.FakeClient, started: make(chan struct{})}
+			w := NewWorker(WorkerDeps{Backend: f.Backend, VectorsDB: f.VectorsDB, MainDB: f.MainDB,
+				Store: f.Store, Client: client, BatchSize: 1, MaxConsecutiveFailures: 1, Recorder: recorder})
+			ctx, cancel := context.WithTimeoutCause(t.Context(), time.Second, jobctx.ErrRunBudgetExceeded)
+			defer cancel()
+			res, err := w.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
+			select {
+			case <-client.started:
+			default:
+				require.FailNow("the runtime limit must interrupt an in-flight provider call")
+			}
+			require.NoError(err, "a scheduled pass boundary is not a provider failure")
+			assert.Equal(RunResult{Claimed: 1}, res)
+			assert.Equal(2, countMissing(t, f.MainDB, int64(f.BuildingGen)))
+			runs := messageEmbeddingOperationRuns(t, recorder)
+			require.Len(runs, 1)
+			assert.Equal(operations.StateCancelled, runs[0].State)
+			require.NotNil(runs[0].Error)
+			assert.Equal(operations.PublicErrorInvocationCancelled, runs[0].Error.Code)
+			var failed int
+			require.NoError(f.VectorsDB.QueryRow("SELECT failed FROM embed_runs ORDER BY id DESC LIMIT 1").Scan(&failed))
+			assert.Zero(failed, "the persisted batch counters exclude interrupted work")
 
-		w.deps.Client = f.FakeClient
-		scope := testEmbeddingPassScope()
-		scope.Key += ":resume"
-		res, err = w.RunOnce(t.Context(), f.BuildingGen, scope)
-		require.NoError(err)
-		assert.Equal(RunResult{Claimed: 2, Succeeded: 2}, res)
-		assert.Zero(countMissing(t, f.MainDB, int64(f.BuildingGen)), "the next pass covers the interrupted batch and later rows")
+			w.deps.Client = f.FakeClient
+			scope := testEmbeddingPassScope()
+			scope.Key += ":resume"
+			res, err = w.RunOnce(t.Context(), f.BuildingGen, scope)
+			require.NoError(err)
+			assert.Equal(RunResult{Claimed: 2, Succeeded: 2}, res)
+			assert.Zero(countMissing(t, f.MainDB, int64(f.BuildingGen)), "the next pass covers the interrupted batch and later rows")
+		})
 	})
 }
 

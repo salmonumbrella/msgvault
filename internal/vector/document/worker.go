@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +60,10 @@ type WorkerDeps struct {
 	// ContextualDocuments keeps each durable extraction chunk in its own stable
 	// provider document. A worker batch must never redefine contextual scope.
 	ContextualDocuments bool
+	// ProviderRequests, when set with ContextualDocuments, reports how many
+	// provider requests one EmbedDocuments call sends. Run then claims only
+	// what fits one request, so it publishes that request before the next run.
+	ProviderRequests func([]vector.DocumentInput) (int, error)
 	// AfterGenerationID and AfterChunkID restore the bounded scan cursor reported
 	// by a prior run of the same generation. Task 6b may persist this pair; Worker
 	// also carries it across sequential runs and resets it when generations change.
@@ -448,13 +454,12 @@ func (w *Worker) collectClaims(ctx context.Context, generationID GenerationID, l
 	if err != nil {
 		return nil, fmt.Errorf("list document vector candidates: %w", err)
 	}
-	if len(candidates) == 0 {
-		result.Exhausted = true
-		w.resetCursor(result)
-		return claims, nil
-	}
+	unit := w.newRequestUnit(candidates)
 	processed := 0
 	for _, candidate := range candidates {
+		if candidate.ChunkID > after && !unit.admits(ctx, candidate) {
+			break
+		}
 		processed++
 		if candidate.ChunkID <= after {
 			continue
@@ -467,9 +472,8 @@ func (w *Worker) collectClaims(ctx context.Context, generationID GenerationID, l
 		if claim != nil {
 			claims = append(claims, claim)
 			result.Claimed++
-			if claim.ChunkID > after {
-				after = claim.ChunkID
-			}
+			after = max(after, claim.ChunkID)
+			unit.add(ctx, candidate)
 		}
 		result.AfterChunkID = after
 		if len(claims) == limit {
@@ -483,6 +487,74 @@ func (w *Worker) collectClaims(ctx context.Context, generationID GenerationID, l
 		w.afterChunkID = after
 	}
 	return claims, nil
+}
+
+// requestUnit sizes contextual candidates before they are claimed, using the
+// inputs Run will send, so one run's provider call is one request.
+type requestUnit struct {
+	worker     *Worker
+	candidates []store.DocumentVectorChunkCandidate
+	prepared   map[string]bool
+	texts      map[int64]string
+	inputs     []vector.DocumentInput
+}
+
+func (w *Worker) newRequestUnit(candidates []store.DocumentVectorChunkCandidate) *requestUnit {
+	if w.deps.ProviderRequests == nil || !w.deps.ContextualDocuments {
+		return nil
+	}
+	return &requestUnit{
+		worker: w, candidates: candidates,
+		prepared: make(map[string]bool), texts: make(map[int64]string),
+	}
+}
+
+// admits reports whether candidate shares the unit's request. The first
+// candidate is always admitted, so an oversize one gets the provider's error.
+// A candidate that cannot be prepared is admitted and fails in Run.
+func (u *requestUnit) admits(ctx context.Context, candidate store.DocumentVectorChunkCandidate) bool {
+	if u == nil || len(u.inputs) == 0 {
+		return true
+	}
+	text, ok := u.text(ctx, candidate)
+	if !ok {
+		return true
+	}
+	next := append(slices.Clip(u.inputs), vector.DocumentInput{Chunks: []string{text}})
+	requests, err := u.worker.deps.ProviderRequests(next)
+	return err == nil && requests <= 1
+}
+
+func (u *requestUnit) add(ctx context.Context, candidate store.DocumentVectorChunkCandidate) {
+	if u == nil {
+		return
+	}
+	if text, ok := u.text(ctx, candidate); ok {
+		u.inputs = append(u.inputs, vector.DocumentInput{Chunks: []string{text}})
+	}
+}
+
+// text prepares each extraction's listed candidates once, as Run prepares claims.
+func (u *requestUnit) text(ctx context.Context, candidate store.DocumentVectorChunkCandidate) (string, bool) {
+	if !u.prepared[candidate.ExtractionID] {
+		u.prepared[candidate.ExtractionID] = true
+		var claims []*store.DocumentVectorChunkClaim
+		for _, listed := range u.candidates {
+			if listed.ExtractionID == candidate.ExtractionID {
+				claims = append(claims, &store.DocumentVectorChunkClaim{
+					DocumentVectorChunkCandidate: listed, Token: strconv.FormatInt(listed.ChunkID, 10),
+				})
+			}
+		}
+		texts, err := u.worker.deps.prepareInputs(ctx, u.worker.deps.Ledger, u.worker.deps.Recipe, claims)
+		for _, claim := range claims {
+			if text, ok := texts[claim.Token]; ok && err == nil {
+				u.texts[claim.ChunkID] = text
+			}
+		}
+	}
+	text, ok := u.texts[candidate.ChunkID]
+	return text, ok
 }
 
 func (w *Worker) resetCursor(result *RunResult) {

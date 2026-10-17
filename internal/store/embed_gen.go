@@ -79,6 +79,40 @@ func (s *Store) ScanForEmbeddingScoped(ctx context.Context, target int64, afterI
 	return out, nil
 }
 
+// ScanEmbeddingBackstop examines at most limit messages after afterID, including
+// covered, deleted and out-of-scope rows. It returns missing live IDs within
+// the scope and the last examined ID, so an empty page can still advance repair.
+func (s *Store) ScanEmbeddingBackstop(ctx context.Context, target, afterID int64, limit int, messageTypes []string, sourceIDs []int64) ([]int64, int64, error) {
+	if limit <= 0 {
+		return nil, afterID, nil
+	}
+	liveWhere, liveArgs := liveMessagesWhereScoped(messageTypes, sourceIDs)
+	q := `SELECT id, (embed_gen IS NULL OR embed_gen <> ?) AND ` + liveWhere + `
+	      FROM messages WHERE id > ? ORDER BY id LIMIT ?`
+	args := append([]any{target}, liveArgs...)
+	args = append(args, afterID, limit)
+	rows, err := s.db.QueryContext(ctx, s.Rebind(q), args...)
+	if err != nil {
+		return nil, afterID, fmt.Errorf("scan embedding backstop: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	last := afterID
+	for rows.Next() {
+		var missing bool
+		if err := rows.Scan(&last, &missing); err != nil {
+			return nil, afterID, fmt.Errorf("scan embedding backstop row: %w", err)
+		}
+		if missing {
+			ids = append(ids, last)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, afterID, fmt.Errorf("iterate embedding backstop: %w", err)
+	}
+	return ids, last, nil
+}
+
 // SetEmbedGen stamps embed_gen = target on the given message ids,
 // marking them covered for that generation. Used by the embed worker
 // after a successful upsert (the rows now have embeddings for target) or

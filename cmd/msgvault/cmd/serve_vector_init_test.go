@@ -296,7 +296,7 @@ func TestRegisterDocumentVectorJobRequiresDocumentEmbeddingsAndBackend(t *testin
 	c := config.NewDefaultConfig()
 	c.Vector.Embed.Schedule.Cron = "*/7 * * * *"
 	c.Vector.Embed.Schedule.RunAfterSync = true
-	c.Vector.Embed.Schedule.MaxRuntime = 3 * time.Second
+	c.Vector.Embed.Schedule.MaxRuntime = 30 * time.Minute
 	testCtx := withTestConfig(t, c)
 	state := invocationFromContext(testCtx)
 	state.logger = testDiscardLogger()
@@ -493,11 +493,44 @@ func TestStartVectorInitAbortsQuietlyOnCancel(t *testing.T) {
 		"shutdown-cancelled init must not flip status to error")
 }
 
+func TestScheduledVectorBudgetsCoverProviderAttempts(t *testing.T) {
+	for _, tc := range []struct {
+		name                                               string
+		configured, timeout, messageBudget, documentBudget time.Duration
+		attempts                                           int
+	}{
+		{name: "provider attempts raise configured runtime", configured: 3 * time.Second, timeout: 120 * time.Second, attempts: 5, messageBudget: 1567200 * time.Millisecond, documentBudget: 783600 * time.Millisecond},
+		{name: "default covers short request", timeout: 30 * time.Second, attempts: 1, messageBudget: 5 * time.Minute, documentBudget: 5 * time.Minute},
+		{name: "provider floor raises default", timeout: 10 * time.Minute, attempts: 1, messageBudget: 21 * time.Minute, documentBudget: 10*time.Minute + 30*time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			cfg := config.NewDefaultConfig()
+			cfg.Vector.Embed.Schedule.MaxRuntime = tc.configured
+			cfg.Vector.Embeddings.Timeout = tc.timeout
+			cfg.Vector.Embeddings.MaxRetries = tc.attempts
+			cfg.Vector.Embeddings.BatchSize = 32
+			cfg.Attachments.Documents.Index.Embeddings.Enabled = true
+			vf := &vectorFeatures{Backend: &fakeCmdVectorBackend{}, Runner: &embed.GenerationWorker{},
+				DocumentBackend: startupDocumentBackend{}, Cfg: cfg.Vector}
+			embedding := &registeredEmbedJobCapture{}
+			require.NoError(registerEmbedJob(embedding, vf, nil, nil, cfg, testDiscardLogger()))
+			assert.Equal(tc.messageBudget, embedding.maxRuntime)
+			state := invocationFromContext(withTestConfig(t, cfg))
+			state.logger = testDiscardLogger()
+			documents := &registeredDocumentVectorJobCapture{}
+			require.NoError(registerDocumentVectorJob(documents, vf, nil, state))
+			assert.Equal(tc.documentBudget, documents.maxRuntime)
+		})
+	}
+}
+
 func TestNewSchedulerEmbedJobThreadsGenerationRunnerAndConvergenceChecker(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
 	cfg := config.NewDefaultConfig()
-	cfg.Vector.Embed.Schedule.MaxRuntime = 3 * time.Second
+	cfg.Vector.Embed.Schedule.MaxRuntime = 30 * time.Minute
 	runner := &embed.GenerationWorker{}
 	checker := &registeredConvergenceChecker{}
 	vf := &vectorFeatures{Backend: &fakeCmdVectorBackend{}, Runner: runner, Convergence: checker, Cfg: cfg.Vector}

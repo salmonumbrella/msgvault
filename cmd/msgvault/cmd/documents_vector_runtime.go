@@ -169,8 +169,8 @@ func runDocumentVectorWithFeatures(
 		Owner: owner, Dimension: generation.Dimension,
 		MaxInputChars:       cfg.Vector.Embeddings.MaxInputChars,
 		ContextualDocuments: cfg.Vector.Embeddings.EffectiveAPIFormat() == vector.APIFormatVoyageContextual,
-		LeaseDuration:       2 * time.Minute, HeartbeatInterval: 20 * time.Second,
-		RetryDelay: time.Minute, MaxAttempts: 5,
+		ProviderRequests:    scheduledDocumentProviderRequests(cfg.Vector, scope),
+		LeaseDuration:       2 * time.Minute, HeartbeatInterval: 20 * time.Second, RetryDelay: time.Minute, MaxAttempts: 5,
 		AfterGenerationID: afterGenerationID, AfterChunkID: cursor, Now: now,
 	})
 	checkpointed := checkpointingDocumentVectorWorker{
@@ -181,6 +181,20 @@ func runDocumentVectorWithFeatures(
 		Ledger: st, Worker: checkpointed, Backend: vf.DocumentBackend, Now: now,
 	})
 	return reconciler.Run(ctx, vectordocument.GenerationID(generationID), limit)
+}
+
+// scheduledDocumentProviderRequests limits each scheduled contextual run to one
+// Voyage request, so a pass publishes every finished request before it can
+// expire. Manual builds keep their configured batch.
+func scheduledDocumentProviderRequests(vectorCfg vector.Config, scope operations.PassScope) func([]vector.DocumentInput) (int, error) {
+	if scope.Trigger != operations.TriggerScheduled || vectorCfg.Embeddings.EffectiveAPIFormat() != vector.APIFormatVoyageContextual {
+		return nil
+	}
+	voyageCfg, err := voyageContextualEmbedConfig(vectorCfg, "")
+	if err != nil {
+		return nil
+	}
+	return voyageCfg.DocumentRequests
 }
 
 func runScheduledDocumentVectorGeneration(ctx context.Context, st *store.Store, vf *vectorFeatures, limit int, owner string) error {

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"go.kenn.io/msgvault/internal/scheduler"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector"
+	"go.kenn.io/msgvault/internal/vector/embed"
 	"go.kenn.io/msgvault/internal/vector/visual"
 )
 
@@ -557,12 +559,29 @@ func registerDocumentVectorJob(sched documentVectorJobRegistrar, vf *vectorFeatu
 	job := invocationBoundJobRun(state, func(ctx context.Context) error {
 		return runScheduledDocumentVectorGeneration(ctx, st, vf, limit, owner)
 	})
-	if err := sched.SetDocumentVectorJob(job, cfg.Vector.Embed.Schedule.Cron, cfg.Vector.Embed.Schedule.RunAfterSync, cfg.Vector.Embed.Schedule.MaxRuntime); err != nil {
+	maxRuntime := scheduledVectorRuntime(cfg.Vector, 1, "document-vector", state.logger)
+	if err := sched.SetDocumentVectorJob(job, cfg.Vector.Embed.Schedule.Cron, cfg.Vector.Embed.Schedule.RunAfterSync, maxRuntime); err != nil {
 		return fmt.Errorf("register document vector job: %w", err)
 	}
 	repairLogger(state.logger).Info("document vectors scheduled", "cron", cfg.Vector.Embed.Schedule.Cron,
 		"run_after_sync", cfg.Vector.Embed.Schedule.RunAfterSync)
 	return nil
+}
+
+// scheduledVectorRuntime raises the configured pass budget to cover one atomic
+// unit of provider requests, each allowed every configured attempt at the full
+// timeout plus capped backoff. Zero selects the five-minute default before the
+// comparison; larger budgets stay. A scheduled document run sends one request;
+// message units come from the batch size.
+func scheduledVectorRuntime(vectorCfg vector.Config, requests int, job string, logger *slog.Logger) time.Duration {
+	configured := cmp.Or(vectorCfg.Embed.Schedule.MaxRuntime, 5*time.Minute)
+	floor := time.Duration(requests) * embed.RequestBudget(vectorCfg.Embeddings.Timeout, vectorCfg.Embeddings.MaxRetries)
+	if configured >= floor {
+		return configured
+	}
+	repairLogger(logger).Info("raised scheduled vector pass runtime to cover provider retries",
+		"job", job, "configured_max_runtime", configured, "max_runtime", floor, "provider_requests", requests)
+	return floor
 }
 
 func registerEmbedJob(sched embedJobRegistrar, vf *vectorFeatures, s *store.Store, apiServer *api.Server, cfg *config.Config, logger *slog.Logger) error {
@@ -583,7 +602,8 @@ func registerEmbedJob(sched embedJobRegistrar, vf *vectorFeatures, s *store.Stor
 		embedJob.OnScopeDrift = apiServer.SetVectorScopeDrift
 	}
 	schedule := cfg.Vector.Embed.Schedule.Cron
-	if err := sched.SetEmbedJob(embedJob, schedule, cfg.Vector.Embed.Schedule.RunAfterSync, cfg.Vector.Embed.Schedule.MaxRuntime); err != nil {
+	maxRuntime := scheduledVectorRuntime(cfg.Vector, embed.MessageCommitUnitRequests(cfg.Vector.Embeddings.BatchSize), "embed", logger)
+	if err := sched.SetEmbedJob(embedJob, schedule, cfg.Vector.Embed.Schedule.RunAfterSync, maxRuntime); err != nil {
 		return fmt.Errorf("register embed job: %w", err)
 	}
 	repairLogger(logger).Info("embed scheduled",

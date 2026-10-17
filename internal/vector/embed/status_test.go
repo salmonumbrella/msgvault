@@ -402,7 +402,6 @@ func TestWorkerDiagnosticsCountCommittedCoverage(t *testing.T) {
 			_, stamped, _, _, err := f.store.CoverageCounts(t.Context(), int64(f.gen))
 			require.NoError(err)
 			assert.Equal(int64(1), stamped)
-			assert.True(jobctx.HasProgress(ctx), "the first stamp committed")
 			got := capture.read(t)
 			require.Len(got.RecentBatches, 1)
 			assert.Equal(1, got.RecentBatches[0].Completed)

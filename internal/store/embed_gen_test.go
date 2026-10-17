@@ -87,6 +87,32 @@ func TestScanForEmbeddingScopedFiltersBySource(t *testing.T) {
 	assert.Empty(none, "a source with no messages scans empty")
 }
 
+func TestEmbeddingBackstopPagesAdvanceAcrossCoveredAndOutOfScopeRows(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	st := testutil.NewTestStore(t)
+	fx := seedEmbedScopeFixture(t, st)
+	ctx := t.Context()
+	require.NoError(st.SetEmbedGen(ctx, fx.msgsA[:2], 7))
+
+	ids, after, err := st.ScanEmbeddingBackstop(ctx, 7, 0, 2, []string{"email"}, []int64{fx.srcA.ID})
+	require.NoError(err)
+	assert.Empty(ids, "covered rows still consume the examined page")
+	assert.Equal(fx.msgsA[1], after)
+	ids, after, err = st.ScanEmbeddingBackstop(ctx, 7, after, 2, []string{"email"}, []int64{fx.srcA.ID})
+	require.NoError(err)
+	assert.Equal([]int64{fx.msgsA[2]}, ids)
+	assert.Equal(fx.msgsB[0], after, "the cursor includes out-of-scope rows after the missing message")
+	ids, after, err = st.ScanEmbeddingBackstop(ctx, 7, after, 3, []string{"email"}, []int64{fx.srcA.ID})
+	require.NoError(err)
+	assert.Empty(ids)
+	assert.Equal(fx.deletedA, after, "deleted rows also consume the examined page")
+	ids, end, err := st.ScanEmbeddingBackstop(ctx, 7, after, 2, nil, nil)
+	require.NoError(err)
+	assert.Empty(ids)
+	assert.Equal(after, end, "only an unchanged cursor means the archive scan ended")
+}
+
 func TestCoverageCountsScopedVariantsFilterBySource(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)

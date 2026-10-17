@@ -62,6 +62,49 @@ func (s *pgWorkStore) ScanForEmbedding(ctx context.Context, target int64, afterI
 	return out, rows.Err()
 }
 
+func (s *pgWorkStore) ScanEmbeddingBackstop(ctx context.Context, target, afterID int64, limit int, messageTypes []string, sourceIDs []int64) ([]int64, int64, error) {
+	where := `(embed_gen IS NULL OR embed_gen <> ?) AND deleted_at IS NULL AND deleted_from_source_at IS NULL`
+	args := []any{target}
+	if len(messageTypes) > 0 {
+		ph := make([]string, len(messageTypes))
+		for i, typ := range messageTypes {
+			ph[i] = "?"
+			args = append(args, typ)
+		}
+		where += ` AND message_type IN (` + strings.Join(ph, ",") + `)`
+	}
+	if len(sourceIDs) > 0 {
+		ph := make([]string, len(sourceIDs))
+		for i, id := range sourceIDs {
+			ph[i] = "?"
+			args = append(args, id)
+		}
+		where += ` AND source_id IN (` + strings.Join(ph, ",") + `)`
+	}
+	args = append(args, afterID, limit)
+	query := `SELECT id, ` + where + ` FROM messages WHERE id > ? ORDER BY id LIMIT ?`
+	for i := 1; i <= len(args); i++ {
+		query = strings.Replace(query, "?", fmt.Sprintf("$%d", i), 1)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, afterID, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	last := afterID
+	for rows.Next() {
+		var missing bool
+		if err := rows.Scan(&last, &missing); err != nil {
+			return nil, afterID, err
+		}
+		if missing {
+			ids = append(ids, last)
+		}
+	}
+	return ids, last, rows.Err()
+}
+
 func (s *pgWorkStore) SetEmbedGen(ctx context.Context, ids []int64, target int64) error {
 	if len(ids) == 0 {
 		return nil
