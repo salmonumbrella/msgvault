@@ -1111,18 +1111,19 @@ func TestEmbedJob_Run_PersonFailureStillRunsMessageBackstop(t *testing.T) {
 	assert.NotContains(logs.String(), "embed run failed")
 }
 
-func TestEmbedJob_MaybeRunBackstop_FinishedRepairKeepsIntervalAfterLaterError(t *testing.T) {
+func TestEmbedJob_MaybeRunBackstop_KeepsIntervalAfterIndependentError(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		err  error
+		name          string
+		err           error
+		repairSettled bool
 	}{
-		{"person", &embed.GenerationRunError{Person: errors.New("person provider failed")}},
-		{"cleanup", &embed.GenerationRunError{Message: errors.New("journal cleanup failed")}},
+		{"person error without message failure", &embed.GenerationRunError{Person: errors.New("person provider failed")}, false},
+		{"settled repair before cleanup failure", &embed.GenerationRunError{Message: errors.New("journal cleanup failed")}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require := require.New(t)
 			assert := assert.New(t)
-			runner := &fakeRunner{backstopResult: embed.RunResult{RepairSettled: true}, backstopErr: tc.err}
+			runner := &fakeRunner{backstopResult: embed.RunResult{RepairSettled: tc.repairSettled}, backstopErr: tc.err}
 			job := &EmbedJob{Worker: runner, BackstopInterval: time.Hour}
 			now := time.Now().UTC()
 
@@ -2201,7 +2202,7 @@ func TestGenericJobYieldContextFinishesCleanly(t *testing.T) {
 func TestScheduledFailureLogsHaveOneOwner(t *testing.T) {
 	for _, tc := range []struct{ name, mode string }{
 		{"embed", "ordinary"}, {"other", "ordinary"}, {"document-vector", "ordinary"},
-		{"other", "wrapped"}, {"document-vector", "wrapped"},
+		{"other", "wrapped"}, {"document-vector", "wrapped"}, {"document-vector", "continuation"},
 	} {
 		t.Run(tc.name+"/"+tc.mode, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -2214,8 +2215,17 @@ func TestScheduledFailureLogsHaveOneOwner(t *testing.T) {
 				failure := errors.New("synthetic provider failure")
 				callbackErr := failure
 				started := make(chan struct{})
+				var runs int
 				run := func(ctx context.Context) error {
-					if tc.mode != "ordinary" {
+					runs++
+					if tc.mode == "continuation" {
+						if runs == 1 {
+							jobctx.RecordProgress(ctx)
+							return ErrReschedule
+						}
+						return nil
+					}
+					if tc.mode == "wrapped" {
 						close(started)
 						<-ctx.Done()
 						callbackErr = fmt.Errorf("document pass: %w", ctx.Err())
@@ -2231,7 +2241,10 @@ func TestScheduledFailureLogsHaveOneOwner(t *testing.T) {
 				default:
 					require.NoError(s.AddJob(Job{Name: tc.name, Schedule: "17 3 * * *", Run: run}))
 				}
-				if tc.mode != "ordinary" {
+				if tc.mode == "continuation" {
+					require.NoError(s.TriggerJob(tc.name))
+					synctest.Wait()
+				} else if tc.mode == "wrapped" {
 					errCh := make(chan error, 1)
 					go func() { errCh <- s.TriggerJob(tc.name) }()
 					<-started
@@ -2245,6 +2258,13 @@ func TestScheduledFailureLogsHaveOneOwner(t *testing.T) {
 					require.ErrorIs(s.TriggerJob(tc.name), failure)
 				}
 				status := s.JobStatus()[0]
+				if tc.mode == "continuation" {
+					assert.Equal(2, runs, "the scheduler runs the unfinished pass again")
+					assert.Empty(status.LastError)
+					assert.NotContains(logs.String(), "level=ERROR")
+					assert.NotContains(logs.String(), "scheduled document indexing failed")
+					return
+				}
 				if tc.mode == "wrapped" {
 					assert.Empty(status.LastError)
 					assert.NotContains(logs.String(), "level=ERROR")

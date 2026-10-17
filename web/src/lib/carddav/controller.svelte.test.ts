@@ -348,8 +348,9 @@ describe('CardDAVController', () => {
     expect(statusReads).toBe(3);
   });
 
-  it('resumes queued work on visibility return and reconciles runs completed while hidden', async () => {
+  it.each([false, true])('resumes work and refreshes completion after hiding, entirely hidden=%s', async (entirelyHidden) => {
     vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-01T15:00:00Z'));
     let stage = 'idle';
     let statusReads = 0;
     let bookReads = 0;
@@ -366,6 +367,7 @@ describe('CardDAVController', () => {
       }
       statusReads += 1;
       return Response.json({ ...idleStatus, scheduled: true,
+        ...(entirelyHidden && stage !== 'completed' ? { next_scheduled_at: '2026-10-01T15:01:00Z' } : {}),
         ...(stage === 'queued' ? { queued_at: '2026-10-01T15:01:00Z' } : {}),
         ...(stage === 'admitted' ? { scheduler_running: true } : {}),
         ...(stage === 'active' ? { active: { ...run(1), trigger: 'scheduled' } } : {}),
@@ -373,44 +375,50 @@ describe('CardDAVController', () => {
     });
     const controller = new CardDAVController(createAPIClient(fetchFn));
     await controller.load();
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(statusReads).toBe(1);
+    expect(controller.books[0]?.name).toBe('Original book');
+    expect(controller.runs).toEqual([]);
+    if (!entirelyHidden) {
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(statusReads).toBe(1);
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+      stage = 'queued';
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(controller.status?.queued_at).toBe('2026-10-01T15:01:00Z');
+      stage = 'admitted';
+      await vi.advanceTimersByTimeAsync(500);
+      expect(controller.status?.scheduler_running).toBe(true);
+      expect(controller.canSync).toBe(false);
+      stage = 'active';
+      await vi.advanceTimersByTimeAsync(500);
+      expect(controller.status?.active?.id).toBe(1);
+      stage = 'queued';
+      await vi.advanceTimersByTimeAsync(500);
+      expect(controller.status?.active).toBeUndefined();
+      expect(controller.status?.queued_at).toBe('2026-10-01T15:01:00Z');
+      stage = 'active';
+      await vi.advanceTimersByTimeAsync(500);
+      expect(controller.status?.active?.id).toBe(1);
+    }
     Object.defineProperty(document, 'hidden', { configurable: true, value: true });
     document.dispatchEvent(new Event('visibilitychange'));
-    stage = 'queued';
-    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
-    document.dispatchEvent(new Event('visibilitychange'));
-    await vi.advanceTimersByTimeAsync(0);
-    expect(controller.status?.queued_at).toBe('2026-10-01T15:01:00Z');
-    stage = 'admitted';
-    await vi.advanceTimersByTimeAsync(500);
-    expect(controller.status?.scheduler_running).toBe(true);
-    expect(controller.canSync).toBe(false);
-    stage = 'active';
-    await vi.advanceTimersByTimeAsync(500);
-    expect(controller.status?.active?.id).toBe(1);
-    stage = 'queued';
-    await vi.advanceTimersByTimeAsync(500);
-    expect(controller.status?.active).toBeUndefined();
-    expect(controller.status?.queued_at).toBe('2026-10-01T15:01:00Z');
-    stage = 'active';
-    await vi.advanceTimersByTimeAsync(500);
-    expect(controller.status?.active?.id).toBe(1);
-    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
-    document.dispatchEvent(new Event('visibilitychange'));
+    const hiddenReads = statusReads;
     await vi.advanceTimersByTimeAsync(30_000);
     stage = 'completed';
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(statusReads).toBe(6);
+    expect(statusReads).toBe(hiddenReads);
     Object.defineProperty(document, 'hidden', { configurable: true, value: false });
     document.dispatchEvent(new Event('visibilitychange'));
     await vi.advanceTimersByTimeAsync(500);
-    expect(statusReads).toBe(7);
+    expect(statusReads).toBe(hiddenReads + 1);
     expect(controller.books[0]?.name).toBe('Updated book');
     expect(controller.runs[0]?.id).toBe(1);
+    expect(controller.runs[0]?.trigger).toBe('scheduled');
     expect([bookReads, runReads]).toEqual([2, 2]);
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(statusReads).toBe(7);
+    expect(statusReads).toBe(hiddenReads + 1);
     expect([bookReads, runReads]).toEqual([2, 2]);
     controller.destroy();
   });
@@ -418,16 +426,12 @@ describe('CardDAVController', () => {
   it('uses progress-aware polling, caps backoff, and pauses while hidden', async () => {
     vi.useFakeTimers();
     let statusReads = 0;
-    let bookReads = 0;
-    let runReads = 0;
     const fetchFn = vi.fn<typeof fetch>(async (input) => {
       const path = new URL(requestOf(input).url).pathname;
       if (path === '/api/v1/carddav/books') {
-        bookReads += 1;
         return Response.json({ books: [book(1)] });
       }
       if (path === '/api/v1/carddav/runs') {
-        runReads += 1;
         return Response.json({ runs: [] });
       }
       statusReads += 1;
@@ -456,15 +460,6 @@ describe('CardDAVController', () => {
     await vi.advanceTimersByTimeAsync(8_000);
     expect(statusReads).toBe(8);
 
-    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
-    document.dispatchEvent(new Event('visibilitychange'));
-    await vi.advanceTimersByTimeAsync(499);
-    expect(statusReads).toBe(8);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(statusReads).toBe(9);
-    await vi.waitFor(() => expect(bookReads).toBe(2));
-    expect(runReads).toBe(2);
-    expect(controller.status?.active).toBeUndefined();
     controller.destroy();
   });
 

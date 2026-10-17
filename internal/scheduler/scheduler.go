@@ -441,11 +441,20 @@ func (s *Scheduler) SetDocumentVectorJob(job func(context.Context) error, schedu
 	}
 	return s.setVectorJob("document-vector", "scheduled document indexing", func(ctx context.Context) error {
 		err := job(ctx)
-		if failure := jobctx.ErrorAfterYield(ctx, err); failure != nil {
+		if failure := scheduledFailure(ctx, err); failure != nil {
 			s.logger.Error("scheduled document indexing failed", "job", "document-vector", "error", failure)
 		}
 		return err
 	}, schedule, runAfterSync, maxRuntime)
+}
+
+// scheduledFailure reports the callback error worth logging, treating a plain
+// ErrReschedule continuation as success.
+func scheduledFailure(ctx context.Context, err error) error {
+	if _, failed := errors.AsType[*RescheduleError](err); !failed && errors.Is(err, ErrReschedule) {
+		return nil
+	}
+	return jobctx.ErrorAfterYield(ctx, err)
 }
 
 func (s *Scheduler) setVectorJob(name, label string, job func(context.Context) error, schedule string, runAfterSync bool, maxRuntime time.Duration) error {

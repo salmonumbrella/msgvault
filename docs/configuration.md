@@ -1927,7 +1927,7 @@ Empty config disables scheduled embedding; you can still run
 | ---------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `cron`           | —       | 5-field cron expression. Empty string disables the standalone cron.                                                                          |
 | `run_after_sync` | `false` | Run an embed pass after successful scheduled Gmail, IMAP, Teams, and Discord syncs. Other sources use the standalone cron or a manual build. |
-| `max_runtime` | `"5m"` | Requested duration for each automatic message or document embedding pass, raised to the provider-work floor below. Zero selects the default; negative durations are rejected. |
+| `max_runtime`    | `"5m"`  | Requested duration for each automatic message or document embedding pass, raised to the provider-work floor below. Zero selects the default; negative durations are rejected. |
 
 `msgvault setup providers` supplies `run_after_sync = true` and
 `cron = "*/15 * * * *"` when it enables a text lane. It preserves either key
@@ -1935,7 +1935,15 @@ when explicitly set, including `false` and `""`. Already enabled text lanes keep
 their schedules. See
 [Recommended Configuration](usage/recommended-configuration.md).
 
-Automatic message and document embedding passes use the larger of `max_runtime` (default `5m`) and the time needed for one complete publication unit. The provider-work floor includes every configured attempt at its full timeout, capped retry backoffs, and a publication reserve. Ordinary messages can span several requests; contextual messages and documents publish each packed request separately. With default settings, the ordinary-message floor is 393.6 seconds. Provider `Retry-After` waits can exceed this floor and remain subject to pass cancellation. Sync preemption stays independent: when a sync waits, embedding yields after about 65 seconds and resumes behind it.
+Automatic message and document embedding passes use the larger of `max_runtime`
+(default `5m`) and the time needed for one complete publication unit. The
+provider-work floor includes every configured attempt at its full timeout, capped
+retry backoffs, and a publication reserve. Ordinary messages can span several
+requests; contextual messages and documents publish each packed request separately.
+With default settings, the ordinary-message floor is 393.6 seconds. Provider
+`Retry-After` waits can exceed this floor and remain subject to pass cancellation.
+Sync preemption stays independent: when a sync waits, embedding yields after about
+65 seconds and resumes behind it.
 Post-sync passes start after the sync releases the operation gate. Later passes
 skip committed coverage and publications; an interrupted provider request may
 repeat. Post-sync visual indexing can queue alongside message and document jobs

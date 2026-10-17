@@ -520,80 +520,9 @@ func TestScheduledDocumentVectorRotationRetiresObsoleteBuildingBeforeDesiredBuil
 	assert.Zero(client.documentCalls)
 }
 
-func TestRegisteredDocumentVectorJobReusesWorkerOwner(t *testing.T) {
-	require := require.New(t)
-	fixture, spec, testCtx := documentVectorCommandFixture(t)
-	st := fixture.Store
-	consent, err := configuredDocumentVectorConsentSpec(spec, invocationFromContext(testCtx), "document_embedding")
-	require.NoError(err)
-	_, _, err = st.RecordDocumentVectorConsent(testCtx, consent, time.Now())
-	require.NoError(err)
-	require.NoError(st.RecordDocumentProviderConsent(testCtx, store.DocumentProviderConsent{
-		ProfileID: spec.TargetExtractionProfileID, ProfileFingerprint: strings.Repeat("7", 64), RetentionPosture: "standard", TrainingPosture: "opted-out",
-	}))
-	hash := strings.Repeat("b", 64)
-	messageID := fixture.CreateMessage("interrupted-document")
-	require.NoError(st.UpsertAttachmentRecord(testCtx, messageID, store.AttachmentWrite{
-		Filename: "synthetic.pdf", MIMEType: "application/pdf", Size: 128, StoragePath: hash[:2] + "/" + hash,
-		ContentHash: hash, Role: store.AttachmentRoleStandalone, RoleSource: store.AttachmentRoleSourceMIMEDisposition, SourcePartKey: "mime:1.2",
-	}))
-	var attachmentID int64
-	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT id FROM attachments WHERE message_id = ?`), messageID).Scan(&attachmentID))
-	_, eligible, err := st.ReconcileDocumentOccurrence(testCtx, attachmentID, 1)
-	require.NoError(err)
-	require.True(eligible)
-	var messageType string
-	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT COALESCE(message_type, '') FROM messages WHERE id = ?`), messageID).Scan(&messageType))
-	claim, err := st.ClaimDocumentExtraction(testCtx, store.DocumentExtractionClaimInput{
-		ExtractionID: "interrupted-extraction", ProfileID: spec.TargetExtractionProfileID, CanonicalBlobHash: hash,
-		ExtractionInputKey: "original", LeaseOwner: "extraction-worker", LeaseUntil: time.Now().Add(time.Minute),
-		LocalBytes: 128, SourceSequence: 1, OccurrenceAttachmentID: attachmentID, OccurrenceMIMEType: "application/pdf", OccurrenceMessageType: messageType,
-	})
-	require.NoError(err)
-	policy, err := docbankdocument.NewNormalizePolicy(10000)
-	require.NoError(err)
-	normalized, err := docbankdocument.NormalizeDocument(docbankdocument.SourceDocument{
-		Family: "pdf", UnitKind: "page", Units: []docbankdocument.SourceUnit{{Index: 0, Markdown: "Synthetic evidence"}},
-	}, policy)
-	require.NoError(err)
-	unit, chunk := normalized.Units[0], normalized.Chunks[0]
-	require.NoError(st.PublishDocumentExtraction(testCtx, store.DocumentExtractionPublication{
-		ExtractionID: claim.ExtractionID, ProfileID: claim.ProfileID, CanonicalBlobHash: hash, ExtractionInputKey: claim.ExtractionInputKey,
-		OccurrenceAttachmentID: attachmentID, OccurrenceMIMEType: claim.OccurrenceMIMEType, OccurrenceMessageType: messageType,
-		LeaseOwner: claim.LeaseOwner, LeaseFence: claim.LeaseFence, ReturnedModel: "extract-test", UnitsProcessed: 1,
-		ManifestChecksum: normalized.Checksum, NormalizationVersion: normalized.PolicyVersion, DocumentFamily: normalized.Family, UnitKind: normalized.UnitKind,
-		Units: []store.DocumentPublishedUnit{{Index: 0, Kind: unit.Kind, Text: unit.Text, Checksum: unit.Checksum, CharCount: unit.CharCount}},
-		Chunks: []store.DocumentPublishedChunk{{Key: chunk.Key, Ordinal: 0, Text: chunk.Text, Checksum: chunk.Checksum, CharCount: chunk.CharCount,
-			Spans: []store.DocumentPublishedSpan{{UnitIndex: 0, CharStart: chunk.Spans[0].CharStart, CharEnd: chunk.Spans[0].CharEnd}}}},
-	}))
-	var cancelCurrent context.CancelCauseFunc
-	var owners []string
-	client := &commandDocumentSemanticClient{embedDocuments: func(ctx context.Context, _ []vector.DocumentInput) ([][][]float32, error) {
-		var owner string
-		require.NoError(st.DB().QueryRow(`SELECT lease_owner FROM document_vector_publications WHERE state = 'pending'`).Scan(&owner))
-		owners = append(owners, owner)
-		cancelCurrent(jobctx.ErrYieldedToWaiter)
-		return nil, ctx.Err()
-	}}
-	state := invocationFromContext(testCtx)
-	state.logger = testDiscardLogger()
-	features := &vectorFeatures{DocumentBackend: &commandDocumentVectorBackend{}, SemanticClient: client, Cfg: state.cfg.Vector}
-	capture := &registeredDocumentVectorJobCapture{}
-	require.NoError(registerDocumentVectorJob(capture, features, st, state))
-	for range 2 {
-		ctx, cancel := context.WithCancelCause(t.Context())
-		cancelCurrent = cancel
-		require.ErrorIs(capture.job(ctx), context.Canceled)
-		cancel(nil)
-	}
-	require.Len(owners, 2)
-	require.NotEmpty(owners[0])
-	require.Equal(owners[0], owners[1])
-}
-
 func TestScheduledDocumentVectorContinuesUntilBacklogIsPublished(t *testing.T) {
-	for _, leased := range []bool{false, true} {
-		t.Run(fmt.Sprintf("leased=%t", leased), func(t *testing.T) {
+	for _, mode := range []string{"publishes backlog", "leased by another worker", "reuses worker owner"} {
+		t.Run(mode, func(t *testing.T) {
 			require := require.New(t)
 			fixture, _, testCtx := documentVectorCommandFixture(t)
 			cfg := invocationFromContext(testCtx).cfg
@@ -647,9 +576,18 @@ func TestScheduledDocumentVectorContinuesUntilBacklogIsPublished(t *testing.T) {
 						Spans: []store.DocumentPublishedSpan{{UnitIndex: 0, CharStart: chunk.Spans[0].CharStart, CharEnd: chunk.Spans[0].CharEnd}}}},
 				}))
 			}
-			client := &commandDocumentSemanticClient{embedDocuments: func(_ context.Context, inputs []vector.DocumentInput) ([][][]float32, error) {
+			var cancelCurrent context.CancelCauseFunc
+			var owners []string
+			client := &commandDocumentSemanticClient{embedDocuments: func(ctx context.Context, inputs []vector.DocumentInput) ([][][]float32, error) {
 				require.Len(inputs, 1, "each pass keeps one provider request")
 				require.Equal([]string{"Source: page 1\nContent:\nSynthetic evidence"}, inputs[0].Chunks)
+				if mode == "reuses worker owner" {
+					var owner string
+					require.NoError(st.DB().QueryRow(`SELECT lease_owner FROM document_vector_publications WHERE state = 'pending'`).Scan(&owner))
+					owners = append(owners, owner)
+					cancelCurrent(jobctx.ErrYieldedToWaiter)
+					return nil, ctx.Err()
+				}
 				return [][][]float32{{{1, 0, 0}}}, nil
 			}}
 			state := invocationFromContext(testCtx)
@@ -658,7 +596,19 @@ func TestScheduledDocumentVectorContinuesUntilBacklogIsPublished(t *testing.T) {
 			capture := &registeredDocumentVectorJobCapture{}
 			require.NoError(registerDocumentVectorJob(capture, features, st, state))
 
-			if leased {
+			if mode == "reuses worker owner" {
+				for range 2 {
+					ctx, cancel := context.WithCancelCause(t.Context())
+					cancelCurrent = cancel
+					require.ErrorIs(capture.job(ctx), context.Canceled)
+					cancel(nil)
+				}
+				require.Len(owners, 2)
+				require.NotEmpty(owners[0])
+				require.Equal(owners[0], owners[1])
+				return
+			}
+			if mode == "leased by another worker" {
 				generation, _, err := st.EnsureDocumentVectorGeneration(testCtx, spec)
 				require.NoError(err)
 				var afterChunkID int64

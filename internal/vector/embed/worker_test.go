@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -98,6 +99,44 @@ func TestEmbeddingChunkPolicy_IsCanonicalForWorkerCallers(t *testing.T) {
 	require.Len(t, spans, 2)
 	assert.Equal(t, policy.OverlapRunes,
 		utf8.RuneCountInString(spans[0].Text)+utf8.RuneCountInString(spans[1].Text)-utf8.RuneCountInString(text))
+}
+
+func TestWorkerReadsEachBodyOnceAcrossScannedPage(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	f := newWorkerFixture(t, 4)
+	_, err := f.MainDB.Exec(`UPDATE message_bodies SET body_text = ?`, strings.Repeat("long message content ", 100))
+	require.NoError(err)
+	f.MainDB.SetMaxOpenConns(1)
+	f.MainDB.SetMaxIdleConns(1)
+	reads := map[int64]int{}
+	conn, err := f.MainDB.Conn(t.Context())
+	require.NoError(err)
+	err = conn.Raw(func(raw any) error {
+		sqliteConn, ok := raw.(*sqlite3.SQLiteConn)
+		if !ok {
+			return fmt.Errorf("expected SQLite connection, got %T", raw)
+		}
+		return sqliteConn.RegisterFunc("observe_body", func(id int64, text string) string {
+			reads[id]++
+			return text
+		}, false)
+	})
+	require.NoError(conn.Close())
+	require.NoError(err)
+	_, err = f.MainDB.Exec(`ALTER TABLE message_bodies RENAME TO stored_message_bodies;
+		CREATE VIEW message_bodies AS SELECT message_id, observe_body(message_id, body_text) AS body_text, body_html FROM stored_message_bodies`)
+	require.NoError(err)
+	w := NewWorker(WorkerDeps{
+		Backend: f.Backend, VectorsDB: f.VectorsDB, MainDB: f.MainDB,
+		Store: f.Store, Client: f.FakeClient, BatchSize: 4, MaxInputChars: 80, Recorder: f.Recorder,
+	})
+	result, err := w.RunOnce(t.Context(), f.BuildingGen, testEmbeddingPassScope())
+	require.NoError(err)
+	assert.Equal(4, result.Succeeded)
+	assert.Zero(countMissing(t, f.MainDB, int64(f.BuildingGen)))
+	assert.Equal(map[int64]int{1: 1, 2: 1, 3: 1, 4: 1}, reads,
+		"each scanned message body is read once before its complete publication")
 }
 
 // TestWorker_DrainsToZeroEndToEnd is the happy-path: a fresh corpus is
@@ -871,40 +910,90 @@ func TestWorker_WatermarkLossHarmless(t *testing.T) {
 	assert.Equal(t, callsBefore, f.FakeClient.calls, "no re-embed after watermark loss")
 }
 
+type e2eWorkStore struct {
+	WorkStore
+
+	afterStamp   func()
+	scanAfterIDs []int64
+	afterScan    func(int64)
+}
+
+func (s *e2eWorkStore) ScanEmbeddingBackstop(ctx context.Context, target, afterID int64, limit int, messageTypes []string, sourceIDs []int64) ([]int64, int64, error) {
+	s.scanAfterIDs = append(s.scanAfterIDs, afterID)
+	ids, examined, err := s.WorkStore.ScanEmbeddingBackstop(ctx, target, afterID, limit, messageTypes, sourceIDs)
+	if s.afterScan != nil {
+		s.afterScan(afterID)
+	}
+	return ids, examined, err
+}
+
+func (s *e2eWorkStore) SetEmbedGenIfUnchanged(ctx context.Context, items []store.EmbedGenStamp, target int64) ([]int64, int, error) {
+	missed, covered, err := s.WorkStore.SetEmbedGenIfUnchanged(ctx, items, target)
+	if s.afterStamp != nil && covered > 0 {
+		s.afterStamp()
+	}
+	return missed, covered, err
+}
+
 // TestWorker_BackstopCatchesSubWatermarkStraggler: a message left
 // unstamped BELOW the persisted watermark is invisible to RunOnce
 // (watermark-bounded) but caught by RunBackstop (full scan from 0).
 func TestWorker_BackstopCatchesSubWatermarkStraggler(t *testing.T) {
-	assert := assert.
-		New(t)
-
 	require := require.New(t)
-	f := newWorkerFixture(t, 5)
-	w := newTestWorker(f, 5)
-	_, err := w.RunOnce(context.Background(), f.BuildingGen, testEmbeddingPassScope())
-	require.NoError(err, "RunOnce 1")
-	require.Equal(0, countMissing(t, f.MainDB, int64(f.BuildingGen)), "all stamped")
-	require.Equal(int64(5), readWatermark(t, f.VectorsDB, int64(f.BuildingGen)), "watermark")
+	assert := assert.New(t)
+	f := newWorkerFixture(t, 256)
+	ws := &e2eWorkStore{WorkStore: f.Store}
+	w := NewWorker(WorkerDeps{
+		Backend: f.Backend, VectorsDB: f.VectorsDB, MainDB: f.MainDB,
+		Store: ws, Client: f.FakeClient, BatchSize: 1, Recorder: f.Recorder,
+	})
+	_, err := w.RunOnce(t.Context(), f.BuildingGen, testEmbeddingPassScope())
+	require.NoError(err)
+	require.Zero(countMissing(t, f.MainDB, int64(f.BuildingGen)))
+	require.Equal(int64(256), readWatermark(t, f.VectorsDB, int64(f.BuildingGen)))
+	_, err = f.MainDB.Exec(`UPDATE messages SET embed_gen = NULL WHERE id IN (254, 255, 256)`)
+	require.NoError(err)
+	res, err := w.RunOnce(t.Context(), f.BuildingGen, testEmbeddingPassScope())
+	require.NoError(err)
+	assert.Zero(res.Succeeded, "forward scans miss sub-watermark stragglers")
+	assert.False(res.RepairSettled)
+	require.Equal(3, countMissing(t, f.MainDB, int64(f.BuildingGen)))
 
-	// Manually un-stamp message 2 (a sub-watermark straggler) — as if a
-	// prior run dropped it during a transient fault while the watermark
-	// advanced past it.
-	_, err = f.MainDB.Exec(`UPDATE messages SET embed_gen = NULL WHERE id = 2`)
-	require.NoError(err, "unstamp msg 2")
+	scanCtx, cancelScan := context.WithCancelCause(jobctx.WithProgress(t.Context()))
+	defer cancelScan(nil)
+	ws.afterScan = func(afterID int64) {
+		if afterID == 0 {
+			cancelScan(jobctx.ErrYieldedToWaiter)
+		}
+	}
+	res, err = w.RunBackstop(scanCtx, f.BuildingGen, testEmbeddingPassScope())
+	require.NoError(err)
+	assert.False(res.RepairSettled)
+	assert.True(jobctx.HasProgress(scanCtx), "an examined covered page is a resumable checkpoint")
+	require.Equal(3, countMissing(t, f.MainDB, int64(f.BuildingGen)))
+	ws.afterScan = nil
+	ws.scanAfterIDs = nil
 
-	// RunOnce resumes from the watermark (id > 5) and does NOT see id 2.
-	res, err := w.RunOnce(context.Background(), f.BuildingGen, testEmbeddingPassScope())
-	require.NoError(err, "RunOnce 2")
-	assert.Equal(0, res.Succeeded, "RunOnce misses sub-watermark straggler")
-	assert.Equal(1, countMissing(t, f.MainDB, int64(f.BuildingGen)), "straggler still missing")
-	assert.False(res.RepairSettled, "a forward pass does not finish a repair")
+	ctx, cancel := context.WithCancelCause(jobctx.WithProgress(t.Context()))
+	defer cancel(nil)
+	ws.afterStamp = func() { cancel(jobctx.ErrYieldedToWaiter) }
+	res, err = w.RunBackstop(ctx, f.BuildingGen, testEmbeddingPassScope())
+	require.NoError(err)
+	assert.False(res.RepairSettled)
+	require.NotEmpty(ws.scanAfterIDs)
+	assert.Equal(int64(1), ws.scanAfterIDs[0], "resume after the examined covered page")
+	assert.True(jobctx.HasProgress(ctx), "the batch committed before yielding")
+	require.Equal(2, countMissing(t, f.MainDB, int64(f.BuildingGen)))
+	ws.afterStamp = nil
+	ws.scanAfterIDs = nil
 
-	// Backstop scans from 0 and catches it.
-	res, err = w.RunBackstop(context.Background(), f.BuildingGen, testEmbeddingPassScope())
-	require.NoError(err, "RunBackstop")
-	assert.Equal(1, res.Succeeded, "backstop embeds the straggler")
-	assert.Equal(0, countMissing(t, f.MainDB, int64(f.BuildingGen)), "straggler covered")
-	assert.True(res.RepairSettled, "the backstop scan reached the end")
+	res, err = w.RunBackstop(t.Context(), f.BuildingGen, testEmbeddingPassScope())
+	require.NoError(err)
+	require.NotEmpty(ws.scanAfterIDs)
+	assert.Equal(int64(254), ws.scanAfterIDs[0], "resume after the committed batch")
+	assert.Equal(2, res.Succeeded)
+	assert.Zero(countMissing(t, f.MainDB, int64(f.BuildingGen)))
+	assert.True(res.RepairSettled)
 }
 
 // TestWorker_BackstopDoesNotPersistWatermark: the backstop must not

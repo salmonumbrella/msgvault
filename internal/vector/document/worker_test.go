@@ -235,11 +235,8 @@ func TestWorkerRunContextualBoundariesDoNotDependOnLimit(t *testing.T) {
 }
 
 func TestWorkerRunClaimsOneProviderRequestAndIsolatesOversizeDocument(t *testing.T) {
-	for _, oversize := range []bool{true, false} {
-		name := "one provider request"
-		if oversize {
-			name = "oversize isolation"
-		}
+	for _, name := range []string{"one provider request", "oversize isolation", "preparation failure"} {
+		oversize := name == "oversize isolation"
 		t.Run(name, func(t *testing.T) {
 			assertions := assert.New(t)
 			requirements := require.New(t)
@@ -266,6 +263,17 @@ func TestWorkerRunClaimsOneProviderRequestAndIsolatesOversizeDocument(t *testing
 			worker := newFakeWorker(ledger, provider, &fakeDocumentVectorBackend{})
 			worker.deps.ContextualDocuments = true
 			worker.deps.ProviderRequests = voyage.DocumentRequests
+			if name == "preparation failure" {
+				failure := errors.New("extraction unavailable")
+				worker.deps.prepareInputs = func(context.Context, Ledger, Recipe, []*store.DocumentVectorChunkClaim) (map[string]string, error) {
+					return nil, failure
+				}
+				_, err := worker.Run(t.Context(), 1, 10)
+				requirements.ErrorIs(err, failure)
+				assertions.Len(ledger.failures, 3)
+				assertions.Empty(provider.calls)
+				return
+			}
 			if oversize {
 				result, err := worker.Run(t.Context(), 1, 10)
 				requirements.ErrorIs(err, embed.ErrDocumentTooLarge)
@@ -286,23 +294,6 @@ func TestWorkerRunClaimsOneProviderRequestAndIsolatesOversizeDocument(t *testing
 			assertions.Equal([]string{"token-b", "token-c"}, ledger.committed)
 		})
 	}
-}
-
-func TestWorkerRunRetainsPreparationFailureFromRequestSizing(t *testing.T) {
-	require := require.New(t)
-	ledger := newFakeDocumentVectorLedger(workerClaim("extract-a", 1, "one", "token-a"), workerClaim("extract-a", 2, "two", "token-b"))
-	provider := &fakeDocumentVectorProvider{}
-	worker := newFakeWorker(ledger, provider, &fakeDocumentVectorBackend{})
-	worker.deps.ContextualDocuments = true
-	worker.deps.ProviderRequests = (embed.VoyageConfig{}).DocumentRequests
-	failure := errors.New("extraction unavailable")
-	worker.deps.prepareInputs = func(context.Context, Ledger, Recipe, []*store.DocumentVectorChunkClaim) (map[string]string, error) {
-		return nil, failure
-	}
-	_, err := worker.Run(t.Context(), 1, 10)
-	require.ErrorIs(err, failure)
-	require.Len(ledger.failures, 2)
-	require.Empty(provider.calls)
 }
 
 func TestWorkerRunBoundsScanningAndCarriesCursorWithoutStarvation(t *testing.T) {

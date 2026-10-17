@@ -145,6 +145,9 @@ type Worker struct {
 	// form when the dep is empty.
 	lastModifiedExpr string
 	runStart         time.Time // valid only during a RunOnce call
+	// deferred is the loaded suffix the last commit unit left for the next
+	// scan of this run, so each scanned body is read and preprocessed once.
+	deferred loadedBatch
 }
 
 // NewWorker constructs a Worker, applying defaults for BatchSize (32),
@@ -338,7 +341,7 @@ func (w *Worker) run(
 	consecutiveFailures := 0
 	var lastErr error
 	completedRows := 0
-	w.runStart = time.Now()
+	w.runStart, w.deferred = time.Now(), loadedBatch{}
 	runID := w.startEmbedRun(ctx, gen, w.runStart.Unix())
 	defer func() {
 		// Finalize on a context detached from the caller's cancellation so
@@ -414,11 +417,11 @@ func (w *Worker) run(
 		}
 		diagnosticRun(ctx).beginBatch(len(ids), batchStart)
 		scannedIDs := ids
-		batch := w.loadBatch(ctx, ids)
+		batch := w.loadScanned(ctx, ids)
 		// batchMax ends this commit unit; once it is stamped, advancing the
 		// cursor past it avoids re-scanning the covered prefix.
 		batchMax := ids[len(ids)-1]
-		if unit := batch.commitUnit(ids, w.deps.BatchSize); len(unit) < len(ids) {
+		if unit := batch.commitUnit(ids, w.deps.BatchSize, &w.deferred); len(unit) < len(ids) {
 			ids, batchMax = unit, unit[len(unit)-1]
 			diagnosticRun(ctx).setAttempted(len(ids))
 		} else if backstop {
@@ -757,8 +760,8 @@ type loadedBatch struct {
 // commitUnit keeps the scanned prefix whose complete messages share one
 // provider request of requestSize spans. A message with more spans starts a
 // unit by itself, so its ceil(spans/requestSize) requests stay atomic while
-// earlier messages are already saved.
-func (b *loadedBatch) commitUnit(ids []int64, requestSize int) []int64 {
+// earlier messages are already saved. The loaded remainder goes to deferredOut.
+func (b *loadedBatch) commitUnit(ids []int64, requestSize int, deferredOut *loadedBatch) []int64 {
 	if b.err != nil || requestSize <= 0 {
 		return ids
 	}
@@ -782,11 +785,59 @@ func (b *loadedBatch) commitUnit(ids []int64, requestSize int) []int64 {
 		deferred[id] = struct{}{}
 	}
 	isDeferred := func(id int64) bool { _, ok := deferred[id]; return ok }
+	*deferredOut = b.only(isDeferred)
 	b.msgs = slices.DeleteFunc(b.msgs, func(m msgText) bool { return isDeferred(m.ID) })
 	b.pieces = slices.DeleteFunc(b.pieces, func(p inputChunk) bool { return isDeferred(p.ID) })
 	b.missing = slices.DeleteFunc(b.missing, isDeferred)
 	b.empty = slices.DeleteFunc(b.empty, isDeferred)
 	return ids[:end]
+}
+
+// only returns a copy of b limited to the ids keep accepts.
+func (b *loadedBatch) only(keep func(int64) bool) loadedBatch {
+	drop := func(id int64) bool { return !keep(id) }
+	out := loadedBatch{
+		msgs:         slices.DeleteFunc(slices.Clone(b.msgs), func(m msgText) bool { return drop(m.ID) }),
+		pieces:       slices.DeleteFunc(slices.Clone(b.pieces), func(p inputChunk) bool { return drop(p.ID) }),
+		missing:      slices.DeleteFunc(slices.Clone(b.missing), drop),
+		empty:        slices.DeleteFunc(slices.Clone(b.empty), drop),
+		lastModified: make(map[int64]any),
+	}
+	for id, lm := range b.lastModified {
+		if keep(id) {
+			out.lastModified[id] = lm
+		}
+	}
+	return out
+}
+
+// loadScanned loads ids, reusing rows the previous commit unit deferred and
+// reading only ids it did not load.
+func (w *Worker) loadScanned(ctx context.Context, ids []int64) loadedBatch {
+	cached := w.deferred
+	w.deferred = loadedBatch{}
+	isCached := func(id int64) bool {
+		_, ok := cached.lastModified[id]
+		return ok || slices.Contains(cached.missing, id)
+	}
+	fresh := slices.DeleteFunc(slices.Clone(ids), isCached)
+	if len(fresh) == len(ids) {
+		return w.loadBatch(ctx, ids)
+	}
+	b := cached.only(func(id int64) bool { return slices.Contains(ids, id) })
+	if len(fresh) == 0 {
+		return b
+	}
+	loaded := w.loadBatch(ctx, fresh)
+	if loaded.err != nil {
+		return loaded
+	}
+	b.msgs = append(b.msgs, loaded.msgs...)
+	b.pieces = append(b.pieces, loaded.pieces...)
+	b.missing = append(b.missing, loaded.missing...)
+	b.empty = append(b.empty, loaded.empty...)
+	maps.Copy(b.lastModified, loaded.lastModified)
+	return b
 }
 
 // embedBatch fetches subject/body for ids, preprocesses each, calls the
