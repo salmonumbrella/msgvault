@@ -428,7 +428,7 @@ func TestCardDAVStatusReportsSelectedAndAggregateSchedules(t *testing.T) {
 	controller := &CardDAVController{cfg: cfg, store: testutil.NewTestStore(t)}
 	next := time.Date(2026, 10, 1, 1, 0, 0, 0, time.UTC)
 	sched := newMockScheduler()
-	sched.jobStatuses = []JobStatus{{Name: "carddav:work", NextRun: next, Running: true, Queued: true, QueuedAt: next.Add(-time.Minute)}, {Name: "carddav:personal", NextRun: next.Add(time.Hour), Queued: true, QueuedAt: next}, {Name: "unrelated", NextRun: next.Add(-time.Hour)}}
+	sched.jobStatuses = []JobStatus{{Name: "carddav:work", NextRun: next, Queued: true, QueuedAt: next.Add(-time.Minute)}, {Name: "carddav:personal", NextRun: next.Add(time.Hour), Queued: true, QueuedAt: next}, {Name: "unrelated", NextRun: next.Add(-time.Hour)}}
 	server := cardDAVReadServer(t, cfg, controller, sched)
 	for _, tc := range []struct {
 		query            string
@@ -437,8 +437,14 @@ func TestCardDAVStatusReportsSelectedAndAggregateSchedules(t *testing.T) {
 		queued           time.Time
 		schedulerRunning bool
 	}{
-		{"", true, next, next.Add(-time.Minute), true}, {"?connection=work", true, next, next.Add(-time.Minute), true}, {"?connection=personal", true, next.Add(time.Hour), next, false}, {"?connection=default", false, time.Time{}, time.Time{}, false},
+		{"", true, next, next.Add(-time.Minute), false}, {"?connection=work", true, next, next.Add(-time.Minute), false}, {"?connection=personal", true, next.Add(time.Hour), next, false}, {"?connection=default", false, time.Time{}, time.Time{}, false},
+		{"", true, next, next, true}, {"?connection=work", true, next, time.Time{}, true},
 	} {
+		if tc.schedulerRunning {
+			sched.jobStatuses[0].Running = true
+			sched.jobStatuses[0].Queued = false
+			sched.jobStatuses[0].QueuedAt = time.Time{}
+		}
 		response := getCardDAVRead(t, server, "/api/v1/carddav/status"+tc.query)
 		require.Equal(http.StatusOK, response.Code, response.Body.String())
 		var status CardDAVStatusResponse
@@ -448,10 +454,13 @@ func TestCardDAVStatusReportsSelectedAndAggregateSchedules(t *testing.T) {
 		if tc.scheduled {
 			require.NotNil(status.NextScheduledAt)
 			assertions.Equal(tc.next, *status.NextScheduledAt)
+		} else {
+			assertions.Nil(status.NextScheduledAt)
+		}
+		if !tc.queued.IsZero() {
 			require.NotNil(status.QueuedAt)
 			assertions.Equal(tc.queued, *status.QueuedAt)
 		} else {
-			assertions.Nil(status.NextScheduledAt)
 			assertions.Nil(status.QueuedAt)
 		}
 	}

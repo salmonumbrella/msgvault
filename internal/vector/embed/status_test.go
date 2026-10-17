@@ -516,8 +516,11 @@ func TestDiagnosticsClassifyPassErrors(t *testing.T) {
 		err      error
 		yield    bool
 		preBatch bool
+		shutdown bool
+		failure  bool
 	}{
-		{name: "shutdown", err: fmt.Errorf("RunOnce: %w", context.Canceled)},
+		{name: "shutdown", err: fmt.Errorf("RunOnce: %w", context.Canceled), shutdown: true},
+		{name: "shutdown with independent failure", err: errors.Join(errors.New("synthetic worker failure"), context.Canceled), shutdown: true, failure: true},
 		{name: "retired message generation", err: fmt.Errorf("upsert: %w", vector.ErrGenerationRetired)},
 		{name: "retired contextual generation", err: errContextGenerationRetired},
 		{name: "yielded to waiter", err: fmt.Errorf("embed: %w", context.DeadlineExceeded), yield: true},
@@ -527,6 +530,11 @@ func TestDiagnosticsClassifyPassErrors(t *testing.T) {
 			assert := assert.New(t)
 			capture := &diagnosticCapture{}
 			ctx := t.Context()
+			if tt.shutdown {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
 			if tt.yield {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithDeadlineCause(ctx, time.Now().Add(-time.Second), jobctx.ErrYieldedToWaiter)
@@ -544,6 +552,13 @@ func TestDiagnosticsClassifyPassErrors(t *testing.T) {
 			if tt.preBatch {
 				assert.NotNil(got.LastError)
 				assert.Empty(got.RecentBatches)
+				return
+			}
+			if tt.failure {
+				require.NotNil(t, got.LastError)
+				assert.Equal(operations.PublicErrorInvocationUpstreamFailed, got.LastError.Code)
+				require.Len(t, got.RecentBatches, 1)
+				assert.Equal(got.LastError, got.RecentBatches[0].Error)
 				return
 			}
 			assert.Nil(got.LastError)

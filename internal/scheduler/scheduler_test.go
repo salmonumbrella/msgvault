@@ -2242,60 +2242,69 @@ func TestGenericJobYieldContextFinishesCleanly(t *testing.T) {
 }
 
 func TestGenericJobShutdownContextFinishesCleanly(t *testing.T) {
-	require := require.New(t)
-	started := make(chan struct{})
-	var logs bytes.Buffer
-	s := New(func(context.Context, string) error { return nil }).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
-	require.NoError(s.AddJob(Job{
-		Name:     "attachment-maintenance",
-		Schedule: "17 3 * * *",
-		Run: func(ctx context.Context) error {
-			close(started)
-			<-ctx.Done()
-			return ctx.Err()
-		},
-	}), "AddJob")
-	s.Start()
-
-	errCh := make(chan error, 1)
-	go func() { errCh <- s.TriggerJob("attachment-maintenance") }()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		require.FailNow("generic job did not start")
+	for _, mode := range []string{"pure", "wrapped", "joined"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				require := require.New(t)
+				assert := assert.New(t)
+				started := make(chan struct{})
+				var logs bytes.Buffer
+				var callbackErr error
+				failure := errors.New("synthetic document indexing failure")
+				s := New(nil).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+				require.NoError(s.AddJob(Job{Name: "document-vector", Schedule: "17 3 * * *", Run: func(ctx context.Context) error {
+					close(started)
+					<-ctx.Done()
+					callbackErr = ctx.Err()
+					switch mode {
+					case "wrapped":
+						callbackErr = fmt.Errorf("document pass: %w", callbackErr)
+					case "joined":
+						callbackErr = fmt.Errorf("document pass: %w", errors.Join(failure, callbackErr))
+					}
+					return callbackErr
+				}}))
+				errCh := make(chan error, 1)
+				go func() { errCh <- s.TriggerJob("document-vector") }()
+				<-started
+				<-s.Stop().Done()
+				err := <-errCh
+				require.Same(callbackErr, err, "the caller receives the original callback error")
+				require.ErrorIs(err, context.Canceled)
+				status := s.JobStatus()[0]
+				if mode == "joined" {
+					require.ErrorIs(err, failure)
+					assert.Contains(status.LastError, failure.Error())
+					assert.NotContains(status.LastError, "context canceled")
+					assert.Contains(logs.String(), failure.Error())
+					assert.Contains(logs.String(), "level=ERROR")
+					assert.NotContains(logs.String(), "context canceled")
+				} else {
+					assert.Empty(status.LastError)
+					assert.NotContains(logs.String(), "level=ERROR")
+				}
+			})
+		})
 	}
-
-	stopCtx := s.Stop()
-	select {
-	case <-stopCtx.Done():
-	case <-time.After(time.Second):
-		require.FailNow("scheduler shutdown did not wait for canceled generic job")
-	}
-	select {
-	case err := <-errCh:
-		require.ErrorIs(err, context.Canceled, "running job observes scheduler cancellation")
-	case <-time.After(time.Second):
-		require.FailNow("TriggerJob did not finish during shutdown")
-	}
-	assert.Empty(t, s.JobStatus()[0].LastError, "shutdown cancellation is not a job failure")
-	assert.NotContains(t, logs.String(), "level=ERROR")
 }
 
 func TestScheduledDocumentVectorFailureIsLogged(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
+		assert := assert.New(t)
+		require := require.New(t)
 		var logs bytes.Buffer
 		s := New(nil).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
 		defer func() { <-s.Stop().Done() }()
 		failure := errors.New("synthetic document indexing failure")
-		require.NoError(t, s.SetDocumentVectorJob(func(context.Context) error {
+		require.NoError(s.SetDocumentVectorJob(func(context.Context) error {
 			return failure
 		}, "0 0 1 1 *", false))
 		s.cron.Entry(s.genericJobs["document-vector"]).Job.Run()
 		synctest.Wait()
-		assert.Equal(t, failure.Error(), s.JobStatus()[0].LastError)
-		assert.Contains(t, logs.String(), "level=ERROR")
-		assert.Contains(t, logs.String(), "job=document-vector")
-		assert.Contains(t, logs.String(), failure.Error())
+		assert.Equal(failure.Error(), s.JobStatus()[0].LastError)
+		assert.Contains(logs.String(), "level=ERROR")
+		assert.Contains(logs.String(), "job=document-vector")
+		assert.Contains(logs.String(), failure.Error())
 	})
 }
 
@@ -3235,6 +3244,7 @@ func TestJobBudgetWithoutCheckpointReportsFailureAndWaitsForTick(t *testing.T) {
 }
 
 func TestBudgetFiltersCancellationCause(t *testing.T) {
+	require.ErrorIs(t, jobctx.ErrorAfterYield(t.Context(), context.Canceled), context.Canceled)
 	ctx, cancel := context.WithTimeoutCause(t.Context(), 0, jobctx.ErrRunBudgetExceeded)
 	defer cancel()
 	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)

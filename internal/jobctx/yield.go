@@ -17,13 +17,13 @@ func YieldedToWaiter(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), ErrYieldedToWaiter)
 }
 
-// ErrorAfterYield removes scheduler cancellation from err while preserving
+// ErrorAfterYield removes scheduler yield or shutdown cancellation from err while preserving
 // independent failures, including failures joined with the cancellation.
 func ErrorAfterYield(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
-	if YieldedToWaiter(ctx) || errors.Is(context.Cause(ctx), ErrRunBudgetExceeded) {
+	if errors.Is(ctx.Err(), context.Canceled) || YieldedToWaiter(ctx) || errors.Is(context.Cause(ctx), ErrRunBudgetExceeded) {
 		_, filtered := filterYieldCancellation(err, errors.Is(ctx.Err(), context.DeadlineExceeded))
 		return filtered
 	}

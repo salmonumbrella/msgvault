@@ -866,11 +866,10 @@ func (s *Scheduler) runJob(name string, run func(context.Context) error) error {
 // recordGenericJobResult updates status and logs failures with s.mu held.
 func (s *Scheduler) recordGenericJobResult(name string, err error) error {
 	if err != nil {
-		if s.ctx.Err() != nil && errors.Is(err, context.Canceled) {
-			return err
+		if failure := jobctx.ErrorAfterYield(s.ctx, err); failure != nil {
+			s.genericLastErr[name] = failure
+			s.logger.Error("scheduled job failed", "job", name, "error", failure)
 		}
-		s.genericLastErr[name] = err
-		s.logger.Error("scheduled job failed", "job", name, "error", err)
 		return err
 	}
 	s.genericLastRun[name] = time.Now()
