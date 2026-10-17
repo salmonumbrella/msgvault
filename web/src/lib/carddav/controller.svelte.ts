@@ -74,10 +74,7 @@ export class CardDAVController {
       this.stopPolling();
       return;
     }
-    if (this.shouldPoll()) {
-      this.pollDelay = MIN_POLL_MS;
-      this.schedulePoll(MIN_POLL_MS);
-    }
+    this.resumeVisiblePage();
   };
   constructor(
     client: APIClient,
@@ -462,6 +459,14 @@ export class CardDAVController {
   private shouldPoll(): boolean {
     return !this.disposed && !this.visibilityDocument?.hidden && this.hasWork();
   }
+  private resumeVisiblePage(): void {
+    if (this.shouldPoll()) {
+      this.pollDelay = MIN_POLL_MS;
+      this.schedulePoll(MIN_POLL_MS);
+    } else if (!this.disposed && this.status?.scheduled) {
+      void this.poll(++this.pollGeneration, true);
+    }
+  }
   private schedulePoll(delay: number): void {
     if (!this.shouldPoll()) return;
     if (this.pollTimer !== undefined) clearTimeout(this.pollTimer);
@@ -471,7 +476,7 @@ export class CardDAVController {
       void this.poll(generation);
     }, delay);
   }
-  private async poll(generation: number): Promise<void> {
+  private async poll(generation: number, revalidateIdle = false): Promise<void> {
     if (this.disposed || generation !== this.pollGeneration || this.visibilityDocument?.hidden) return;
     const context = this.generation;
     const statusCommit = ++this.statusCommitGeneration;
@@ -479,6 +484,7 @@ export class CardDAVController {
     const requestController = new AbortController();
     this.pollAbort = requestController;
     const hadWork = this.hasWork();
+    const previousLatest = this.status?.latest;
     try {
       const { data } = await generatedGetCardDAVStatus(
         this.connection ? { connection: this.connection } : undefined,
@@ -506,7 +512,9 @@ export class CardDAVController {
       this.statusError = null;
       this.pollFingerprint = fingerprint;
       this.recordSuccessfulStatusCommit(statusCommit);
-      if (hadWork && !this.hasWork()) {
+      const completedWhileHidden = revalidateIdle && data.latest && data.latest.state !== 'running' &&
+        (data.latest.id !== previousLatest?.id || data.latest.state !== previousLatest?.state);
+      if ((hadWork || completedWhileHidden) && !this.hasWork()) {
         this.stopPolling(false);
         await Promise.all([...(data.available ? [this.loadBooks(true)] : []), this.refreshRuns()]);
         return;

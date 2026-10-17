@@ -58,6 +58,49 @@ afterEach(() => {
 });
 
 describe('CardDAVController', () => {
+  it('revalidates once when a scheduled run starts and finishes entirely while hidden', async () => {
+    vi.useFakeTimers();
+    let stage = 'idle';
+    let statusReads = 0;
+    let bookReads = 0;
+    let runReads = 0;
+    const client = createAPIClient(async (input) => {
+      const path = new URL(requestOf(input).url).pathname;
+      if (path.endsWith('/status')) {
+        statusReads++;
+        return Response.json({ ...idleStatus, scheduled: true,
+          ...(stage === 'active' ? { active: { ...run(1), trigger: 'scheduled' } } : {}),
+          ...(stage === 'completed' ? { latest: { ...run(1, 'succeeded'), trigger: 'scheduled' } } : {}) });
+      }
+      if (path.endsWith('/books')) {
+        bookReads++;
+        return Response.json({ books: [book(1, { name: stage === 'completed' ? 'Updated book' : 'Original book' })] });
+      }
+      runReads++;
+      return Response.json({ runs: stage === 'completed' ? [{ ...run(1, 'succeeded'), trigger: 'scheduled' }] : [] });
+    });
+    const controller = new CardDAVController(client);
+    await controller.load();
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    stage = 'active';
+    await vi.advanceTimersByTimeAsync(30_000);
+    stage = 'completed';
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(statusReads).toBe(1);
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(statusReads).toBe(2);
+    expect(controller.books[0]?.name).toBe('Updated book');
+    expect(controller.runs[0]?.id).toBe(1);
+    expect([bookReads, runReads]).toEqual([2, 2]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(statusReads).toBe(2);
+    expect([bookReads, runReads]).toEqual([2, 2]);
+    controller.destroy();
+  });
+
   it('leaves a visible scheduled idle page at rest', async () => {
     vi.useFakeTimers();
     let statusReads = 0;
@@ -268,10 +311,10 @@ describe('CardDAVController', () => {
     controller.destroy();
   });
 
-  it('retries status errors and follows queued and active work until completion', async () => {
+  it('resumes queued work on visibility return and retries status errors through completion', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-01T15:00:00Z'));
-    let stage = 'queued';
+    let stage = 'idle';
     let reads = 0;
     const fetchFn = vi.fn<typeof fetch>(async (input) => {
       const path = new URL(requestOf(input).url).pathname;
@@ -289,6 +332,12 @@ describe('CardDAVController', () => {
     });
     const controller = new CardDAVController(createAPIClient(fetchFn));
     await controller.load();
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    stage = 'queued';
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0);
     expect(controller.status?.queued_at).toBe('2026-10-01T15:01:00Z');
     stage = 'error';
     await vi.advanceTimersByTimeAsync(500);
