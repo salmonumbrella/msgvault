@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"go.kenn.io/msgvault/internal/jobctx"
@@ -171,22 +170,16 @@ type EmbedJob struct {
 	// up to BackstopInterval. In-memory (not persisted): a
 	// daemon restart resets it, so the first eligible active or incomplete-build
 	// tick runs one extra backstop — harmless because RunBackstop is idempotent.
-	// Read/written only while the running lock is held, so it needs no separate
-	// guard. Lazily allocated in maybeRunBackstop so the zero value stays usable.
+	// The scheduler serializes runs. Lazily allocated in maybeRunBackstop so
+	// the zero value stays usable.
 	// Growth is negligible (a handful of generations over the tool's life), so
 	// no pruning is needed.
 	lastBackstop map[vector.GenerationID]time.Time
-
-	// running guards against overlapping Run calls (cron fires while a
-	// post-sync hook is still draining, etc). sync.Mutex.TryLock gives
-	// us "skip if busy" without serializing a queue of waiters.
-	running sync.Mutex
 }
 
-// Run executes one embed cycle. Safe to call from cron or as a
-// post-sync hook. Returns immediately when vector search has no
-// pending work (no active and no matching building generation), or
-// when another Run is already in flight.
+// Run executes one embed cycle under the scheduler's reservation.
+// It returns immediately when vector search has no pending work
+// (no active and no matching building generation).
 func (j *EmbedJob) Run(ctx context.Context) error {
 	var retErr error
 	if j == nil || j.Worker == nil || j.Backend == nil {
@@ -197,11 +190,6 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 		log = slog.Default()
 	}
 
-	if !j.running.TryLock() {
-		log.Debug("embed run skipped: previous run still in flight")
-		return retErr
-	}
-	defer j.running.Unlock()
 	occurrence := j.now().UTC()
 
 	if j.ResolveBuildScope != nil {
@@ -466,8 +454,8 @@ func (j *EmbedJob) missingCount(ctx context.Context, target vector.GenerationID)
 // BackstopInterval has elapsed since this generation's last one, then records
 // the time. The throttle is keyed per generation so a recent backstop of one
 // generation cannot suppress a different generation's first backstop. Called
-// with the running lock held (from Run), so lastBackstop needs no separate
-// guard. A negative BackstopInterval disables it; zero defaults to 24h.
+// under the scheduler's reservation, so lastBackstop needs no separate guard.
+// A negative BackstopInterval disables it; zero defaults to 24h.
 //
 // Only a finished repair starts the interval, even when a later person or
 // cleanup step fails. An interrupted or failed legacy scan retries after the

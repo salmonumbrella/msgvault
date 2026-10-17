@@ -1832,84 +1832,6 @@ func (c *fakeCoverage) MissingCount(_ context.Context, _ int64) (int64, error) {
 	return c.missing, nil
 }
 
-// slowRunner blocks RunOnce on `release` so tests can control when it
-// completes. gate closes exactly once on the first RunOnce entry so
-// tests can wait for the slow call to actually be in flight.
-type slowRunner struct {
-	mu       sync.Mutex
-	runCalls int
-	gate     chan struct{}
-	release  chan struct{}
-	gateOnce sync.Once
-}
-
-func (r *slowRunner) ReclaimStale(context.Context) (int, error) { return 0, nil }
-
-func (r *slowRunner) RunOnce(
-	context.Context, vector.GenerationID, operations.PassScope,
-) (embed.RunResult, error) {
-	r.mu.Lock()
-	r.runCalls++
-	r.mu.Unlock()
-	if r.gate != nil {
-		r.gateOnce.Do(func() { close(r.gate) })
-	}
-	if r.release != nil {
-		<-r.release
-	}
-	return embed.RunResult{}, nil
-}
-
-func (r *slowRunner) RunBackstop(
-	context.Context, vector.GenerationID, operations.PassScope,
-) (embed.RunResult, error) {
-	return embed.RunResult{}, nil
-}
-
-func (r *slowRunner) calls() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.runCalls
-}
-
-// TestEmbedJob_Run_SkipsWhenAlreadyRunning verifies the TryLock guard:
-// a second Run invoked while the first is still in flight must return
-// immediately without calling the worker. This prevents cron and the
-// post-sync hook from stepping on each other's claim passes.
-func TestEmbedJob_Run_SkipsWhenAlreadyRunning(t *testing.T) {
-	backend := &fakeBackend{active: vector.Generation{ID: 11}}
-	gate := make(chan struct{})
-	release := make(chan struct{})
-	runner := &slowRunner{gate: gate, release: release}
-	job := &EmbedJob{Worker: runner, Backend: backend}
-
-	go func() { _ = job.Run(context.Background()) }()
-
-	// Wait for the first RunOnce to actually be in flight.
-	select {
-	case <-gate:
-	case <-time.After(time.Second):
-		require.Fail(t, "first RunOnce did not start")
-	}
-
-	// Second call must return immediately (no waiters queued).
-	done := make(chan struct{})
-	go func() {
-		_ = job.Run(context.Background())
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		require.Fail(t, "second Run blocked; TryLock guard did not short-circuit")
-	}
-
-	assert.Equal(t, 1, runner.calls(), "RunOnce calls during overlap")
-
-	// Release the first call so the job can complete.
-	close(release)
-}
-
 func TestEmbedJob_Run_NilSafe(t *testing.T) {
 	// All nil-safety guards should return cleanly without panicking or
 	// calling the worker. Use a runner that panics if touched.
@@ -2320,7 +2242,8 @@ func TestGenericJobYieldContextFinishesCleanly(t *testing.T) {
 func TestGenericJobShutdownContextFinishesCleanly(t *testing.T) {
 	require := require.New(t)
 	started := make(chan struct{})
-	s := New(func(context.Context, string) error { return nil })
+	var logs bytes.Buffer
+	s := New(func(context.Context, string) error { return nil }).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
 	require.NoError(s.AddJob(Job{
 		Name:     "attachment-maintenance",
 		Schedule: "17 3 * * *",
@@ -2352,6 +2275,26 @@ func TestGenericJobShutdownContextFinishesCleanly(t *testing.T) {
 	case <-time.After(time.Second):
 		require.FailNow("TriggerJob did not finish during shutdown")
 	}
+	assert.Empty(t, s.JobStatus()[0].LastError, "shutdown cancellation is not a job failure")
+	assert.NotContains(t, logs.String(), "level=ERROR")
+}
+
+func TestScheduledDocumentVectorFailureIsLogged(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var logs bytes.Buffer
+		s := New(nil).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+		defer func() { <-s.Stop().Done() }()
+		failure := errors.New("synthetic document indexing failure")
+		require.NoError(t, s.SetDocumentVectorJob(func(context.Context) error {
+			return failure
+		}, "0 0 1 1 *", false))
+		s.cron.Entry(s.genericJobs["document-vector"]).Job.Run()
+		synctest.Wait()
+		assert.Equal(t, failure.Error(), s.JobStatus()[0].LastError)
+		assert.Contains(t, logs.String(), "level=ERROR")
+		assert.Contains(t, logs.String(), "job=document-vector")
+		assert.Contains(t, logs.String(), failure.Error())
+	})
 }
 
 func TestRemoveJobClearsStableGenericScheduleAndRunner(t *testing.T) {

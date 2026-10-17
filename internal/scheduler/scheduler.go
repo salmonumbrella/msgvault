@@ -840,8 +840,7 @@ func (s *Scheduler) runJob(name string, run func(context.Context) error) error {
 	if errors.Is(err, ErrReschedule) {
 		s.genericPending[name] = true
 		if _, failed := errors.AsType[*RescheduleError](err); failed {
-			s.genericLastErr[name] = err
-			return err
+			return s.recordGenericJobResult(name, err)
 		}
 		s.logger.Info("scheduled job has remaining work; queued follow-up",
 			"job", name)
@@ -861,8 +860,17 @@ func (s *Scheduler) runJob(name string, run func(context.Context) error) error {
 			"job", name)
 		return nil
 	}
+	return s.recordGenericJobResult(name, err)
+}
+
+// recordGenericJobResult updates status and logs failures with s.mu held.
+func (s *Scheduler) recordGenericJobResult(name string, err error) error {
 	if err != nil {
+		if s.ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			return err
+		}
 		s.genericLastErr[name] = err
+		s.logger.Error("scheduled job failed", "job", name, "error", err)
 		return err
 	}
 	s.genericLastRun[name] = time.Now()

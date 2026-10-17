@@ -2509,7 +2509,7 @@ packing and daily attachment maintenance stop after one minute and resume
 behind waiting work. IMAP full passes do not support scheduled preemption.
 Automatic message and document embedding passes yield on the same one-minute
 policy and stop after five minutes. A pass with committed progress queues one
-continuation; a pass that reaches its limit without progress reports an error
+continuation; a pass that reaches its limit without progress records the failure in daemon logs
 and waits for its next trigger. Post-sync embedding acquires its own gate slot.
 Other jobs keep their own runtime budgets. Waiting API requests can still
 interrupt scheduled work. `GET /api/v1/sources/status` reports the same
