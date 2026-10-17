@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -358,4 +359,36 @@ func TestContextualBackstopYieldRetainsOnlyDurableCursor(t *testing.T) {
 			}
 		})
 	}
+}
+
+type yieldingLegacyRunner struct{ fakeRunner }
+
+func (r *yieldingLegacyRunner) RunBackstop(ctx context.Context, gen vector.GenerationID, scope operations.PassScope) (embed.RunResult, error) {
+	result, _ := r.fakeRunner.RunBackstop(ctx, gen, scope)
+	jobctx.RecordProgress(ctx)
+	<-ctx.Done()
+	return result, ctx.Err()
+}
+
+func TestLegacyBackstopYieldContinuesForwardWithoutRestartingScan(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		runner := &yieldingLegacyRunner{}
+		job := &EmbedJob{Worker: runner, Backend: &fakeBackend{active: vector.Generation{ID: 5}}, BackstopInterval: time.Hour}
+		s := New(nil)
+		defer func() { <-s.Stop().Done() }()
+		require.NoError(s.SetEmbedJob(job, "", false))
+		_, err := s.StartJob("embed")
+		require.NoError(err)
+		synctest.Wait()
+		time.Sleep(5*time.Minute + time.Second)
+		synctest.Wait()
+		_, forwards, _ := runner.calls()
+		backstops, _ := runner.backstops()
+		assert.Equal(2, forwards, "the bounded continuation still runs the regular pass")
+		assert.Equal(1, backstops, "a yield must not restart the legacy full scan at row zero")
+		assert.False(s.JobStatus()[0].Running)
+		assert.Empty(s.JobStatus()[0].LastError)
+	})
 }

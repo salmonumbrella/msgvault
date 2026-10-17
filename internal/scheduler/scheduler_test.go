@@ -1137,7 +1137,7 @@ func TestEmbedJob_Run_PersonFailureStillRunsMessageBackstop(t *testing.T) {
 	assert.NotContains(logs.String(), "embed run failed")
 }
 
-func TestEmbedJob_MaybeRunBackstop_YieldedCleanRunDoesNotRecordCompletion(t *testing.T) {
+func TestEmbedJob_MaybeRunBackstop_YieldedCleanRunThrottlesRetry(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	t.Cleanup(func() { cancel(nil) })
@@ -1157,9 +1157,9 @@ func TestEmbedJob_MaybeRunBackstop_YieldedCleanRunDoesNotRecordCompletion(t *tes
 
 	assert.NotContains(logs.String(), "embed backstop complete", "yield must not log completion")
 	n, _ := runner.backstops()
-	assert.Equal(2, n, "yield must not throttle a retry")
+	assert.Equal(1, n, "yield must throttle a retry")
 	_, recorded := job.lastBackstop[gen]
-	assert.False(recorded, "yield must not record lastBackstop")
+	assert.True(recorded, "yield must retain lastBackstop")
 }
 
 func TestEmbedJob_Run_ActiveGeneration(t *testing.T) {

@@ -466,9 +466,9 @@ func (j *EmbedJob) missingCount(ctx context.Context, target vector.GenerationID)
 // the time. The throttle is keyed per generation so a recent backstop of one
 // generation cannot suppress a different generation's first backstop. Called
 // with the running lock held (from Run), so lastBackstop needs no separate
-// guard. A negative BackstopInterval disables it; zero defaults to 24h. A
-// A failed backstop is retried at the next trigger. Contextual backstops
-// record their start so continuations resume the durable cursor via RunOnce.
+// guard. A negative BackstopInterval disables it; zero defaults to 24h.
+// A failed backstop is retried at the next trigger. Backstops record their
+// start so a yield lets continuations run the regular pass before another scan.
 // maybeRunBackstop reports whether it invoked RunBackstop, so the caller
 // knows durable state may have changed since any earlier convergence check.
 func (j *EmbedJob) maybeRunBackstop(
@@ -490,9 +490,7 @@ func (j *EmbedJob) maybeRunBackstop(
 	if j.lastBackstop == nil {
 		j.lastBackstop = make(map[vector.GenerationID]time.Time)
 	}
-	if j.SequenceBoundActivation {
-		j.lastBackstop[gen] = t
-	}
+	j.lastBackstop[gen] = t
 	res, err := j.Worker.RunBackstop(ctx, gen, scheduledEmbeddingPassScope(occurrence, gen, "backstop"))
 	workerErr := err
 	if jobctx.ErrorAfterYield(ctx, err) != nil || (j.SequenceBoundActivation && !res.BackstopStarted) {
