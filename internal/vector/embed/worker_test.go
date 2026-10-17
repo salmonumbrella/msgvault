@@ -834,12 +834,14 @@ func TestWorker_BackstopCatchesSubWatermarkStraggler(t *testing.T) {
 	require.NoError(err, "RunOnce 2")
 	assert.Equal(0, res.Succeeded, "RunOnce misses sub-watermark straggler")
 	assert.Equal(1, countMissing(t, f.MainDB, int64(f.BuildingGen)), "straggler still missing")
+	assert.False(res.RepairComplete, "a forward pass does not finish a repair")
 
 	// Backstop scans from 0 and catches it.
 	res, err = w.RunBackstop(context.Background(), f.BuildingGen, testEmbeddingPassScope())
 	require.NoError(err, "RunBackstop")
 	assert.Equal(1, res.Succeeded, "backstop embeds the straggler")
 	assert.Equal(0, countMissing(t, f.MainDB, int64(f.BuildingGen)), "straggler covered")
+	assert.True(res.RepairComplete, "the backstop scan reached the end")
 }
 
 // TestWorker_BackstopDoesNotPersistWatermark: the backstop must not

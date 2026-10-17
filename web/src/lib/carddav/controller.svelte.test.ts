@@ -297,6 +297,50 @@ describe('CardDAVController', () => {
     controller.destroy();
   });
 
+  it('refreshes books and history when a run completes between polls or while hidden', async () => {
+    vi.useFakeTimers();
+    let latest: ReturnType<typeof run> | undefined;
+    let statusReads = 0;
+    let bookReads = 0;
+    let runReads = 0;
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(requestOf(input).url).pathname;
+      if (path.endsWith('/status')) {
+        statusReads++;
+        return Response.json({ ...idleStatus, scheduled: true, ...(latest ? { latest } : {}) });
+      }
+      if (path.endsWith('/books')) {
+        bookReads++;
+        return Response.json({ books: [book(1, { name: `Address book after run ${latest?.id ?? 0}` })] });
+      }
+      runReads++;
+      return Response.json({ runs: latest ? [latest] : [] });
+    });
+    const controller = new CardDAVController(createAPIClient(fetchFn));
+    await controller.load();
+    expect(controller.books[0]?.name).toBe('Address book after run 0');
+
+    latest = run(1, 'succeeded');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(controller.books[0]?.name).toBe('Address book after run 1');
+    expect(controller.runs[0]?.id).toBe(1);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(bookReads).toBe(2);
+    expect(runReads).toBe(2);
+
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    latest = run(2, 'succeeded');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(statusReads).toBe(3);
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(controller.books[0]?.name).toBe('Address book after run 2');
+    expect(controller.runs[0]?.id).toBe(2);
+    controller.destroy();
+  });
+
   it('retries a failed scheduled status refresh while cached status is idle', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-01T15:00:00Z'));

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -26,8 +25,12 @@ import (
 )
 
 // e2eWorkStore is a minimal embed.WorkStore over the test main DB,
-// mirroring store.ScanForEmbedding / store.SetEmbedGen.
-type e2eWorkStore struct{ db *sql.DB }
+// mirroring store.ScanForEmbedding / store.SetEmbedGen. afterStamp, when set,
+// runs after each committed coverage stamp.
+type e2eWorkStore struct {
+	db         *sql.DB
+	afterStamp func()
+}
 
 func (s *e2eWorkStore) ScanForEmbedding(ctx context.Context, target, afterID int64, limit int) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -85,6 +88,9 @@ func (s *e2eWorkStore) SetEmbedGenIfUnchanged(ctx context.Context, items []store
 			covered++
 		}
 	}
+	if s.afterStamp != nil && covered > 0 {
+		s.afterStamp()
+	}
 	return missed, covered, nil
 }
 
@@ -127,28 +133,26 @@ func countMissingE2E(t *testing.T, db *sql.DB, gen int64) int {
 	return n
 }
 
-// TestEmbedJob_Backstop_RecoversSubWatermarkStraggler is the end-to-end
-// backstop test: a real EmbedJob (real Worker + sqlitevec backend) whose
-// backstop interval has elapsed runs a backstop that re-embeds a
-// below-watermark straggler WITHOUT re-embedding already-stamped messages;
-// and when the interval has NOT elapsed it only runs RunOnce (which misses
-// the sub-watermark straggler).
-func TestEmbedJob_Backstop_RecoversSubWatermarkStraggler(t *testing.T) {
-	assert := assert.New(
-		t,
-	)
-	require := require.New(t)
+type legacyBackstopFixture struct {
+	db      *sql.DB
+	backend *sqlitevec.Backend
+	gen     vector.GenerationID
+	store   *e2eWorkStore
+	worker  *embed.Worker
+}
 
-	ctx := context.Background()
+// newLegacyBackstopFixture builds a real legacy Worker and sqlitevec backend
+// over n messages, drains them so the watermark passes every id, and
+// activates the generation.
+func newLegacyBackstopFixture(t *testing.T, n, batchSize int) legacyBackstopFixture {
+	t.Helper()
+	require := require.New(t)
+	ctx := t.Context()
 	dir := t.TempDir()
 	mainPath := filepath.Join(dir, "main.db")
-	require.NoError(
-		sqlitevec.RegisterExtension(), "RegisterExtension")
-
+	require.NoError(sqlitevec.RegisterExtension(), "RegisterExtension")
 	mainDB, err := sql.Open(sqlitevec.DriverName(), mainPath)
-	require.NoError(
-		err, "open main")
-
+	require.NoError(err, "open main")
 	t.Cleanup(func() { _ = mainDB.Close() })
 
 	_, err = mainDB.Exec(`
@@ -175,75 +179,68 @@ AFTER INSERT ON message_bodies FOR EACH ROW
 BEGIN
     UPDATE messages SET last_modified = CURRENT_TIMESTAMP WHERE id = NEW.message_id;
 END;`)
-	require.NoError(
-		err, "schema")
-
-	const n = 4
+	require.NoError(err, "schema")
 	for i := 1; i <= n; i++ {
 		_, err = mainDB.Exec(`INSERT INTO messages (id, subject) VALUES (?, ?)`, i, fmt.Sprintf("msg %d", i))
-		require.NoError(
-			err, "insert message")
-
+		require.NoError(err, "insert message")
 		_, err = mainDB.Exec(`INSERT INTO message_bodies (message_id, body_text) VALUES (?, ?)`, i, fmt.Sprintf("body %d", i))
-		require.NoError(
-			err, "insert body")
+		require.NoError(err, "insert body")
 	}
 
 	vecPath := filepath.Join(dir, "vectors.db")
 	backend, err := sqlitevec.Open(ctx, sqlitevec.Options{
 		Path: vecPath, MainPath: mainPath, Dimension: 4, MainDB: mainDB,
 	})
-	require.NoError(
-		err, "sqlitevec.Open")
-
+	require.NoError(err, "sqlitevec.Open")
 	t.Cleanup(func() { _ = backend.Close() })
-
 	gen, err := backend.CreateGeneration(ctx, "fake", 4, "")
-	require.NoError(
-		err, "CreateGeneration")
-
+	require.NoError(err, "CreateGeneration")
 	vecDB, err := sql.Open(sqlitevec.DriverName(), vecPath)
-	require.NoError(
-		err, "open vectors handle")
-
+	require.NoError(err, "open vectors handle")
 	t.Cleanup(func() { _ = vecDB.Close() })
 
 	ws := &e2eWorkStore{db: mainDB}
 	worker := embed.NewWorker(embed.WorkerDeps{
 		Backend: backend, VectorsDB: vecDB, MainDB: mainDB,
-		Store: ws, Client: &e2eClient{dim: 4}, BatchSize: 8,
+		Store: ws, Client: &e2eClient{dim: 4}, BatchSize: batchSize,
 		LastModifiedExpr: "CAST(m.last_modified AS TEXT)",
 		Recorder:         testutil.NewTestStore(t),
 	})
-
-	// Drain the corpus fully via the worker so every message is embedded +
-	// stamped and the per-gen watermark advances to the max id.
 	_, err = worker.RunOnce(ctx, gen, operations.PassScope{
 		Key: "test:scheduler:backstop:seed", Trigger: operations.TriggerScheduled,
 		StartedAt: time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC),
 	})
-	require.NoError(
-		err, "initial drain")
-
-	require.NoError(
-		backend.ActivateGeneration(ctx, gen, false), "activate (coverage complete)")
-
+	require.NoError(err, "initial drain")
+	require.NoError(backend.ActivateGeneration(ctx, gen, false), "activate (coverage complete)")
 	require.Equal(0, countMissingE2E(t, mainDB, int64(gen)), "all embedded after drain")
+	return legacyBackstopFixture{db: mainDB, backend: backend, gen: gen, store: ws, worker: worker}
+}
+
+// TestEmbedJob_Backstop_RecoversSubWatermarkStraggler is the end-to-end
+// backstop test: a real EmbedJob (real Worker + sqlitevec backend) whose
+// backstop interval has elapsed runs a backstop that re-embeds a
+// below-watermark straggler WITHOUT re-embedding already-stamped messages;
+// and when the interval has NOT elapsed it only runs RunOnce (which misses
+// the sub-watermark straggler).
+func TestEmbedJob_Backstop_RecoversSubWatermarkStraggler(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	ctx := context.Background()
+	f := newLegacyBackstopFixture(t, 4, 8)
+	mainDB, gen := f.db, f.gen
 
 	// Create a sub-watermark straggler: un-stamp message 2 (its id is below
 	// the watermark, so a plain RunOnce will skip it). This models a
 	// repair-encoding NULL reset.
-	_, err = mainDB.ExecContext(ctx, `UPDATE messages SET embed_gen = NULL WHERE id = 2`)
-	require.NoError(
-		err, "un-stamp straggler")
-
+	_, err := mainDB.ExecContext(ctx, `UPDATE messages SET embed_gen = NULL WHERE id = 2`)
+	require.NoError(err, "un-stamp straggler")
 	require.Equal(1, countMissingE2E(t, mainDB, int64(gen)), "straggler now missing")
 
 	now := time.Now()
 	clock := &now
 	job := &EmbedJob{
-		Worker:           worker,
-		Backend:          backend,
+		Worker:           f.worker,
+		Backend:          f.backend,
 		Store:            &e2eCoverage{db: mainDB},
 		Fingerprint:      "fake:4",
 		BackstopInterval: 24 * time.Hour,
@@ -266,6 +263,41 @@ END;`)
 	_ = job.Run(ctx)
 	assert.Equal(0, countMissingE2E(t, mainDB, int64(gen)),
 		"after interval: backstop recovers the sub-watermark straggler")
+}
+
+// TestLegacyBackstopYieldResumesRemainingStragglers commits one repair batch,
+// yields to a waiting sync, and checks that the continuation embeds the
+// remaining below-watermark rows instead of waiting a full interval.
+func TestLegacyBackstopYieldResumesRemainingStragglers(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	f := newLegacyBackstopFixture(t, 5, 1)
+	_, err := f.db.Exec(`UPDATE messages SET embed_gen = NULL WHERE id IN (2, 3, 4)`)
+	require.NoError(err, "un-stamp stragglers")
+	now := time.Now()
+	clock := &now
+	job := &EmbedJob{
+		Worker: f.worker, Backend: f.backend, Fingerprint: "fake:4",
+		BackstopInterval: 24 * time.Hour, Now: func() time.Time { return *clock },
+	}
+
+	ctx, cancel := context.WithCancelCause(jobctx.WithProgress(t.Context()))
+	defer cancel(nil)
+	f.store.afterStamp = func() { cancel(jobctx.ErrYieldedToWaiter) }
+	_ = job.Run(ctx)
+	f.store.afterStamp = nil
+	assert.True(jobctx.HasProgress(ctx), "the first repair batch committed before the yield")
+	require.Equal(2, countMissingE2E(t, f.db, int64(f.gen)), "the yield left two stragglers")
+
+	*clock = now.Add(time.Minute)
+	require.NoError(job.Run(t.Context()))
+	assert.Equal(0, countMissingE2E(t, f.db, int64(f.gen)), "the continuation finishes the interrupted repair")
+
+	_, err = f.db.Exec(`UPDATE messages SET embed_gen = NULL WHERE id = 2`)
+	require.NoError(err)
+	*clock = now.Add(2 * time.Minute)
+	require.NoError(job.Run(t.Context()))
+	assert.Equal(1, countMissingE2E(t, f.db, int64(f.gen)), "the finished repair starts the interval")
 }
 
 type backstopYieldPublisher struct {
@@ -359,36 +391,4 @@ func TestContextualBackstopYieldRetainsOnlyDurableCursor(t *testing.T) {
 			}
 		})
 	}
-}
-
-type yieldingLegacyRunner struct{ fakeRunner }
-
-func (r *yieldingLegacyRunner) RunBackstop(ctx context.Context, gen vector.GenerationID, scope operations.PassScope) (embed.RunResult, error) {
-	result, _ := r.fakeRunner.RunBackstop(ctx, gen, scope)
-	jobctx.RecordProgress(ctx)
-	<-ctx.Done()
-	return result, ctx.Err()
-}
-
-func TestLegacyBackstopYieldContinuesForwardWithoutRestartingScan(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		require := require.New(t)
-		assert := assert.New(t)
-		runner := &yieldingLegacyRunner{}
-		job := &EmbedJob{Worker: runner, Backend: &fakeBackend{active: vector.Generation{ID: 5}}, BackstopInterval: time.Hour}
-		s := New(nil)
-		defer func() { <-s.Stop().Done() }()
-		require.NoError(s.SetEmbedJob(job, "", false))
-		_, err := s.StartJob("embed")
-		require.NoError(err)
-		synctest.Wait()
-		time.Sleep(5*time.Minute + time.Second)
-		synctest.Wait()
-		_, forwards, _ := runner.calls()
-		backstops, _ := runner.backstops()
-		assert.Equal(2, forwards, "the bounded continuation still runs the regular pass")
-		assert.Equal(1, backstops, "a yield must not restart the legacy full scan at row zero")
-		assert.False(s.JobStatus()[0].Running)
-		assert.Empty(s.JobStatus()[0].LastError)
-	})
 }

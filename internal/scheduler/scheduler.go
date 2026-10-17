@@ -2,6 +2,7 @@
 package scheduler
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -100,6 +101,11 @@ type Job struct {
 	// so they never ask a preemptible holder to yield. Use it for frequent
 	// maintenance that can wait behind a long run.
 	Background bool
+	// AfterSync starts the job after each successful account sync releases
+	// the gate.
+	AfterSync bool
+	// WorkLabel names the job to gate waiters. Empty uses Name.
+	WorkLabel string
 }
 
 type JobStatus struct {
@@ -129,10 +135,9 @@ type Scheduler struct {
 	running   map[string]bool         // email -> currently syncing
 	lastRun   map[string]time.Time    // email -> last successful run
 	lastErr   map[string]error        // email -> last error
-	queuedAt  map[string]time.Time
-	queued    map[string]bool      // email -> run waiting for the gate
-	pending   map[string]bool      // email -> follow-up requested by a tick or yield
-	startedAt map[string]time.Time // email -> current run began executing
+	queuedAt  map[string]time.Time    // email -> when a run began waiting for the gate
+	pending   map[string]bool         // email -> follow-up requested by a tick or yield
+	startedAt map[string]time.Time    // email -> current run began executing
 
 	genericJobs        map[string]cron.EntryID
 	genericSchedules   map[string]string
@@ -143,16 +148,15 @@ type Scheduler struct {
 	genericPreemptible map[string]bool
 	genericMaxRuntime  map[string]time.Duration
 	genericBackground  map[string]bool
+	genericAfterSync   map[string]bool
+	genericWorkLabel   map[string]string
 	genericQueuedAt    map[string]time.Time
-	genericQueued      map[string]bool
 	genericPending     map[string]bool
 	genericStartedAt   map[string]time.Time
 
 	// queuedRuns counts runs blocked waiting for the work gate.
 	queuedRuns int
 
-	embed             cronSlot // set via SetEmbedJob
-	documentVector    cronSlot // set via SetDocumentVectorJob
 	visualPostSync    func(context.Context) error
 	visualPostRunning bool
 	visualPostPending bool
@@ -162,13 +166,6 @@ type Scheduler struct {
 	wg      sync.WaitGroup     // tracks running sync goroutines
 	started bool               // true after Start(), false after Stop()
 	stopped bool               // true after Stop()
-}
-
-// cronSlot holds the labels and post-sync policy for an optional vector job.
-type cronSlot struct {
-	workLabel    string // beginWork label for cron runs
-	jobName      string // jobContext label for cron runs
-	runAfterSync bool
 }
 
 // SetVisualPostSyncJob installs the independently consented visual lane's
@@ -193,7 +190,6 @@ func New(syncFunc SyncFunc) *Scheduler {
 		running:            make(map[string]bool),
 		lastRun:            make(map[string]time.Time),
 		lastErr:            make(map[string]error),
-		queued:             make(map[string]bool),
 		queuedAt:           make(map[string]time.Time),
 		pending:            make(map[string]bool),
 		startedAt:          make(map[string]time.Time),
@@ -206,12 +202,11 @@ func New(syncFunc SyncFunc) *Scheduler {
 		genericPreemptible: make(map[string]bool),
 		genericMaxRuntime:  make(map[string]time.Duration),
 		genericBackground:  make(map[string]bool),
-		genericQueued:      make(map[string]bool),
+		genericAfterSync:   make(map[string]bool),
+		genericWorkLabel:   make(map[string]string),
 		genericQueuedAt:    make(map[string]time.Time),
 		genericPending:     make(map[string]bool),
 		genericStartedAt:   make(map[string]time.Time),
-		embed:              cronSlot{workLabel: "scheduled embedding", jobName: "embed"},
-		documentVector:     cronSlot{workLabel: "scheduled document indexing", jobName: "document-vector"},
 		ctx:                ctx,
 		cancel:             cancel,
 	}
@@ -281,12 +276,11 @@ func (s *Scheduler) onAccountTick(email string) {
 		return
 	}
 	if s.running[email] {
-		s.coalesceTickLocked("email", email, s.queued, s.pending)
+		s.coalesceTickLocked("email", email, s.queuedAt, s.pending)
 		s.mu.Unlock()
 		return
 	}
 	s.running[email] = true
-	s.queued[email] = true
 	s.queuedAt[email] = time.Now()
 	s.wg.Add(1)
 	s.mu.Unlock()
@@ -294,11 +288,11 @@ func (s *Scheduler) onAccountTick(email string) {
 }
 
 // coalesceTickLocked records a tick that arrived while its job was active.
-// The caller holds s.mu.
+// A queued run keeps its original queue time. The caller holds s.mu.
 // It reports whether a new follow-up run was recorded; false means an
 // existing run or follow-up already covers the request.
-func (s *Scheduler) coalesceTickLocked(kind, name string, queued, pending map[string]bool) bool {
-	if queued[name] {
+func (s *Scheduler) coalesceTickLocked(kind, name string, queuedAt map[string]time.Time, pending map[string]bool) bool {
+	if _, queued := queuedAt[name]; queued {
 		s.logger.Debug("scheduled tick dropped: previous run is still waiting to start", kind, name)
 		return false
 	}
@@ -330,7 +324,9 @@ func (s *Scheduler) AddAccountsFromConfig(cfg *config.Config) (int, []error) {
 func (s *Scheduler) AddJob(job Job) error { return s.addJob(job, false) }
 
 // addJob registers job; postSyncOnly permits an empty schedule for vector
-// jobs started only by manual or post-sync triggers.
+// jobs started only by manual or post-sync triggers. Registration and the
+// job's post-sync policy become visible together, so a sync that finishes
+// meanwhile sees either the previous job or this one.
 func (s *Scheduler) addJob(job Job, postSyncOnly bool) error {
 	if job.MaxRuntime < 0 {
 		return errors.New("job runtime budget must be non-negative")
@@ -375,6 +371,8 @@ func (s *Scheduler) addJob(job Job, postSyncOnly bool) error {
 	s.genericPreemptible[job.Name] = job.Preemptible
 	s.genericMaxRuntime[job.Name] = job.MaxRuntime
 	s.genericBackground[job.Name] = job.Background
+	s.genericAfterSync[job.Name] = job.AfterSync
+	s.genericWorkLabel[job.Name] = job.WorkLabel
 	s.logger.Info("scheduled job", "job", job.Name, "schedule", schedule, "next_run", s.nextRun(entryID))
 	return nil
 }
@@ -394,6 +392,8 @@ func (s *Scheduler) RemoveJob(name string) {
 	delete(s.genericPreemptible, name)
 	delete(s.genericMaxRuntime, name)
 	delete(s.genericBackground, name)
+	delete(s.genericAfterSync, name)
+	delete(s.genericWorkLabel, name)
 	delete(s.genericLastRun, name)
 	delete(s.genericLastErr, name)
 	if s.genericPending[name] {
@@ -430,28 +430,24 @@ func (s *Scheduler) SetEmbedJob(job *EmbedJob, schedule string, runAfterSync boo
 	if job != nil {
 		run = job.Run
 	}
-	return s.setCronSlot(&s.embed, run, schedule, runAfterSync)
+	return s.setVectorJob("embed", "scheduled embedding", run, schedule, runAfterSync)
 }
 
 // SetDocumentVectorJob installs the bounded document-vector convergence job
 // on the same cron/post-sync policy used by message embeddings.
 func (s *Scheduler) SetDocumentVectorJob(job func(context.Context) error, schedule string, runAfterSync bool) error {
-	return s.setCronSlot(&s.documentVector, job, schedule, runAfterSync)
+	return s.setVectorJob("document-vector", "scheduled document indexing", job, schedule, runAfterSync)
 }
 
-func (s *Scheduler) setCronSlot(slot *cronSlot, job func(context.Context) error, schedule string, runAfterSync bool) error {
+func (s *Scheduler) setVectorJob(name, label string, job func(context.Context) error, schedule string, runAfterSync bool) error {
 	if job == nil {
-		s.RemoveJob(slot.jobName)
-	} else if err := s.addJob(Job{
-		Name: slot.jobName, Schedule: schedule, Run: job,
-		Preemptible: true, Background: true, MaxRuntime: 5 * time.Minute,
-	}, true); err != nil {
-		return err
+		s.RemoveJob(name)
+		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	slot.runAfterSync = runAfterSync && job != nil
-	return nil
+	return s.addJob(Job{
+		Name: name, Schedule: schedule, Run: job, WorkLabel: label, AfterSync: runAfterSync,
+		Preemptible: true, Background: true, MaxRuntime: 5 * time.Minute,
+	}, true)
 }
 
 // Start begins executing scheduled jobs.
@@ -509,7 +505,6 @@ func (s *Scheduler) runSync(email string) {
 
 	done, ok := s.beginWork("scheduled sync of "+email, true)
 	s.mu.Lock()
-	delete(s.queued, email)
 	delete(s.queuedAt, email)
 	if ok {
 		s.startedAt[email] = time.Now()
@@ -565,9 +560,9 @@ func (s *Scheduler) runSync(email string) {
 	}
 	s.mu.Lock()
 	var afterSync []string
-	for _, slot := range []*cronSlot{&s.embed, &s.documentVector} {
-		if slot.runAfterSync && !s.stopped {
-			afterSync = append(afterSync, slot.jobName)
+	for name, enabled := range s.genericAfterSync {
+		if enabled && !s.stopped {
+			afterSync = append(afterSync, name)
 		}
 	}
 	s.mu.Unlock()
@@ -602,7 +597,6 @@ func (s *Scheduler) finishAccountRun(email string) {
 	delete(s.startedAt, email)
 	if s.pending[email] && !s.stopped {
 		delete(s.pending, email)
-		s.queued[email] = true
 		s.queuedAt[email] = time.Now()
 		s.wg.Add(1)
 		go s.runSync(email)
@@ -686,7 +680,6 @@ func (s *Scheduler) TriggerSync(email string) error {
 	}
 
 	s.running[email] = true
-	s.queued[email] = true
 	s.queuedAt[email] = time.Now()
 	s.wg.Add(1)
 	go s.runSync(email)
@@ -784,13 +777,12 @@ func (s *Scheduler) reserveGenericJob(name string, coalesce bool) (run func(cont
 		if !coalesce {
 			return nil, "", nil
 		}
-		if s.coalesceTickLocked("job", name, s.genericQueued, s.genericPending) {
+		if s.coalesceTickLocked("job", name, s.genericQueuedAt, s.genericPending) {
 			return nil, JobPending, nil
 		}
 		return nil, JobCoalesced, nil
 	}
 	s.genericRunning[name] = true
-	s.genericQueued[name] = true
 	s.genericQueuedAt[name] = time.Now()
 	s.wg.Add(1)
 	return run, JobStarted, nil
@@ -807,16 +799,10 @@ func (s *Scheduler) runJob(name string, run func(context.Context) error) error {
 	preemptible := s.genericPreemptible[name]
 	maxRuntime := s.genericMaxRuntime[name]
 	background := s.genericBackground[name]
+	label := cmp.Or(s.genericWorkLabel[name], name)
 	s.mu.Unlock()
-	label := name
-	for _, slot := range []*cronSlot{&s.embed, &s.documentVector} {
-		if name == slot.jobName {
-			label = slot.workLabel
-		}
-	}
 	done, ok := s.beginWork(label, !background)
 	s.mu.Lock()
-	delete(s.genericQueued, name)
 	delete(s.genericQueuedAt, name)
 	if ok {
 		s.genericStartedAt[name] = time.Now()
@@ -895,7 +881,6 @@ func (s *Scheduler) finishGenericRun(name string) {
 	current := s.genericFuncs[name]
 	if s.genericPending[name] && !s.stopped && current != nil {
 		delete(s.genericPending, name)
-		s.genericQueued[name] = true
 		s.genericQueuedAt[name] = time.Now()
 		s.wg.Add(1)
 		go func() { _ = s.runJob(name, current) }()
@@ -1028,13 +1013,14 @@ func (s *Scheduler) Status() []AccountStatus {
 
 	var statuses []AccountStatus
 	for email, entryID := range s.jobs {
+		_, queued := s.queuedAt[email]
 		status := AccountStatus{
 			Email:     email,
 			Running:   !s.startedAt[email].IsZero(),
 			LastRun:   s.lastRun[email],
 			NextRun:   s.nextRun(entryID),
 			Schedule:  s.schedules[email],
-			Queued:    s.queued[email],
+			Queued:    queued,
 			QueuedAt:  s.queuedAt[email],
 			Pending:   s.pending[email],
 			StartedAt: s.startedAt[email],
@@ -1056,6 +1042,7 @@ func (s *Scheduler) JobStatus() []JobStatus {
 		if err := s.genericLastErr[name]; err != nil {
 			lastErr = err.Error()
 		}
+		_, queued := s.genericQueuedAt[name]
 		out = append(out, JobStatus{
 			Name:      name,
 			Running:   !s.genericStartedAt[name].IsZero(),
@@ -1063,7 +1050,7 @@ func (s *Scheduler) JobStatus() []JobStatus {
 			NextRun:   s.nextRun(entryID),
 			Schedule:  s.genericSchedules[name],
 			LastError: lastErr,
-			Queued:    s.genericQueued[name],
+			Queued:    queued,
 			QueuedAt:  s.genericQueuedAt[name],
 			Pending:   s.genericPending[name],
 			StartedAt: s.genericStartedAt[name],

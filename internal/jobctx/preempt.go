@@ -22,3 +22,9 @@ func PreemptionRequested(ctx context.Context) bool {
 	flag, ok := ctx.Value(preemptionKey{}).(*atomic.Bool)
 	return ok && flag.Load()
 }
+
+// StopRequested reports whether the job running under ctx should stop at its
+// next safe boundary: its context ended or the scheduler asked it to yield.
+func StopRequested(ctx context.Context) bool {
+	return ctx.Err() != nil || PreemptionRequested(ctx)
+}

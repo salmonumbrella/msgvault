@@ -161,13 +161,14 @@ type EmbedJob struct {
 	// backstop interval deterministically. nil uses time.Now.
 	Now func() time.Time
 
-	// lastBackstop maps each generation to the time its most recent backstop
-	// ran, used to gate the next one by BackstopInterval. Keyed per generation
-	// so that switching the target (e.g. the active gen recently backstopped,
-	// then a building gen selected) does not let one generation's recent
-	// backstop throttle a different generation's first backstop — which would
-	// otherwise delay recovery of a below-watermark straggler and block
-	// auto-activation for up to BackstopInterval. In-memory (not persisted): a
+	// lastBackstop maps each generation to the start of its most recent
+	// finished or resumable backstop, used to gate the next one by
+	// BackstopInterval. Keyed per generation so that switching the target
+	// (e.g. the active gen recently backstopped, then a building gen
+	// selected) does not let one generation's recent backstop throttle a
+	// different generation's first backstop — which would otherwise delay
+	// recovery of a below-watermark straggler and block auto-activation for
+	// up to BackstopInterval. In-memory (not persisted): a
 	// daemon restart resets it, so the first eligible active or incomplete-build
 	// tick runs one extra backstop — harmless because RunBackstop is idempotent.
 	// Read/written only while the running lock is held, so it needs no separate
@@ -233,14 +234,14 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 
 	if _, err := j.Worker.ReclaimStale(ctx); err != nil {
 		retErr = err
-		if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+		if jobctx.StopRequested(ctx) {
 			return retErr
 		}
 		log.Warn("embed reclaim failed", "error", err)
 	}
 
 	retErr = errors.Join(retErr, j.maintainActivePeopleDuringBuild(ctx, log, occurrence))
-	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+	if jobctx.StopRequested(ctx) {
 		return retErr
 	}
 
@@ -252,7 +253,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 	res, err := j.Worker.RunOnce(ctx, target, scheduledEmbeddingPassScope(occurrence, target, "forward"))
 	retErr = errors.Join(retErr, err)
 	// Preserve worker errors even when the scheduler interrupted the pass.
-	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+	if jobctx.StopRequested(ctx) {
 		return retErr
 	}
 	if generationErr, ok := errors.AsType[*embed.GenerationRunError](err); ok {
@@ -281,7 +282,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 	var contextualState *ConvergenceResult
 	if isBuilding && j.Convergence != nil {
 		state, err := j.Convergence.CheckConvergence(ctx, target)
-		if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+		if jobctx.StopRequested(ctx) {
 			return retErr
 		}
 		if err != nil {
@@ -306,7 +307,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 	// skipped) so it never re-embeds stamped messages.
 	backstopRan, backstopErr := j.maybeRunBackstop(ctx, target, log, occurrence)
 	retErr = errors.Join(retErr, backstopErr)
-	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+	if jobctx.StopRequested(ctx) {
 		return retErr
 	}
 
@@ -325,7 +326,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 		// check did not produce a result.
 		if backstopRan || contextualState == nil {
 			state, err := j.Convergence.CheckConvergence(ctx, target)
-			if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+			if jobctx.StopRequested(ctx) {
 				return retErr
 			}
 			if err != nil {
@@ -354,7 +355,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 		return retErr
 	} else {
 		missing, err := j.missingCount(ctx, target)
-		if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+		if jobctx.StopRequested(ctx) {
 			return retErr
 		}
 		if err != nil {
@@ -379,14 +380,14 @@ func (j *EmbedJob) maintainActivePeopleDuringBuild(
 		return nil
 	}
 	building, err := j.Backend.BuildingGeneration(ctx)
-	if err != nil || building == nil || ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+	if err != nil || building == nil || jobctx.StopRequested(ctx) {
 		return err
 	}
 	active, err := j.Backend.ActiveGeneration(ctx)
 	if errors.Is(err, vector.ErrNoActiveGeneration) {
 		return nil
 	}
-	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+	if jobctx.StopRequested(ctx) {
 		return err
 	}
 	if err != nil {
@@ -399,7 +400,7 @@ func (j *EmbedJob) maintainActivePeopleDuringBuild(
 	res, err := runner.RunPersonsOnce(
 		ctx, active.ID, scheduledEmbeddingPassScope(occurrence, active.ID, "active-people"),
 	)
-	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+	if jobctx.StopRequested(ctx) {
 		return err
 	}
 	if err != nil {
@@ -419,7 +420,7 @@ func (j *EmbedJob) maintainActivePeopleDuringBuild(
 func (j *EmbedJob) activateBuilding(
 	ctx context.Context, target vector.GenerationID, contextualState *ConvergenceResult, log *slog.Logger,
 ) {
-	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+	if jobctx.StopRequested(ctx) {
 		return
 	}
 	var activateErr error
@@ -438,13 +439,13 @@ func (j *EmbedJob) activateBuilding(
 		activateErr = j.Backend.ActivateGeneration(ctx, target, false)
 	}
 	if activateErr != nil {
-		if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+		if jobctx.StopRequested(ctx) {
 			return
 		}
 		log.Warn("embed: activation failed", "gen", target, "error", activateErr)
 		return
 	}
-	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+	if jobctx.StopRequested(ctx) {
 		return
 	}
 	log.Info("embed: building generation activated", "gen", target)
@@ -467,8 +468,12 @@ func (j *EmbedJob) missingCount(ctx context.Context, target vector.GenerationID)
 // generation cannot suppress a different generation's first backstop. Called
 // with the running lock held (from Run), so lastBackstop needs no separate
 // guard. A negative BackstopInterval disables it; zero defaults to 24h.
-// A failed backstop is retried at the next trigger. Backstops record their
-// start so a yield lets continuations run the regular pass before another scan.
+//
+// Only a finished repair starts the interval, even when a later person or
+// cleanup step fails. An interrupted or failed legacy scan retries after the
+// next forward pass; its coverage predicate skips rows already committed. A
+// contextual repair whose cursor exists or whose reset committed keeps the
+// interval, so the forward pass resumes that cursor instead of resetting it.
 // maybeRunBackstop reports whether it invoked RunBackstop, so the caller
 // knows durable state may have changed since any earlier convergence check.
 func (j *EmbedJob) maybeRunBackstop(
@@ -487,31 +492,32 @@ func (j *EmbedJob) maybeRunBackstop(
 	if last, ok := j.lastBackstop[gen]; ok && t.Sub(last) < interval {
 		return false, nil
 	}
-	if j.lastBackstop == nil {
-		j.lastBackstop = make(map[vector.GenerationID]time.Time)
-	}
-	j.lastBackstop[gen] = t
 	res, err := j.Worker.RunBackstop(ctx, gen, scheduledEmbeddingPassScope(occurrence, gen, "backstop"))
-	workerErr := err
-	if jobctx.ErrorAfterYield(ctx, err) != nil || (j.SequenceBoundActivation && !res.BackstopStarted) {
-		delete(j.lastBackstop, gen)
-	}
-	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
-		return true, err
-	}
+	messageErr := err
+	var personErr error
 	if generationErr, ok := errors.AsType[*embed.GenerationRunError](err); ok {
-		if generationErr.Person != nil {
-			log.Warn("person embedding backstop failed", "gen", gen, "error", generationErr.Person)
-		}
-		err = generationErr.Message
+		messageErr, personErr = generationErr.Message, generationErr.Person
 	}
-	if err != nil {
-		log.Warn("embed backstop failed", "gen", gen, "error", err)
-		// Retry a real failure at the next trigger.
+	stopped := jobctx.StopRequested(ctx)
+	if res.RepairComplete || (!stopped && messageErr == nil) ||
+		(j.SequenceBoundActivation && res.BackstopStarted) {
+		if j.lastBackstop == nil {
+			j.lastBackstop = make(map[vector.GenerationID]time.Time)
+		}
+		j.lastBackstop[gen] = t
+	} else {
 		delete(j.lastBackstop, gen)
+	}
+	if stopped {
 		return true, err
 	}
-	j.lastBackstop[gen] = t
+	if personErr != nil {
+		log.Warn("person embedding backstop failed", "gen", gen, "error", personErr)
+	}
+	if messageErr != nil {
+		log.Warn("embed backstop failed", "gen", gen, "error", messageErr)
+		return true, err
+	}
 	log.Info("embed backstop complete",
 		"gen", gen,
 		"scanned", res.Claimed,
@@ -519,7 +525,7 @@ func (j *EmbedJob) maybeRunBackstop(
 		"failed", res.Failed,
 		"truncated", res.Truncated,
 	)
-	return true, workerErr
+	return true, err
 }
 
 func (j *EmbedJob) now() time.Time {
@@ -560,7 +566,7 @@ func scheduledEmbeddingPassScope(
 // occurred (already logged); the caller should return.
 func (j *EmbedJob) pickTarget(ctx context.Context, log *slog.Logger) (vector.GenerationID, bool, bool) {
 	bg, bgErr := j.Backend.BuildingGeneration(ctx)
-	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+	if jobctx.StopRequested(ctx) {
 		return 0, false, false
 	}
 	if bgErr != nil {
@@ -589,7 +595,7 @@ func (j *EmbedJob) pickTarget(ctx context.Context, log *slog.Logger) (vector.Gen
 	}
 
 	active, err := j.Backend.ActiveGeneration(ctx)
-	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+	if jobctx.StopRequested(ctx) {
 		return 0, false, false
 	}
 	switch {

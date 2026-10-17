@@ -1137,7 +1137,7 @@ func TestEmbedJob_Run_PersonFailureStillRunsMessageBackstop(t *testing.T) {
 	assert.NotContains(logs.String(), "embed run failed")
 }
 
-func TestEmbedJob_MaybeRunBackstop_YieldedCleanRunThrottlesRetry(t *testing.T) {
+func TestEmbedJob_MaybeRunBackstop_YieldedCleanRunRetries(t *testing.T) {
 	assert := assert.New(t)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	t.Cleanup(func() { cancel(nil) })
@@ -1157,9 +1157,34 @@ func TestEmbedJob_MaybeRunBackstop_YieldedCleanRunThrottlesRetry(t *testing.T) {
 
 	assert.NotContains(logs.String(), "embed backstop complete", "yield must not log completion")
 	n, _ := runner.backstops()
-	assert.Equal(1, n, "yield must throttle a retry")
+	assert.Equal(2, n, "an interrupted legacy scan retries instead of waiting an interval")
 	_, recorded := job.lastBackstop[gen]
-	assert.True(recorded, "yield must retain lastBackstop")
+	assert.False(recorded, "yield must not record lastBackstop")
+}
+
+func TestEmbedJob_MaybeRunBackstop_FinishedRepairKeepsIntervalAfterLaterError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"person", &embed.GenerationRunError{Person: errors.New("person provider failed")}},
+		{"cleanup", &embed.GenerationRunError{Message: errors.New("journal cleanup failed")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			runner := &fakeRunner{backstopResult: embed.RunResult{RepairComplete: true}, backstopErr: tc.err}
+			job := &EmbedJob{Worker: runner, BackstopInterval: time.Hour}
+			now := time.Now().UTC()
+
+			ran, err := job.maybeRunBackstop(t.Context(), 5, slog.Default(), now)
+			assert.True(ran)
+			require.ErrorIs(err, tc.err, "the independent error still reaches job status")
+			ran, err = job.maybeRunBackstop(t.Context(), 5, slog.Default(), now.Add(time.Minute))
+			require.NoError(err)
+			assert.False(ran, "a finished repair starts its interval")
+		})
+	}
 }
 
 func TestEmbedJob_Run_ActiveGeneration(t *testing.T) {
@@ -2008,13 +2033,13 @@ func TestScheduler_SetEmbedJob_AddsCronEntry(t *testing.T) {
 	// Replacing with a new schedule should not error.
 	require.NoError(s.SetEmbedJob(job, "0 * * * *", true), "SetEmbedJob replace")
 	assert.NotZero(s.genericJobs["embed"], "replacement keeps a cron entry")
-	assert.True(s.embed.runAfterSync, "runEmbedAfterSync should be true after replacement with runAfterSync=true")
+	assert.True(s.EmbeddingStatus().Scheduler.RunAfterSync, "runEmbedAfterSync should be true after replacement with runAfterSync=true")
 
 	// Clearing.
 	require.NoError(s.SetEmbedJob(nil, "", false), "SetEmbedJob clear")
 	assert.Zero(s.genericJobs["embed"], "clearing removes the cron entry")
 	assert.Nil(s.genericFuncs["embed"], "embedJob should be nil after clear")
-	assert.False(s.embed.runAfterSync, "runEmbedAfterSync should be false after clear")
+	assert.False(s.EmbeddingStatus().Scheduler.RunAfterSync, "runEmbedAfterSync should be false after clear")
 }
 
 func TestScheduler_SetEmbedJob_InvalidCron(t *testing.T) {
@@ -2045,7 +2070,7 @@ func TestScheduler_SetEmbedJob_InvalidReplacePreservesPrevious(t *testing.T) {
 
 		require.Error(s.SetEmbedJob(job2, "bogus cron", true), "SetEmbedJob(job2, invalid)")
 
-		assert.True(s.embed.runAfterSync, "runAfterSync should remain true")
+		assert.True(s.EmbeddingStatus().Scheduler.RunAfterSync, "runAfterSync should remain true")
 		assert.NotZero(s.genericJobs["embed"], "the previous cron entry remains registered")
 		assert.Equal(prevEntry, s.genericJobs["embed"], "cron entry should still be job1's")
 
@@ -2071,7 +2096,7 @@ func TestScheduler_SetEmbedJob_EmptyScheduleNoCronEntry(t *testing.T) {
 	require.NoError(t, s.SetEmbedJob(job, "", true), "SetEmbedJob")
 	assert.Zero(s.genericJobs["embed"], "empty schedule should not create a cron entry")
 	assert.NotNil(s.genericFuncs["embed"], "embedJob should be set even with empty schedule")
-	assert.True(s.embed.runAfterSync, "runEmbedAfterSync should be true")
+	assert.True(s.EmbeddingStatus().Scheduler.RunAfterSync, "runEmbedAfterSync should be true")
 }
 
 func TestScheduler_RunAfterSync_Fires(t *testing.T) {

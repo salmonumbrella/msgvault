@@ -70,7 +70,7 @@ func TestEmbeddingJobStatus(t *testing.T) {
 					return nil
 				}
 			}
-			require.NoError(t, s.setCronSlot(&s.embed, blocking(firstRelease), "", false))
+			require.NoError(t, s.setVectorJob("embed", "scheduled embedding", blocking(firstRelease), "", false))
 			_, err := s.StartJob("embed")
 			require.NoError(t, err)
 			synctest.Wait()
@@ -116,10 +116,15 @@ func TestQueueTimesClearOnAdmission(t *testing.T) {
 				}
 				synctest.Wait()
 				time.Sleep(20 * time.Second)
+				// A repeated trigger while queued keeps the original queue time.
 				if account {
+					s.onAccountTick("queue@example.com")
 					assert.Equal(t, queuedAt, s.Status()[0].QueuedAt)
 					assert.False(t, s.Status()[0].Running)
 				} else {
+					disposition, err := s.StartJob("queue")
+					require.NoError(t, err)
+					assert.Equal(t, JobCoalesced, disposition)
 					assert.Equal(t, queuedAt, s.JobStatus()[0].QueuedAt)
 					assert.False(t, s.JobStatus()[0].Running)
 				}
@@ -145,7 +150,7 @@ func TestPostSyncJobsStartIndependently(t *testing.T) {
 		s := New(func(context.Context, string) error { return nil }).WithWorkTracker(newSerialWorkTracker())
 		defer func() { <-s.Stop().Done() }()
 		passes := 0
-		require.NoError(s.setCronSlot(&s.embed, func(ctx context.Context) error {
+		require.NoError(s.setVectorJob("embed", "scheduled embedding", func(ctx context.Context) error {
 			passes++
 			jobctx.RecordProgress(ctx)
 			<-ctx.Done()

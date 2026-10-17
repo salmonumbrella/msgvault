@@ -544,6 +544,7 @@ func TestMCPSourceStatusRetainsRealSchedulerQueue(t *testing.T) {
 	sched := scheduler.New(func(context.Context, string) error { return nil }).WithWorkTracker(gate)
 	requirements.NoError(sched.AddAccount("queued@example.com", "0 2 * * *"))
 	t.Cleanup(func() { release(); sched.Stop() })
+	queuedAfter := time.Now().Truncate(time.Second)
 	requirements.NoError(sched.TriggerSync("queued@example.com"))
 	backend := sourceOperationFixture(t, api.NewServerWithOptions(api.ServerOptions{Config: &config.Config{}, Store: st, Scheduler: &schedulerAdapter{scheduler: sched}, Logger: slog.New(slog.DiscardHandler)}))
 	var status generated.SourceStatusResponse
@@ -559,6 +560,10 @@ func TestMCPSourceStatusRetainsRealSchedulerQueue(t *testing.T) {
 	}, 10*time.Second, 10*time.Millisecond)
 	assertions.False(status.Sources[0].CanSync)
 	assertions.Nil(status.Sources[0].SchedulerStartedAt)
+	requirements.NotNil(status.Sources[0].SchedulerQueuedAt)
+	queuedAt, err := time.Parse(time.RFC3339, *status.Sources[0].SchedulerQueuedAt)
+	requirements.NoError(err)
+	assertions.WithinRange(queuedAt, queuedAfter, time.Now(), "MCP reports when the sync began waiting")
 }
 
 func TestMCPCacheJobStatusRetainsRealLifecycle(t *testing.T) {

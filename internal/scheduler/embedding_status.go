@@ -7,7 +7,7 @@ func (s *Scheduler) EmbeddingStatus() vector.EmbeddingStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	status := vector.EmbeddingStatus{Job: vector.EmbeddingJobState{State: "idle"}, Scheduler: vector.EmbeddingSchedulerState{
-		Registered: s.genericFuncs["embed"] != nil, Schedule: s.genericSchedules["embed"], RunAfterSync: s.embed.runAfterSync,
+		Registered: s.genericFuncs["embed"] != nil, Schedule: s.genericSchedules["embed"], RunAfterSync: s.genericAfterSync["embed"],
 	}}
 	if started := s.genericStartedAt["embed"]; !started.IsZero() {
 		status.Job.State = "running"
