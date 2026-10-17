@@ -8,7 +8,9 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
-- Automatic embedding yields to waiting syncs and runs in configurable passes (default five minutes), resuming committed work. On upgrade, installations whose provider requests and retries can exceed five minutes should raise `[vector.embed.schedule].max_runtime`; requests interrupted before committing may repeat on later passes. Mail syncs finish before post-sync indexing runs. Sources and CardDAV show when a sync entered the queue, and open pages follow observed queued and active syncs through completion. API schema 3.24.0 adds queue timestamps and CardDAV scheduler admission status. Generic job status and embedding diagnostics retain independent failures joined with shutdown cancellation.
+- Automatic embedding yields to waiting syncs and resumes committed work in configurable passes, with a five-minute default. Mail syncs finish before post-sync indexing runs. On upgrade, raise `[vector.embed.schedule].max_runtime` if provider requests and retries can exceed five minutes. Requests interrupted before committing may repeat on later passes.
+- Sources and CardDAV show when a sync entered the queue. Open pages follow queued and active syncs through completion and refresh when users return after a sync finishes while hidden.
+- API schema 3.24.0 adds queue timestamps and CardDAV scheduler admission status. Generic job status and embedding diagnostics keep independent failures visible when shutdown cancels a pass.
 
 - Message [search](usage/searching.md#match-any-of-several-searches) accepts up to eight pipe-separated alternatives in full-text mode. API schema 3.19.0 adds support for remote clients.
 - A standalone ` | ` between searches used to be literal text and now means OR; `"a | b"` keeps it literal.
