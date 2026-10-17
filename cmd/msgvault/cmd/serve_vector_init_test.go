@@ -1137,7 +1137,7 @@ func TestServeVectorPassBudgetFromConfig(t *testing.T) {
 					}
 					if name == "embed" {
 						capture := &registeredEmbedJobCapture{}
-						vf := &vectorFeatures{Runner: &budgetedProviderRunner{run: run}, Backend: &fakeCmdVectorBackend{active: &vector.Generation{ID: 1}}, Cfg: cfg.Vector}
+						vf := &vectorFeatures{Runner: &budgetedProviderRunner{run: run}, Backend: &fakeCmdVectorBackend{active: &vector.Generation{ID: 1, Fingerprint: cfg.Vector.GenerationFingerprint()}}, Cfg: cfg.Vector}
 						require.NoError(registerEmbedJob(capture, vf, nil, nil, &cfg, testDiscardLogger()))
 						capture.job.BackstopInterval = -1
 						require.NoError(s.SetEmbedJob(capture.job, "", false, capture.maxRuntime))
