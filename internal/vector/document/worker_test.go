@@ -257,6 +257,12 @@ func TestWorkerRunClaimsOneProviderRequestAndIsolatesOversizeDocument(t *testing
 	worker := newFakeWorker(ledger, provider, &fakeDocumentVectorBackend{})
 	worker.deps.ContextualDocuments = true
 	worker.deps.ProviderRequests = voyage.DocumentRequests
+	prepare := worker.deps.prepareInputs
+	preparations := 0
+	worker.deps.prepareInputs = func(ctx context.Context, ledger Ledger, recipe Recipe, claims []*store.DocumentVectorChunkClaim) (map[string]string, error) {
+		preparations++
+		return prepare(ctx, ledger, recipe, claims)
+	}
 
 	first, err := worker.Run(t.Context(), 1, 10)
 	requirements.ErrorIs(err, embed.ErrDocumentTooLarge)
@@ -270,6 +276,27 @@ func TestWorkerRunClaimsOneProviderRequestAndIsolatesOversizeDocument(t *testing
 	requirements.Len(provider.calls, 2)
 	assertions.Equal([]embed.DocumentInput{{Chunks: []string{"two"}}, {Chunks: []string{"three"}}}, provider.calls[1])
 	assertions.Equal([]string{"token-b", "token-c"}, ledger.committed)
+	assertions.Equal(2, preparations, "each pass prepares its extraction once for sizing and publication")
+}
+
+func TestWorkerRunRetainsPreparationFailureFromRequestSizing(t *testing.T) {
+	require := require.New(t)
+	ledger := newFakeDocumentVectorLedger(workerClaim("extract-a", 1, "one", "token-a"), workerClaim("extract-a", 2, "two", "token-b"))
+	provider := &fakeDocumentVectorProvider{}
+	worker := newFakeWorker(ledger, provider, &fakeDocumentVectorBackend{})
+	worker.deps.ContextualDocuments = true
+	worker.deps.ProviderRequests = (embed.VoyageConfig{}).DocumentRequests
+	failure := errors.New("extraction unavailable")
+	preparations := 0
+	worker.deps.prepareInputs = func(context.Context, Ledger, Recipe, []*store.DocumentVectorChunkClaim) (map[string]string, error) {
+		preparations++
+		return nil, failure
+	}
+	_, err := worker.Run(t.Context(), 1, 10)
+	require.ErrorIs(err, failure)
+	require.Equal(1, preparations)
+	require.Len(ledger.failures, 2)
+	require.Empty(provider.calls)
 }
 
 func TestWorkerRunBoundsScanningAndCarriesCursorWithoutStarvation(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector"
 	"go.kenn.io/msgvault/internal/vector/sqlitevec"
 )
@@ -57,11 +58,15 @@ CREATE TABLE applied_migrations (
 		require.NoError(t, err, "insert body")
 	}
 
+	realStore, err := store.OpenForTest(mainPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = realStore.Close() })
+
 	return &orphanFixture{
 		MainDB:   mainDB,
 		MainPath: mainPath,
 		VecPath:  filepath.Join(dir, "vectors.db"),
-		Store:    &testWorkStore{db: mainDB},
+		Store:    &testWorkStore{db: mainDB, store: realStore},
 		Client:   &fakeEmbeddingClient{dim: 4},
 	}
 }

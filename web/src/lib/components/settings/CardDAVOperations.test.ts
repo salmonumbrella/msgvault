@@ -24,7 +24,7 @@ describe('CardDAVOperations', () => {
     controller.destroy();
   });
 
-  it('shows queue time until the running state takes over', async () => {
+  it('shows another connection queue time alongside a running sync', async () => {
     const controller = new CardDAVController(createAPIClient(vi.fn<typeof fetch>()));
     const status = {
       configured: true, available: true, credential_configured: true, enabled: true,
@@ -36,12 +36,12 @@ describe('CardDAVOperations', () => {
     const queued = screen.getByText('Queued since', { exact: false });
     expect(queued.querySelector('time')?.getAttribute('datetime')).toBe('2026-10-01T15:04:00Z');
     controller.status = { ...status, scheduler_running: true };
-    await waitFor(() => expect(screen.queryByText('Queued since', { exact: false })).toBeNull());
+    await waitFor(() => expect(screen.getByText('Queued since', { exact: false })).toBeDefined());
     expect(screen.getByLabelText('Active CardDAV sync').textContent).toContain('Running');
     controller.status = { ...status, active: {
       id: 1, account_id: 1, trigger: 'scheduled', full: false, state: 'running', started_at: '2026-10-01T15:05:00Z', books: 0, created: 0, updated: 0, removed: 0
     } };
-    await waitFor(() => expect(screen.queryByText('Queued since', { exact: false })).toBeNull());
+    await waitFor(() => expect(screen.getByText('Queued since', { exact: false })).toBeDefined());
     expect(screen.getByLabelText('Active CardDAV sync')).toBeDefined();
     controller.destroy();
   });

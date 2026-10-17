@@ -487,8 +487,7 @@ run_after_sync = true     # and opportunistically after every scheduled sync
 With `run_after_sync = true`, every successful scheduled sync
 queues a bounded embed pass over messages still missing coverage. The sync
 releases its gate reservation before the embed pass acquires its own slot.
-The pass can wait behind other work and uses `[vector.embed.schedule].max_runtime`
-as its time limit (five minutes by default).
+The pass can wait behind other work. Its time limit is the larger of `[vector.embed.schedule].max_runtime` (default `5m`) and the [provider-work floor](../configuration.md#vectorembedschedule). Provider `Retry-After` waits can exceed that floor and remain subject to pass cancellation.
 The standalone cron ensures embedding catches up even when syncs are
 quiet (e.g. overnight). An empty `cron = ""` disables the
 standalone schedule (useful if you only want the post-sync

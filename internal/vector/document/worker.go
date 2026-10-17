@@ -256,7 +256,7 @@ func (w *Worker) Run(ctx context.Context, generationID GenerationID, limit int) 
 	w.bindCursor(generationID)
 	result.AfterGenerationID = generationID
 
-	claims, err := w.collectClaims(ctx, generationID, limit, &result)
+	claims, unit, err := w.collectClaims(ctx, generationID, limit, &result)
 	if err != nil || len(claims) == 0 {
 		return result, err
 	}
@@ -265,9 +265,19 @@ func (w *Worker) Run(ctx context.Context, generationID GenerationID, limit int) 
 	preparedTexts := make(map[string]string, len(claims))
 	preparedClaims := make([]*store.DocumentVectorChunkClaim, 0, len(claims))
 	for _, claimGroup := range groupWorkerClaimsByExtraction(claims) {
-		groupTexts, prepareErr := w.deps.prepareInputs(
-			heartbeat.context(), w.deps.Ledger, w.deps.Recipe, claimGroup,
-		)
+		var groupTexts map[string]string
+		var prepareErr error
+		if unit != nil {
+			groupTexts = make(map[string]string, len(claimGroup))
+			for _, claim := range claimGroup {
+				if text, ok := unit.texts[claim.ChunkID]; ok {
+					groupTexts[claim.Token] = text
+				}
+			}
+			prepareErr = unit.errors[claimGroup[0].ExtractionID]
+		} else {
+			groupTexts, prepareErr = w.deps.prepareInputs(heartbeat.context(), w.deps.Ledger, w.deps.Recipe, claimGroup)
+		}
 		if prepareErr != nil {
 			cause := fmt.Errorf("%w: extraction %q: %w", errInputPreparation, claimGroup[0].ExtractionID, prepareErr)
 			failureErr := w.failClaims(ctx, generationID, claimGroup, cause, heartbeat, &result)
@@ -446,13 +456,13 @@ func (w *Worker) bindCursor(generationID GenerationID) {
 	w.cursorGenerationID = generationID
 }
 
-func (w *Worker) collectClaims(ctx context.Context, generationID GenerationID, limit int, result *RunResult) ([]*store.DocumentVectorChunkClaim, error) {
+func (w *Worker) collectClaims(ctx context.Context, generationID GenerationID, limit int, result *RunResult) ([]*store.DocumentVectorChunkClaim, *requestUnit, error) {
 	claims := make([]*store.DocumentVectorChunkClaim, 0, limit)
 	after := w.afterChunkID
 	result.AfterChunkID = after
 	candidates, err := w.deps.Ledger.ListDocumentVectorChunkCandidates(ctx, int64(generationID), after, maxWorkerRunLimit)
 	if err != nil {
-		return nil, fmt.Errorf("list document vector candidates: %w", err)
+		return nil, nil, fmt.Errorf("list document vector candidates: %w", err)
 	}
 	unit := w.newRequestUnit(candidates)
 	processed := 0
@@ -466,7 +476,7 @@ func (w *Worker) collectClaims(ctx context.Context, generationID GenerationID, l
 		}
 		claim, err := w.deps.Ledger.ClaimDocumentVectorChunk(ctx, int64(generationID), after, 1, w.deps.Owner, w.deps.Now(), w.deps.LeaseDuration)
 		if err != nil {
-			return nil, fmt.Errorf("claim document vector chunk: %w", err)
+			return nil, nil, fmt.Errorf("claim document vector chunk: %w", err)
 		}
 		after = candidate.ChunkID
 		if claim != nil {
@@ -486,7 +496,7 @@ func (w *Worker) collectClaims(ctx context.Context, generationID GenerationID, l
 	} else {
 		w.afterChunkID = after
 	}
-	return claims, nil
+	return claims, unit, nil
 }
 
 // requestUnit sizes contextual candidates before they are claimed, using the
@@ -495,6 +505,7 @@ type requestUnit struct {
 	worker     *Worker
 	candidates []store.DocumentVectorChunkCandidate
 	prepared   map[string]bool
+	errors     map[string]error
 	texts      map[int64]string
 	inputs     []vector.DocumentInput
 }
@@ -505,7 +516,7 @@ func (w *Worker) newRequestUnit(candidates []store.DocumentVectorChunkCandidate)
 	}
 	return &requestUnit{
 		worker: w, candidates: candidates,
-		prepared: make(map[string]bool), texts: make(map[int64]string),
+		prepared: make(map[string]bool), texts: make(map[int64]string), errors: make(map[string]error),
 	}
 }
 
@@ -547,6 +558,7 @@ func (u *requestUnit) text(ctx context.Context, candidate store.DocumentVectorCh
 			}
 		}
 		texts, err := u.worker.deps.prepareInputs(ctx, u.worker.deps.Ledger, u.worker.deps.Recipe, claims)
+		u.errors[candidate.ExtractionID] = err
 		for _, claim := range claims {
 			if text, ok := texts[claim.Token]; ok && err == nil {
 				u.texts[claim.ChunkID] = text

@@ -10,19 +10,20 @@ import (
 )
 
 func TestErrorAfterYieldDistinguishesSchedulerShutdown(t *testing.T) {
+	requirements := require.New(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	failure := errors.New("provider failed")
 	for _, err := range []error{ctx.Err(), errors.Join(failure, ctx.Err())} {
-		require.Same(t, err, ErrorAfterYield(ctx, err), "ordinary cancellation keeps the caller's original error")
+		requirements.Same(err, ErrorAfterYield(ctx, err), "ordinary cancellation keeps the caller's original error")
 	}
 	shutdown, stop := context.WithCancelCause(t.Context())
 	stop(ErrSchedulerStopped)
 	for _, err := range []error{shutdown.Err(), context.Cause(shutdown)} {
-		require.NoError(t, ErrorAfterYield(shutdown, err))
+		requirements.NoError(ErrorAfterYield(shutdown, err))
 	}
-	require.ErrorIs(t, ErrorAfterYield(shutdown, errors.Join(failure, shutdown.Err())), failure)
-	require.NotErrorIs(t, ErrorAfterYield(shutdown, errors.Join(failure, shutdown.Err())), context.Canceled)
+	requirements.ErrorIs(ErrorAfterYield(shutdown, errors.Join(failure, shutdown.Err())), failure)
+	requirements.NotErrorIs(ErrorAfterYield(shutdown, errors.Join(failure, shutdown.Err())), context.Canceled)
 	yielded, yield := context.WithCancelCause(t.Context())
 	yield(ErrYieldedToWaiter)
 	for _, tc := range []struct {
@@ -36,15 +37,16 @@ func TestErrorAfterYieldDistinguishesSchedulerShutdown(t *testing.T) {
 		{name: "independent deadline", err: context.DeadlineExceeded, want: context.DeadlineExceeded, message: "context deadline exceeded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			requirements := require.New(t)
 			got := ErrorAfterYield(yielded, tc.err)
-			require.ErrorIs(t, got, tc.want)
-			require.NotErrorIs(t, got, ErrYieldedToWaiter)
-			require.NotErrorIs(t, got, context.Canceled)
-			require.EqualError(t, got, tc.message)
+			requirements.ErrorIs(got, tc.want)
+			requirements.NotErrorIs(got, ErrYieldedToWaiter)
+			requirements.NotErrorIs(got, context.Canceled)
+			requirements.EqualError(got, tc.message)
 		})
 	}
 	budget, expire := context.WithTimeoutCause(t.Context(), 0, ErrRunBudgetExceeded)
 	defer expire()
-	require.ErrorIs(t, budget.Err(), context.DeadlineExceeded)
-	require.NoError(t, ErrorAfterYield(budget, context.Cause(budget)))
+	requirements.ErrorIs(budget.Err(), context.DeadlineExceeded)
+	requirements.NoError(ErrorAfterYield(budget, context.Cause(budget)))
 }

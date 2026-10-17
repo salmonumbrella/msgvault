@@ -87,7 +87,7 @@ func (s *Store) ScanEmbeddingBackstop(ctx context.Context, target, afterID int64
 		return nil, afterID, nil
 	}
 	liveWhere, liveArgs := liveMessagesWhereScoped(messageTypes, sourceIDs)
-	q := `SELECT id, (embed_gen IS NULL OR embed_gen <> ?) AND ` + liveWhere + `
+	q := `SELECT id, COALESCE((embed_gen IS NULL OR embed_gen <> ?) AND ` + liveWhere + `, FALSE)
 	      FROM messages WHERE id > ? ORDER BY id LIMIT ?`
 	args := append([]any{target}, liveArgs...)
 	args = append(args, afterID, limit)

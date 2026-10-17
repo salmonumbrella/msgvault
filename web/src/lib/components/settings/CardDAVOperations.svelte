@@ -123,7 +123,7 @@
         {/if}
       </div>
       {#if status.repair_reason}<p class="notice notice--error" role="alert">{repairCopy[status.repair_reason]}</p>{/if}
-      {#if status.queued_at && !status.active && !status.scheduler_running}
+      {#if status.queued_at}
         <p class="muted">Queued since <time datetime={status.queued_at} title={status.queued_at}>{formatTimestamp(status.queued_at)}</time></p>
       {/if}
       {#if status.active || status.scheduler_running}

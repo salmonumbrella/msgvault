@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -570,11 +569,11 @@ func registerDocumentVectorJob(sched documentVectorJobRegistrar, vf *vectorFeatu
 
 // scheduledVectorRuntime raises the configured pass budget to cover one atomic
 // unit of provider requests, each allowed every configured attempt at the full
-// timeout plus capped backoff. Zero selects the five-minute default before the
-// comparison; larger budgets stay. A scheduled document run sends one request;
+// timeout plus capped backoff. Configuration already has defaults applied.
+// Contextual and document runs publish one request at a time; ordinary
 // message units come from the batch size.
 func scheduledVectorRuntime(vectorCfg vector.Config, requests int, job string, logger *slog.Logger) time.Duration {
-	configured := cmp.Or(vectorCfg.Embed.Schedule.MaxRuntime, 5*time.Minute)
+	configured := vectorCfg.Embed.Schedule.MaxRuntime
 	floor := time.Duration(requests) * embed.RequestBudget(vectorCfg.Embeddings.Timeout, vectorCfg.Embeddings.MaxRetries)
 	if configured >= floor {
 		return configured
@@ -602,7 +601,11 @@ func registerEmbedJob(sched embedJobRegistrar, vf *vectorFeatures, s *store.Stor
 		embedJob.OnScopeDrift = apiServer.SetVectorScopeDrift
 	}
 	schedule := cfg.Vector.Embed.Schedule.Cron
-	maxRuntime := scheduledVectorRuntime(cfg.Vector, embed.MessageCommitUnitRequests(cfg.Vector.Embeddings.BatchSize), "embed", logger)
+	requests := 1
+	if cfg.Vector.Embeddings.EffectiveAPIFormat() != vector.APIFormatVoyageContextual {
+		requests = embed.MessageCommitUnitRequests(cfg.Vector.Embeddings.BatchSize)
+	}
+	maxRuntime := scheduledVectorRuntime(cfg.Vector, requests, "embed", logger)
 	if err := sched.SetEmbedJob(embedJob, schedule, cfg.Vector.Embed.Schedule.RunAfterSync, maxRuntime); err != nil {
 		return fmt.Errorf("register embed job: %w", err)
 	}

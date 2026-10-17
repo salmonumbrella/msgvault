@@ -4,7 +4,6 @@
 package embed
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -72,12 +71,10 @@ const durablePublishReserve = 30 * time.Second
 
 // RequestBudget is the longest one provider request can take when every
 // attempt runs to timeout and every computed backoff reaches its jittered cap,
-// plus the reserve to publish its result durably. It mirrors the clients'
-// defaults for zero values. Retry-After waits, which both clients honor up to
+// plus the reserve to publish its result durably. Configuration must already
+// have defaults applied. Retry-After waits, which both clients honor up to
 // an hour each, are not included.
 func RequestBudget(timeout time.Duration, attempts int) time.Duration {
-	timeout = cmp.Or(timeout, 30*time.Second)
-	attempts = max(cmp.Or(attempts, 3), 1)
 	return time.Duration(attempts)*timeout + time.Duration(attempts-1)*maxComputedBackoff*3/2 + durablePublishReserve
 }
 

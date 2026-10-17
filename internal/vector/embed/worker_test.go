@@ -1149,3 +1149,26 @@ var _ interface {
 	RunBackstop(ctx context.Context, gen vector.GenerationID, scope operations.PassScope) (RunResult, error)
 	ReclaimStale(ctx context.Context) (int, error)
 } = (*Worker)(nil)
+
+func TestWorker_RejectedMultiChunkMessageStillRecoversSibling(t *testing.T) {
+	require := require.New(t)
+	f := newWorkerFixture(t, 2)
+	_, err := f.MainDB.Exec(`UPDATE message_bodies SET body_text = ? WHERE message_id = 1`, strings.Repeat("rejected ", 100))
+	require.NoError(err)
+	f.FakeClient.OnEmbed = func(inputs []string) ([][]float32, error) {
+		for _, text := range inputs {
+			if strings.Contains(text, "rejected") {
+				return nil, ErrPermanent4xx
+			}
+		}
+		return [][]float32{{1, 2, 3, 4}}, nil
+	}
+	w := NewWorker(WorkerDeps{Backend: f.Backend, VectorsDB: f.VectorsDB, MainDB: f.MainDB, Store: f.Store, Client: f.FakeClient, MaxInputChars: 80, BatchSize: 2, MaxConsecutiveFailures: 2, Recorder: f.Recorder})
+	result, err := w.RunOnce(t.Context(), f.BuildingGen, testEmbeddingPassScope())
+	require.NoError(err)
+	require.Equal(1, result.Succeeded)
+	var covered int
+	require.NoError(f.MainDB.QueryRow(`SELECT COUNT(*) FROM messages WHERE embed_gen = ?`, f.BuildingGen).Scan(&covered))
+	require.Equal(2, covered)
+	require.Equal(2, result.Claimed)
+}

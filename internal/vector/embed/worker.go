@@ -413,6 +413,7 @@ func (w *Worker) run(
 			return res, nil
 		}
 		diagnosticRun(ctx).beginBatch(len(ids), batchStart)
+		scannedIDs := ids
 		batch := w.loadBatch(ctx, ids)
 		// batchMax ends this commit unit; once it is stamped, advancing the
 		// cursor past it avoids re-scanning the covered prefix.
@@ -443,10 +444,13 @@ func (w *Worker) run(
 				// whether to stamp (it embedded, or is a confirmed
 				// message-specific 4xx given some sibling embedded) or leave
 				// unstamped (endpoint-wide failure can't be ruled out).
+				res.Claimed += len(scannedIDs) - len(ids)
+				diagnosticRun(ctx).setAttempted(len(scannedIDs))
+				outcomes.attempt(scannedIDs)
 				w.deps.Log.Info("embed: downshifting to BatchSize=1 to drain failing batch",
-					"gen", gen, "batch_size", len(ids))
+					"gen", gen, "batch_size", len(scannedIDs))
 				embedded, embeddedOK, stamped, safeAdvanceID, drainErr := w.downshiftDrain(
-					ctx, gen, ids, &res, &completedRows, outcomes,
+					ctx, gen, scannedIDs, &res, &completedRows, outcomes,
 				)
 				if w.stopIfInterrupted(ctx, gen) {
 					return res, nil
@@ -455,19 +459,19 @@ func (w *Worker) run(
 				res.Succeeded += embedded
 				if drainErr != nil {
 					w.deps.Log.Info("embed: downshift drain returned error",
-						"gen", gen, "batch_size", len(ids),
+						"gen", gen, "batch_size", len(scannedIDs),
 						"embedded", embedded, "embedded_ok", embeddedOK, "stamped", stamped, "error", drainErr)
 				} else {
 					w.deps.Log.Info("embed: downshift drain complete; resuming configured batch size",
-						"gen", gen, "batch_size", len(ids),
+						"gen", gen, "batch_size", len(scannedIDs),
 						"embedded", embedded, "embedded_ok", embeddedOK, "stamped", stamped)
 				}
 
 				// Forward progress resets the cap and advances the cursor —
 				// but ONLY past rows that are actually stamped. On a clean
 				// drain every id is resolved (embedded, skip-marked, or a
-				// message-specific 4xx drop) so safeAdvanceID == batchMax and
-				// behavior is unchanged. On a NON-4xx (transient) drain error
+				// message-specific 4xx drop), including siblings beyond the
+				// commit unit. On a NON-4xx (transient) drain error
 				// an EARLIER singleton may have stamped while a LATER one was
 				// left unstamped; safeAdvanceID is the highest CONTIGUOUSLY
 				// stamped id before the failure, so the watermark never jumps
@@ -1482,9 +1486,6 @@ const maxSpansPerMessage = 64
 // MessageCommitUnitRequests is the most provider requests one Worker commit
 // unit sends: a message at the span cap, split into batchSize-span requests.
 func MessageCommitUnitRequests(batchSize int) int {
-	if batchSize < 1 {
-		batchSize = 32
-	}
 	return (maxSpansPerMessage + batchSize - 1) / batchSize
 }
 

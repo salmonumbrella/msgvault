@@ -458,14 +458,14 @@ func (w *ContextWorker) drainJournal(ctx context.Context, gen vector.GenerationI
 				if err := w.closeSnapshot(pageSnapshot); err != nil {
 					return err
 				}
-				processed, publishErr := w.publishPreparedScopes(ctx, gen, prepared, res, batchStart)
-				if processed > 0 {
-					cursor := encodeJournalCursor(change.Sequence, prepared[processed-1].key)
+				processed, publishErr := w.publishPreparedScopes(ctx, gen, prepared, res, batchStart, func(scopeKey string) error {
+					cursor := encodeJournalCursor(change.Sequence, scopeKey)
 					if err := w.deps.Publisher.SetDocumentJournalCursor(ctx, gen, cursor); err != nil {
 						return fmt.Errorf("persist contextual journal subcursor: %w", err)
 					}
 					jobctx.RecordProgress(ctx)
-				}
+					return nil
+				})
 				if publishErr != nil {
 					return fmt.Errorf("publish metadata journal event %d: %w", change.Sequence, publishErr)
 				}
@@ -523,14 +523,14 @@ func (w *ContextWorker) drainJournal(ctx context.Context, gen vector.GenerationI
 			if err := w.closeSnapshot(pageSnapshot); err != nil {
 				return err
 			}
-			processed, publishErr := w.publishPreparedScopes(ctx, gen, prepared, res, batchStart)
-			if processed > 0 {
-				cursor := encodeJournalCursor(last, prepared[processed-1].key)
+			_, publishErr := w.publishPreparedScopes(ctx, gen, prepared, res, batchStart, func(scopeKey string) error {
+				cursor := encodeJournalCursor(last, scopeKey)
 				if err := w.deps.Publisher.SetDocumentJournalCursor(ctx, gen, cursor); err != nil {
 					return fmt.Errorf("persist contextual journal scope cursor: %w", err)
 				}
 				jobctx.RecordProgress(ctx)
-			}
+				return nil
+			})
 			if publishErr != nil {
 				return fmt.Errorf("publish journal scope page through sequence %d: %w", last, publishErr)
 			}
@@ -615,14 +615,14 @@ func (w *ContextWorker) drainOrdinaryDiscovery(ctx context.Context, gen vector.G
 			first := sort.Search(len(prepared), func(i int) bool { return prepared[i].key > resumeScope })
 			prepared = prepared[first:]
 		}
-		processed, publishErr := w.publishPreparedScopes(ctx, gen, prepared, res, batchStart)
-		if processed > 0 {
-			cursor := "discovery:" + strconv.FormatInt(pageAfter, 10) + "|" + prepared[processed-1].key
+		_, publishErr := w.publishPreparedScopes(ctx, gen, prepared, res, batchStart, func(scopeKey string) error {
+			cursor := "discovery:" + strconv.FormatInt(pageAfter, 10) + "|" + scopeKey
 			if err := w.deps.Publisher.SetDocumentReconcileCursor(ctx, gen, cursor); err != nil {
 				return fmt.Errorf("persist contextual ordinary discovery scope cursor: %w", err)
 			}
 			jobctx.RecordProgress(ctx)
-		}
+			return nil
+		})
 		if publishErr != nil {
 			return fmt.Errorf("publish discovered scopes: %w", publishErr)
 		}
@@ -748,7 +748,7 @@ func (w *ContextWorker) selectorInBuildScope(
 	return found && scope.ContainsSource(sourceID), nil
 }
 
-func (w *ContextWorker) publishPreparedScopes(ctx context.Context, gen vector.GenerationID, scopes []preparedScope, res *RunResult, batchStart time.Time) (_ int, retErr error) {
+func (w *ContextWorker) publishPreparedScopes(ctx context.Context, gen vector.GenerationID, scopes []preparedScope, res *RunResult, batchStart time.Time, checkpoint func(string) error) (_ int, retErr error) {
 	diagnostics := diagnosticRun(ctx)
 	diagnostics.beginBatch(0, batchStart)
 	defer func() {
@@ -829,110 +829,126 @@ func (w *ContextWorker) publishPreparedScopes(ctx context.Context, gen vector.Ge
 		attempted += len(plan.scope.liveVersions)
 	}
 	diagnostics.setAttempted(attempted)
-	results, embedErr := w.embedDocuments(ctx, inputs)
-	if len(results) > len(targets) || (embedErr == nil && len(results) != len(targets)) {
-		return 0, fmt.Errorf("contextual batched vector document count mismatch: got %d, expected %d", len(results), len(targets))
+	requests := [][]DocumentInput{inputs}
+	if client, ok := w.deps.Client.(*VoyageClient); ok {
+		packed, err := client.documentRequests(inputs)
+		if err == nil && len(packed) > 0 {
+			requests = packed
+		}
 	}
-	for i, target := range targets {
-		if i >= len(results) {
-			break
+
+	processed := 0
+	offset := 0
+	for _, request := range requests {
+		completedBeforeRequest := processed
+		results, embedErr := w.embedDocuments(ctx, request)
+		if len(results) > len(request) || (embedErr == nil && len(results) != len(request)) {
+			return processed, fmt.Errorf("contextual batched vector document count mismatch: got %d, expected %d", len(results), len(request))
 		}
-		plans[target.scopeIndex].resolved[target.docIndex] = true
-		if results[i].tooLarge {
-			plans[target.scopeIndex].failedDocs[target.docIndex] = true
-			continue
+		for i, target := range targets[offset : offset+len(request)] {
+			if i >= len(results) {
+				break
+			}
+			plans[target.scopeIndex].resolved[target.docIndex] = true
+			if results[i].tooLarge {
+				plans[target.scopeIndex].failedDocs[target.docIndex] = true
+				continue
+			}
+			if results[i].embeddedChunks != nil {
+				applyTruncatedEmbedding(&plans[target.scopeIndex].scope.docs[target.docIndex], results[i].embeddedChunks)
+				res.Truncated++
+			}
+			plans[target.scopeIndex].vectors[target.docIndex] = results[i].vectors
 		}
-		if results[i].embeddedChunks != nil {
-			applyTruncatedEmbedding(&plans[target.scopeIndex].scope.docs[target.docIndex], results[i].embeddedChunks)
-			res.Truncated++
-		}
-		plans[target.scopeIndex].vectors[target.docIndex] = results[i].vectors
-	}
-	completePlans := len(plans)
-	partialPlan := -1
-	if embedErr != nil {
-		completePlans = 0
+		completePlans := processed
+		partialPlan := -1
 		for completePlans < len(plans) && preparedScopeResolved(plans[completePlans]) {
 			completePlans++
 		}
 		if completePlans < len(plans) && preparedScopeHasNewVectors(plans[completePlans]) {
 			partialPlan = completePlans
 		}
-	}
-	publicationPlans := completePlans
-	if partialPlan >= 0 {
-		publicationPlans++
-	}
-	publications := make([]vector.DocumentScopePublication, 0, publicationPlans)
-	partialPublished := false
-	for planIndex := range publicationPlans {
-		plan := plans[planIndex]
-		if !plan.changed {
-			if plan.fence {
-				publications = append(publications, vector.DocumentScopePublication{
-					ScopeKey: plan.scope.key, SourceSequence: plan.scope.sequence,
-					Documents: documentPublications(plan.scope.docs), FenceOnly: true,
-				})
-			}
-			continue
+		publicationPlans := completePlans
+		if partialPlan >= 0 {
+			publicationPlans++
 		}
-		documents, vectors, preserved := successfulPreparedDocuments(plan)
-		docs, chunks, err := buildDocumentPublication(documents, vectors, preserved)
-		if err != nil {
-			return 0, fmt.Errorf("scope %q: %w", plan.scope.key, err)
-		}
-		if planIndex == partialPlan {
-			var safe bool
-			docs, safe = preserveUnresolvedDocumentPublications(plan.scope.sequence, docs, plan.existing)
-			if !safe {
+		publications := make([]vector.DocumentScopePublication, 0, publicationPlans)
+		partialPublished := false
+		for planIndex := processed; planIndex < publicationPlans; planIndex++ {
+			plan := plans[planIndex]
+			if !plan.changed {
+				if plan.fence {
+					publications = append(publications, vector.DocumentScopePublication{
+						ScopeKey: plan.scope.key, SourceSequence: plan.scope.sequence,
+						Documents: documentPublications(plan.scope.docs), FenceOnly: true,
+					})
+				}
 				continue
 			}
-			partialPublished = true
-		}
-		if w.deps.Hooks.BeforePublish != nil {
-			if err := w.deps.Hooks.BeforePublish(); err != nil {
-				return 0, fmt.Errorf("scope %q: before index commit: %w", plan.scope.key, err)
+			documents, vectors, preserved := successfulPreparedDocuments(plan)
+			docs, chunks, err := buildDocumentPublication(documents, vectors, preserved)
+			if err != nil {
+				return processed, fmt.Errorf("scope %q: %w", plan.scope.key, err)
 			}
-		}
-		publications = append(publications, vector.DocumentScopePublication{
-			ScopeKey: plan.scope.key, SourceSequence: plan.scope.sequence, Documents: docs, Chunks: chunks,
-		})
-	}
-	if len(publications) > 0 {
-		finishWrite := measureEmbeddingWrite(ctx)
-		publishErr := w.deps.Publisher.PublishScopes(ctx, gen, publications)
-		finishWrite(publishErr)
-		if err := publishErr; err != nil {
-			if errors.Is(err, vector.ErrGenerationRetired) {
-				return 0, errContextGenerationRetired
+			if planIndex == partialPlan {
+				var safe bool
+				docs, safe = preserveUnresolvedDocumentPublications(plan.scope.sequence, docs, plan.existing)
+				if !safe {
+					continue
+				}
+				partialPublished = true
 			}
-			return 0, fmt.Errorf("publish prepared scope page: %w", err)
-		}
-		jobctx.RecordProgress(ctx)
-	}
-	processed := 0
-	for planIndex := range completePlans {
-		plan := plans[planIndex]
-		if plan.changed {
-			if w.deps.Hooks.AfterPublish != nil {
-				if err := w.deps.Hooks.AfterPublish(); err != nil {
-					return processed, fmt.Errorf("scope %q: after index commit: %w", plan.scope.key, err)
+			if w.deps.Hooks.BeforePublish != nil {
+				if err := w.deps.Hooks.BeforePublish(); err != nil {
+					return processed, fmt.Errorf("scope %q: before index commit: %w", plan.scope.key, err)
 				}
 			}
+			publications = append(publications, vector.DocumentScopePublication{
+				ScopeKey: plan.scope.key, SourceSequence: plan.scope.sequence, Documents: docs, Chunks: chunks,
+			})
 		}
-		if err := w.coverPreparedScopePlan(ctx, gen, plan, res); err != nil {
-			return processed, fmt.Errorf("scope %q: %w", plan.scope.key, err)
+		if len(publications) > 0 {
+			finishWrite := measureEmbeddingWrite(ctx)
+			publishErr := w.deps.Publisher.PublishScopes(ctx, gen, publications)
+			finishWrite(publishErr)
+			if err := publishErr; err != nil {
+				if errors.Is(err, vector.ErrGenerationRetired) {
+					return processed, errContextGenerationRetired
+				}
+				return processed, fmt.Errorf("publish prepared scope page: %w", err)
+			}
+			jobctx.RecordProgress(ctx)
 		}
-		processed++
-	}
-	if partialPublished && w.deps.Hooks.AfterPublish != nil {
-		if err := w.deps.Hooks.AfterPublish(); err != nil {
-			return processed, fmt.Errorf("scope %q: after partial index commit: %w", plans[partialPlan].scope.key, err)
+		for planIndex := processed; planIndex < completePlans; planIndex++ {
+			plan := plans[planIndex]
+			if plan.changed {
+				if w.deps.Hooks.AfterPublish != nil {
+					if err := w.deps.Hooks.AfterPublish(); err != nil {
+						return processed, fmt.Errorf("scope %q: after index commit: %w", plan.scope.key, err)
+					}
+				}
+			}
+			if err := w.coverPreparedScopePlan(ctx, gen, plan, res); err != nil {
+				return processed, fmt.Errorf("scope %q: %w", plan.scope.key, err)
+			}
+			processed++
 		}
+		if processed > completedBeforeRequest {
+			if err := checkpoint(plans[processed-1].scope.key); err != nil {
+				return processed, err
+			}
+		}
+		if partialPublished && w.deps.Hooks.AfterPublish != nil {
+			if err := w.deps.Hooks.AfterPublish(); err != nil {
+				return processed, fmt.Errorf("scope %q: after partial index commit: %w", plans[partialPlan].scope.key, err)
+			}
+		}
+		if embedErr != nil {
+			return processed, embedErr
+		}
+		offset += len(request)
 	}
-	if embedErr != nil {
-		return processed, embedErr
-	}
+
 	if budgetExhausted {
 		return processed, errContextRunBudgetExhausted
 	}
@@ -1400,14 +1416,14 @@ func (w *ContextWorker) reconcile(ctx context.Context, gen vector.GenerationID, 
 					return fmt.Errorf("after contextual source page: %w", err)
 				}
 			}
-			processed, publishErr := w.publishPreparedScopes(ctx, gen, prepared, res, batchStart)
-			if processed > 0 {
-				partial := "source:" + strconv.FormatInt(pageAfter, 10) + "|" + prepared[processed-1].key
+			_, publishErr := w.publishPreparedScopes(ctx, gen, prepared, res, batchStart, func(scopeKey string) error {
+				partial := "source:" + strconv.FormatInt(pageAfter, 10) + "|" + scopeKey
 				if err := w.deps.Publisher.SetDocumentReconcileCursor(ctx, gen, partial); err != nil {
 					return err
 				}
 				jobctx.RecordProgress(ctx)
-			}
+				return nil
+			})
 			if publishErr != nil {
 				return fmt.Errorf("reconcile source scopes: %w", publishErr)
 			}
@@ -1480,14 +1496,14 @@ func (w *ContextWorker) reconcile(ctx context.Context, gen vector.GenerationID, 
 		if err := w.closeSnapshot(snapshot); err != nil {
 			return err
 		}
-		processed, publishErr := w.publishPreparedScopes(ctx, gen, prepared, res, batchStart)
-		if processed > 0 {
-			partial := encodeOrphanReconcileCursor(pageAfterKey, pageEndKey, prepared[processed-1].key)
+		_, publishErr := w.publishPreparedScopes(ctx, gen, prepared, res, batchStart, func(scopeKey string) error {
+			partial := encodeOrphanReconcileCursor(pageAfterKey, pageEndKey, scopeKey)
 			if err := w.deps.Publisher.SetDocumentReconcileCursor(ctx, gen, partial); err != nil {
 				return err
 			}
 			jobctx.RecordProgress(ctx)
-		}
+			return nil
+		})
 		if publishErr != nil {
 			return fmt.Errorf("reconcile ledger scopes: %w", publishErr)
 		}

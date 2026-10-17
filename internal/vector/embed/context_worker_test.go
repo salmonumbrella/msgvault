@@ -1909,79 +1909,111 @@ func TestContextWorker_VoyageSizeFallbackDoesNotRepeatSuccessfulSibling(t *testi
 }
 
 func TestContextWorker_LaterPackedFailurePublishesAndResumesSuccessfulScopePrefix(t *testing.T) {
-	assert := assert.New(t)
-	var handlerMu sync.Mutex
-	var handlerErr error
-	requestsByDocument := make(map[string]int)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request voyageRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			handlerMu.Lock()
-			handlerErr = err
-			handlerMu.Unlock()
-			http.Error(w, "invalid synthetic request", http.StatusBadRequest)
-			return
-		}
-		joined := strings.Join(request.Inputs[0], "\n")
-		document := "first"
-		if strings.Contains(joined, "second retry") {
-			document = "second"
-		}
-		handlerMu.Lock()
-		requestsByDocument[document]++
-		attempt := requestsByDocument[document]
-		handlerMu.Unlock()
-		if document == "second" && attempt == 1 {
-			http.Error(w, "synthetic provider failure", http.StatusServiceUnavailable)
-			return
-		}
-		data := make([]map[string]any, len(request.Inputs))
-		for outer, chunks := range request.Inputs {
-			inner := make([]map[string]any, len(chunks))
-			for index := range chunks {
-				inner[index] = map[string]any{"embedding": []float32{1, 2, 3, 4}, "index": index}
+	for _, failure := range []string{"provider-error", "deadline"} {
+		t.Run(failure, func(t *testing.T) {
+			assert := assert.New(t)
+			ctx := t.Context()
+			var beforeSecond func()
+			var observedProgress vector.DocumentProgress
+			var progressErr error
+			var handlerMu sync.Mutex
+			var handlerErr error
+			requestsByDocument := make(map[string]int)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request voyageRequest
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					handlerMu.Lock()
+					handlerErr = err
+					handlerMu.Unlock()
+					http.Error(w, "invalid synthetic request", http.StatusBadRequest)
+					return
+				}
+				joined := strings.Join(request.Inputs[0], "\n")
+				document := "first"
+				if strings.Contains(joined, "second retry") {
+					document = "second"
+				}
+				handlerMu.Lock()
+				requestsByDocument[document]++
+				attempt := requestsByDocument[document]
+				handlerMu.Unlock()
+				if document == "second" && attempt == 1 {
+					if failure == "deadline" {
+						beforeSecond()
+						<-r.Context().Done()
+					} else {
+						http.Error(w, "synthetic provider failure", http.StatusServiceUnavailable)
+					}
+					return
+				}
+				data := make([]map[string]any, len(request.Inputs))
+				for outer, chunks := range request.Inputs {
+					inner := make([]map[string]any, len(chunks))
+					for index := range chunks {
+						inner[index] = map[string]any{"embedding": []float32{1, 2, 3, 4}, "index": index}
+					}
+					data[outer] = map[string]any{"data": inner, "index": outer}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(map[string]any{"data": data}); err != nil {
+					handlerMu.Lock()
+					handlerErr = err
+					handlerMu.Unlock()
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			f := newContextWorkerFixture(t, func(deps *ContextWorkerDeps) {
+				deps.Client = NewVoyageClient(VoyageConfig{
+					Endpoint: server.URL, Model: "voyage-context-4", Dimension: 4, MaxRetries: 1,
+					Limits: RequestLimits{MaxDocuments: 1, MaxChunks: 16_000, MaxUTF8Bytes: 100_000},
+				})
+			})
+			conversationID, err := f.store.EnsureConversation(f.sourceID, "ordinary", "Ordinary")
+			require.NoError(t, err)
+			firstID := f.seed("email", conversationID, time.Now().UTC(), "first prefix")
+			secondID := f.seed("email", conversationID, time.Now().UTC().Add(time.Minute), "second retry")
+
+			beforeSecond = func() {
+				progress, err := f.backend.GetDocumentProgress(t.Context(), f.gen)
+				handlerMu.Lock()
+				observedProgress, progressErr = progress, err
+				handlerMu.Unlock()
 			}
-			data[outer] = map[string]any{"data": inner, "index": outer}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]any{"data": data}); err != nil {
+			if failure == "deadline" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeoutCause(ctx, time.Second, jobctx.ErrRunBudgetExceeded)
+				defer cancel()
+			}
+			ctx = jobctx.WithProgress(ctx)
+			_, err = f.worker.RunOnce(ctx, f.gen, testEmbeddingPassScope())
+			if failure == "deadline" {
+				require.ErrorIs(t, context.Cause(ctx), jobctx.ErrRunBudgetExceeded)
+			} else {
+				require.Error(t, err)
+			}
+			assert.True(jobctx.HasProgress(ctx), "the published prefix counts even when later work fails")
+			_, err = f.backend.GetDocument(t.Context(), f.gen, fmt.Sprintf("message:%d", firstID))
+			require.NoError(t, err, "the successful packed request must be durably published before returning the later error")
+			_, err = f.backend.GetDocument(t.Context(), f.gen, fmt.Sprintf("message:%d", secondID))
+			require.Error(t, err)
+			assert.Equal(1, f.missing())
+
+			result, err := f.run()
+			require.NoError(t, err)
+			assert.True(result.Contextual.Converged)
+			assert.Zero(f.missing())
 			handlerMu.Lock()
-			handlerErr = err
-			handlerMu.Unlock()
-		}
-	}))
-	t.Cleanup(server.Close)
-
-	f := newContextWorkerFixture(t, func(deps *ContextWorkerDeps) {
-		deps.Client = NewVoyageClient(VoyageConfig{
-			Endpoint: server.URL, Model: "voyage-context-4", Dimension: 4, MaxRetries: 1,
-			Limits: RequestLimits{MaxDocuments: 1, MaxChunks: 16_000, MaxUTF8Bytes: 100_000},
+			defer handlerMu.Unlock()
+			require.NoError(t, handlerErr)
+			if failure == "deadline" {
+				require.NoError(t, progressErr)
+				assert.NotEmpty(observedProgress.JournalCursor+observedProgress.ReconcileCursor, "the successful request is checkpointed before the next request begins")
+			}
+			assert.Equal(1, requestsByDocument["first"], "the successful provider request must not be billed twice")
+			assert.Equal(2, requestsByDocument["second"], "only the failed document is retried")
 		})
-	})
-	conversationID, err := f.store.EnsureConversation(f.sourceID, "ordinary", "Ordinary")
-	require.NoError(t, err)
-	firstID := f.seed("email", conversationID, time.Now().UTC(), "first prefix")
-	secondID := f.seed("email", conversationID, time.Now().UTC().Add(time.Minute), "second retry")
-
-	ctx := jobctx.WithProgress(t.Context())
-	_, err = f.worker.RunOnce(ctx, f.gen, testEmbeddingPassScope())
-	require.Error(t, err)
-	assert.True(jobctx.HasProgress(ctx), "the published prefix counts even when later work fails")
-	_, err = f.backend.GetDocument(t.Context(), f.gen, fmt.Sprintf("message:%d", firstID))
-	require.NoError(t, err, "the successful packed request must be durably published before returning the later error")
-	_, err = f.backend.GetDocument(t.Context(), f.gen, fmt.Sprintf("message:%d", secondID))
-	require.Error(t, err)
-	assert.Equal(1, f.missing())
-
-	result, err := f.run()
-	require.NoError(t, err)
-	assert.True(result.Contextual.Converged)
-	assert.Zero(f.missing())
-	handlerMu.Lock()
-	defer handlerMu.Unlock()
-	require.NoError(t, handlerErr)
-	assert.Equal(1, requestsByDocument["first"], "the successful provider request must not be billed twice")
-	assert.Equal(2, requestsByDocument["second"], "only the failed document is retried")
+	}
 }
 
 func TestContextWorker_LaterPackedFailureRetainsSuccessfulDocumentWithinScope(t *testing.T) {

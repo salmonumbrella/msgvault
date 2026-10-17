@@ -122,14 +122,14 @@ func (c *VoyageClient) EmbedDocuments(ctx context.Context, documents []DocumentI
 	if len(documents) == 0 {
 		return nil, nil
 	}
-	batches, err := PackDocuments(prependDocumentPrefix(documents, c.cfg.DocumentPrefix), c.cfg.Limits)
+	batches, err := c.documentRequests(documents)
 	if err != nil {
 		return nil, err
 	}
 
 	results := make([][][]float32, 0, len(documents))
 	for _, batch := range batches {
-		batchResults, err := c.embedRequest(ctx, documentInputs(batch), "document")
+		batchResults, err := c.embedRequest(ctx, documentInputs(prependDocumentPrefix(batch, c.cfg.DocumentPrefix)), "document")
 		if err != nil {
 			return results, err
 		}
@@ -139,6 +139,22 @@ func (c *VoyageClient) EmbedDocuments(ctx context.Context, documents []DocumentI
 		results = append(results, batchResults...)
 	}
 	return results, nil
+}
+
+// documentRequests keeps the original inputs while sizing with their prefix.
+// ContextWorker publishes each request before sending the next one.
+func (c *VoyageClient) documentRequests(documents []DocumentInput) ([][]DocumentInput, error) {
+	packed, err := PackDocuments(prependDocumentPrefix(documents, c.cfg.DocumentPrefix), c.cfg.Limits)
+	if err != nil {
+		return nil, err
+	}
+	requests := make([][]DocumentInput, 0, len(packed))
+	offset := 0
+	for _, batch := range packed {
+		requests = append(requests, documents[offset:offset+len(batch)])
+		offset += len(batch)
+	}
+	return requests, nil
 }
 
 func prependDocumentPrefix(documents []DocumentInput, prefix string) []DocumentInput {

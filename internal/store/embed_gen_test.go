@@ -229,3 +229,28 @@ func TestSetEmbedGenIfUnchanged(t *testing.T) {
 	assert.Empty(missed, "an already covered row is not a CAS miss")
 	assert.Zero(covered, "an already covered row is not newly covered")
 }
+
+func TestEmbeddingBackstopSkipsLegacyNullMessageType(t *testing.T) {
+	require := require.New(t)
+	st := testutil.NewTestStore(t)
+	var sourceID, conversationID int64
+	if st.IsPostgreSQL() {
+		_, err := st.DB().Exec(`ALTER TABLE messages ALTER COLUMN message_type DROP NOT NULL`)
+		require.NoError(err)
+		fx := seedEmbedScopeFixture(t, st)
+		sourceID = fx.srcA.ID
+		conversationID, err = st.EnsureConversation(sourceID, "legacy-backstop-thread", "Legacy")
+		require.NoError(err)
+		require.NoError(st.SetEmbedGen(t.Context(), append(fx.msgsA, fx.msgsB...), 7))
+	} else {
+		st, sourceID, conversationID = newLegacyNullableMessageTypeStore(t)
+	}
+	id, err := st.UpsertMessage(&store.Message{SourceID: sourceID, ConversationID: conversationID, SourceMessageID: "legacy-backstop", MessageType: "email"})
+	require.NoError(err)
+	_, err = st.DB().Exec(st.Rebind(`UPDATE messages SET message_type = NULL WHERE id = ?`), id)
+	require.NoError(err)
+	ids, after, err := st.ScanEmbeddingBackstop(t.Context(), 7, 0, 100, []string{"email"}, nil)
+	require.NoError(err)
+	require.Empty(ids)
+	require.Equal(id, after)
+}

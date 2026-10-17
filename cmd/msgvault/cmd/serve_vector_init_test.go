@@ -511,6 +511,7 @@ func TestScheduledVectorBudgetsCoverProviderAttempts(t *testing.T) {
 			cfg.Vector.Embeddings.Timeout = tc.timeout
 			cfg.Vector.Embeddings.MaxRetries = tc.attempts
 			cfg.Vector.Embeddings.BatchSize = 32
+			cfg.Vector.ApplyDefaults()
 			cfg.Attachments.Documents.Index.Embeddings.Enabled = true
 			vf := &vectorFeatures{Backend: &fakeCmdVectorBackend{}, Runner: &embed.GenerationWorker{},
 				DocumentBackend: startupDocumentBackend{}, Cfg: cfg.Vector}
@@ -522,6 +523,9 @@ func TestScheduledVectorBudgetsCoverProviderAttempts(t *testing.T) {
 			documents := &registeredDocumentVectorJobCapture{}
 			require.NoError(registerDocumentVectorJob(documents, vf, nil, state))
 			assert.Equal(tc.documentBudget, documents.maxRuntime)
+			cfg.Vector.Embeddings.APIFormat = vector.APIFormatVoyageContextual
+			require.NoError(registerEmbedJob(embedding, vf, nil, nil, cfg, testDiscardLogger()))
+			assert.Equal(tc.documentBudget, embedding.maxRuntime, "contextual messages publish each packed request")
 		})
 	}
 }

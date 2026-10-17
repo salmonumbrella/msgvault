@@ -38,7 +38,10 @@ func (c *pgFakeEmbeddingClient) Embed(_ context.Context, inputs []string) ([][]f
 
 // pgWorkStore is a minimal WorkStore over the PG test schema, mirroring
 // store.ScanForEmbedding / store.SetEmbedGen with $N placeholders.
-type pgWorkStore struct{ db *sql.DB }
+type pgWorkStore struct {
+	db    *sql.DB
+	store *store.Store
+}
 
 func (s *pgWorkStore) ScanForEmbedding(ctx context.Context, target int64, afterID int64, limit int) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -63,46 +66,7 @@ func (s *pgWorkStore) ScanForEmbedding(ctx context.Context, target int64, afterI
 }
 
 func (s *pgWorkStore) ScanEmbeddingBackstop(ctx context.Context, target, afterID int64, limit int, messageTypes []string, sourceIDs []int64) ([]int64, int64, error) {
-	where := `(embed_gen IS NULL OR embed_gen <> ?) AND deleted_at IS NULL AND deleted_from_source_at IS NULL`
-	args := []any{target}
-	if len(messageTypes) > 0 {
-		ph := make([]string, len(messageTypes))
-		for i, typ := range messageTypes {
-			ph[i] = "?"
-			args = append(args, typ)
-		}
-		where += ` AND message_type IN (` + strings.Join(ph, ",") + `)`
-	}
-	if len(sourceIDs) > 0 {
-		ph := make([]string, len(sourceIDs))
-		for i, id := range sourceIDs {
-			ph[i] = "?"
-			args = append(args, id)
-		}
-		where += ` AND source_id IN (` + strings.Join(ph, ",") + `)`
-	}
-	args = append(args, afterID, limit)
-	query := `SELECT id, ` + where + ` FROM messages WHERE id > ? ORDER BY id LIMIT ?`
-	for i := 1; i <= len(args); i++ {
-		query = strings.Replace(query, "?", fmt.Sprintf("$%d", i), 1)
-	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, afterID, err
-	}
-	defer func() { _ = rows.Close() }()
-	var ids []int64
-	last := afterID
-	for rows.Next() {
-		var missing bool
-		if err := rows.Scan(&last, &missing); err != nil {
-			return nil, afterID, err
-		}
-		if missing {
-			ids = append(ids, last)
-		}
-	}
-	return ids, last, rows.Err()
+	return s.store.ScanEmbeddingBackstop(ctx, target, afterID, limit, messageTypes, sourceIDs)
 }
 
 func (s *pgWorkStore) SetEmbedGen(ctx context.Context, ids []int64, target int64) error {
@@ -167,7 +131,7 @@ func pgCountMissing(t *testing.T, db *sql.DB, gen int64) int {
 // including embed_gen and the deleted_* columns LiveMessagesWhere
 // references) and seeds n live messages. Returns the *sql.DB; cleanup
 // drops the schema.
-func openPGWorkerDB(t *testing.T, n int) *sql.DB {
+func openPGWorkerDB(t *testing.T, n int) (*sql.DB, *store.Store) {
 	t.Helper()
 	url := os.Getenv("MSGVAULT_TEST_DB")
 	if !strings.HasPrefix(url, "postgres://") && !strings.HasPrefix(url, "postgresql://") {
@@ -192,10 +156,11 @@ func openPGWorkerDB(t *testing.T, n int) *sql.DB {
 	}
 	testURL += sep + "search_path=" + schemaName + ",public"
 
-	db, err := sql.Open("pgx", testURL)
-	require.NoError(t, err, "open")
+	realStore, err := store.OpenForTest(testURL)
+	require.NoError(t, err, "open store")
+	db := realStore.DB()
 	t.Cleanup(func() {
-		_ = db.Close()
+		_ = realStore.Close()
 		cleanup, err := sql.Open("pgx", url)
 		if err != nil {
 			return
@@ -207,6 +172,8 @@ func openPGWorkerDB(t *testing.T, n int) *sql.DB {
 	_, err = db.Exec(`
 		CREATE TABLE messages (
 			id BIGINT PRIMARY KEY,
+			source_id BIGINT,
+			message_type TEXT,
 			subject TEXT,
 			deleted_at TIMESTAMPTZ,
 			deleted_from_source_at TIMESTAMPTZ,
@@ -248,7 +215,7 @@ func openPGWorkerDB(t *testing.T, n int) *sql.DB {
 			`INSERT INTO message_bodies (message_id, body_text) VALUES ($1, $2)`, i, fmt.Sprintf("body %d", i))
 		require.NoError(t, err, "insert body")
 	}
-	return db
+	return db, realStore
 }
 
 // TestWorkerPG_RunOnce_EndToEnd drives the full scan-and-fill pipeline
@@ -261,7 +228,7 @@ func TestWorkerPG_RunOnce_EndToEnd(t *testing.T) {
 
 	ctx := context.Background()
 	const n = 5
-	db := openPGWorkerDB(t, n)
+	db, realStore := openPGWorkerDB(t, n)
 
 	backend, err := pgvector.Open(ctx, pgvector.Options{DB: db, Dimension: 4})
 	require.NoError(
@@ -280,7 +247,7 @@ func TestWorkerPG_RunOnce_EndToEnd(t *testing.T) {
 		Backend:          backend,
 		VectorsDB:        db,
 		MainDB:           db,
-		Store:            &pgWorkStore{db: db},
+		Store:            &pgWorkStore{db: db, store: realStore},
 		Client:           &pgFakeEmbeddingClient{dim: 4},
 		Rebind:           (&store.PostgreSQLDialect{}).Rebind,
 		LastModifiedExpr: "m.last_modified",
@@ -312,7 +279,7 @@ func TestWorkerPG_EmbedBatch_RebindsINClause(t *testing.T) {
 	require := require.New(t)
 
 	ctx := context.Background()
-	db := openPGWorkerDB(t, 3)
+	db, realStore := openPGWorkerDB(t, 3)
 
 	backend, err := pgvector.Open(ctx, pgvector.Options{DB: db, Dimension: 4})
 	require.NoError(
@@ -324,7 +291,7 @@ func TestWorkerPG_EmbedBatch_RebindsINClause(t *testing.T) {
 		Backend:          backend,
 		VectorsDB:        db,
 		MainDB:           db,
-		Store:            &pgWorkStore{db: db},
+		Store:            &pgWorkStore{db: db, store: realStore},
 		Client:           &pgFakeEmbeddingClient{dim: 4},
 		Rebind:           (&store.PostgreSQLDialect{}).Rebind,
 		LastModifiedExpr: "m.last_modified",
@@ -341,4 +308,20 @@ func TestWorkerPG_EmbedBatch_RebindsINClause(t *testing.T) {
 	for _, c := range eb.chunks {
 		assert.Len(c.Vector, 4)
 	}
+}
+
+func TestWorkerPG_BackstopUsesStoreScopedScan(t *testing.T) {
+	require := require.New(t)
+	db, realStore := openPGWorkerDB(t, 3)
+	_, err := db.Exec(`UPDATE messages SET message_type = 'email', source_id = 1 WHERE id > 1`)
+	require.NoError(err)
+	work := &pgWorkStore{db: db, store: realStore}
+	ids, after, err := work.ScanEmbeddingBackstop(t.Context(), 7, 0, 2, []string{"email"}, []int64{1})
+	require.NoError(err)
+	require.Equal([]int64{2}, ids)
+	require.Equal(int64(2), after)
+	ids, after, err = work.ScanEmbeddingBackstop(t.Context(), 7, after, 2, []string{"email"}, []int64{1})
+	require.NoError(err)
+	require.Equal([]int64{3}, ids)
+	require.Equal(int64(3), after)
 }

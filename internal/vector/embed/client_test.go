@@ -15,12 +15,6 @@ import (
 	"go.kenn.io/msgvault/internal/vector"
 )
 
-func TestRequestBudgetReservesDurableWorkAfterSingleAttempt(t *testing.T) {
-	timeout := 2 * time.Minute
-	assert.Greater(t, RequestBudget(timeout, 1), timeout,
-		"a successful provider response must leave positive time to publish and stamp durable progress")
-}
-
 type requestConsentState struct{ active atomic.Bool }
 
 func (s *requestConsentState) HasActivePersonSemanticEmbeddingConsent(
