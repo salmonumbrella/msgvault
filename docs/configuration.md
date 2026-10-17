@@ -1938,7 +1938,8 @@ their schedules. See
 Automatic message and document embedding passes use the larger of `max_runtime` (default `5m`) and the time needed for one complete publication unit. The provider-work floor includes every configured attempt at its full timeout, capped retry backoffs, and a publication reserve. Ordinary messages can span several requests; contextual messages and documents publish each packed request separately. With default settings, the ordinary-message floor is 393.6 seconds. Provider `Retry-After` waits can exceed this floor and remain subject to pass cancellation. Sync preemption stays independent: when a sync waits, embedding yields after about 65 seconds and resumes behind it.
 Post-sync passes start after the sync releases the operation gate. Later passes
 skip committed coverage and publications; an interrupted provider request may
-repeat. A pass that reaches its time limit without committed progress writes
+repeat. Post-sync visual indexing can queue alongside message and document jobs
+and runs independently of their `max_runtime` budget. A pass that reaches its time limit without committed progress writes
 a warning to the daemon log and waits for the next configured trigger.
 
 #### `[vector.people]`

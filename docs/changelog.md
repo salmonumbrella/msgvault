@@ -8,7 +8,7 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
-- Automatic embedding yields to waiting syncs and resumes committed work in bounded passes. Mail syncs finish before post-sync indexing runs. Each pass uses the larger of `[vector.embed.schedule].max_runtime` (default `5m`) and the [provider-work floor](configuration.md#vectorembedschedule), including retries and time to publish. Provider `Retry-After` waits can exceed that floor and remain subject to pass cancellation. Requests interrupted before committing may repeat on later passes.
+- Automatic embedding yields to waiting syncs and resumes committed work in bounded passes. Mail syncs finish before post-sync indexing runs. See [embedding schedule configuration](configuration.md#vectorembedschedule) for pass budgets and provider retry limits. Requests interrupted before committing may repeat on later passes.
 - Sources and CardDAV show when a sync entered the queue. Open pages follow queued and active syncs through completion and refresh when users return after a sync finishes while hidden.
 - API schema 3.24.0 adds queue timestamps and CardDAV scheduler admission status. Generic job status and embedding diagnostics keep independent failures visible when shutdown cancels a pass.
 

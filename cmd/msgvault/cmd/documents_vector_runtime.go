@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.kenn.io/msgvault/internal/operations"
+	"go.kenn.io/msgvault/internal/scheduler"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector"
 	vectordocument "go.kenn.io/msgvault/internal/vector/document"
@@ -285,6 +286,9 @@ func runScheduledDocumentVectorGenerationLocked(ctx context.Context, st *store.S
 			building = &generation
 		}
 	}
-	_, err = runDocumentVectorWithFeatures(ctx, st, vf, building.ID, limit, scope, owner)
+	result, err := runDocumentVectorWithFeatures(ctx, st, vf, building.ID, limit, scope, owner)
+	if err == nil && !result.Converged && (result.Worker.Published > 0 || result.CleanupFinalized > 0) {
+		return scheduler.ErrReschedule
+	}
 	return err
 }

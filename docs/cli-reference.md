@@ -3753,7 +3753,7 @@ The job state is `idle`, `queued`, or `running`. `queued` means a scheduled run 
 waiting for the slot; text output includes when it entered the queue. A successful sync releases its reservation before the post-sync embedding job acquires its own slot. That bounded job can show as `queued` before it runs. A manual build waiting for the slot shows as `idle` with the current holder. Scheduler state shows the
 configured schedule, whether embeddings run after sync, and the current slot
 holder (`none`, `sync`, `embeddings`, or `other`). `sync` covers account syncs
-and scheduled source syncs such as Slack or CardDAV. Automatic message and document passes use the larger of `[vector.embed.schedule].max_runtime` (default `5m`) and the [provider-work floor](configuration.md#vectorembedschedule), independently of sync preemption. Provider `Retry-After` waits can exceed that floor and remain subject to pass cancellation. No source names appear in slot labels.
+and scheduled source syncs such as Slack or CardDAV. See [embedding schedule configuration](configuration.md#vectorembedschedule) for automatic message and document pass budgets. No source names appear in slot labels.
 
 The latest 20 finished batches and current batch report attempted and newly
 covered messages, input characters the provider accepted, provider-call time, HTTP request time,

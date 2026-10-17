@@ -20,6 +20,7 @@ import (
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/jobctx"
 	"go.kenn.io/msgvault/internal/operations"
+	"go.kenn.io/msgvault/internal/scheduler"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil/storetest"
 	"go.kenn.io/msgvault/internal/vector"
@@ -588,6 +589,114 @@ func TestRegisteredDocumentVectorJobReusesWorkerOwner(t *testing.T) {
 	require.Len(owners, 2)
 	require.NotEmpty(owners[0])
 	require.Equal(owners[0], owners[1])
+}
+
+func TestScheduledDocumentVectorContinuesUntilBacklogIsPublished(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		t.Run(fmt.Sprintf("leased=%t", leased), func(t *testing.T) {
+			require := require.New(t)
+			fixture, _, testCtx := documentVectorCommandFixture(t)
+			cfg := invocationFromContext(testCtx).cfg
+			cfg.Vector.Embeddings.APIFormat = vector.APIFormatVoyageContextual
+			cfg.Vector.Embeddings.Model = "voyage-context-4"
+			cfg.Vector.Embeddings.BatchSize = 1
+			spec, err := desiredDocumentVectorSpec(testCtx, fixture.Store)
+			require.NoError(err)
+			st := fixture.Store
+			consent, err := configuredDocumentVectorConsentSpec(spec, invocationFromContext(testCtx), "document_embedding")
+			require.NoError(err)
+			_, _, err = st.RecordDocumentVectorConsent(testCtx, consent, time.Now())
+			require.NoError(err)
+			require.NoError(st.RecordDocumentProviderConsent(testCtx, store.DocumentProviderConsent{
+				ProfileID: spec.TargetExtractionProfileID, ProfileFingerprint: strings.Repeat("7", 64), RetentionPosture: "standard", TrainingPosture: "opted-out",
+			}))
+			for index := range 2 {
+				hash := fmt.Sprintf("%064x", index+1)
+				messageID := fixture.CreateMessage(fmt.Sprintf("document-%d", index))
+				require.NoError(st.UpsertAttachmentRecord(testCtx, messageID, store.AttachmentWrite{
+					Filename: "synthetic.pdf", MIMEType: "application/pdf", Size: 128, StoragePath: hash[:2] + "/" + hash,
+					ContentHash: hash, Role: store.AttachmentRoleStandalone, RoleSource: store.AttachmentRoleSourceMIMEDisposition, SourcePartKey: "mime:1.2",
+				}))
+				var attachmentID int64
+				require.NoError(st.DB().QueryRow(st.Rebind(`SELECT id FROM attachments WHERE message_id = ?`), messageID).Scan(&attachmentID))
+				_, eligible, err := st.ReconcileDocumentOccurrence(testCtx, attachmentID, 1)
+				require.NoError(err)
+				require.True(eligible)
+				var messageType string
+				require.NoError(st.DB().QueryRow(st.Rebind(`SELECT COALESCE(message_type, '') FROM messages WHERE id = ?`), messageID).Scan(&messageType))
+				claim, err := st.ClaimDocumentExtraction(testCtx, store.DocumentExtractionClaimInput{
+					ExtractionID: fmt.Sprintf("extraction-%d", index), ProfileID: spec.TargetExtractionProfileID, CanonicalBlobHash: hash,
+					ExtractionInputKey: "original", LeaseOwner: "extraction-worker", LeaseUntil: time.Now().Add(time.Minute),
+					LocalBytes: 128, SourceSequence: 1, OccurrenceAttachmentID: attachmentID, OccurrenceMIMEType: "application/pdf", OccurrenceMessageType: messageType,
+				})
+				require.NoError(err)
+				policy, err := docbankdocument.NewNormalizePolicy(10000)
+				require.NoError(err)
+				normalized, err := docbankdocument.NormalizeDocument(docbankdocument.SourceDocument{
+					Family: "pdf", UnitKind: "page", Units: []docbankdocument.SourceUnit{{Index: 0, Markdown: "Synthetic evidence"}},
+				}, policy)
+				require.NoError(err)
+				unit, chunk := normalized.Units[0], normalized.Chunks[0]
+				require.NoError(st.PublishDocumentExtraction(testCtx, store.DocumentExtractionPublication{
+					ExtractionID: claim.ExtractionID, ProfileID: claim.ProfileID, CanonicalBlobHash: hash, ExtractionInputKey: claim.ExtractionInputKey,
+					OccurrenceAttachmentID: attachmentID, OccurrenceMIMEType: claim.OccurrenceMIMEType, OccurrenceMessageType: messageType,
+					LeaseOwner: claim.LeaseOwner, LeaseFence: claim.LeaseFence, ReturnedModel: "extract-test", UnitsProcessed: 1,
+					ManifestChecksum: normalized.Checksum, NormalizationVersion: normalized.PolicyVersion, DocumentFamily: normalized.Family, UnitKind: normalized.UnitKind,
+					Units: []store.DocumentPublishedUnit{{Index: 0, Kind: unit.Kind, Text: unit.Text, Checksum: unit.Checksum, CharCount: unit.CharCount}},
+					Chunks: []store.DocumentPublishedChunk{{Key: chunk.Key, Ordinal: 0, Text: chunk.Text, Checksum: chunk.Checksum, CharCount: chunk.CharCount,
+						Spans: []store.DocumentPublishedSpan{{UnitIndex: 0, CharStart: chunk.Spans[0].CharStart, CharEnd: chunk.Spans[0].CharEnd}}}},
+				}))
+			}
+			client := &commandDocumentSemanticClient{embedDocuments: func(_ context.Context, inputs []vector.DocumentInput) ([][][]float32, error) {
+				require.Len(inputs, 1, "each pass keeps one provider request")
+				require.Equal([]string{"Source: page 1\nContent:\nSynthetic evidence"}, inputs[0].Chunks)
+				return [][][]float32{{{1, 0, 0}}}, nil
+			}}
+			state := invocationFromContext(testCtx)
+			state.logger = testDiscardLogger()
+			features := &vectorFeatures{DocumentBackend: &commandDocumentVectorBackend{}, SemanticClient: client, Cfg: cfg.Vector}
+			capture := &registeredDocumentVectorJobCapture{}
+			require.NoError(registerDocumentVectorJob(capture, features, st, state))
+
+			if leased {
+				generation, _, err := st.EnsureDocumentVectorGeneration(testCtx, spec)
+				require.NoError(err)
+				var afterChunkID int64
+				for range 2 {
+					claim, err := st.ClaimDocumentVectorChunk(testCtx, generation.ID, afterChunkID, 1, "another-worker", time.Now(), time.Minute)
+					require.NoError(err)
+					require.NotNil(claim)
+					afterChunkID = claim.ChunkID
+				}
+				require.NoError(capture.job(t.Context()), "a pass without committed progress waits for its next trigger")
+				require.Zero(client.documentCalls)
+				coverage, err := st.GetDocumentVectorCoverage(testCtx, generation.ID)
+				require.NoError(err)
+				require.False(coverage.Complete())
+				return
+			}
+
+			require.ErrorIs(capture.job(t.Context()), scheduler.ErrReschedule)
+			building, err := st.GetBuildingDocumentVectorGeneration(testCtx)
+			require.NoError(err)
+			require.NotNil(building)
+			coverage, err := st.GetDocumentVectorCoverage(testCtx, building.ID)
+			require.NoError(err)
+			require.False(coverage.Complete())
+			require.Equal(1, client.documentCalls)
+
+			require.NoError(capture.job(t.Context()))
+			active, err := st.GetActiveDocumentVectorGeneration(testCtx)
+			require.NoError(err)
+			require.NotNil(active)
+			coverage, err = st.GetDocumentVectorCoverage(testCtx, active.ID)
+			require.NoError(err)
+			require.True(coverage.Complete())
+			require.Equal(2, client.documentCalls)
+			require.NoError(capture.job(t.Context()))
+			require.Equal(2, client.documentCalls, "completed work is not repeated")
+		})
+	}
 }
 
 func TestRegisteredDocumentVectorJobCarriesInvocation(t *testing.T) {
