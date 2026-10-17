@@ -47,6 +47,7 @@ describe('CardDAVOperations', () => {
     await controller.retryStatus();
     await waitFor(() => expect(screen.queryByText('Queued since', { exact: false })).toBeNull());
     expect(screen.getByLabelText('Active CardDAV sync').textContent).toContain('Running');
+    admitted = false;
     active = true;
     await controller.retryStatus();
     await waitFor(() => expect(screen.queryByText('Queued since', { exact: false })).toBeNull());

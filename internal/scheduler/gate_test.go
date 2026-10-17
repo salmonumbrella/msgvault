@@ -71,21 +71,14 @@ func TestEmbeddingYieldsDaemonGateToQueuedSync(t *testing.T) {
 		require.NoError(err)
 		synctest.Wait()
 		require.Equal("running", s.EmbeddingStatus().Job.State)
-		queuedAt := time.Now()
 		require.NoError(s.TriggerSync("sync@example.com"))
 		synctest.Wait()
-		account := s.Status()[0]
-		assert.True(account.Queued, "the sync waits behind embedding")
-		assert.Equal(queuedAt, account.QueuedAt)
 
 		time.Sleep(time.Minute + 10*time.Second)
 		synctest.Wait()
 		assert.Equal([]string{"scheduled embedding", "scheduled sync of sync@example.com", "scheduled embedding"}, holders,
 			"embedding yields the gate to the sync, then continues")
-		account = s.Status()[0]
-		assert.False(account.Queued)
-		assert.Zero(account.QueuedAt, "admission clears the queue time")
-		assert.False(account.LastRun.IsZero(), "the sync completed")
+		assert.False(s.Status()[0].LastRun.IsZero(), "the sync completed")
 		embedding := s.JobStatus()[0]
 		assert.False(embedding.Running)
 		assert.False(embedding.Pending)

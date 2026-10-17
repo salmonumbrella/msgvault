@@ -363,8 +363,15 @@ func TestDiagnosticTimingMeasuresElapsedTime(t *testing.T) {
 }
 
 func TestWorkerDiagnosticsCountCommittedCoverage(t *testing.T) {
-	for _, mode := range []string{"covered", "skipped then covered", "missing skip"} {
-		t.Run(mode, func(t *testing.T) {
+	for _, tc := range []struct {
+		mode         string
+		wantProgress bool
+	}{
+		{"covered", true},
+		{"skipped then covered", true},
+		{"missing skip", true},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
 			assert := assert.New(t)
 			require := require.New(t)
 			f := newContextWorkerFixture(t, nil)
@@ -385,7 +392,7 @@ func TestWorkerDiagnosticsCountCommittedCoverage(t *testing.T) {
 			d.beginBatch(2, time.Now())
 			ctx := jobctx.WithProgress(withEmbeddingDiagnostics(t.Context(), d))
 			w := NewWorker(WorkerDeps{Store: f.store, MainDB: f.store.DB(), Backend: f.backend})
-			switch mode {
+			switch tc.mode {
 			case "missing skip":
 				_, err = w.stampSkipped(ctx, f.gen, []int64{ids[0], ids[1] + 1000}, tokens)
 				require.NoError(err)
@@ -394,7 +401,7 @@ func TestWorkerDiagnosticsCountCommittedCoverage(t *testing.T) {
 				require.NoError(err)
 				ids = ids[1:]
 			}
-			if mode != "missing skip" {
+			if tc.mode != "missing skip" {
 				_, err = w.stampCovered(ctx, f.gen, ids, tokens)
 				require.ErrorContains(err, "synthetic stamp failure")
 			}
@@ -402,9 +409,7 @@ func TestWorkerDiagnosticsCountCommittedCoverage(t *testing.T) {
 			_, stamped, _, _, err := f.store.CoverageCounts(t.Context(), int64(f.gen))
 			require.NoError(err)
 			assert.Equal(int64(1), stamped)
-			if mode == "covered" {
-				assert.True(jobctx.HasProgress(ctx), "the first stamp committed before the second failed")
-			}
+			assert.Equal(tc.wantProgress, jobctx.HasProgress(ctx), "the first stamp committed")
 			got := capture.read(t)
 			require.Len(got.RecentBatches, 1)
 			assert.Equal(1, got.RecentBatches[0].Completed)

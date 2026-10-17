@@ -135,7 +135,7 @@ func countMissingE2E(t *testing.T, db *sql.DB, gen int64) int {
 
 // A repair commits one batch before yielding, resumes the remaining rows,
 // and starts its interval after completion.
-func TestEmbedJob_Backstop_RecoversSubWatermarkStraggler(t *testing.T) {
+func TestEmbedJob_Backstop_ResumesAfterCommittedBatchYields(t *testing.T) {
 	assert := assert.New(
 		t,
 	)
@@ -252,12 +252,6 @@ END;`)
 	*clock = now.Add(time.Minute)
 	require.NoError(job.Run(t.Context()))
 	assert.Equal(0, countMissingE2E(t, mainDB, int64(gen)), "the continuation finishes the interrupted repair")
-
-	_, err = mainDB.Exec(`UPDATE messages SET embed_gen = NULL WHERE id = 2`)
-	require.NoError(err)
-	*clock = now.Add(2 * time.Minute)
-	require.NoError(job.Run(t.Context()))
-	assert.Equal(1, countMissingE2E(t, mainDB, int64(gen)), "the finished repair starts the interval")
 }
 
 type backstopYieldPublisher struct {

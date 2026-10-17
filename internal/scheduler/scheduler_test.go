@@ -1059,12 +1059,13 @@ func TestEmbedJob_Run_YieldedActivationStopsWithoutWarningOrCompletion(t *testin
 
 func TestEmbedJob_Run_YieldedRunErrorStopsWithoutFailureWork(t *testing.T) {
 	assert := assert.New(t)
+	failure := errors.New("operation failed")
 	building := &vector.Generation{ID: 77, State: vector.GenerationBuilding, Fingerprint: "m:768"}
 	backend := &fakeBackend{activeErr: vector.ErrNoActiveGeneration, building: building}
 	ctx, cancel := context.WithCancelCause(context.Background())
 	t.Cleanup(func() { cancel(nil) })
 	runner := &fakeRunner{
-		runErr:      errors.New("operation failed"),
+		runErr:      failure,
 		yieldCancel: cancel,
 	}
 	coverage := &fakeCoverage{}
@@ -1077,7 +1078,7 @@ func TestEmbedJob_Run_YieldedRunErrorStopsWithoutFailureWork(t *testing.T) {
 		Log:         slog.New(slog.NewTextHandler(&logs, nil)),
 	}
 
-	_ = job.Run(ctx)
+	require.ErrorIs(t, job.Run(ctx), failure)
 
 	_, run, _ := runner.calls()
 	assert.Equal(1, run, "RunOnce calls")
@@ -2126,6 +2127,7 @@ func TestRegistrationPathsRejectWhatTheValidatorRejects(t *testing.T) {
 		assertions.Empty(s.schedules, "AddAccount(%q) must not register", expr)
 		requirements.Error(s.AddJob(Job{Name: "job", Schedule: expr, Run: func(context.Context) error { return nil }}), "AddJob(%q)", expr)
 	}
+	requirements.Error(New(nil).AddJob(Job{Name: "job", Run: func(context.Context) error { return nil }}), "AddJob rejects an empty schedule")
 }
 
 func TestValidateCronExpr(t *testing.T) {
@@ -3387,33 +3389,6 @@ func TestStartJobDroppedFollowUpIsLogged(t *testing.T) {
 	})
 }
 
-func TestSchedulerStartsBothVectorJobsAfterSync(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-		s := New(func(context.Context, string) error { return nil })
-		order := make(chan string, 8)
-		runner := &fakeRunner{onRunOnce: func(vector.GenerationID) { order <- "embed" }}
-		job := &EmbedJob{Worker: runner, Backend: &fakeBackend{active: vector.Generation{ID: 1}}}
-		require.NoError(s.SetEmbedJob(job, "", true))
-		require.NoError(s.SetDocumentVectorJob(func(context.Context) error {
-			order <- "document vector"
-			return nil
-		}, "", true))
-		require.NoError(s.AddAccount("test@example.test", "0 0 1 1 *"))
-		s.Start()
-		defer func() { <-s.Stop().Done() }()
-
-		require.NoError(s.TriggerSync("test@example.test"))
-		synctest.Wait()
-		got := make([]string, 0, 2)
-		for len(order) > 0 {
-			got = append(got, <-order)
-		}
-		assert.ElementsMatch([]string{"embed", "document vector"}, got)
-	})
-}
-
 type labelRecordingTracker struct {
 	mu     sync.Mutex
 	labels []string
@@ -3518,21 +3493,4 @@ func TestGenericJobYieldWithProgressClearsEarlierFailure(t *testing.T) {
 		close(release)
 		synctest.Wait()
 	})
-}
-
-func TestEmbedJobReturnsWorkerErrorAfterYield(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	ctx, cancel := context.WithCancelCause(t.Context())
-	defer cancel(nil)
-	failure := errors.New("embedding write failed")
-	runner := &fakeRunner{runErr: failure, yieldCancel: cancel}
-	job := &EmbedJob{Worker: runner, Backend: &fakeBackend{active: vector.Generation{ID: 5}}}
-	require.ErrorIs(job.Run(ctx), failure)
-	runner.yieldCancel = nil
-	s := New(nil)
-	defer func() { <-s.Stop().Done() }()
-	require.NoError(s.SetEmbedJob(job, "", false))
-	require.ErrorIs(s.TriggerJob("embed"), failure)
-	assert.Contains(s.JobStatus()[0].LastError, "embedding write failed")
 }

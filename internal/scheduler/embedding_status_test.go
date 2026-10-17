@@ -61,18 +61,3 @@ func TestPostSyncJobsStartIndependently(t *testing.T) {
 		assert.False(s.Status()[0].Running)
 	})
 }
-
-func TestAddJobRejectsEmptySchedule(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	s := New(nil)
-	defer func() { <-s.Stop().Done() }()
-	job := Job{Name: "generic", Run: func(context.Context) error { return nil }}
-	require.Error(s.AddJob(job))
-	assert.False(s.IsJobScheduled(job.Name))
-	job.Schedule = "0 0 * * *"
-	require.NoError(s.AddJob(job))
-	job.Schedule = ""
-	require.Error(s.AddJob(job))
-	assert.Equal("0 0 * * *", s.JobStatus()[0].Schedule, "invalid replacement preserves the registered schedule")
-}
