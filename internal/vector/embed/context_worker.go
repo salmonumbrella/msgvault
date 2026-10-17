@@ -482,7 +482,6 @@ func (w *ContextWorker) drainJournal(ctx context.Context, gen vector.GenerationI
 			if err := w.deps.Publisher.SetDocumentJournalCursor(ctx, gen, ""); err != nil {
 				return fmt.Errorf("clear contextual journal subcursor: %w", err)
 			}
-			jobctx.RecordProgress(ctx)
 			continue
 		}
 		normalChanges := changes
@@ -542,7 +541,6 @@ func (w *ContextWorker) drainJournal(ctx context.Context, gen vector.GenerationI
 		if err := w.deps.Publisher.SetDocumentJournalCursor(ctx, gen, ""); err != nil {
 			return fmt.Errorf("clear contextual journal scope cursor: %w", err)
 		}
-		jobctx.RecordProgress(ctx)
 	}
 }
 

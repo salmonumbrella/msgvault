@@ -1992,17 +1992,17 @@ func TestScheduler_SetEmbedJob_AddsCronEntry(t *testing.T) {
 	job := &EmbedJob{Worker: runner, Backend: backend}
 
 	require.NoError(s.SetEmbedJob(job, "*/5 * * * *", false), "SetEmbedJob first")
-	assert.True(s.embed.entrySet, "embedEntrySet should be true after first SetEmbedJob")
+	assert.NotZero(s.genericJobs["embed"], "first registration creates a cron entry")
 
 	// Replacing with a new schedule should not error.
 	require.NoError(s.SetEmbedJob(job, "0 * * * *", true), "SetEmbedJob replace")
-	assert.True(s.embed.entrySet, "embedEntrySet should remain true after replacement")
+	assert.NotZero(s.genericJobs["embed"], "replacement keeps a cron entry")
 	assert.True(s.embed.runAfterSync, "runEmbedAfterSync should be true after replacement with runAfterSync=true")
 
 	// Clearing.
 	require.NoError(s.SetEmbedJob(nil, "", false), "SetEmbedJob clear")
-	assert.False(s.embed.entrySet, "embedEntrySet should be false after clear")
-	assert.Nil(s.embed.job, "embedJob should be nil after clear")
+	assert.Zero(s.genericJobs["embed"], "clearing removes the cron entry")
+	assert.Nil(s.genericFuncs["embed"], "embedJob should be nil after clear")
 	assert.False(s.embed.runAfterSync, "runEmbedAfterSync should be false after clear")
 }
 
@@ -2014,7 +2014,7 @@ func TestScheduler_SetEmbedJob_InvalidCron(t *testing.T) {
 
 	err := s.SetEmbedJob(job, "not a cron", false)
 	require.Error(t, err, "SetEmbedJob with invalid cron")
-	assert.False(t, s.embed.entrySet, "embedEntrySet should remain false after invalid cron")
+	assert.Zero(t, s.genericJobs["embed"], "invalid schedule creates no cron entry")
 }
 
 func TestScheduler_SetEmbedJob_InvalidReplacePreservesPrevious(t *testing.T) {
@@ -2030,13 +2030,13 @@ func TestScheduler_SetEmbedJob_InvalidReplacePreservesPrevious(t *testing.T) {
 		job2 := &EmbedJob{Worker: runner2, Backend: backend}
 
 		require.NoError(s.SetEmbedJob(job1, "*/5 * * * *", true), "SetEmbedJob(job1)")
-		prevEntry := s.embed.entry
+		prevEntry := s.genericJobs["embed"]
 
 		require.Error(s.SetEmbedJob(job2, "bogus cron", true), "SetEmbedJob(job2, invalid)")
 
 		assert.True(s.embed.runAfterSync, "runAfterSync should remain true")
-		assert.True(s.embed.entrySet, "cron entry should still be job1's (entrySet)")
-		assert.Equal(prevEntry, s.embed.entry, "cron entry should still be job1's")
+		assert.NotZero(s.genericJobs["embed"], "the previous cron entry remains registered")
+		assert.Equal(prevEntry, s.genericJobs["embed"], "cron entry should still be job1's")
 
 		require.NoError(s.AddAccount("test@example.test", "0 0 1 1 *"))
 		s.Start()
@@ -2058,8 +2058,8 @@ func TestScheduler_SetEmbedJob_EmptyScheduleNoCronEntry(t *testing.T) {
 	job := &EmbedJob{Worker: runner, Backend: backend}
 
 	require.NoError(t, s.SetEmbedJob(job, "", true), "SetEmbedJob")
-	assert.False(s.embed.entrySet, "empty schedule should not create a cron entry")
-	assert.NotNil(s.embed.job, "embedJob should be set even with empty schedule")
+	assert.Zero(s.genericJobs["embed"], "empty schedule should not create a cron entry")
+	assert.NotNil(s.genericFuncs["embed"], "embedJob should be set even with empty schedule")
 	assert.True(s.embed.runAfterSync, "runEmbedAfterSync should be true")
 }
 
@@ -3524,8 +3524,8 @@ func TestScheduledVectorJobsHoldGateUnderOwnLabel(t *testing.T) {
 		job := &EmbedJob{Worker: &fakeRunner{}, Backend: &fakeBackend{active: vector.Generation{ID: 1}}}
 		require.NoError(s.SetEmbedJob(job, "0 0 1 1 *", false))
 		require.NoError(s.SetDocumentVectorJob(func(context.Context) error { return nil }, "0 0 1 1 *", false))
-		s.cron.Entry(s.embed.entry).Job.Run()
-		s.cron.Entry(s.documentVector.entry).Job.Run()
+		s.cron.Entry(s.genericJobs["embed"]).Job.Run()
+		s.cron.Entry(s.genericJobs["document-vector"]).Job.Run()
 		synctest.Wait()
 		assert.Equal(t, []string{"scheduled embedding", "scheduled document indexing"}, tracker.labels)
 	})

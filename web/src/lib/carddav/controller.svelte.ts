@@ -62,6 +62,7 @@ export class CardDAVController {
   private syncAbort?: AbortController;
   private bookMutationAbort?: AbortController;
   private pollTimer?: ReturnType<typeof setTimeout>;
+  private scheduledRefreshAt?: string;
   private pollGeneration = 1;
   private pollDelay = MIN_POLL_MS;
   private pollFingerprint = '';
@@ -77,6 +78,8 @@ export class CardDAVController {
     if (this.shouldPoll()) {
       this.pollDelay = MIN_POLL_MS;
       this.schedulePoll(MIN_POLL_MS);
+    } else {
+      this.scheduleScheduledRefresh();
     }
   };
   constructor(
@@ -371,9 +374,10 @@ export class CardDAVController {
       }
       return false;
     } finally {
-      if (schedule && this.currentStatusCommit(context, statusCommit, requestController.signal) && this.shouldPoll()) {
+      if (schedule && this.currentStatusCommit(context, statusCommit, requestController.signal)) {
         this.pollDelay = MIN_POLL_MS;
-        this.schedulePoll(MIN_POLL_MS);
+        if (this.shouldPoll()) this.schedulePoll(MIN_POLL_MS);
+        else this.scheduleScheduledRefresh();
       }
       if (this.current(context) && this.statusReadAbort === requestController) {
         this.statusReadAbort = undefined;
@@ -458,6 +462,22 @@ export class CardDAVController {
   private shouldPoll(): boolean {
     return !this.disposed && !this.visibilityDocument?.hidden && Boolean(this.status?.active || this.status?.queued_at || this.syncPending);
   }
+  private scheduleScheduledRefresh(): void {
+    if (this.shouldPoll()) return;
+    if (this.pollTimer !== undefined) clearTimeout(this.pollTimer);
+    this.pollTimer = undefined;
+    const next = this.status?.next_scheduled_at;
+    if (this.disposed || this.visibilityDocument?.hidden || !this.status?.scheduled || !next || next === this.scheduledRefreshAt) return;
+    const target = Date.parse(next) + 1000;
+    if (!Number.isFinite(target)) return;
+    const generation = ++this.pollGeneration;
+    this.pollTimer = setTimeout(() => {
+      this.pollTimer = undefined;
+      if (Date.now() < target) { this.scheduleScheduledRefresh(); return; }
+      this.scheduledRefreshAt = next;
+      void this.poll(generation);
+    }, Math.min(2_147_483_647, Math.max(0, target - Date.now())));
+  }
   private schedulePoll(delay: number): void {
     if (!this.shouldPoll()) return;
     if (this.pollTimer !== undefined) clearTimeout(this.pollTimer);
@@ -502,14 +522,17 @@ export class CardDAVController {
       this.statusError = null;
       this.pollFingerprint = fingerprint;
       this.recordSuccessfulStatusCommit(statusCommit);
-      if (priorActive && !data.active && !this.syncPending) {
+      if (priorActive && !data.active && !data.queued_at && !this.syncPending) {
         this.stopPolling(false);
         await Promise.all([...(data.available ? [this.loadBooks(true)] : []), this.refreshRuns()]);
+        this.scheduleScheduledRefresh();
         return;
       }
       if (this.shouldPoll()) {
         this.pollDelay = advanced ? MIN_POLL_MS : Math.min(MAX_POLL_MS, this.pollDelay * 2);
         this.schedulePoll(this.pollDelay);
+      } else {
+        this.scheduleScheduledRefresh();
       }
       if (becameAvailable) await this.loadBooks(false);
     } catch {

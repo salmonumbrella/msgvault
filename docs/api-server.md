@@ -2487,7 +2487,9 @@ Scheduler state and per-account schedule details.
 The daemon runs scheduled work one job at a time. While a sync waits for
 another job to finish, its entry reports `"queued": true` and `"running": false`.
 `queued_at` records when the wait began and clears on admission. CardDAV status
-reports the earliest `queued_at` among the selected connections.
+reports the earliest `queued_at` among the selected connections. An open CardDAV
+page refreshes just after the next scheduled run, follows queued and active
+work, then stops polling when both states clear.
 `"running": true` means it acquired the operation gate; `started_at` gives when
 it began. The top-level `running` field reports whether the scheduler is active.
 A schedule tick that fires during a run

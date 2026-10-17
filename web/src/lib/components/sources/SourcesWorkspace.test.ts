@@ -42,7 +42,10 @@ describe('SourcesWorkspace', () => {
     expect(await screen.findByText('Queued')).toBeDefined();
     expect(screen.getByText('Failed')).toBeDefined();
     expect(screen.getAllByText('Sync queued')).toHaveLength(2);
-    expect(screen.getByText('Queued since', { exact: false }).querySelector('time')?.getAttribute('datetime')).toBe('2026-10-01T15:04:00Z');
+    const queuedTime = screen.getByText('Queued since', { exact: false }).querySelector('time');
+    expect(queuedTime?.getAttribute('datetime')).toBe('2026-10-01T15:04:00Z');
+    expect(queuedTime?.textContent).toMatch(/Oct 1, 2026/);
+    expect(queuedTime?.textContent).toMatch(/\d{1,2}:04/);
     expect(screen.queryByText('Sync in progress')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Show details for Resuming archive' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Show details for Broken archive' })).toBeDefined();
@@ -276,6 +279,36 @@ describe('SourcesWorkspace', () => {
 
     expect(requests.every((request) => request.headers.get('Accept') !== 'text/event-stream')).toBe(true);
     expect(requests.every((request) => ['/api/v1/sources/status', '/api/v1/sync/archive%40example.com'].includes(new URL(request.url).pathname))).toBe(true);
+    rendered.unmount();
+  });
+
+  it('follows a queued sync beyond 65 seconds through admission and completion', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let stage = 'queued';
+    let reads = 0;
+    const fetchFn = vi.fn<typeof fetch>(async () => {
+      reads++;
+      return Response.json({ sources: [source(stage === 'queued' ? {
+        can_sync: false, scheduler_queued: true, scheduler_queued_at: '2026-10-01T15:04:00Z', sync_unavailable_reason: 'sync_already_running'
+      } : stage === 'running' ? {
+        can_sync: false, active_sync: run('running', 5), sync_unavailable_reason: 'sync_already_running'
+      } : { latest_sync: run('completed', 8, { completed_at: '2026-10-01T15:06:00Z' }) })] });
+    });
+    const rendered = render(SourcesWorkspace, { client: createAPIClient(fetchFn) });
+    await screen.findByText('Queued');
+    await vi.advanceTimersByTimeAsync(80_000);
+    const queuedReads = reads;
+    stage = 'running';
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(reads).toBeGreaterThan(queuedReads);
+    expect(screen.getByText('5 processed')).toBeDefined();
+    stage = 'completed';
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(screen.getByText('Completed')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Sync now Archive' })).toBeDefined();
+    const completedReads = reads;
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(reads).toBe(completedReads);
     rendered.unmount();
   });
 

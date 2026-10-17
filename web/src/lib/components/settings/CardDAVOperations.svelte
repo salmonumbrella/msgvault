@@ -124,7 +124,7 @@
       </div>
       {#if status.repair_reason}<p class="notice notice--error" role="alert">{repairCopy[status.repair_reason]}</p>{/if}
       {#if status.queued_at && !status.active}
-        <p class="muted">Queued since <time datetime={status.queued_at} title={status.queued_at}>{new Date(status.queued_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></p>
+        <p class="muted">Queued since <time datetime={status.queued_at} title={status.queued_at}>{formatTimestamp(status.queued_at)}</time></p>
       {/if}
       {#if status.active}
         <div class="run-summary" aria-label="Active CardDAV sync">

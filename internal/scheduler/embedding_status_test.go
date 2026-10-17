@@ -26,7 +26,7 @@ func TestEmbeddingJobStatus(t *testing.T) {
 			defer func() { <-s.Stop().Done() }()
 			job := &EmbedJob{}
 			require.NoError(s.SetEmbedJob(job, "0 0 * * *", true))
-			go s.cron.Entry(s.embed.entry).Job.Run()
+			go s.cron.Entry(s.genericJobs["embed"]).Job.Run()
 			synctest.Wait()
 			status := s.EmbeddingStatus()
 			assert.Equal("queued", status.Job.State)
@@ -202,4 +202,42 @@ func TestEmbedJobStopsBetweenPhases(t *testing.T) {
 			assert.Zero(t, runner.backstopCalls, "a stop request prevents starting another embedding phase")
 		})
 	}
+}
+
+func TestPostSyncDocumentWaitsForEmbeddingContinuation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var order []string
+		runs := 0
+		release := make(chan struct{})
+		s := New(func(context.Context, string) error { return nil }).WithWorkTracker(newSerialWorkTracker())
+		defer func() { <-s.Stop().Done() }()
+		require.NoError(t, s.setCronSlot(&s.embed, func(ctx context.Context) error {
+			runs++
+			order = append(order, "embed")
+			if runs == 1 {
+				jobctx.RecordProgress(ctx)
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			order = append(order, "embed complete")
+			return nil
+		}, "", true))
+		require.NoError(t, s.SetDocumentVectorJob(func(context.Context) error {
+			order = append(order, "document")
+			return nil
+		}, "", true))
+		require.NoError(t, s.AddAccount("sync@example.com", "0 0 1 1 *"))
+		require.NoError(t, s.TriggerSync("sync@example.com"))
+		synctest.Wait()
+		time.Sleep(5*time.Minute + time.Second)
+		synctest.Wait()
+		assert.Equal(t, []string{"embed", "embed"}, order, "document work waits through the embedding continuation")
+		close(release)
+		synctest.Wait()
+		assert.Equal(t, []string{"embed", "embed", "embed complete", "document"}, order)
+	})
 }

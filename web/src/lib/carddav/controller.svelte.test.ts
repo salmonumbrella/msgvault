@@ -249,6 +249,49 @@ describe('CardDAVController', () => {
     controller.destroy();
   });
 
+  it('refreshes once at the next schedule, then follows queued and active work', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-01T15:00:00Z'));
+    let stage = 'idle';
+    let reads = 0;
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(requestOf(input).url).pathname;
+      if (path.endsWith('/status')) {
+        reads++;
+        return Response.json({ ...idleStatus, scheduled: true, next_scheduled_at: '2026-10-01T15:01:00Z',
+          ...(stage === 'queued' ? { queued_at: '2026-10-01T15:01:00Z' } : {}),
+          ...(stage === 'active' ? { active: run(1) } : {}),
+          ...(stage === 'completed' ? { latest: run(1, 'succeeded') } : {}) });
+      }
+      if (path.endsWith('/books')) return Response.json({ books: [] });
+      return Response.json({ runs: [] });
+    });
+    const controller = new CardDAVController(createAPIClient(fetchFn));
+    await controller.load();
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(reads).toBe(1);
+    stage = 'queued';
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(controller.status?.queued_at).toBe('2026-10-01T15:01:00Z');
+    stage = 'active';
+    await vi.advanceTimersByTimeAsync(500);
+    expect(controller.status?.active?.id).toBe(1);
+    stage = 'queued';
+    await vi.advanceTimersByTimeAsync(500);
+    expect(controller.status?.active).toBeUndefined();
+    expect(controller.status?.queued_at).toBe('2026-10-01T15:01:00Z');
+    stage = 'active';
+    await vi.advanceTimersByTimeAsync(500);
+    expect(controller.status?.active?.id).toBe(1);
+    stage = 'completed';
+    await vi.advanceTimersByTimeAsync(500);
+    expect(controller.status?.latest?.state).toBe('succeeded');
+    const completedReads = reads;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(reads).toBe(completedReads);
+    controller.destroy();
+  });
+
   it('polls queued work through admission and stops after completion', async () => {
     vi.useFakeTimers();
     let statusReads = 0;
