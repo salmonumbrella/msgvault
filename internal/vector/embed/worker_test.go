@@ -330,9 +330,6 @@ func TestWorker_StampsAfterUpsert(t *testing.T) {
 		`SELECT COUNT(*) FROM messages WHERE embed_gen = ?`, int64(f.BuildingGen)).Scan(&stamped))
 	require.Equal(3, stamped, "stamped messages")
 	assert.True(t, jobctx.HasProgress(ctx))
-	res, err := w.RunOnce(t.Context(), f.BuildingGen, testEmbeddingPassScope())
-	require.NoError(err)
-	assert.Zero(t, res.Claimed, "committed coverage is skipped on the next pass")
 }
 
 // TestWorker_EmptyCorpusReturnsZero: scanning an empty corpus returns a

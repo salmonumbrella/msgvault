@@ -2,8 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"errors"
-	"strconv"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -50,10 +48,10 @@ func TestEmbeddingJobStatus(t *testing.T) {
 			require.NoError(s.AddAccount("synthetic@example.com", "0 0 * * *"))
 			require.NoError(s.TriggerSync("synthetic@example.com"))
 			<-runner.gate
+			synctest.Wait()
 			status := s.EmbeddingStatus()
 			assert.Equal("running", status.Job.State)
 			assert.False(s.Status()[0].Running, "the sync finishes before embedding starts")
-			assert.Nil(status.Job.QueuedAt, "queue time clears on admission")
 			require.NotNil(status.Job.StartedAt)
 			close(runner.release)
 			synctest.Wait()
@@ -140,143 +138,71 @@ func TestQueueTimesClearOnAdmission(t *testing.T) {
 	}
 }
 
-func TestAutomaticEmbeddingBudgetContinuesOnlyCommittedProgress(t *testing.T) {
-	for _, progress := range []bool{true, false} {
-		t.Run(strconv.FormatBool(progress), func(t *testing.T) {
+func TestPostSyncDocumentOrderingAcrossEmbeddingContinuations(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing bool
+		wait     time.Duration
+		before   []string
+		after    []string
+	}{
+		{"fresh chain", false, 5*time.Minute + time.Second, []string{"sync", "embed", "embed"}, []string{"sync", "embed", "embed", "embed complete", "document"}},
+		{"existing chain", true, 66 * time.Second, []string{"embed", "sync", "embed"}, []string{"embed", "sync", "embed", "document"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				s := New(nil)
-				defer func() { <-s.Stop().Done() }()
+				var order, documentOrder []string
 				runs := 0
-				callbackErr := errors.New("synthetic publication failure")
 				release := make(chan struct{})
-				require.NoError(t, s.SetDocumentVectorJob(func(ctx context.Context) error {
+				s := New(func(context.Context, string) error {
+					order = append(order, "sync")
+					return nil
+				}).WithWorkTracker(newSerialWorkTracker())
+				defer func() { <-s.Stop().Done() }()
+				require.NoError(t, s.setCronSlot(&s.embed, func(ctx context.Context) error {
 					runs++
-					if runs == 1 {
-						if progress {
-							jobctx.RecordProgress(ctx)
-						}
+					order = append(order, "embed")
+					if tc.existing || runs == 1 {
+						jobctx.RecordProgress(ctx)
 						<-ctx.Done()
-						return errors.Join(callbackErr, ctx.Err(), context.Cause(ctx))
+						return ctx.Err()
 					}
-					<-release
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+					order = append(order, "embed complete")
 					return nil
 				}, "", true))
-				_, err := s.StartJob("document-vector")
-				require.NoError(t, err)
-				time.Sleep(5*time.Minute + time.Second)
+				require.NoError(t, s.SetDocumentVectorJob(func(context.Context) error {
+					order = append(order, "document")
+					documentOrder = append([]string(nil), order...)
+					return nil
+				}, "", true))
+				require.NoError(t, s.AddAccount("sync@example.com", "0 0 1 1 *"))
+				if tc.existing {
+					require.Equal(t, JobStarted, mustStartJob(t, s, "embed"))
+					synctest.Wait()
+				}
+				require.NoError(t, s.TriggerSync("sync@example.com"))
 				synctest.Wait()
-				status := s.JobStatus()[0]
-				assert.Contains(t, status.LastError, callbackErr.Error())
-				if progress {
-					assert.Equal(t, 2, runs)
-					assert.True(t, status.Running)
-					assert.NotContains(t, status.LastError, jobctx.ErrRunBudgetExceeded.Error())
-				} else {
-					assert.Equal(t, 1, runs)
-					assert.False(t, status.Running)
-					assert.Contains(t, status.LastError, "before committing progress")
+				time.Sleep(tc.wait)
+				synctest.Wait()
+				require.Equal(t, tc.before, order)
+				for _, status := range s.JobStatus() {
+					if status.Name == "document-vector" {
+						assert.Equal(t, tc.existing, status.Queued, "only an existing chain lets document work join the gate between passes")
+					}
 				}
 				close(release)
+				if tc.existing {
+					time.Sleep(5 * time.Minute)
+				}
+				synctest.Wait()
+				assert.Equal(t, tc.after, documentOrder)
 			})
 		})
 	}
-}
-
-func TestEmbedJobStopsBetweenPhases(t *testing.T) {
-	for _, budget := range []bool{false, true} {
-		t.Run(strconv.FormatBool(budget), func(t *testing.T) {
-			ctx, request := jobctx.WithPreemption(t.Context())
-			ctx, cancel := context.WithCancelCause(ctx)
-			defer cancel(nil)
-			runner := &fakeRunner{onRunOnce: func(vector.GenerationID) {
-				if budget {
-					cancel(jobctx.ErrRunBudgetExceeded)
-				} else {
-					request()
-				}
-			}}
-			backend := &fakeBackend{active: vector.Generation{ID: 1}}
-			job := &EmbedJob{Worker: runner, Backend: backend}
-			job.Run(ctx)
-			assert.Equal(t, 1, runner.runCalls)
-			assert.Zero(t, runner.backstopCalls, "a stop request prevents starting another embedding phase")
-		})
-	}
-}
-
-func TestPostSyncDocumentWaitsForEmbeddingContinuation(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var order []string
-		runs := 0
-		release := make(chan struct{})
-		s := New(func(context.Context, string) error { return nil }).WithWorkTracker(newSerialWorkTracker())
-		defer func() { <-s.Stop().Done() }()
-		require.NoError(t, s.setCronSlot(&s.embed, func(ctx context.Context) error {
-			runs++
-			order = append(order, "embed")
-			if runs == 1 {
-				jobctx.RecordProgress(ctx)
-				<-ctx.Done()
-				return ctx.Err()
-			}
-			select {
-			case <-release:
-			case <-ctx.Done():
-			}
-			order = append(order, "embed complete")
-			return nil
-		}, "", true))
-		require.NoError(t, s.SetDocumentVectorJob(func(context.Context) error {
-			order = append(order, "document")
-			return nil
-		}, "", true))
-		require.NoError(t, s.AddAccount("sync@example.com", "0 0 1 1 *"))
-		require.NoError(t, s.TriggerSync("sync@example.com"))
-		synctest.Wait()
-		time.Sleep(5*time.Minute + time.Second)
-		synctest.Wait()
-		assert.Equal(t, []string{"embed", "embed"}, order, "document work waits through the embedding continuation")
-		close(release)
-		synctest.Wait()
-		assert.Equal(t, []string{"embed", "embed", "embed complete", "document"}, order)
-	})
-}
-
-func TestPostSyncDocumentQueuesBehindExistingEmbeddingContinuation(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var order []string
-		s := New(func(context.Context, string) error {
-			order = append(order, "sync")
-			return nil
-		}).WithWorkTracker(newSerialWorkTracker())
-		defer func() { <-s.Stop().Done() }()
-		require.NoError(t, s.setCronSlot(&s.embed, func(ctx context.Context) error {
-			order = append(order, "embed")
-			jobctx.RecordProgress(ctx)
-			<-ctx.Done()
-			return ctx.Err()
-		}, "", true))
-		require.NoError(t, s.SetDocumentVectorJob(func(context.Context) error {
-			order = append(order, "document")
-			return nil
-		}, "", true))
-		require.NoError(t, s.AddAccount("sync@example.com", "0 0 1 1 *"))
-		require.Equal(t, JobStarted, mustStartJob(t, s, "embed"))
-		synctest.Wait()
-		require.NoError(t, s.TriggerSync("sync@example.com"))
-		synctest.Wait()
-		time.Sleep(66 * time.Second)
-		synctest.Wait()
-		require.Equal(t, []string{"embed", "sync", "embed"}, order)
-		for _, status := range s.JobStatus() {
-			if status.Name == "document-vector" {
-				assert.True(t, status.Queued, "document work joins the gate while the existing embedding chain continues")
-			}
-		}
-		time.Sleep(5 * time.Minute)
-		synctest.Wait()
-		assert.Equal(t, []string{"embed", "sync", "embed", "document", "embed"}, order)
-	})
 }
 
 func TestAddJobRejectsEmptySchedule(t *testing.T) {

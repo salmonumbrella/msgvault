@@ -871,31 +871,42 @@ func (r *fakeRunner) passScopes() (run, backstop []operations.PassScope) {
 // ---------- EmbedJob tests ----------
 
 func TestEmbedJob_Run_YieldedCleanRunStopsBeforeCompletionWork(t *testing.T) {
-	assert := assert.New(t)
-	building := &vector.Generation{ID: 77, State: vector.GenerationBuilding, Fingerprint: "m:768"}
-	backend := &fakeBackend{activeErr: vector.ErrNoActiveGeneration, building: building}
-	ctx, cancel := context.WithCancelCause(context.Background())
-	t.Cleanup(func() { cancel(nil) })
-	runner := &fakeRunner{yieldCancel: cancel}
-	coverage := &fakeCoverage{}
-	var logs bytes.Buffer
-	job := &EmbedJob{
-		Worker:      runner,
-		Backend:     backend,
-		Store:       coverage,
-		Fingerprint: "m:768",
-		Log:         slog.New(slog.NewTextHandler(&logs, nil)),
+	for _, tc := range []struct {
+		name        string
+		cooperative bool
+	}{{"cancelled", false}, {"requested", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+			building := &vector.Generation{ID: 77, State: vector.GenerationBuilding, Fingerprint: "m:768"}
+			backend := &fakeBackend{activeErr: vector.ErrNoActiveGeneration, building: building}
+			ctx, request := jobctx.WithPreemption(t.Context())
+			ctx, cancel := context.WithCancelCause(ctx)
+			t.Cleanup(func() { cancel(nil) })
+			runner := &fakeRunner{yieldCancel: cancel}
+			if tc.cooperative {
+				runner = &fakeRunner{onRunOnce: func(vector.GenerationID) { request() }}
+			}
+			coverage := &fakeCoverage{}
+			var logs bytes.Buffer
+			job := &EmbedJob{
+				Worker:      runner,
+				Backend:     backend,
+				Store:       coverage,
+				Fingerprint: "m:768",
+				Log:         slog.New(slog.NewTextHandler(&logs, nil)),
+			}
+
+			job.Run(ctx)
+
+			_, run, _ := runner.calls()
+			assert.Equal(1, run, "RunOnce calls")
+			n, _ := runner.backstops()
+			assert.Equal(0, n, "RunBackstop calls")
+			assert.Equal(0, coverage.calls, "coverage queries")
+			assert.Empty(backend.activations(), "activation calls")
+			assert.NotContains(logs.String(), "embed run complete", "yield must not log completion")
+		})
 	}
-
-	job.Run(ctx)
-
-	_, run, _ := runner.calls()
-	assert.Equal(1, run, "RunOnce calls")
-	n, _ := runner.backstops()
-	assert.Equal(0, n, "RunBackstop calls")
-	assert.Equal(0, coverage.calls, "coverage queries")
-	assert.Empty(backend.activations(), "activation calls")
-	assert.NotContains(logs.String(), "embed run complete", "yield must not log completion")
 }
 
 func TestEmbedJob_Run_YieldedReclaimStopsWithoutWarning(t *testing.T) {

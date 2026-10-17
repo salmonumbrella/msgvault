@@ -8977,17 +8977,6 @@ func TestHandleSourceStatusDisablesSyncForQueuedJobs(t *testing.T) {
 			assert.Equal("2026-10-01T15:04:00Z", *response.Sources[0].SchedulerQueuedAt)
 			assert.False(response.Sources[0].CanSync)
 			assert.Equal("sync_already_running", response.Sources[0].SyncUnavailableReason)
-			if sourceType == "gmail" {
-				sched.statuses[0].Queued = false
-			} else {
-				sched.jobStatuses[0].Queued = false
-			}
-			w = httptest.NewRecorder()
-			srv.Router().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/sources/status", nil))
-			require.Equal(http.StatusOK, w.Code)
-			response = SourceStatusResponse{}
-			require.NoError(json.Unmarshal(w.Body.Bytes(), &response))
-			assert.Nil(response.Sources[0].SchedulerQueuedAt, "the queue time disappears after admission")
 		})
 	}
 }

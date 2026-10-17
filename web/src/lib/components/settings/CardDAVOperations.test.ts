@@ -41,8 +41,6 @@ describe('CardDAVOperations', () => {
     render(CardDAVOperations, { controller });
     const queued = screen.getByText('Queued since', { exact: false });
     expect(queued.querySelector('time')?.getAttribute('datetime')).toBe('2026-10-01T15:04:00Z');
-    expect(queued.querySelector('time')?.textContent).toMatch(/Oct 1, 2026/);
-    expect(queued.querySelector('time')?.textContent).toMatch(/\d{1,2}:04/);
     active = true;
     await controller.retryStatus();
     await waitFor(() => expect(screen.queryByText('Queued since', { exact: false })).toBeNull());

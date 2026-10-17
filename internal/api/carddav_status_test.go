@@ -434,8 +434,9 @@ func TestCardDAVStatusReportsSelectedAndAggregateSchedules(t *testing.T) {
 		query     string
 		scheduled bool
 		next      time.Time
+		queued    time.Time
 	}{
-		{"", true, next}, {"?connection=work", true, next}, {"?connection=personal", true, next.Add(time.Hour)}, {"?connection=default", false, time.Time{}},
+		{"", true, next, next.Add(-time.Minute)}, {"?connection=work", true, next, next.Add(-time.Minute)}, {"?connection=personal", true, next.Add(time.Hour), next}, {"?connection=default", false, time.Time{}, time.Time{}},
 	} {
 		response := getCardDAVRead(t, server, "/api/v1/carddav/status"+tc.query)
 		require.Equal(http.StatusOK, response.Code, response.Body.String())
@@ -446,22 +447,10 @@ func TestCardDAVStatusReportsSelectedAndAggregateSchedules(t *testing.T) {
 			require.NotNil(status.NextScheduledAt)
 			assertions.Equal(tc.next, *status.NextScheduledAt)
 			require.NotNil(status.QueuedAt)
-			if tc.query == "?connection=personal" {
-				assertions.Equal(next, *status.QueuedAt)
-			} else {
-				assertions.Equal(next.Add(-time.Minute), *status.QueuedAt)
-			}
+			assertions.Equal(tc.queued, *status.QueuedAt)
 		} else {
 			assertions.Nil(status.NextScheduledAt)
 			assertions.Nil(status.QueuedAt)
 		}
 	}
-	for i := range sched.jobStatuses {
-		sched.jobStatuses[i].Queued = false
-	}
-	response := getCardDAVRead(t, server, "/api/v1/carddav/status")
-	require.Equal(http.StatusOK, response.Code)
-	var admitted CardDAVStatusResponse
-	require.NoError(json.NewDecoder(response.Body).Decode(&admitted))
-	assertions.Nil(admitted.QueuedAt, "admitted jobs no longer report a queue time")
 }

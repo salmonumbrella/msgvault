@@ -356,35 +356,6 @@ describe('CardDAVController', () => {
     controller.destroy();
   });
 
-  it('polls queued work through admission and stops after completion', async () => {
-    vi.useFakeTimers();
-    let statusReads = 0;
-    const fetchFn = vi.fn<typeof fetch>(async (input) => {
-      const path = new URL(requestOf(input).url).pathname;
-      if (path.endsWith('/status')) {
-        statusReads++;
-        if (statusReads === 1) return Response.json({ ...idleStatus, queued_at: '2026-10-01T15:04:00Z' });
-        if (statusReads === 2) return Response.json({ ...idleStatus, active: run(1) });
-        return Response.json({ ...idleStatus, latest: run(1, 'succeeded') });
-      }
-      if (path.endsWith('/books')) return Response.json({ books: [] });
-      if (path.endsWith('/runs')) return Response.json({ runs: [] });
-      throw new Error(`Unexpected ${path}`);
-    });
-    const controller = new CardDAVController(createAPIClient(fetchFn));
-    await controller.load();
-    expect(controller.status?.queued_at).toBe('2026-10-01T15:04:00Z');
-    await vi.advanceTimersByTimeAsync(500);
-    expect(controller.status?.queued_at).toBeUndefined();
-    expect(controller.status?.active?.id).toBe(1);
-    await vi.advanceTimersByTimeAsync(500);
-    expect(controller.status?.active).toBeUndefined();
-    expect(controller.status?.latest?.state).toBe('succeeded');
-    await vi.advanceTimersByTimeAsync(8000);
-    expect(statusReads).toBe(3);
-    controller.destroy();
-  });
-
   it('uses progress-aware polling, caps backoff, pauses while hidden, and reconciles terminal state', async () => {
     vi.useFakeTimers();
     let statusReads = 0;

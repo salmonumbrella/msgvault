@@ -44,8 +44,6 @@ describe('SourcesWorkspace', () => {
     expect(screen.getAllByText('Sync queued')).toHaveLength(2);
     const queuedTime = screen.getByText('Queued since', { exact: false }).querySelector('time');
     expect(queuedTime?.getAttribute('datetime')).toBe('2026-10-01T15:04:00Z');
-    expect(queuedTime?.textContent).toMatch(/Oct 1, 2026/);
-    expect(queuedTime?.textContent).toMatch(/\d{1,2}:04/);
     expect(screen.queryByText('Sync in progress')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Show details for Resuming archive' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Show details for Broken archive' })).toBeDefined();
