@@ -499,8 +499,7 @@ func (j *EmbedJob) maybeRunBackstop(
 		messageErr, personErr = generationErr.Message, generationErr.Person
 	}
 	stopped := jobctx.StopRequested(ctx)
-	if res.RepairComplete || (!stopped && messageErr == nil) ||
-		(j.SequenceBoundActivation && res.BackstopStarted) {
+	if res.RepairSettled || (!stopped && messageErr == nil) {
 		if j.lastBackstop == nil {
 			j.lastBackstop = make(map[vector.GenerationID]time.Time)
 		}

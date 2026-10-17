@@ -1136,7 +1136,7 @@ func TestEmbedJob_MaybeRunBackstop_FinishedRepairKeepsIntervalAfterLaterError(t 
 		t.Run(tc.name, func(t *testing.T) {
 			require := require.New(t)
 			assert := assert.New(t)
-			runner := &fakeRunner{backstopResult: embed.RunResult{RepairComplete: true}, backstopErr: tc.err}
+			runner := &fakeRunner{backstopResult: embed.RunResult{RepairSettled: true}, backstopErr: tc.err}
 			job := &EmbedJob{Worker: runner, BackstopInterval: time.Hour}
 			now := time.Now().UTC()
 

@@ -172,11 +172,9 @@ type RunResult struct {
 	Claimed, Succeeded, Failed, Truncated int
 	// Contextual is set by ContextWorker. The ordinary Worker leaves it nil.
 	Contextual *ContextConvergence
-	// BackstopStarted means a contextual repair cursor exists or its reset committed.
-	BackstopStarted bool
-	// RepairComplete means a backstop scan reached the end of the archive.
-	// A later cleanup or person error does not undo it.
-	RepairComplete bool
+	// RepairSettled means a legacy scan finished or a contextual cursor is resumable.
+	// Later cleanup or person errors do not undo it.
+	RepairSettled bool
 }
 
 // msgText is the per-message preprocessed input to the chunker, carried
@@ -379,7 +377,7 @@ func (w *Worker) run(
 			return res, fmt.Errorf("scan for embedding: %w", err)
 		}
 		if len(ids) == 0 {
-			res.RepairComplete = backstop
+			res.RepairSettled = backstop
 			if err := pruneEmbeddingJournal(ctx, w.deps.Backend, w.deps.Store); err != nil {
 				return res, err
 			}

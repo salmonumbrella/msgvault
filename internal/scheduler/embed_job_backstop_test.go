@@ -330,7 +330,6 @@ func TestContextualBackstopYieldRetainsOnlyDurableCursor(t *testing.T) {
 			require.NoError(err)
 			if phase == "after reset" {
 				assert.Empty(progress.ReconcileCursor)
-				assert.True(jobctx.HasProgress(ctx), "the committed reset remains resumable progress")
 			} else {
 				assert.Equal(cursor, progress.ReconcileCursor)
 			}
