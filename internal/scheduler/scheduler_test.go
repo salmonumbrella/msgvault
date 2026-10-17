@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1086,7 +1087,7 @@ func TestEmbedJob_Run_YieldedRunErrorStopsWithoutFailureWork(t *testing.T) {
 	assert.Equal(0, n, "RunBackstop calls")
 	assert.Equal(0, coverage.calls, "coverage queries")
 	assert.Empty(backend.activations(), "activation calls")
-	assert.NotContains(logs.String(), "embed run failed", "yield must not log a failure")
+	assert.Equal(1, strings.Count(logs.String(), failure.Error()))
 	assert.NotContains(logs.String(), "embed run complete", "yield must not log completion")
 }
 
@@ -2252,7 +2253,7 @@ func TestGenericJobShutdownContextFinishesCleanly(t *testing.T) {
 				var callbackErr error
 				failure := errors.New("synthetic document indexing failure")
 				s := New(nil).WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))
-				require.NoError(s.AddJob(Job{Name: "document-vector", Schedule: "17 3 * * *", Run: func(ctx context.Context) error {
+				require.NoError(s.SetDocumentVectorJob(func(ctx context.Context) error {
 					close(started)
 					<-ctx.Done()
 					callbackErr = ctx.Err()
@@ -2263,7 +2264,7 @@ func TestGenericJobShutdownContextFinishesCleanly(t *testing.T) {
 						callbackErr = fmt.Errorf("document pass: %w", errors.Join(failure, callbackErr))
 					}
 					return callbackErr
-				}}))
+				}, "17 3 * * *", false))
 				errCh := make(chan error, 1)
 				go func() { errCh <- s.TriggerJob("document-vector") }()
 				<-started
@@ -2276,7 +2277,7 @@ func TestGenericJobShutdownContextFinishesCleanly(t *testing.T) {
 					require.ErrorIs(err, failure)
 					assert.Contains(status.LastError, failure.Error())
 					assert.NotContains(status.LastError, "context canceled")
-					assert.Contains(logs.String(), failure.Error())
+					assert.Equal(1, strings.Count(logs.String(), failure.Error()))
 					assert.Contains(logs.String(), "level=ERROR")
 					assert.NotContains(logs.String(), "context canceled")
 				} else {
@@ -2304,8 +2305,38 @@ func TestScheduledDocumentVectorFailureIsLogged(t *testing.T) {
 		assert.Equal(failure.Error(), s.JobStatus()[0].LastError)
 		assert.Contains(logs.String(), "level=ERROR")
 		assert.Contains(logs.String(), "job=document-vector")
-		assert.Contains(logs.String(), failure.Error())
+		assert.Equal(1, strings.Count(logs.String(), failure.Error()))
 	})
+}
+
+func TestScheduledFailureLogsHaveOneOwner(t *testing.T) {
+	for _, name := range []string{"embed", "other"} {
+		t.Run(name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			var logs bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logs, nil))
+			s := New(nil).WithLogger(logger)
+			defer func() { <-s.Stop().Done() }()
+			failure := errors.New("synthetic provider failure")
+			if name == "embed" {
+				job := &EmbedJob{Worker: &fakeRunner{runErr: failure},
+					Backend: &fakeBackend{active: vector.Generation{ID: 5}}, Log: logger}
+				require.NoError(s.SetEmbedJob(job, "", false))
+			} else {
+				require.NoError(s.AddJob(Job{Name: name, Schedule: "17 3 * * *", Run: func(context.Context) error { return failure }}))
+			}
+			require.ErrorIs(s.TriggerJob(name), failure)
+			assert.Contains(s.JobStatus()[0].LastError, failure.Error())
+			if name == "embed" {
+				assert.Equal(1, strings.Count(logs.String(), failure.Error()))
+				assert.Contains(logs.String(), "level=WARN")
+			} else {
+				assert.NotContains(logs.String(), failure.Error())
+			}
+			assert.NotContains(logs.String(), "level=ERROR")
+		})
+	}
 }
 
 func TestRemoveJobClearsStableGenericScheduleAndRunner(t *testing.T) {
@@ -2991,7 +3022,7 @@ func TestPreemptedGenericJobErrorQueuesFollowUpAndPreservesError(t *testing.T) {
 			"the waiter runs before the yielded follow-up")
 		status := s.JobStatus()[0]
 		assert.Contains(status.LastError, partialErr.Error(), "the callback error remains visible while follow-up waits")
-		assert.Contains(logs.String(), partialErr.Error(), "the callback error is logged")
+		assert.NotContains(logs.String(), partialErr.Error(), "the generic callback owns its failure log")
 
 		close(releaseWaiter)
 		synctest.Wait()

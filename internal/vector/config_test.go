@@ -50,6 +50,8 @@ run_after_sync = true
 	assert.Equal(768, c.Embeddings.Dimension)
 	assert.Equal(15*time.Second, c.Embeddings.Timeout)
 	assert.Equal(60, c.Search.RRFK)
+	c.ApplyDefaults()
+	assert.Equal(5*time.Minute, c.Embed.Schedule.MaxRuntime)
 }
 
 func TestConfig_Validate(t *testing.T) {
@@ -81,6 +83,7 @@ func TestConfig_Validate(t *testing.T) {
 		{"NegativeDim", func(c *Config) { c.Embeddings.Dimension = -1 }, "dimension"},
 		{"UnknownBackend", func(c *Config) { c.Backend = "mystery" }, "backend"},
 		{"ZeroBatch", func(c *Config) { c.Embeddings.BatchSize = 0 }, "batch_size"},
+		{"NegativePassBudget", func(c *Config) { c.Embed.Schedule.MaxRuntime = -time.Second }, "vector.embed.schedule.max_runtime"},
 		{"MissingModel", func(c *Config) { c.Embeddings.Model = "" }, "model"},
 		{"DocumentPrefixTooLarge", func(c *Config) {
 			c.Embeddings.DocumentPrefix = strings.Repeat("x", maxEmbeddingTaskPrefixUTF8Bytes+1)

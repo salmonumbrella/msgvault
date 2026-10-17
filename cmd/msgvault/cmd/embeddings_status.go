@@ -192,6 +192,9 @@ func writeEmbeddingStatus(out io.Writer, s vector.EmbeddingStatus, asJSON bool) 
 			s.Scheduler.Registered, s.Scheduler.Schedule, s.Scheduler.RunAfterSync, s.Scheduler.SlotHolder),
 		fmt.Sprintf("Throughput: %s  ETA: %s  window: %d batches / %.1fs", rate, eta, s.WindowBatches, s.WindowSeconds),
 	}
+	if s.Job.QueuedAt != nil {
+		lines[2] += "  queued since: " + s.Job.QueuedAt.UTC().Format(time.RFC3339)
+	}
 	if !s.CoverageSampledAt.IsZero() {
 		lines = append(lines, fmt.Sprintf("Coverage sampled: %s (%.1fs ago)", s.CoverageSampledAt.UTC().Format(time.RFC3339), max(0, s.SampledAt.Sub(s.CoverageSampledAt).Seconds())))
 	}

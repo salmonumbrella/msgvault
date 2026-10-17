@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -115,7 +116,7 @@ func TestServeSchedulerReportsActualGateHolder(t *testing.T) {
 		assert := assert.New(t)
 		require := require.New(t)
 		gate := api.NewSerialOperationGate()
-		sched, media := newServeSchedulers(nil, testDiscardLogger(), &fakeDaemonWorkTracker{allow: true}, gate)
+		sched, media := newServeSchedulers(nil, testDiscardLogger(), &fakeDaemonWorkTracker{allow: true}, gate, 5*time.Minute)
 		defer func() { <-sched.Stop().Done(); <-media.Stop().Done() }()
 		release := make(chan struct{})
 		require.NoError(sched.AddJob(scheduler.Job{Name: "activity-projection", Schedule: "0 0 1 1 *", Run: func(context.Context) error {

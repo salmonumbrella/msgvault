@@ -79,6 +79,11 @@ func TestEmbeddingStatusRendering(t *testing.T) {
 		columns map[string]string
 	}{
 		{
+			name:   "queued since",
+			status: vector.EmbeddingStatus{Job: vector.EmbeddingJobState{State: "queued", QueuedAt: new(time.Date(2026, 9, 1, 12, 34, 56, 0, time.UTC))}},
+			want:   []string{"Job: queued", "queued since: 2026-09-01T12:34:56Z"},
+		},
+		{
 			name: "provider and writes",
 			status: vector.EmbeddingStatus{Generation: vector.EmbeddingGenerationStatus{ID: 4, State: "building"}, Eligible: 10, Current: 3, Pending: 7,
 				Job:         vector.EmbeddingJobState{State: "running", Phase: "retry_wait", PhaseSeconds: 30, HoldingSchedulerSlot: true},

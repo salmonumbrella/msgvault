@@ -15,10 +15,12 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/api"
 	"go.kenn.io/msgvault/internal/config"
+	"go.kenn.io/msgvault/internal/jobctx"
 	"go.kenn.io/msgvault/internal/operations"
 	"go.kenn.io/msgvault/internal/scheduler"
 	"go.kenn.io/msgvault/internal/store"
@@ -1084,4 +1086,69 @@ func visualInvocationKeys(t *testing.T, st *store.Store) []string {
 	}
 	require.NoError(t, rows.Err())
 	return keys
+}
+
+// budgetedProviderRunner models a provider call that needs two milliseconds.
+type budgetedProviderRunner struct {
+	registeredContextRunner
+
+	run func(context.Context) error
+}
+
+func (r *budgetedProviderRunner) RunOnce(ctx context.Context, _ vector.GenerationID, _ operations.PassScope) (embed.RunResult, error) {
+	return embed.RunResult{}, r.run(ctx)
+}
+
+func TestServeVectorPassBudgetFromConfig(t *testing.T) {
+	for _, budget := range []string{"1ms", "3ms"} {
+		for _, name := range []string{"embed", "document-vector"} {
+			t.Run(budget+"/"+name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					require := require.New(t)
+					assert := assert.New(t)
+					var cfg config.Config
+					_, err := toml.Decode(`[vector]
+ enabled = true
+ [vector.embeddings]
+ endpoint = "https://provider.example/v1"
+ model = "test-model"
+ dimension = 1
+ timeout = "10ms"
+ [vector.embed.schedule]
+ max_runtime = "`+budget+`"
+`, &cfg)
+					require.NoError(err)
+					cfg.Vector.ApplyDefaults()
+					require.NoError(cfg.Vector.Validate())
+					s, media := newServeSchedulers(nil, testDiscardLogger(), nil, api.NewSerialOperationGate(), cfg.Vector.Embed.Schedule.MaxRuntime)
+					defer func() { <-s.Stop().Done(); <-media.Stop().Done() }()
+					committed := false
+					run := func(ctx context.Context) error {
+						time.Sleep(2 * time.Millisecond)
+						if ctx.Err() != nil {
+							return ctx.Err()
+						}
+						committed = true
+						return nil
+					}
+					if name == "embed" {
+						job := &scheduler.EmbedJob{Worker: &budgetedProviderRunner{run: run}, Backend: &fakeCmdVectorBackend{active: &vector.Generation{ID: 1}}, BackstopInterval: -1}
+						require.NoError(s.SetEmbedJob(job, "", false))
+					} else {
+						require.NoError(s.SetDocumentVectorJob(run, "", false))
+					}
+					err = s.TriggerJob(name)
+					if budget == "1ms" {
+						require.ErrorIs(err, jobctx.ErrRunBudgetExceeded)
+						assert.False(committed)
+						assert.Contains(s.JobStatus()[0].LastError, "before committing progress")
+					} else {
+						require.NoError(err)
+						assert.True(committed, "a larger configured pass budget lets the provider commit")
+						assert.Empty(s.JobStatus()[0].LastError)
+					}
+				})
+			})
+		}
+	}
 }

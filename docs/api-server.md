@@ -2507,7 +2507,7 @@ two minutes regardless. It saves its reconciliation progress. Attachment
 packing and daily attachment maintenance stop after one minute and resume
 behind waiting work. IMAP full passes do not support scheduled preemption.
 Automatic message and document embedding passes yield on the same one-minute
-policy and have a fixed five-minute pass cap. A pass with committed progress queues one
+policy and use the finite `[vector.embed.schedule].max_runtime` pass cap (default `5m`). A pass with committed progress queues one
 continuation; a pass that reaches its limit without progress writes a warning to the daemon log
 and waits for its next trigger. Post-sync embedding acquires its own gate slot.
 Other jobs keep their own runtime budgets. Waiting API requests can still

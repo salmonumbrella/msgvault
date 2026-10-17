@@ -127,6 +127,7 @@ type Scheduler struct {
 	syncFunc                SyncFunc
 	logger                  *slog.Logger
 	work                    WorkTracker
+	vectorPassBudget        time.Duration
 	accountPreemptionPolicy func(string) bool
 
 	mu        sync.RWMutex
@@ -184,6 +185,7 @@ func New(syncFunc SyncFunc) *Scheduler {
 			cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow,
 		))),
 		syncFunc:           syncFunc,
+		vectorPassBudget:   5 * time.Minute,
 		logger:             slog.Default(),
 		jobs:               make(map[string]cron.EntryID),
 		schedules:          make(map[string]string),
@@ -215,6 +217,14 @@ func New(syncFunc SyncFunc) *Scheduler {
 // WithLogger sets the logger for the scheduler.
 func (s *Scheduler) WithLogger(logger *slog.Logger) *Scheduler {
 	s.logger = logger
+	return s
+}
+
+// WithVectorPassBudget sets the finite message and document pass budget before registration.
+func (s *Scheduler) WithVectorPassBudget(budget time.Duration) *Scheduler {
+	if budget != 0 {
+		s.vectorPassBudget = budget
+	}
 	return s
 }
 
@@ -436,7 +446,16 @@ func (s *Scheduler) SetEmbedJob(job *EmbedJob, schedule string, runAfterSync boo
 // SetDocumentVectorJob installs the bounded document-vector convergence job
 // on the same cron/post-sync policy used by message embeddings.
 func (s *Scheduler) SetDocumentVectorJob(job func(context.Context) error, schedule string, runAfterSync bool) error {
-	return s.setVectorJob("document-vector", "scheduled document indexing", job, schedule, runAfterSync)
+	if job == nil {
+		return s.setVectorJob("document-vector", "scheduled document indexing", nil, schedule, runAfterSync)
+	}
+	return s.setVectorJob("document-vector", "scheduled document indexing", func(ctx context.Context) error {
+		err := job(ctx)
+		if failure := jobctx.ErrorAfterYield(ctx, err); failure != nil {
+			s.logger.Error("scheduled document indexing failed", "job", "document-vector", "error", failure)
+		}
+		return err
+	}, schedule, runAfterSync)
 }
 
 func (s *Scheduler) setVectorJob(name, label string, job func(context.Context) error, schedule string, runAfterSync bool) error {
@@ -446,7 +465,7 @@ func (s *Scheduler) setVectorJob(name, label string, job func(context.Context) e
 	}
 	return s.addJob(Job{
 		Name: name, Schedule: schedule, Run: job, WorkLabel: label, AfterSync: runAfterSync,
-		Preemptible: true, Background: true, MaxRuntime: 5 * time.Minute,
+		Preemptible: true, Background: true, MaxRuntime: s.vectorPassBudget,
 	}, true)
 }
 
@@ -558,18 +577,36 @@ func (s *Scheduler) runSync(email string) {
 	if err != nil || yielded {
 		return
 	}
-	s.mu.Lock()
-	var afterSync []string
+	s.startPostSyncJobs()
+	s.startVisualPostSync()
+}
+
+// startPostSyncJobs gives a fresh message pass the gate before documents queue.
+// Existing message work already owns a reservation, so documents queue now and
+// can take a turn between later passes.
+func (s *Scheduler) startPostSyncJobs() {
+	s.mu.RLock()
+	var others []string
+	embed := s.genericAfterSync["embed"]
 	for name, enabled := range s.genericAfterSync {
-		if enabled && !s.stopped {
-			afterSync = append(afterSync, name)
+		if enabled && name != "embed" {
+			others = append(others, name)
 		}
 	}
-	s.mu.Unlock()
-	for _, name := range afterSync {
-		_, _ = s.StartJob(name)
+	s.mu.RUnlock()
+	startOthers := func() {
+		for _, name := range others {
+			_, _ = s.StartJob(name)
+		}
 	}
-	s.startVisualPostSync()
+	if embed {
+		run, disp, err := s.reserveGenericJob("embed", true)
+		if err == nil && disp == JobStarted {
+			go func() { _ = s.runJob("embed", run, startOthers) }()
+			return
+		}
+	}
+	startOthers()
 }
 
 // logScheduledSyncError keeps transient network failures below the error
@@ -705,7 +742,7 @@ func (s *Scheduler) TriggerJob(name string) error {
 	if disp != JobStarted {
 		return nil
 	}
-	return s.runJob(name, run)
+	return s.runJob(name, run, nil)
 }
 
 // JobDisposition says what a manual trigger of a generic job did.
@@ -742,7 +779,7 @@ func (s *Scheduler) StartJob(name string) (JobDisposition, error) {
 		return disp, nil
 	}
 	go func() {
-		_ = s.runJob(name, run)
+		_ = s.runJob(name, run, nil)
 	}()
 	return disp, nil
 }
@@ -754,7 +791,7 @@ func (s *Scheduler) onJobTick(name string) {
 	if err != nil || disp != JobStarted {
 		return
 	}
-	_ = s.runJob(name, run)
+	_ = s.runJob(name, run, nil)
 }
 
 // reserveGenericJob validates and reserves the named generic job under the
@@ -791,7 +828,7 @@ func (s *Scheduler) reserveGenericJob(name string, coalesce bool) (run func(cont
 // runJob executes an already-reserved generic job and records the result.
 // The caller must have set genericRunning[name] = true and called
 // s.wg.Add(1) before invoking runJob.
-func (s *Scheduler) runJob(name string, run func(context.Context) error) error {
+func (s *Scheduler) runJob(name string, run func(context.Context) error, admitted func()) error {
 	defer s.wg.Done()
 	defer s.finishGenericRun(name)
 
@@ -812,6 +849,9 @@ func (s *Scheduler) runJob(name string, run func(context.Context) error) error {
 		return nil
 	}
 	defer done()
+	if admitted != nil {
+		admitted()
+	}
 
 	runCtx, endRun := s.jobContext(name, preemptible, maxRuntime)
 	err := run(runCtx)
@@ -832,8 +872,7 @@ func (s *Scheduler) runJob(name string, run func(context.Context) error) error {
 		s.genericLastErr[name] = err
 		s.logger.Warn("scheduled job reached its runtime limit before committing progress; waiting for the next trigger",
 			"job", name,
-			"max_runtime", maxRuntime,
-			"error", err)
+			"max_runtime", maxRuntime)
 		return err
 	}
 	yielded := budgetExpired || yieldedToWaiter(runCtx) || jobctx.PreemptionRequested(runCtx)
@@ -850,9 +889,6 @@ func (s *Scheduler) runJob(name string, run func(context.Context) error) error {
 		s.genericPending[name] = true
 		if callbackErr := jobctx.ErrorAfterYield(runCtx, err); callbackErr != nil {
 			s.genericLastErr[name] = callbackErr
-			s.logger.Error("scheduled job yielded after callback error; queued follow-up",
-				"job", name,
-				"error", callbackErr)
 			return callbackErr
 		}
 		delete(s.genericLastErr, name)
@@ -863,12 +899,11 @@ func (s *Scheduler) runJob(name string, run func(context.Context) error) error {
 	return s.recordGenericJobResult(name, err)
 }
 
-// recordGenericJobResult updates status and logs failures with s.mu held.
+// recordGenericJobResult updates status with s.mu held. Callbacks own failure logs.
 func (s *Scheduler) recordGenericJobResult(name string, err error) error {
 	if err != nil {
 		if failure := jobctx.ErrorAfterYield(s.ctx, err); failure != nil {
 			s.genericLastErr[name] = failure
-			s.logger.Error("scheduled job failed", "job", name, "error", failure)
 		}
 		return err
 	}
@@ -890,7 +925,7 @@ func (s *Scheduler) finishGenericRun(name string) {
 		delete(s.genericPending, name)
 		s.genericQueuedAt[name] = time.Now()
 		s.wg.Add(1)
-		go func() { _ = s.runJob(name, current) }()
+		go func() { _ = s.runJob(name, current, nil) }()
 		return
 	}
 	if s.genericPending[name] {

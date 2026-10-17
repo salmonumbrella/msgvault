@@ -111,14 +111,14 @@ type MultimodalConfig struct {
 	Dimension int    `toml:"dimension"`
 	// CapabilitiesFile is the operator-probed Voyage capability manifest.
 	// Uploads fail closed without it.
-	CapabilitiesFile    string              `toml:"capabilities_file"`
-	MaxContextChars     int                 `toml:"max_context_chars"`
-	IncludeImages       *bool               `toml:"include_images"`
-	IncludeAnimatedGIFs *bool               `toml:"include_animated_gifs"`
-	IncludeVideo        *bool               `toml:"include_video"`
-	AllowImageQueries   *bool               `toml:"allow_image_queries"`
-	Scope               EmbedScopeConfig    `toml:"scope"`
-	Schedule            EmbedScheduleConfig `toml:"schedule"`
+	CapabilitiesFile    string                   `toml:"capabilities_file"`
+	MaxContextChars     int                      `toml:"max_context_chars"`
+	IncludeImages       *bool                    `toml:"include_images"`
+	IncludeAnimatedGIFs *bool                    `toml:"include_animated_gifs"`
+	IncludeVideo        *bool                    `toml:"include_video"`
+	AllowImageQueries   *bool                    `toml:"allow_image_queries"`
+	Scope               EmbedScopeConfig         `toml:"scope"`
+	Schedule            MultimodalScheduleConfig `toml:"schedule"`
 }
 
 func configuredBool(value *bool, defaultValue bool) bool {
@@ -412,8 +412,15 @@ type EmbedConfig struct {
 // EmbedScheduleConfig controls when the embed worker runs on its own
 // (outside of explicit `msgvault embeddings build` invocations).
 type EmbedScheduleConfig struct {
-	Cron         string `toml:"cron"`           // empty disables scheduled embedding
-	RunAfterSync bool   `toml:"run_after_sync"` // trigger after each successful sync
+	MaxRuntime   time.Duration `toml:"max_runtime"`    // finite pass budget; zero selects five minutes
+	Cron         string        `toml:"cron"`           // empty disables scheduled embedding
+	RunAfterSync bool          `toml:"run_after_sync"` // trigger after each successful sync
+}
+
+// MultimodalScheduleConfig controls when the visual lane runs automatically.
+type MultimodalScheduleConfig struct {
+	Cron         string `toml:"cron"`
+	RunAfterSync bool   `toml:"run_after_sync"`
 }
 
 // EmbedScopeConfig limits which messages are included in newly-built
@@ -568,6 +575,9 @@ func (c *Config) Validate() error {
 	if !c.Enabled {
 		return nil
 	}
+	if c.Embed.Schedule.MaxRuntime < 0 {
+		return errors.New("vector.embed.schedule.max_runtime: must be positive; zero selects five minutes")
+	}
 	if err := c.Embeddings.Validate(); err != nil {
 		return err
 	}
@@ -660,6 +670,9 @@ func normalizedMultimodalEndpoint(endpoint string) (string, error) {
 // ApplyDefaults fills in sensible defaults for any zero-valued fields.
 // Called after TOML decode, before Validate.
 func (c *Config) ApplyDefaults() {
+	if c.Embed.Schedule.MaxRuntime == 0 {
+		c.Embed.Schedule.MaxRuntime = 5 * time.Minute
+	}
 	if c.Backend == "" {
 		c.Backend = "sqlite-vec"
 	}

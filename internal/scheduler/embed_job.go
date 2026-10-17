@@ -223,6 +223,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 	if _, err := j.Worker.ReclaimStale(ctx); err != nil {
 		retErr = err
 		if jobctx.StopRequested(ctx) {
+			logEmbedPassError(ctx, log, err)
 			return retErr
 		}
 		log.Warn("embed reclaim failed", "error", err)
@@ -242,6 +243,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 	retErr = errors.Join(retErr, err)
 	// Preserve worker errors even when the scheduler interrupted the pass.
 	if jobctx.StopRequested(ctx) {
+		logEmbedPassError(ctx, log, err)
 		return retErr
 	}
 	if generationErr, ok := errors.AsType[*embed.GenerationRunError](err); ok {
@@ -360,6 +362,12 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 	return retErr
 }
 
+func logEmbedPassError(ctx context.Context, log *slog.Logger, err error) {
+	if failure := jobctx.ErrorAfterYield(ctx, err); failure != nil {
+		log.Warn("embed pass failed", "error", failure)
+	}
+}
+
 func (j *EmbedJob) maintainActivePeopleDuringBuild(
 	ctx context.Context, log *slog.Logger, occurrence time.Time,
 ) error {
@@ -369,6 +377,7 @@ func (j *EmbedJob) maintainActivePeopleDuringBuild(
 	}
 	building, err := j.Backend.BuildingGeneration(ctx)
 	if err != nil || building == nil || jobctx.StopRequested(ctx) {
+		logEmbedPassError(ctx, log, err)
 		return err
 	}
 	active, err := j.Backend.ActiveGeneration(ctx)
@@ -376,6 +385,7 @@ func (j *EmbedJob) maintainActivePeopleDuringBuild(
 		return nil
 	}
 	if jobctx.StopRequested(ctx) {
+		logEmbedPassError(ctx, log, err)
 		return err
 	}
 	if err != nil {
@@ -389,6 +399,7 @@ func (j *EmbedJob) maintainActivePeopleDuringBuild(
 		ctx, active.ID, scheduledEmbeddingPassScope(occurrence, active.ID, "active-people"),
 	)
 	if jobctx.StopRequested(ctx) {
+		logEmbedPassError(ctx, log, err)
 		return err
 	}
 	if err != nil {
@@ -496,6 +507,7 @@ func (j *EmbedJob) maybeRunBackstop(
 		delete(j.lastBackstop, gen)
 	}
 	if stopped {
+		logEmbedPassError(ctx, log, err)
 		return true, err
 	}
 	if personErr != nil {

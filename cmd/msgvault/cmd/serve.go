@@ -169,9 +169,9 @@ func (s serveSchedulers) Stop() context.Context {
 // for minutes, so that job takes the gate only around its Store writes.
 // Media passes do not count as activity; shutdown cancels and drains them.
 func newServeSchedulers(
-	syncFunc scheduler.SyncFunc, logger *slog.Logger, idle scheduler.WorkTracker, gate api.LabeledOperationGate,
+	syncFunc scheduler.SyncFunc, logger *slog.Logger, idle scheduler.WorkTracker, gate api.LabeledOperationGate, vectorPassBudget time.Duration,
 ) (*scheduler.Scheduler, *scheduler.Scheduler) {
-	sched := scheduler.New(syncFunc).WithLogger(logger).
+	sched := scheduler.New(syncFunc).WithLogger(logger).WithVectorPassBudget(vectorPassBudget).
 		WithWorkTracker(combineWorkTrackers(scheduleIdleWorkTracker(idle), labelWorkTracker(gate, "a scheduled sync")))
 	media := scheduler.New(nil).WithLogger(logger)
 	return sched, media
@@ -429,7 +429,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create and configure scheduler
-	sched, mediaSched := newServeSchedulers(syncFunc, logger, idleTracker, operationGate)
+	sched, mediaSched := newServeSchedulers(syncFunc, logger, idleTracker, operationGate, cfg.Vector.Embed.Schedule.MaxRuntime)
 	sched.WithAccountPreemptionPolicy(func(identifier string) bool {
 		return scheduledSyncPreemptible(s, identifier, logger)
 	})

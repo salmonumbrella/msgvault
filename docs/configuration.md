@@ -1927,6 +1927,7 @@ Empty config disables scheduled embedding; you can still run
 | ---------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `cron`           | —       | 5-field cron expression. Empty string disables the standalone cron.                                                                          |
 | `run_after_sync` | `false` | Run an embed pass after successful scheduled Gmail, IMAP, Teams, and Discord syncs. Other sources use the standalone cron or a manual build. |
+| `max_runtime` | `"5m"` | Finite duration cap for each automatic message or document embedding pass. Zero selects the default; negative durations are rejected. |
 
 `msgvault setup providers` supplies `run_after_sync = true` and
 `cron = "*/15 * * * *"` when it enables a text lane. It preserves either key
@@ -1934,8 +1935,7 @@ when explicitly set, including `false` and `""`. Already enabled text lanes keep
 their schedules. See
 [Recommended Configuration](usage/recommended-configuration.md).
 
-Automatic message and document embedding runs have a fixed five-minute pass cap. When
-a sync waits, embedding yields after about 65 seconds and resumes behind it.
+Automatic message and document embedding runs use `max_runtime`, which defaults to five minutes. Set it long enough for your provider requests and retries to finish; the cap can interrupt an in-flight request. Sync preemption stays independent: when a sync waits, embedding yields after about 65 seconds and resumes behind it.
 Post-sync passes start after the sync releases the operation gate. Later passes
 skip committed coverage and publications; an interrupted provider request may
 repeat. A pass that reaches its time limit without committed progress writes

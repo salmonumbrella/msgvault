@@ -341,12 +341,12 @@ func embeddingProviderName(endpoint string) string {
 	return "custom"
 }
 
-func embedScheduleSummary(schedule vector.EmbedScheduleConfig) string {
+func embedScheduleSummary(cron string, runAfterSync bool) string {
 	parts := []string{}
-	if schedule.Cron != "" {
-		parts = append(parts, "cron "+schedule.Cron)
+	if cron != "" {
+		parts = append(parts, "cron "+cron)
 	}
-	if schedule.RunAfterSync {
+	if runAfterSync {
 		parts = append(parts, "after each scheduled sync")
 	}
 	if len(parts) == 0 {
@@ -380,7 +380,7 @@ func textSearchLane(cfg *config.Config, env setupEnvironment) laneStatus {
 		lane.State = laneStateOn
 		lane.Provider = embeddingProviderName(embeddings.Endpoint)
 		lane.Model = embeddings.Model
-		lane.Schedule = embedScheduleSummary(cfg.Vector.Embed.Schedule)
+		lane.Schedule = embedScheduleSummary(cfg.Vector.Embed.Schedule.Cron, cfg.Vector.Embed.Schedule.RunAfterSync)
 		if embeddings.EffectiveAPIFormat() == vector.APIFormatVoyageContextual {
 			lane.Reason = "conversation windows and turn-aware meeting chunks share one contextual generation"
 		} else {
@@ -442,7 +442,7 @@ func visualSearchLane(cfg *config.Config, env setupEnvironment) laneStatus {
 		lane.State = laneStateOn
 		lane.Provider = multimodal.Provider
 		lane.Model = multimodal.Model
-		lane.Schedule = embedScheduleSummary(multimodal.Schedule)
+		lane.Schedule = embedScheduleSummary(multimodal.Schedule.Cron, multimodal.Schedule.RunAfterSync)
 		lane.Consent = env.consentState(func(s setupConsentState) bool { return s.Visual })
 		if _, unavailable := setupVectorBackend(cfg); unavailable != "" {
 			lane.State, lane.Reason = laneStatePending, unavailable
@@ -566,7 +566,7 @@ func documentVectorsLane(cfg *config.Config, env setupEnvironment) laneStatus {
 		lane.State = laneStateOn
 		lane.Provider = embeddingProviderName(cfg.Vector.Embeddings.Endpoint)
 		lane.Model = cfg.Vector.Embeddings.Model
-		lane.Schedule = embedScheduleSummary(cfg.Vector.Embed.Schedule)
+		lane.Schedule = embedScheduleSummary(cfg.Vector.Embed.Schedule.Cron, cfg.Vector.Embed.Schedule.RunAfterSync)
 		lane.Reason = "document chunks and search query text are sent to the text-search provider under separate consents"
 		if text := textSearchLane(cfg, env); text.State != laneStateOn {
 			lane.State = laneStatePending
