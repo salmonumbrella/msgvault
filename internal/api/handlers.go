@@ -111,7 +111,6 @@ type AccountInfo struct {
 }
 
 // SourceStatusResponse represents source sync status for all matching sources.
-// SchedulerQueuedAt records when a scheduled sync began waiting for the gate.
 type SourceStatusResponse struct {
 	Sources []SourceStatus `json:"sources"`
 }
