@@ -1934,12 +1934,12 @@ when explicitly set, including `false` and `""`. Already enabled text lanes keep
 their schedules. See
 [Recommended Configuration](usage/recommended-configuration.md).
 
-Automatic message and document embedding runs use five-minute passes. When
+Automatic message and document embedding runs have a fixed five-minute pass cap. When
 a sync waits, embedding yields after about 65 seconds and resumes behind it.
 Post-sync passes start after the sync releases the operation gate. Later passes
 skip committed coverage and publications; an interrupted provider request may
-repeat. A pass that reaches its time limit without committed progress reports
-an error and waits for the next configured trigger.
+repeat. A pass that reaches its time limit without committed progress writes
+a warning to the daemon log and waits for the next configured trigger.
 
 #### `[vector.people]`
 

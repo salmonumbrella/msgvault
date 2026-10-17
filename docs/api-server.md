@@ -2489,10 +2489,9 @@ The daemon runs scheduled work one job at a time. While a sync waits for
 another job to finish, its entry reports `"queued": true` and `"running": false`.
 `queued_at` records when the wait began and clears on admission. CardDAV status
 reports the earliest `queued_at` among the selected connections. An open CardDAV
-page polls every 30 seconds while idle with a schedule, then polls faster
-while queued or running. `scheduler_running` stays true between admission
-and creation of the active run. A newly completed run refreshes books and
-history even when polling missed its active state.
+page polls while it observes queued or running work. `scheduler_running` stays
+true between admission and creation of the active run. Completion of observed
+work refreshes books and history.
 `"running": true` means it acquired the operation gate; `started_at` gives when
 it began. The top-level `running` field reports whether the scheduler is active.
 A schedule tick that fires during a run
@@ -2508,8 +2507,8 @@ two minutes regardless. It saves its reconciliation progress. Attachment
 packing and daily attachment maintenance stop after one minute and resume
 behind waiting work. IMAP full passes do not support scheduled preemption.
 Automatic message and document embedding passes yield on the same one-minute
-policy and stop after five minutes. A pass with committed progress queues one
-continuation; a pass that reaches its limit without progress records the failure in daemon logs
+policy and have a fixed five-minute pass cap. A pass with committed progress queues one
+continuation; a pass that reaches its limit without progress writes a warning to the daemon log
 and waits for its next trigger. Post-sync embedding acquires its own gate slot.
 Other jobs keep their own runtime budgets. Waiting API requests can still
 interrupt scheduled work. `GET /api/v1/sources/status` reports the same
