@@ -304,7 +304,7 @@ describe('CardDAVController', () => {
     controller.destroy();
   });
 
-  it('revalidates once at scheduled times and follows discovered queued work', async () => {
+  it('retries failed scheduled reads and follows discovered queued work', async () => {
     vi.useFakeTimers();
     const start = Date.now();
     let statusReads = 0;
@@ -313,31 +313,38 @@ describe('CardDAVController', () => {
       if (path.endsWith('/books')) return Response.json({ books: [] });
       if (path.endsWith('/runs')) return Response.json({ runs: [] });
       statusReads += 1;
+      if (statusReads === 2) return Response.json({ error: 'temporarily_unavailable' }, { status: 503 });
       return Response.json({ ...idleStatus, scheduled: true,
-        next_scheduled_at: new Date(start + (statusReads < 4 ? 60_000 : 120_000)).toISOString(),
-        ...(statusReads === 2 || statusReads === 5 ? { queued_at: new Date().toISOString() } : {}),
-        ...(statusReads === 3 ? { active: run(1) } : {}),
-        ...(statusReads === 4 ? { latest: run(1, 'succeeded') } : {}) });
+        next_scheduled_at: new Date(start + (statusReads < 5 ? 60_000 : 120_000)).toISOString(),
+        ...(statusReads === 3 || statusReads === 6 ? { queued_at: new Date().toISOString() } : {}),
+        ...(statusReads === 4 ? { active: run(1) } : {}),
+        ...(statusReads === 5 ? { latest: run(1, 'succeeded') } : {}) });
     });
     const controller = new CardDAVController(createAPIClient(fetchFn));
     await controller.load();
     await vi.advanceTimersByTimeAsync(59_999);
     expect(statusReads).toBe(1);
     await vi.advanceTimersByTimeAsync(501);
-    expect(controller.status?.queued_at).toBeDefined();
+    expect(controller.statusError).toBe('Unable to load CardDAV status.');
     expect(statusReads).toBe(2);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(statusReads).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(controller.statusError).toBeNull();
+    expect(controller.status?.queued_at).toBeDefined();
+    expect(statusReads).toBe(3);
     await vi.advanceTimersByTimeAsync(500);
     expect(controller.status?.active?.id).toBe(1);
     await vi.advanceTimersByTimeAsync(500);
     expect(controller.status?.latest?.state).toBe('succeeded');
-    await vi.advanceTimersByTimeAsync(58_499);
-    expect(statusReads).toBe(4);
-    await vi.advanceTimersByTimeAsync(501);
+    await vi.advanceTimersByTimeAsync(57_999);
     expect(statusReads).toBe(5);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(statusReads).toBe(6);
     expect(controller.status?.queued_at).toBeDefined();
     controller.destroy();
     await vi.advanceTimersByTimeAsync(120_000);
-    expect(statusReads).toBe(5);
+    expect(statusReads).toBe(6);
   });
 
   it('uses progress-aware polling, caps backoff, pauses while hidden, and reconciles runs completed while hidden', async () => {

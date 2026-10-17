@@ -467,10 +467,10 @@ export class CardDAVController {
       void this.poll(++this.pollGeneration, true);
     }
   }
-  private schedulePoll(delay: number): void {
+  private schedulePoll(delay: number, retryIdleRead = false): void {
     if (this.disposed || this.visibilityDocument?.hidden) return;
     const revalidateIdle = !this.hasWork();
-    if (revalidateIdle) {
+    if (revalidateIdle && !retryIdleRead) {
       const nextRun = Date.parse(this.status?.next_scheduled_at ?? '');
       if (!this.status?.scheduled || !Number.isFinite(nextRun) || nextRun <= Date.now()) return;
       delay = nextRun - Date.now() + MIN_POLL_MS;
@@ -508,7 +508,7 @@ export class CardDAVController {
       if (!data) {
         this.statusError = 'Unable to load CardDAV status.';
         this.pollDelay = Math.min(MAX_POLL_MS, this.pollDelay * 2);
-        this.schedulePoll(this.pollDelay);
+        this.schedulePoll(this.pollDelay, revalidateIdle);
         return;
       }
       const becameAvailable = !this.status?.available && data.available;
@@ -540,7 +540,7 @@ export class CardDAVController {
       this.statusLoading = false;
       this.statusError = 'Unable to load CardDAV status.';
       this.pollDelay = Math.min(MAX_POLL_MS, this.pollDelay * 2);
-      this.schedulePoll(this.pollDelay);
+      this.schedulePoll(this.pollDelay, revalidateIdle);
     } finally {
       if (this.pollAbort === requestController) this.pollAbort = undefined;
     }
