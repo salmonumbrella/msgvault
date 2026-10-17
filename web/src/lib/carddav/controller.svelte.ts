@@ -474,7 +474,7 @@ export class CardDAVController {
     if (revalidateIdle && !retryIdleRead) {
       const nextRun = Date.parse(this.status?.next_scheduled_at ?? '');
       if (!this.status?.scheduled || !Number.isFinite(nextRun)) return;
-      delay = Math.max(MIN_POLL_MS, nextRun - Date.now() + MIN_POLL_MS);
+      delay = Math.max(delay, nextRun - Date.now() + MIN_POLL_MS);
     }
     if (this.pollTimer !== undefined) clearTimeout(this.pollTimer);
     const generation = ++this.pollGeneration;
@@ -527,7 +527,7 @@ export class CardDAVController {
         this.schedulePoll(MIN_POLL_MS);
         return;
       }
-      if (this.shouldPoll()) {
+      if (this.shouldPoll() || revalidateIdle) {
         this.pollDelay = advanced ? MIN_POLL_MS : Math.min(MAX_POLL_MS, this.pollDelay * 2);
       }
       this.schedulePoll(this.pollDelay);

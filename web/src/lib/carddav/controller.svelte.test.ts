@@ -304,6 +304,35 @@ describe('CardDAVController', () => {
     controller.destroy();
   });
 
+  it('backs off when idle scheduled status keeps reporting an overdue run', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-01T15:00:00Z'));
+    let statusReads = 0;
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(requestOf(input).url).pathname;
+      if (path.endsWith('/books')) return Response.json({ books: [] });
+      if (path.endsWith('/runs')) return Response.json({ runs: [] });
+      statusReads += 1;
+      return Response.json({ ...idleStatus, scheduled: true, next_scheduled_at: '2026-10-01T14:59:00Z' });
+    });
+    const controller = new CardDAVController(createAPIClient(fetchFn));
+    try {
+      await controller.load();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(statusReads).toBe(2);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(statusReads).toBe(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(statusReads).toBe(3);
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(statusReads).toBe(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(statusReads).toBe(4);
+    } finally {
+      controller.destroy();
+    }
+  });
+
   it('follows an idle response delayed past its scheduled time through completion', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-01T15:00:00Z'));
