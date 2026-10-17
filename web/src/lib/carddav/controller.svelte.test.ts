@@ -297,41 +297,6 @@ describe('CardDAVController', () => {
     controller.destroy();
   });
 
-  it('refreshes books and history when queued work completes between status reads', async () => {
-    vi.useFakeTimers();
-    let terminal = false;
-    let statusReads = 0;
-    let bookReads = 0;
-    let runReads = 0;
-    const fetchFn = vi.fn<typeof fetch>(async (input) => {
-      const path = new URL(requestOf(input).url).pathname;
-      if (path.endsWith('/status')) {
-        statusReads++;
-        return Response.json({ ...idleStatus, scheduled: true, ...(terminal ? { latest: run(1, 'succeeded') } : {}) });
-      }
-      if (path.endsWith('/books')) {
-        bookReads++;
-        return Response.json({ books: [book(1, { name: terminal ? 'Updated address book' : 'Original address book' })] });
-      }
-      runReads++;
-      return Response.json({ runs: terminal ? [run(1, 'succeeded')] : [] });
-    });
-    const controller = new CardDAVController(createAPIClient(fetchFn));
-    await controller.load();
-    expect(controller.status?.active).toBeUndefined();
-    expect(controller.books[0]?.name).toBe('Original address book');
-    terminal = true;
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(controller.status?.latest?.state).toBe('succeeded');
-    expect(controller.books[0]?.name).toBe('Updated address book');
-    expect(controller.runs[0]?.state).toBe('succeeded');
-    expect(bookReads).toBe(2);
-    expect(runReads).toBe(2);
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(statusReads).toBe(4);
-    controller.destroy();
-  });
-
   it('retries a failed scheduled status refresh while cached status is idle', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-01T15:00:00Z'));

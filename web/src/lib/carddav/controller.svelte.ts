@@ -480,7 +480,6 @@ export class CardDAVController {
     const requestController = new AbortController();
     this.pollAbort = requestController;
     const hadWork = this.hasWork();
-    const previousLatest = this.status?.latest;
     try {
       const { data } = await generatedGetCardDAVStatus(
         this.connection ? { connection: this.connection } : undefined,
@@ -508,8 +507,7 @@ export class CardDAVController {
       this.statusError = null;
       this.pollFingerprint = fingerprint;
       this.recordSuccessfulStatusCommit(statusCommit);
-      const newTerminal = data.latest && data.latest.state !== 'running' && (data.latest.id !== previousLatest?.id || data.latest.state !== previousLatest?.state);
-      if ((hadWork || newTerminal) && !this.hasWork()) {
+      if (hadWork && !this.hasWork()) {
         this.stopPolling(false);
         await Promise.all([...(data.available ? [this.loadBooks(true)] : []), this.refreshRuns()]);
         if (this.shouldPoll()) this.schedulePoll(this.hasWork() ? MIN_POLL_MS : IDLE_POLL_MS);
