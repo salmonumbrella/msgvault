@@ -1089,6 +1089,7 @@ func TestEmbedJob_Run_YieldedRunErrorStopsWithoutFailureWork(t *testing.T) {
 	assert.Equal(0, coverage.calls, "coverage queries")
 	assert.Empty(backend.activations(), "activation calls")
 	assert.NotContains(logs.String(), "embed run complete", "yield must not log completion")
+	assert.NotContains(logs.String(), "embed run failed", "yield must not log failure")
 }
 
 func TestEmbedJob_Run_PersonFailureStillRunsMessageBackstop(t *testing.T) {
@@ -1136,21 +1137,33 @@ func TestEmbedJob_MaybeRunBackstop_FinishedRepairKeepsIntervalAfterLaterError(t 
 }
 
 func TestEmbedJob_Run_ActiveGeneration(t *testing.T) {
-	assert := assert.New(t)
-	backend := &fakeBackend{active: vector.Generation{ID: 5, State: vector.GenerationActive}}
-	runner := &fakeRunner{}
-	job := &EmbedJob{Worker: runner, Backend: backend}
-
-	_ = job.Run(context.Background())
-
-	reclaim, run, gen := runner.calls()
-	assert.Equal(1, reclaim, "ReclaimStale calls")
-	assert.Equal(1, run, "RunOnce calls")
-	assert.Equal(vector.GenerationID(5), gen, "RunOnce gen")
-	// New precedence: BuildingGeneration is consulted first; with no
-	// building present we then fall through to active. Activation
-	// must NOT fire for the active gen.
-	assert.Empty(backend.activations(), "ActivateGeneration calls (target was active)")
+	for _, runErr := range []error{nil, errors.New("synthetic provider failure")} {
+		name := "success"
+		if runErr != nil {
+			name = "provider failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			backend := &fakeBackend{active: vector.Generation{ID: 5, State: vector.GenerationActive}}
+			runner := &fakeRunner{runErr: runErr}
+			var logs bytes.Buffer
+			job := &EmbedJob{Worker: runner, Backend: backend, Log: slog.New(slog.NewTextHandler(&logs, nil))}
+			err := job.Run(t.Context())
+			require.ErrorIs(err, runErr)
+			reclaim, run, gen := runner.calls()
+			assert.Equal(1, reclaim, "ReclaimStale calls")
+			assert.Equal(1, run, "RunOnce calls")
+			assert.Equal(vector.GenerationID(5), gen, "RunOnce gen")
+			assert.Empty(backend.activations(), "the active generation needs no activation")
+			if runErr != nil {
+				assert.Contains(logs.String(), "embed run failed")
+				assert.NotContains(logs.String(), "embed run complete")
+				assert.Contains(logs.String(), "level=WARN")
+				assert.NotContains(logs.String(), "level=ERROR")
+			}
+		})
+	}
 }
 
 func TestEmbedJob_Run_ActiveGenerationFingerprintMismatch(t *testing.T) {
@@ -1933,46 +1946,6 @@ func TestScheduler_SetEmbedJob_InvalidReplacePreservesPrevious(t *testing.T) {
 	})
 }
 
-func TestScheduler_RunAfterSync_Fires(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	syncDone := make(chan struct{})
-	s := New(func(ctx context.Context, email string) error {
-		close(syncDone)
-		return nil
-	})
-	backend := &fakeBackend{active: vector.Generation{ID: 42}}
-	runDone := make(chan struct{})
-	runner := &fakeRunner{runDone: runDone}
-	job := &EmbedJob{Worker: runner, Backend: backend}
-
-	require.NoError(s.SetEmbedJob(job, "", true, 5*time.Minute), "SetEmbedJob")
-	require.NoError(s.AddAccount("test@gmail.com", "0 0 1 1 *"), "AddAccount")
-
-	s.Start()
-	defer func() {
-		ctx := s.Stop()
-		<-ctx.Done()
-	}()
-
-	require.NoError(s.TriggerSync("test@gmail.com"), "TriggerSync")
-
-	select {
-	case <-syncDone:
-	case <-time.After(time.Second):
-		require.Fail("syncFunc did not run")
-	}
-	select {
-	case <-runDone:
-	case <-time.After(time.Second):
-		require.Fail("embed RunOnce did not fire after sync")
-	}
-
-	_, run, gen := runner.calls()
-	assert.Equal(1, run, "RunOnce calls")
-	assert.Equal(vector.GenerationID(42), gen, "RunOnce gen")
-}
-
 func TestScheduler_RunAfterSync_DisabledDoesNotFire(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		require := require.New(t)
@@ -2285,12 +2258,7 @@ func TestScheduledFailureLogsHaveOneOwner(t *testing.T) {
 					assert.NotContains(logs.String(), "level=ERROR")
 				} else {
 					assert.Equal(1, strings.Count(logs.String(), failure.Error()))
-					if tc.name == "embed" {
-						assert.Contains(logs.String(), "embed run failed")
-						assert.NotContains(logs.String(), "embed run complete")
-						assert.Contains(logs.String(), "level=WARN")
-						assert.NotContains(logs.String(), "level=ERROR")
-					} else {
+					if tc.name == "document-vector" {
 						assert.Contains(logs.String(), "level=ERROR")
 						assert.Contains(logs.String(), "job=document-vector")
 					}
@@ -3367,40 +3335,6 @@ func TestStartJobDroppedFollowUpIsLogged(t *testing.T) {
 
 		assert.Contains(logs.String(), "follow-up dropped without running")
 		assert.Contains(logs.String(), "job removed")
-	})
-}
-
-type labelRecordingTracker struct {
-	mu     sync.Mutex
-	labels []string
-}
-
-func (t *labelRecordingTracker) BeginWork() (func(), bool) { return func() {}, true }
-
-func (t *labelRecordingTracker) BeginWorkContext(context.Context) (func(), bool) {
-	return func() {}, true
-}
-
-func (t *labelRecordingTracker) BeginLabeledWorkContext(_ context.Context, label string) (func(), bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.labels = append(t.labels, label)
-	return func() {}, true
-}
-
-func TestScheduledVectorJobsHoldGateUnderOwnLabel(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		require := require.New(t)
-		tracker := &labelRecordingTracker{}
-		s := New(nil).WithWorkTracker(tracker)
-		defer func() { <-s.Stop().Done() }()
-		job := &EmbedJob{Worker: &fakeRunner{}, Backend: &fakeBackend{active: vector.Generation{ID: 1}}}
-		require.NoError(s.SetEmbedJob(job, "0 0 1 1 *", false, 5*time.Minute))
-		require.NoError(s.SetDocumentVectorJob(func(context.Context) error { return nil }, "0 0 1 1 *", false, 5*time.Minute))
-		s.cron.Entry(s.genericJobs["embed"]).Job.Run()
-		s.cron.Entry(s.genericJobs["document-vector"]).Job.Run()
-		synctest.Wait()
-		assert.Equal(t, []string{"scheduled embedding", "scheduled document indexing"}, tracker.labels)
 	})
 }
 

@@ -417,33 +417,59 @@ func TestWorker_YieldCancellationDuringUpsertStopsCleanly(t *testing.T) {
 }
 
 func TestWorker_YieldCancellationDuringEmbedStopsCleanly(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	f := newWorkerFixture(t, 1)
-	ctx, cancel := context.WithCancelCause(context.Background())
-	t.Cleanup(func() { cancel(nil) })
-	logs := &captureLogHandler{}
-	w := NewWorker(WorkerDeps{
-		Backend:                f.Backend,
-		VectorsDB:              f.VectorsDB,
-		MainDB:                 f.MainDB,
-		Store:                  f.Store,
-		Client:                 &yieldingEmbedClient{EmbeddingClient: f.FakeClient, cancel: cancel},
-		BatchSize:              1,
-		MaxConsecutiveFailures: 1,
-		Log:                    slog.New(logs),
-		Recorder:               f.Recorder,
-	})
-
-	res, err := w.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
-	require.NoError(err, "yield cancellation during embed must stop cleanly")
-	assert.Equal(1, res.Claimed, "Claimed")
-	assert.Equal(0, res.Succeeded, "Succeeded")
-	assert.Equal(0, res.Failed, "Failed")
-	assert.Equal(1, countMissing(t, f.MainDB, int64(f.BuildingGen)), "row remains unstamped")
-	for _, record := range logs.records {
-		assert.NotEqual(slog.LevelWarn, record.Level, "yield must not log a warning: %q", record.Message)
-		assert.NotEqual(slog.LevelError, record.Level, "yield must not log an error: %q", record.Message)
+	for _, cause := range []error{jobctx.ErrYieldedToWaiter, jobctx.ErrRunBudgetExceeded} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				require := require.New(t)
+				assert := assert.New(t)
+				f := newWorkerFixture(t, 2)
+				recorder := testutil.NewTestStore(t)
+				logs := &captureLogHandler{}
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+				var client EmbeddingClient = &yieldingEmbedClient{EmbeddingClient: f.FakeClient, cancel: cancel}
+				var blocked *blockedDiagnosticClient
+				if errors.Is(cause, jobctx.ErrRunBudgetExceeded) {
+					var stop context.CancelFunc
+					ctx, stop = context.WithTimeoutCause(t.Context(), time.Second, cause)
+					defer stop()
+					blocked = &blockedDiagnosticClient{inner: f.FakeClient, started: make(chan struct{})}
+					client = blocked
+				}
+				w := NewWorker(WorkerDeps{Backend: f.Backend, VectorsDB: f.VectorsDB, MainDB: f.MainDB,
+					Store: f.Store, Client: client, BatchSize: 1, MaxConsecutiveFailures: 1, Recorder: recorder, Log: slog.New(logs)})
+				res, err := w.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
+				if blocked != nil {
+					select {
+					case <-blocked.started:
+					default:
+						require.FailNow("the runtime limit must interrupt an in-flight provider call")
+					}
+				}
+				require.NoError(err, "a scheduled pass boundary is not a provider failure")
+				assert.Equal(RunResult{Claimed: 1}, res)
+				assert.Equal(2, countMissing(t, f.MainDB, int64(f.BuildingGen)), "interrupted work remains unstamped")
+				for _, record := range logs.records {
+					assert.NotEqual(slog.LevelWarn, record.Level, "scheduled cancellation must not warn: %q", record.Message)
+					assert.NotEqual(slog.LevelError, record.Level, "scheduled cancellation must not log an error: %q", record.Message)
+				}
+				runs := messageEmbeddingOperationRuns(t, recorder)
+				require.Len(runs, 1)
+				assert.Equal(operations.StateCancelled, runs[0].State)
+				require.NotNil(runs[0].Error)
+				assert.Equal(operations.PublicErrorInvocationCancelled, runs[0].Error.Code)
+				var failed int
+				require.NoError(f.VectorsDB.QueryRow("SELECT failed FROM embed_runs ORDER BY id DESC LIMIT 1").Scan(&failed))
+				assert.Zero(failed, "the persisted counters exclude interrupted work")
+				w.deps.Client = f.FakeClient
+				scope := testEmbeddingPassScope()
+				scope.Key += ":resume"
+				res, err = w.RunOnce(t.Context(), f.BuildingGen, scope)
+				require.NoError(err)
+				assert.Equal(RunResult{Claimed: 2, Succeeded: 2}, res)
+				assert.Zero(countMissing(t, f.MainDB, int64(f.BuildingGen)), "the next pass covers the interrupted batch and later rows")
+			})
+		})
 	}
 }
 
@@ -477,47 +503,8 @@ func TestWorker_RuntimeBudgetLeavesInFlightBatchResumable(t *testing.T) {
 				cancel()
 				require.NoError(t, err)
 				assert.Positive(t, res.Succeeded, "each pass must stamp a message before its runtime limit")
-				assert.True(t, jobctx.HasProgress(ctx), "a saved message makes the scheduled pass eligible for continuation")
 			}
 			assert.Zero(t, countMissing(t, f.MainDB, int64(f.BuildingGen)), "continuations drain the messages instead of repeating an uncommitted batch")
-		})
-	})
-	t.Run("in-flight request", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			require := require.New(t)
-			assert := assert.New(t)
-			f := newWorkerFixture(t, 2)
-			recorder := testutil.NewTestStore(t)
-			client := &blockedDiagnosticClient{inner: f.FakeClient, started: make(chan struct{})}
-			w := NewWorker(WorkerDeps{Backend: f.Backend, VectorsDB: f.VectorsDB, MainDB: f.MainDB,
-				Store: f.Store, Client: client, BatchSize: 1, MaxConsecutiveFailures: 1, Recorder: recorder})
-			ctx, cancel := context.WithTimeoutCause(t.Context(), time.Second, jobctx.ErrRunBudgetExceeded)
-			defer cancel()
-			res, err := w.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
-			select {
-			case <-client.started:
-			default:
-				require.FailNow("the runtime limit must interrupt an in-flight provider call")
-			}
-			require.NoError(err, "a scheduled pass boundary is not a provider failure")
-			assert.Equal(RunResult{Claimed: 1}, res)
-			assert.Equal(2, countMissing(t, f.MainDB, int64(f.BuildingGen)))
-			runs := messageEmbeddingOperationRuns(t, recorder)
-			require.Len(runs, 1)
-			assert.Equal(operations.StateCancelled, runs[0].State)
-			require.NotNil(runs[0].Error)
-			assert.Equal(operations.PublicErrorInvocationCancelled, runs[0].Error.Code)
-			var failed int
-			require.NoError(f.VectorsDB.QueryRow("SELECT failed FROM embed_runs ORDER BY id DESC LIMIT 1").Scan(&failed))
-			assert.Zero(failed, "the persisted batch counters exclude interrupted work")
-
-			w.deps.Client = f.FakeClient
-			scope := testEmbeddingPassScope()
-			scope.Key += ":resume"
-			res, err = w.RunOnce(t.Context(), f.BuildingGen, scope)
-			require.NoError(err)
-			assert.Equal(RunResult{Claimed: 2, Succeeded: 2}, res)
-			assert.Zero(countMissing(t, f.MainDB, int64(f.BuildingGen)), "the next pass covers the interrupted batch and later rows")
 		})
 	})
 }

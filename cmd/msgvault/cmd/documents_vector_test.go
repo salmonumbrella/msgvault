@@ -519,7 +519,7 @@ func TestScheduledDocumentVectorRotationRetiresObsoleteBuildingBeforeDesiredBuil
 	assert.Zero(client.documentCalls)
 }
 
-func TestRegisteredDocumentVectorJobResumesUnexpiredLease(t *testing.T) {
+func TestRegisteredDocumentVectorJobReusesWorkerOwner(t *testing.T) {
 	require := require.New(t)
 	fixture, spec, testCtx := documentVectorCommandFixture(t)
 	st := fixture.Store
@@ -565,12 +565,13 @@ func TestRegisteredDocumentVectorJobResumesUnexpiredLease(t *testing.T) {
 		Chunks: []store.DocumentPublishedChunk{{Key: chunk.Key, Ordinal: 0, Text: chunk.Text, Checksum: chunk.Checksum, CharCount: chunk.CharCount,
 			Spans: []store.DocumentPublishedSpan{{UnitIndex: 0, CharStart: chunk.Spans[0].CharStart, CharEnd: chunk.Spans[0].CharEnd}}}},
 	}))
-	ctx, cancel := context.WithCancelCause(context.Background())
-	defer cancel(nil)
+	var cancelCurrent context.CancelCauseFunc
+	var owners []string
 	client := &commandDocumentSemanticClient{embedDocuments: func(ctx context.Context, _ []vector.DocumentInput) ([][][]float32, error) {
-		if ctx.Err() == nil && context.Cause(ctx) == nil {
-			cancel(jobctx.ErrYieldedToWaiter)
-		}
+		var owner string
+		require.NoError(st.DB().QueryRow(`SELECT lease_owner FROM document_vector_publications WHERE state = 'pending'`).Scan(&owner))
+		owners = append(owners, owner)
+		cancelCurrent(jobctx.ErrYieldedToWaiter)
 		return nil, ctx.Err()
 	}}
 	state := invocationFromContext(testCtx)
@@ -578,21 +579,15 @@ func TestRegisteredDocumentVectorJobResumesUnexpiredLease(t *testing.T) {
 	features := &vectorFeatures{DocumentBackend: &commandDocumentVectorBackend{}, SemanticClient: client, Cfg: state.cfg.Vector}
 	capture := &registeredDocumentVectorJobCapture{}
 	require.NoError(registerDocumentVectorJob(capture, features, st, state))
-	require.ErrorIs(capture.job(ctx), context.Canceled)
-	var leaseUntil time.Time
-	require.NoError(st.DB().QueryRow(`SELECT lease_until FROM document_vector_publications WHERE state = 'pending'`).Scan(&leaseUntil))
-	require.True(leaseUntil.After(time.Now()), "the short sync finishes before the interrupted claim expires")
-	client.embedDocuments = func(context.Context, []vector.DocumentInput) ([][][]float32, error) {
-		return [][][]float32{{{1, 0, 0}}}, nil
+	for range 2 {
+		ctx, cancel := context.WithCancelCause(t.Context())
+		cancelCurrent = cancel
+		require.ErrorIs(capture.job(ctx), context.Canceled)
+		cancel(nil)
 	}
-	require.NoError(capture.job(context.Background()))
-	require.Equal(2, client.documentCalls, "the continuation must reclaim the interrupted request")
-	active, err := st.GetActiveDocumentVectorGeneration(testCtx)
-	require.NoError(err)
-	require.NotNil(active)
-	coverage, err := st.GetDocumentVectorCoverage(testCtx, active.ID)
-	require.NoError(err)
-	require.True(coverage.Complete())
+	require.Len(owners, 2)
+	require.NotEmpty(owners[0])
+	require.Equal(owners[0], owners[1])
 }
 
 func TestRegisteredDocumentVectorJobCarriesInvocation(t *testing.T) {

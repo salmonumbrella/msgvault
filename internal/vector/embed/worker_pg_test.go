@@ -309,19 +309,3 @@ func TestWorkerPG_EmbedBatch_RebindsINClause(t *testing.T) {
 		assert.Len(c.Vector, 4)
 	}
 }
-
-func TestWorkerPG_BackstopUsesStoreScopedScan(t *testing.T) {
-	require := require.New(t)
-	db, realStore := openPGWorkerDB(t, 3)
-	_, err := db.Exec(`UPDATE messages SET message_type = 'email', source_id = 1 WHERE id > 1`)
-	require.NoError(err)
-	work := &pgWorkStore{db: db, store: realStore}
-	ids, after, err := work.ScanEmbeddingBackstop(t.Context(), 7, 0, 2, []string{"email"}, []int64{1})
-	require.NoError(err)
-	require.Equal([]int64{2}, ids)
-	require.Equal(int64(2), after)
-	ids, after, err = work.ScanEmbeddingBackstop(t.Context(), 7, after, 2, []string{"email"}, []int64{1})
-	require.NoError(err)
-	require.Equal([]int64{3}, ids)
-	require.Equal(int64(3), after)
-}

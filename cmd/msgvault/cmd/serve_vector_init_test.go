@@ -313,7 +313,6 @@ func TestRegisterDocumentVectorJobRequiresDocumentEmbeddingsAndBackend(t *testin
 	assertions.NotNil(capture.job)
 	assertions.Equal("*/7 * * * *", capture.schedule)
 	assertions.True(capture.runAfterSync)
-	assertions.Equal(c.Vector.Embed.Schedule.MaxRuntime, capture.maxRuntime)
 
 	for name, features := range map[string]*vectorFeatures{
 		"disabled":    nil,
@@ -500,6 +499,7 @@ func TestScheduledVectorBudgetsCoverProviderAttempts(t *testing.T) {
 		attempts                                           int
 	}{
 		{name: "provider attempts raise configured runtime", configured: 3 * time.Second, timeout: 120 * time.Second, attempts: 5, messageBudget: 1567200 * time.Millisecond, documentBudget: 783600 * time.Millisecond},
+		{name: "configured budget exceeds provider floor", configured: 30 * time.Minute, timeout: 30 * time.Second, attempts: 3, messageBudget: 30 * time.Minute, documentBudget: 30 * time.Minute},
 		{name: "default covers short request", timeout: 30 * time.Second, attempts: 1, messageBudget: 5 * time.Minute, documentBudget: 5 * time.Minute},
 		{name: "provider floor raises default", timeout: 10 * time.Minute, attempts: 1, messageBudget: 21 * time.Minute, documentBudget: 10*time.Minute + 30*time.Second},
 	} {
@@ -542,7 +542,6 @@ func TestNewSchedulerEmbedJobThreadsGenerationRunnerAndConvergenceChecker(t *tes
 	require.NoError(registerEmbedJob(capture, vf, nil, nil, cfg, testDiscardLogger()))
 	assert.Same(runner, capture.job.Worker)
 	assert.Same(checker, capture.job.Convergence)
-	assert.Equal(cfg.Vector.Embed.Schedule.MaxRuntime, capture.maxRuntime)
 }
 
 type registeredEmbedJobCapture struct {

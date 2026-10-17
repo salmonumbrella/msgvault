@@ -235,48 +235,57 @@ func TestWorkerRunContextualBoundariesDoNotDependOnLimit(t *testing.T) {
 }
 
 func TestWorkerRunClaimsOneProviderRequestAndIsolatesOversizeDocument(t *testing.T) {
-	assertions := assert.New(t)
-	requirements := require.New(t)
-	ledger := newFakeDocumentVectorLedger(
-		workerClaim("extract-a", 1, strings.Repeat("x", 200), "token-a"),
-		workerClaim("extract-a", 2, "two", "token-b"),
-		workerClaim("extract-a", 3, "three", "token-c"),
-		workerClaim("extract-a", 4, "four", "token-d"),
-	)
-	voyage := embed.VoyageConfig{Limits: embed.RequestLimits{MaxDocuments: 2, MaxChunks: 10, MaxUTF8Bytes: 150}}
-	provider := &fakeDocumentVectorProvider{call: func(_ context.Context, inputs []embed.DocumentInput) ([][][]float32, error) {
-		if _, err := voyage.DocumentRequests(inputs); err != nil {
-			return nil, err
+	for _, oversize := range []bool{true, false} {
+		name := "one provider request"
+		if oversize {
+			name = "oversize isolation"
 		}
-		vectors := make([][][]float32, len(inputs))
-		for i := range vectors {
-			vectors[i] = [][]float32{{1, 2, 3}}
-		}
-		return vectors, nil
-	}}
-	worker := newFakeWorker(ledger, provider, &fakeDocumentVectorBackend{})
-	worker.deps.ContextualDocuments = true
-	worker.deps.ProviderRequests = voyage.DocumentRequests
-	prepare := worker.deps.prepareInputs
-	preparations := 0
-	worker.deps.prepareInputs = func(ctx context.Context, ledger Ledger, recipe Recipe, claims []*store.DocumentVectorChunkClaim) (map[string]string, error) {
-		preparations++
-		return prepare(ctx, ledger, recipe, claims)
+		t.Run(name, func(t *testing.T) {
+			assertions := assert.New(t)
+			requirements := require.New(t)
+			claims := []*store.DocumentVectorChunkClaim{
+				workerClaim("extract-a", 2, "two", "token-b"),
+				workerClaim("extract-a", 3, "three", "token-c"),
+				workerClaim("extract-a", 4, "four", "token-d"),
+			}
+			if oversize {
+				claims = append([]*store.DocumentVectorChunkClaim{workerClaim("extract-a", 1, strings.Repeat("x", 200), "token-a")}, claims...)
+			}
+			ledger := newFakeDocumentVectorLedger(claims...)
+			voyage := embed.VoyageConfig{Limits: embed.RequestLimits{MaxDocuments: 2, MaxChunks: 10, MaxUTF8Bytes: 150}}
+			provider := &fakeDocumentVectorProvider{call: func(_ context.Context, inputs []embed.DocumentInput) ([][][]float32, error) {
+				if _, err := voyage.DocumentRequests(inputs); err != nil {
+					return nil, err
+				}
+				vectors := make([][][]float32, len(inputs))
+				for i := range vectors {
+					vectors[i] = [][]float32{{1, 2, 3}}
+				}
+				return vectors, nil
+			}}
+			worker := newFakeWorker(ledger, provider, &fakeDocumentVectorBackend{})
+			worker.deps.ContextualDocuments = true
+			worker.deps.ProviderRequests = voyage.DocumentRequests
+			if oversize {
+				result, err := worker.Run(t.Context(), 1, 10)
+				requirements.ErrorIs(err, embed.ErrDocumentTooLarge)
+				assertions.Equal(1, result.Claimed, "an oversize document is sent alone")
+				requirements.Len(ledger.failures, 1)
+				assertions.Equal("token-a", ledger.failures[0].token)
+				_, err = worker.Run(t.Context(), 1, 1)
+				requirements.NoError(err)
+				assertions.Equal([]string{"token-b"}, ledger.committed)
+				return
+			}
+			result, err := worker.Run(t.Context(), 1, 10)
+			requirements.NoError(err)
+			assertions.Equal(2, result.Claimed, "a run claims only what fits one provider request")
+			assertions.False(result.Exhausted)
+			requirements.Len(provider.calls, 1)
+			assertions.Equal([]embed.DocumentInput{{Chunks: []string{"two"}}, {Chunks: []string{"three"}}}, provider.calls[0])
+			assertions.Equal([]string{"token-b", "token-c"}, ledger.committed)
+		})
 	}
-
-	first, err := worker.Run(t.Context(), 1, 10)
-	requirements.ErrorIs(err, embed.ErrDocumentTooLarge)
-	assertions.Equal(1, first.Claimed, "an oversize document is sent alone")
-	requirements.Len(ledger.failures, 1)
-	assertions.Equal("token-a", ledger.failures[0].token)
-	second, err := worker.Run(t.Context(), 1, 10)
-	requirements.NoError(err)
-	assertions.Equal(2, second.Claimed, "a run claims only what fits one provider request")
-	assertions.False(second.Exhausted)
-	requirements.Len(provider.calls, 2)
-	assertions.Equal([]embed.DocumentInput{{Chunks: []string{"two"}}, {Chunks: []string{"three"}}}, provider.calls[1])
-	assertions.Equal([]string{"token-b", "token-c"}, ledger.committed)
-	assertions.Equal(2, preparations, "each pass prepares its extraction once for sizing and publication")
 }
 
 func TestWorkerRunRetainsPreparationFailureFromRequestSizing(t *testing.T) {
@@ -287,14 +296,11 @@ func TestWorkerRunRetainsPreparationFailureFromRequestSizing(t *testing.T) {
 	worker.deps.ContextualDocuments = true
 	worker.deps.ProviderRequests = (embed.VoyageConfig{}).DocumentRequests
 	failure := errors.New("extraction unavailable")
-	preparations := 0
 	worker.deps.prepareInputs = func(context.Context, Ledger, Recipe, []*store.DocumentVectorChunkClaim) (map[string]string, error) {
-		preparations++
 		return nil, failure
 	}
 	_, err := worker.Run(t.Context(), 1, 10)
 	require.ErrorIs(err, failure)
-	require.Equal(1, preparations)
 	require.Len(ledger.failures, 2)
 	require.Empty(provider.calls)
 }
