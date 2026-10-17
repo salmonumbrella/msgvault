@@ -473,8 +473,8 @@ export class CardDAVController {
     const revalidateIdle = !this.hasWork();
     if (revalidateIdle && !retryIdleRead) {
       const nextRun = Date.parse(this.status?.next_scheduled_at ?? '');
-      if (!this.status?.scheduled || !Number.isFinite(nextRun) || nextRun <= Date.now()) return;
-      delay = nextRun - Date.now() + MIN_POLL_MS;
+      if (!this.status?.scheduled || !Number.isFinite(nextRun)) return;
+      delay = Math.max(MIN_POLL_MS, nextRun - Date.now() + MIN_POLL_MS);
     }
     if (this.pollTimer !== undefined) clearTimeout(this.pollTimer);
     const generation = ++this.pollGeneration;

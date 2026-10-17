@@ -304,6 +304,42 @@ describe('CardDAVController', () => {
     controller.destroy();
   });
 
+  it('follows an idle response delayed past its scheduled time through completion', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-01T15:00:00Z'));
+    const delayedStatus = deferredResponse();
+    let statusReads = 0;
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(requestOf(input).url).pathname;
+      if (path.endsWith('/books')) return Response.json({ books: [book(statusReads >= 3 ? 2 : 1)] });
+      if (path.endsWith('/runs')) return Response.json({ runs: statusReads >= 3 ? [run(1, 'succeeded')] : [] });
+      statusReads += 1;
+      if (statusReads === 1) return delayedStatus.promise;
+      return Response.json({ ...idleStatus, scheduled: true, next_scheduled_at: '2026-10-01T15:01:00Z',
+        ...(statusReads === 2 ? { queued_at: '2026-10-01T15:00:00.500Z' } : { latest: run(1, 'succeeded') }) });
+    });
+    const controller = new CardDAVController(createAPIClient(fetchFn));
+    try {
+      const loading = controller.load();
+      await vi.advanceTimersByTimeAsync(1_000);
+      delayedStatus.resolve(Response.json({ ...idleStatus, scheduled: true,
+        next_scheduled_at: '2026-10-01T15:00:00.500Z' }));
+      await loading;
+      expect(controller.books.map(({ id }) => id)).toEqual([1]);
+      expect(controller.runs).toEqual([]);
+      await vi.advanceTimersByTimeAsync(499);
+      expect(statusReads).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(controller.status?.queued_at).toBe('2026-10-01T15:00:00.500Z');
+      await vi.advanceTimersByTimeAsync(500);
+      expect(controller.status?.latest?.state).toBe('succeeded');
+      expect(controller.books.map(({ id }) => id)).toEqual([2]);
+      expect(controller.runs.map(({ id, state }) => ({ id, state }))).toEqual([{ id: 1, state: 'succeeded' }]);
+    } finally {
+      controller.destroy();
+    }
+  });
+
   it('waits for a distant scheduled run without overflowing the timer and discovers queued work', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-01T15:00:00Z'));
