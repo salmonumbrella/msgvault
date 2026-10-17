@@ -428,7 +428,7 @@ func TestCardDAVStatusReportsSelectedAndAggregateSchedules(t *testing.T) {
 	controller := &CardDAVController{cfg: cfg, store: testutil.NewTestStore(t)}
 	next := time.Date(2026, 10, 1, 1, 0, 0, 0, time.UTC)
 	sched := newMockScheduler()
-	sched.jobStatuses = []JobStatus{{Name: "carddav:work", NextRun: next}, {Name: "carddav:personal", NextRun: next.Add(time.Hour)}, {Name: "unrelated", NextRun: next.Add(-time.Hour)}}
+	sched.jobStatuses = []JobStatus{{Name: "carddav:work", NextRun: next, Queued: true, QueuedAt: next.Add(-time.Minute)}, {Name: "carddav:personal", NextRun: next.Add(time.Hour), Queued: true, QueuedAt: next}, {Name: "unrelated", NextRun: next.Add(-time.Hour)}}
 	server := cardDAVReadServer(t, cfg, controller, sched)
 	for _, tc := range []struct {
 		query     string
@@ -445,8 +445,23 @@ func TestCardDAVStatusReportsSelectedAndAggregateSchedules(t *testing.T) {
 		if tc.scheduled {
 			require.NotNil(status.NextScheduledAt)
 			assertions.Equal(tc.next, *status.NextScheduledAt)
+			require.NotNil(status.QueuedAt)
+			if tc.query == "?connection=personal" {
+				assertions.Equal(next, *status.QueuedAt)
+			} else {
+				assertions.Equal(next.Add(-time.Minute), *status.QueuedAt)
+			}
 		} else {
 			assertions.Nil(status.NextScheduledAt)
+			assertions.Nil(status.QueuedAt)
 		}
 	}
+	for i := range sched.jobStatuses {
+		sched.jobStatuses[i].Queued = false
+	}
+	response := getCardDAVRead(t, server, "/api/v1/carddav/status")
+	require.Equal(http.StatusOK, response.Code)
+	var admitted CardDAVStatusResponse
+	require.NoError(json.NewDecoder(response.Body).Decode(&admitted))
+	assertions.Nil(admitted.QueuedAt, "admitted jobs no longer report a queue time")
 }

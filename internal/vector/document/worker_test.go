@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	docbankdocument "go.kenn.io/docbank/document"
+	"go.kenn.io/msgvault/internal/jobctx"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector/embed"
 )
@@ -359,10 +360,12 @@ func TestWorkerRunPublishesCompletedProviderPrefixAndRetriesOnlySuffix(t *testin
 	}
 	worker := newFakeWorker(ledger, provider, &fakeDocumentVectorBackend{})
 
-	result, err := worker.Run(t.Context(), 1, 10)
+	ctx := jobctx.WithProgress(t.Context())
+	result, err := worker.Run(ctx, 1, 10)
 	requirements.ErrorIs(err, providerErr)
 	assertions.Equal(1, result.Embedded)
 	assertions.Equal(1, result.Published)
+	assertions.True(jobctx.HasProgress(ctx))
 	assertions.Equal(1, result.Retry)
 	assertions.Zero(result.Terminal)
 	assertions.Equal(2, result.Attempted)
@@ -677,12 +680,14 @@ func TestWorkerRunRetriesBackendPutFailureWithoutCommitting(t *testing.T) {
 		vectors: [][][]float32{{{1, 2, 3}}},
 	}, backend)
 
-	result, err := worker.Run(t.Context(), 1, 10)
+	ctx := jobctx.WithProgress(t.Context())
+	result, err := worker.Run(ctx, 1, 10)
 	requirements.ErrorIs(err, backendErr)
 	assertions.Equal(1, result.Embedded)
 	assertions.Zero(result.Published)
 	assertions.Equal(1, result.Retry)
 	assertions.Empty(ledger.committed)
+	assertions.False(jobctx.HasProgress(ctx), "provider responses alone are not committed progress")
 	requirements.Len(ledger.failures, 1)
 	assertions.Equal("backend_transient", ledger.failures[0].errorCode)
 }

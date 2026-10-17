@@ -321,13 +321,18 @@ func TestWorker_StampsAfterUpsert(t *testing.T) {
 	f := newWorkerFixture(t, 3)
 
 	w := newTestWorker(f, 3)
-	_, err := w.RunOnce(context.Background(), f.BuildingGen, testEmbeddingPassScope())
+	ctx := jobctx.WithProgress(t.Context())
+	_, err := w.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
 	require.NoError(err, "RunOnce")
 
 	var stamped int
 	require.NoError(f.MainDB.QueryRow(
 		`SELECT COUNT(*) FROM messages WHERE embed_gen = ?`, int64(f.BuildingGen)).Scan(&stamped))
 	require.Equal(3, stamped, "stamped messages")
+	assert.True(t, jobctx.HasProgress(ctx))
+	res, err := w.RunOnce(t.Context(), f.BuildingGen, testEmbeddingPassScope())
+	require.NoError(err)
+	assert.Zero(t, res.Claimed, "committed coverage is skipped on the next pass")
 }
 
 // TestWorker_EmptyCorpusReturnsZero: scanning an empty corpus returns a
@@ -362,8 +367,10 @@ func TestWorker_AbortsAfterConsecutiveFailures(t *testing.T) {
 		MaxConsecutiveFailures: 3,
 		Recorder:               f.Recorder,
 	})
-	res, err := w.RunOnce(context.Background(), f.BuildingGen, testEmbeddingPassScope())
+	ctx := jobctx.WithProgress(t.Context())
+	res, err := w.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
 	require.Error(err, "expected abort")
+	assert.False(jobctx.HasProgress(ctx))
 	require.ErrorContains(err, "consecutive failures")
 	assert.Equal(0, res.Succeeded, "nothing should succeed")
 	assert. // All messages left unstamped (next scan re-finds them).

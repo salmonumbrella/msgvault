@@ -1219,6 +1219,9 @@ func (w *Worker) stampCovered(ctx context.Context, gen vector.GenerationID, ids 
 		if err != nil {
 			return missed, err
 		}
+		if covered > 0 {
+			jobctx.RecordProgress(ctx)
+		}
 	}
 	if len(plain) > 0 {
 		// Missing rows have no message to cover, so they are not counted.
@@ -1285,6 +1288,9 @@ func (w *Worker) stampSkipped(ctx context.Context, gen vector.GenerationID, ids 
 		return nil, fmt.Errorf("commit skip stamp tx: %w", err)
 	}
 	diagnosticRun(ctx).completed(covered)
+	if covered > 0 {
+		jobctx.RecordProgress(ctx)
+	}
 	return missed, nil
 }
 

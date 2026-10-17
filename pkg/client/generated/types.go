@@ -60,6 +60,7 @@ type AccountStatus struct {
 	NextRun   time.Time  `json:"next_run" validate:"required"`
 	Pending   *bool      `json:"pending,omitempty"`
 	Queued    *bool      `json:"queued,omitempty"`
+	QueuedAt  *time.Time `json:"queued_at,omitempty"`
 	Running   bool       `json:"running"`
 	Schedule  string     `json:"schedule" validate:"required"`
 	StartedAt *time.Time `json:"started_at,omitempty"`
@@ -1959,6 +1960,7 @@ type CardDAVStatusResponse struct {
 	Latest               *CardDAVRunResponse                `json:"latest,omitempty"`
 	LatestSuccessful     *CardDAVRunResponse                `json:"latest_successful,omitempty"`
 	NextScheduledAt      *time.Time                         `json:"next_scheduled_at,omitempty"`
+	QueuedAt             *time.Time                         `json:"queued_at,omitempty"`
 	RepairReason         *CardDAVStatusResponseRepairReason `json:"repair_reason,omitempty"`
 	Schedule             string                             `json:"schedule" validate:"required"`
 	Scheduled            bool                               `json:"scheduled"`
@@ -14316,6 +14318,7 @@ type SourceStatus struct {
 	SchedulerLastError    *string        `json:"scheduler_last_error,omitzero"`
 	SchedulerPending      *bool          `json:"scheduler_pending,omitempty"`
 	SchedulerQueued       *bool          `json:"scheduler_queued,omitempty"`
+	SchedulerQueuedAt     *string        `json:"scheduler_queued_at,omitzero"`
 	SchedulerStartedAt    *string        `json:"scheduler_started_at,omitzero"`
 	SourceType            string         `json:"source_type" validate:"required"`
 	SyncUnavailableReason *string        `json:"sync_unavailable_reason,omitzero"`

@@ -388,6 +388,9 @@
           <td>
             <div class="cell-stack">
               <Chip size="sm" tone={chip.tone} uppercase={false}>{chip.label}</Chip>
+              {#if source.scheduler_queued && source.scheduler_queued_at && !source.active_sync}
+                <span>Queued since <time datetime={source.scheduler_queued_at} title={formatDateTime(source.scheduler_queued_at, 'long')}>{new Date(source.scheduler_queued_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></span>
+              {/if}
               {#if source.active_sync}
                 <strong>{source.active_sync.messages_processed.toLocaleString()} processed</strong>
                 <span

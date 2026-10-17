@@ -456,7 +456,7 @@ export class CardDAVController {
     }
   }
   private shouldPoll(): boolean {
-    return !this.disposed && !this.visibilityDocument?.hidden && Boolean(this.status?.active || this.syncPending);
+    return !this.disposed && !this.visibilityDocument?.hidden && Boolean(this.status?.active || this.status?.queued_at || this.syncPending);
   }
   private schedulePoll(delay: number): void {
     if (!this.shouldPoll()) return;
@@ -579,6 +579,6 @@ function uniqueRuns(runs: CardDAVRun[]): CardDAVRun[] {
 }
 function statusFingerprint(status: CardDAVStatus): string {
   const run = status.active;
-  if (!run) return `idle:${status.latest?.id ?? 0}:${status.latest?.state ?? ''}`;
+  if (!run) return `idle:${status.queued_at ?? ''}:${status.latest?.id ?? 0}:${status.latest?.state ?? ''}`;
   return [run.id, run.state, run.books, run.created, run.updated, run.removed].join(':');
 }

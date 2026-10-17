@@ -123,6 +123,9 @@
         {/if}
       </div>
       {#if status.repair_reason}<p class="notice notice--error" role="alert">{repairCopy[status.repair_reason]}</p>{/if}
+      {#if status.queued_at && !status.active}
+        <p class="muted">Queued since <time datetime={status.queued_at} title={status.queued_at}>{new Date(status.queued_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></p>
+      {/if}
       {#if status.active}
         <div class="run-summary" aria-label="Active CardDAV sync">
           <span class="working"><Spinner size={14} label="CardDAV sync running" /> Running</span>
@@ -326,6 +329,8 @@
 </SettingsSection>
 
 <style>
+  .muted { color: var(--text-muted); }
+
   .section-state,
   .run-summary,
   .book-list {

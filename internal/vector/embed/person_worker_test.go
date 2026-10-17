@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/jobctx"
 	"go.kenn.io/msgvault/internal/operations"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
@@ -362,10 +363,12 @@ func TestPersonWorkerEmbedsInitialAndChangedDocumentsInStableBatches(t *testing.
 	client := &personWorkerClient{}
 	worker := newTestPersonWorker(source, backend, client, 2)
 
-	result, err := worker.RunOnce(t.Context(), 7, testEmbeddingPassScope())
+	ctx := jobctx.WithProgress(t.Context())
+	result, err := worker.RunOnce(ctx, 7, testEmbeddingPassScope())
 	must.NoError(err)
 	check.Equal(3, result.Claimed)
 	check.Equal(3, result.Succeeded)
+	check.True(jobctx.HasProgress(ctx))
 	revisions, err := backend.ListPersonRevisions(t.Context(), 7)
 	must.NoError(err)
 	check.Equal(map[int64]string{10: "rev-10-a", 20: "rev-20-a", 30: "rev-30-a"}, revisions)

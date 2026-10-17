@@ -20,6 +20,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/jobctx"
 	"go.kenn.io/msgvault/internal/operations"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector"
@@ -1962,8 +1963,10 @@ func TestContextWorker_LaterPackedFailurePublishesAndResumesSuccessfulScopePrefi
 	firstID := f.seed("email", conversationID, time.Now().UTC(), "first prefix")
 	secondID := f.seed("email", conversationID, time.Now().UTC().Add(time.Minute), "second retry")
 
-	_, err = f.run()
+	ctx := jobctx.WithProgress(t.Context())
+	_, err = f.worker.RunOnce(ctx, f.gen, testEmbeddingPassScope())
 	require.Error(t, err)
+	assert.True(jobctx.HasProgress(ctx), "the published prefix counts even when later work fails")
 	_, err = f.backend.GetDocument(t.Context(), f.gen, fmt.Sprintf("message:%d", firstID))
 	require.NoError(t, err, "the successful packed request must be durably published before returning the later error")
 	_, err = f.backend.GetDocument(t.Context(), f.gen, fmt.Sprintf("message:%d", secondID))
