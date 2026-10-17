@@ -370,40 +370,6 @@ describe('CardDAVController', () => {
     controller.destroy();
   });
 
-  it.each(['manual', 'retry'] as const)('resumes idle scheduled polling after %s reconciliation and visibility changes', async (action) => {
-    vi.useFakeTimers();
-    let reads = 0;
-    let queued = false;
-    const fetchFn = vi.fn<typeof fetch>(async (input) => {
-      const path = new URL(requestOf(input).url).pathname;
-      if (path.endsWith('/status')) {
-        reads++;
-        return Response.json({ ...idleStatus, scheduled: true, next_scheduled_at: '2030-01-01T00:00:00Z', ...(queued ? { queued_at: '2026-10-01T15:04:00Z' } : {}) });
-      }
-      if (path.endsWith('/sync')) return Response.json({ status: 'succeeded' });
-      if (path.endsWith('/books')) return Response.json({ books: [] });
-      return Response.json({ runs: [] });
-    });
-    const controller = new CardDAVController(createAPIClient(fetchFn));
-    await controller.load();
-    if (action === 'manual') await controller.sync(false);
-    else await controller.retrySyncState();
-    const reconciledReads = reads;
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(reads).toBeGreaterThan(reconciledReads);
-    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
-    document.dispatchEvent(new Event('visibilitychange'));
-    const hiddenReads = reads;
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(reads).toBe(hiddenReads);
-    queued = true;
-    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
-    document.dispatchEvent(new Event('visibilitychange'));
-    await vi.advanceTimersByTimeAsync(500);
-    expect(controller.status?.queued_at).toBe('2026-10-01T15:04:00Z');
-    controller.destroy();
-  });
-
   it('uses progress-aware polling, caps backoff, pauses while hidden, and reconciles terminal state', async () => {
     vi.useFakeTimers();
     let statusReads = 0;

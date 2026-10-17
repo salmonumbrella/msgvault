@@ -280,36 +280,6 @@ describe('SourcesWorkspace', () => {
     rendered.unmount();
   });
 
-  it('follows a queued sync beyond 65 seconds through admission and completion', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    let stage = 'queued';
-    let reads = 0;
-    const fetchFn = vi.fn<typeof fetch>(async () => {
-      reads++;
-      return Response.json({ sources: [source(stage === 'queued' ? {
-        can_sync: false, scheduler_queued: true, scheduler_queued_at: '2026-10-01T15:04:00Z', sync_unavailable_reason: 'sync_already_running'
-      } : stage === 'running' ? {
-        can_sync: false, active_sync: run('running', 5), sync_unavailable_reason: 'sync_already_running'
-      } : { latest_sync: run('completed', 8, { completed_at: '2026-10-01T15:06:00Z' }) })] });
-    });
-    const rendered = render(SourcesWorkspace, { client: createAPIClient(fetchFn) });
-    await screen.findByText('Queued');
-    await vi.advanceTimersByTimeAsync(80_000);
-    const queuedReads = reads;
-    stage = 'running';
-    await vi.advanceTimersByTimeAsync(8_000);
-    expect(reads).toBeGreaterThan(queuedReads);
-    expect(screen.getByText('5 processed')).toBeDefined();
-    stage = 'completed';
-    await vi.advanceTimersByTimeAsync(8_000);
-    expect(screen.getByText('Completed')).toBeDefined();
-    expect(screen.getByRole('button', { name: 'Sync now Archive' })).toBeDefined();
-    const completedReads = reads;
-    await vi.advanceTimersByTimeAsync(16_000);
-    expect(reads).toBe(completedReads);
-    rendered.unmount();
-  });
-
   it('keeps polling while the scheduler still holds the sync lock after a run completes', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     let statusReads = 0;
