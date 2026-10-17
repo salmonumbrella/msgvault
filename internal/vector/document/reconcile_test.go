@@ -125,6 +125,47 @@ func TestReconcilerRunReportsTerminalGenerationAsBlocked(t *testing.T) {
 	assertions.Zero(ledger.activateCalls)
 }
 
+func TestReconcilerRunPreservesFailureAcrossCancellation(t *testing.T) {
+	for _, stage := range []string{"worker publication", "cleanup finalization"} {
+		t.Run(stage, func(t *testing.T) {
+			assertions := assert.New(t)
+			requirements := require.New(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			failure := errors.New("synthetic publication store failure")
+			ledger := newFakeDocumentVectorReconcileLedger(store.DocumentVectorGenerationActive)
+			backend := &fakeDocumentVectorBackend{}
+			deps := ReconcilerDeps{Ledger: ledger, Backend: backend, Now: func() time.Time { return workerNow }}
+			if stage == "worker publication" {
+				ledger.generation.State = store.DocumentVectorGenerationBuilding
+				workerLedger := newFakeDocumentVectorLedger(workerClaim("extract-a", 1, "first", "token-a"))
+				workerLedger.commit = func(context.Context, string) error {
+					cancel()
+					return failure
+				}
+				deps.Worker = newFakeWorker(workerLedger, &fakeDocumentVectorProvider{vectors: [][][]float32{{{1, 2, 3}}}}, backend)
+			} else {
+				ledger.obsolete = []store.DocumentVectorCleanupToken{{GenerationID: 1, Token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+				ledger.finalizeErr = failure
+				ledger.afterFinalize = cancel
+			}
+			result, err := NewReconciler(deps).Run(ctx, 1, 10)
+			requirements.ErrorIs(ctx.Err(), context.Canceled)
+			assertions.Zero(ledger.statusCalls, "cancellation stops later reconciliation work")
+			assertions.Zero(ledger.activateCalls)
+			if stage == "worker publication" {
+				assertions.True(result.WorkerRan)
+				assertions.Equal(1, result.Worker.Embedded)
+			} else {
+				assertions.Equal(1, result.CleanupDeleted)
+				assertions.Zero(result.CleanupFinalized)
+			}
+			requirements.ErrorIs(err, context.Canceled)
+			requirements.ErrorIs(err, failure, "cancellation must retain the independent boundary failure")
+		})
+	}
+}
+
 func TestReconcilerRunNeverWorksActiveGeneration(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
@@ -300,6 +341,7 @@ type fakeDocumentVectorReconcileLedger struct {
 	finalized      []string
 	finalizeErr    error
 	finalizeErrFor string
+	afterFinalize  func()
 	activateErr    error
 	purgeResult    bool
 	purgeErr       error
@@ -354,6 +396,9 @@ func (l *fakeDocumentVectorReconcileLedger) ParkObsoleteDocumentVectorTokens(_ c
 }
 
 func (l *fakeDocumentVectorReconcileLedger) FinalizeObsoleteDocumentVectorToken(_ context.Context, _ int64, token string, now time.Time) (bool, error) {
+	if l.afterFinalize != nil {
+		defer l.afterFinalize()
+	}
 	l.finalizeAt = now
 	if l.finalizeErr != nil && (l.finalizeErrFor == "" || l.finalizeErrFor == token) {
 		return false, l.finalizeErr

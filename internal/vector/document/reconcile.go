@@ -97,17 +97,17 @@ func (r *Reconciler) Run(ctx context.Context, generationID GenerationID, limit i
 	if generation.State == store.DocumentVectorGenerationBuilding {
 		result.WorkerRan = true
 		result.Worker, err = r.deps.Worker.Run(ctx, generationID, limit)
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return result, ctxErr
-		}
 		reconcileErr = errors.Join(reconcileErr, err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, errors.Join(reconcileErr, ctxErr)
+		}
 	}
 
 	cleanupErr := r.cleanup(ctx, generationID, limit, &result)
+	reconcileErr = errors.Join(reconcileErr, cleanupErr)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return result, errors.Join(reconcileErr, ctxErr)
 	}
-	reconcileErr = errors.Join(reconcileErr, cleanupErr)
 
 	status, statusErr := r.deps.Ledger.GetDocumentVectorGenerationStatus(ctx, int64(generationID), "", limit)
 	if statusErr == nil {
