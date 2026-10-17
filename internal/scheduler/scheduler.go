@@ -82,7 +82,7 @@ type AccountStatus struct {
 
 type Job struct {
 	Name string
-	// An empty Schedule registers a job triggered only manually or after sync.
+	// Schedule is a cron expression; AddJob requires it unless Interval is set.
 	Schedule string
 	Run      func(context.Context) error
 	// Preemptible permits cancellation for another scheduled job. Enable only
@@ -329,7 +329,11 @@ func (s *Scheduler) AddAccountsFromConfig(cfg *config.Config) (int, []error) {
 	return scheduled, errors
 }
 
-func (s *Scheduler) AddJob(job Job) error {
+func (s *Scheduler) AddJob(job Job) error { return s.addJob(job, false) }
+
+// addJob registers job; postSyncOnly permits an empty schedule for vector
+// jobs started only by manual or post-sync triggers.
+func (s *Scheduler) addJob(job Job, postSyncOnly bool) error {
 	if job.MaxRuntime < 0 {
 		return errors.New("job runtime budget must be non-negative")
 	}
@@ -352,7 +356,7 @@ func (s *Scheduler) AddJob(job Job) error {
 		}
 		entryID = s.cron.Schedule(cron.Every(job.Interval), cron.FuncJob(callback))
 		schedule = "@every " + job.Interval.String()
-	} else if job.Schedule != "" {
+	} else if job.Schedule != "" || !postSyncOnly {
 		if err := ValidateCronExpr(job.Schedule); err != nil {
 			return err
 		}
@@ -440,10 +444,10 @@ func (s *Scheduler) SetDocumentVectorJob(job func(context.Context) error, schedu
 func (s *Scheduler) setCronSlot(slot *cronSlot, job func(context.Context) error, schedule string, runAfterSync bool) error {
 	if job == nil {
 		s.RemoveJob(slot.jobName)
-	} else if err := s.AddJob(Job{
+	} else if err := s.addJob(Job{
 		Name: slot.jobName, Schedule: schedule, Run: job,
 		Preemptible: true, Background: true, MaxRuntime: 5 * time.Minute,
-	}); err != nil {
+	}, true); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -569,31 +573,34 @@ func (s *Scheduler) runSync(email string) {
 		}
 	}
 	if len(afterSync) > 0 {
-		s.wg.Go(func() {
-			// Preserve message-before-document ordering without extending the sync.
-			for _, name := range afterSync {
-				run, disposition, err := s.reserveGenericJob(name, true)
-				if err != nil {
-					return
-				}
-				s.mu.RLock()
-				done := s.genericDone[name]
-				s.mu.RUnlock()
-				if disposition == JobStarted {
-					_ = s.runJob(name, run)
-				}
-				if done != nil {
-					select {
-					case <-done:
-					case <-s.ctx.Done():
-						return
-					}
-				}
-			}
-		})
+		s.wg.Go(func() { s.runAfterSync(afterSync) })
 	}
 	s.mu.Unlock()
 	s.startVisualPostSync()
+}
+
+// runAfterSync preserves message-before-document ordering without extending
+// the sync. A chain it starts finishes before later jobs; joining a chain
+// already active queues later jobs for admission between bounded passes.
+func (s *Scheduler) runAfterSync(names []string) {
+	for _, name := range names {
+		run, disposition, err := s.reserveGenericJob(name, true)
+		if err != nil {
+			return
+		}
+		if disposition != JobStarted {
+			continue
+		}
+		s.mu.RLock()
+		done := s.genericDone[name]
+		s.mu.RUnlock()
+		_ = s.runJob(name, run)
+		select {
+		case <-done:
+		case <-s.ctx.Done():
+			return
+		}
+	}
 }
 
 // logScheduledSyncError keeps transient network failures below the error

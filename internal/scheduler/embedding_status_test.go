@@ -112,7 +112,7 @@ func TestQueueTimesClearOnAdmission(t *testing.T) {
 					require.NoError(t, s.AddAccount("queue@example.com", "0 0 1 1 *"))
 					require.NoError(t, s.TriggerSync("queue@example.com"))
 				} else {
-					require.NoError(t, s.AddJob(Job{Name: "queue", Run: run}))
+					require.NoError(t, s.AddJob(Job{Name: "queue", Schedule: "0 0 1 1 *", Run: run}))
 					_, err := s.StartJob("queue")
 					require.NoError(t, err)
 				}
@@ -240,4 +240,54 @@ func TestPostSyncDocumentWaitsForEmbeddingContinuation(t *testing.T) {
 		synctest.Wait()
 		assert.Equal(t, []string{"embed", "embed", "embed complete", "document"}, order)
 	})
+}
+
+func TestPostSyncDocumentQueuesBehindExistingEmbeddingContinuation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var order []string
+		s := New(func(context.Context, string) error {
+			order = append(order, "sync")
+			return nil
+		}).WithWorkTracker(newSerialWorkTracker())
+		defer func() { <-s.Stop().Done() }()
+		require.NoError(t, s.setCronSlot(&s.embed, func(ctx context.Context) error {
+			order = append(order, "embed")
+			jobctx.RecordProgress(ctx)
+			<-ctx.Done()
+			return ctx.Err()
+		}, "", true))
+		require.NoError(t, s.SetDocumentVectorJob(func(context.Context) error {
+			order = append(order, "document")
+			return nil
+		}, "", true))
+		require.NoError(t, s.AddAccount("sync@example.com", "0 0 1 1 *"))
+		require.Equal(t, JobStarted, mustStartJob(t, s, "embed"))
+		synctest.Wait()
+		require.NoError(t, s.TriggerSync("sync@example.com"))
+		synctest.Wait()
+		time.Sleep(66 * time.Second)
+		synctest.Wait()
+		require.Equal(t, []string{"embed", "sync", "embed"}, order)
+		for _, status := range s.JobStatus() {
+			if status.Name == "document-vector" {
+				assert.True(t, status.Queued, "document work joins the gate while the existing embedding chain continues")
+			}
+		}
+		time.Sleep(5 * time.Minute)
+		synctest.Wait()
+		assert.Equal(t, []string{"embed", "sync", "embed", "document", "embed"}, order)
+	})
+}
+
+func TestAddJobRejectsEmptySchedule(t *testing.T) {
+	s := New(nil)
+	defer func() { <-s.Stop().Done() }()
+	job := Job{Name: "generic", Run: func(context.Context) error { return nil }}
+	require.Error(t, s.AddJob(job))
+	assert.False(t, s.IsJobScheduled(job.Name))
+	job.Schedule = "0 0 * * *"
+	require.NoError(t, s.AddJob(job))
+	job.Schedule = ""
+	require.Error(t, s.AddJob(job))
+	assert.Equal(t, "0 0 * * *", s.JobStatus()[0].Schedule, "invalid replacement preserves the registered schedule")
 }

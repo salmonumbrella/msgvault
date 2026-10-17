@@ -292,6 +292,70 @@ describe('CardDAVController', () => {
     controller.destroy();
   });
 
+  it('refreshes books and history when queued work completes between status reads', async () => {
+    vi.useFakeTimers();
+    let terminal = false;
+    let statusReads = 0;
+    let bookReads = 0;
+    let runReads = 0;
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(requestOf(input).url).pathname;
+      if (path.endsWith('/status')) {
+        statusReads++;
+        return Response.json({ ...idleStatus, ...(terminal ? { latest: run(1, 'succeeded') } : { queued_at: '2026-10-01T15:04:00Z' }) });
+      }
+      if (path.endsWith('/books')) {
+        bookReads++;
+        return Response.json({ books: [book(1, { name: terminal ? 'Updated address book' : 'Original address book' })] });
+      }
+      runReads++;
+      return Response.json({ runs: terminal ? [run(1, 'succeeded')] : [] });
+    });
+    const controller = new CardDAVController(createAPIClient(fetchFn));
+    await controller.load();
+    expect(controller.status?.queued_at).toBeDefined();
+    expect(controller.books[0]?.name).toBe('Original address book');
+    terminal = true;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(controller.status?.latest?.state).toBe('succeeded');
+    expect(controller.books[0]?.name).toBe('Updated address book');
+    expect(controller.runs[0]?.state).toBe('succeeded');
+    expect(bookReads).toBe(2);
+    expect(runReads).toBe(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(statusReads).toBe(2);
+    controller.destroy();
+  });
+
+  it('retries a failed scheduled status refresh while cached status is idle', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-01T15:00:00Z'));
+    let reads = 0;
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(requestOf(input).url).pathname;
+      if (path.endsWith('/status')) {
+        reads++;
+        if (reads === 2) return Response.json({ error: 'temporarily_unavailable' }, { status: 503 });
+        return Response.json({ ...idleStatus, scheduled: true, next_scheduled_at: '2026-10-01T15:01:00Z', ...(reads >= 3 ? { latest: run(1, 'succeeded') } : {}) });
+      }
+      if (path.endsWith('/books')) return Response.json({ books: [] });
+      return Response.json({ runs: [] });
+    });
+    const controller = new CardDAVController(createAPIClient(fetchFn));
+    await controller.load();
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(reads).toBe(2);
+    expect(controller.status?.active).toBeUndefined();
+    expect(controller.statusError).toBe('Unable to load CardDAV status.');
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(reads).toBe(3);
+    expect(controller.statusError).toBeNull();
+    expect(controller.status?.latest?.state).toBe('succeeded');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(reads).toBe(3);
+    controller.destroy();
+  });
+
   it('polls queued work through admission and stops after completion', async () => {
     vi.useFakeTimers();
     let statusReads = 0;

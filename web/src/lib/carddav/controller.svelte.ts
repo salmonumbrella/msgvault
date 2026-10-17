@@ -478,8 +478,8 @@ export class CardDAVController {
       void this.poll(generation);
     }, Math.min(2_147_483_647, Math.max(0, target - Date.now())));
   }
-  private schedulePoll(delay: number): void {
-    if (!this.shouldPoll()) return;
+  private schedulePoll(delay: number, retry = false): void {
+    if (this.disposed || this.visibilityDocument?.hidden || (!retry && !this.shouldPoll())) return;
     if (this.pollTimer !== undefined) clearTimeout(this.pollTimer);
     const generation = ++this.pollGeneration;
     this.pollTimer = setTimeout(() => {
@@ -494,7 +494,7 @@ export class CardDAVController {
     this.pollAbort?.abort();
     const requestController = new AbortController();
     this.pollAbort = requestController;
-    const priorActive = Boolean(this.status?.active);
+    const hadWork = Boolean(this.status?.active || this.status?.queued_at);
     try {
       const { data } = await generatedGetCardDAVStatus(
         this.connection ? { connection: this.connection } : undefined,
@@ -512,7 +512,7 @@ export class CardDAVController {
       if (!data) {
         this.statusError = 'Unable to load CardDAV status.';
         this.pollDelay = Math.min(MAX_POLL_MS, this.pollDelay * 2);
-        this.schedulePoll(this.pollDelay);
+        this.schedulePoll(this.pollDelay, true);
         return;
       }
       const becameAvailable = !this.status?.available && data.available;
@@ -522,7 +522,7 @@ export class CardDAVController {
       this.statusError = null;
       this.pollFingerprint = fingerprint;
       this.recordSuccessfulStatusCommit(statusCommit);
-      if (priorActive && !data.active && !data.queued_at && !this.syncPending) {
+      if (hadWork && !data.active && !data.queued_at && !this.syncPending) {
         this.stopPolling(false);
         await Promise.all([...(data.available ? [this.loadBooks(true)] : []), this.refreshRuns()]);
         this.scheduleScheduledRefresh();
@@ -544,7 +544,7 @@ export class CardDAVController {
       this.statusLoading = false;
       this.statusError = 'Unable to load CardDAV status.';
       this.pollDelay = Math.min(MAX_POLL_MS, this.pollDelay * 2);
-      this.schedulePoll(this.pollDelay);
+      this.schedulePoll(this.pollDelay, true);
     } finally {
       if (this.pollAbort === requestController) this.pollAbort = undefined;
     }
