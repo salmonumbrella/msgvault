@@ -174,7 +174,7 @@ func (w *ContextWorker) runBackstop(ctx context.Context, gen vector.GenerationID
 		}
 	}
 	result, err := w.run(ctx, gen)
-	result.RepairSettled = true
+	result.RepairSettled = jobctx.ErrorAfterYield(ctx, err) == nil
 	return result, err
 }
 

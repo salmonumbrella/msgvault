@@ -277,7 +277,7 @@ export class CardDAVController {
       this.syncUnknown = !statusLoaded || !runsLoaded;
     }
     this.syncPending = false;
-    if (this.shouldPoll()) this.schedulePoll(MIN_POLL_MS);
+    this.schedulePoll(MIN_POLL_MS);
   }
   async retrySyncState(): Promise<void> {
     if (this.disposed || this.syncPending) return;
@@ -371,7 +371,7 @@ export class CardDAVController {
     } finally {
       if (schedule && this.currentStatusCommit(context, statusCommit, requestController.signal)) {
         this.pollDelay = MIN_POLL_MS;
-        if (this.shouldPoll()) this.schedulePoll(MIN_POLL_MS);
+        this.schedulePoll(MIN_POLL_MS);
       }
       if (this.current(context) && this.statusReadAbort === requestController) {
         this.statusReadAbort = undefined;
@@ -468,12 +468,18 @@ export class CardDAVController {
     }
   }
   private schedulePoll(delay: number): void {
-    if (!this.shouldPoll()) return;
+    if (this.disposed || this.visibilityDocument?.hidden) return;
+    const revalidateIdle = !this.hasWork();
+    if (revalidateIdle) {
+      const nextRun = Date.parse(this.status?.next_scheduled_at ?? '');
+      if (!this.status?.scheduled || !Number.isFinite(nextRun) || nextRun <= Date.now()) return;
+      delay = nextRun - Date.now() + MIN_POLL_MS;
+    }
     if (this.pollTimer !== undefined) clearTimeout(this.pollTimer);
     const generation = ++this.pollGeneration;
     this.pollTimer = setTimeout(() => {
       this.pollTimer = undefined;
-      void this.poll(generation);
+      void this.poll(generation, revalidateIdle);
     }, delay);
   }
   private async poll(generation: number, revalidateIdle = false): Promise<void> {
@@ -517,12 +523,13 @@ export class CardDAVController {
       if ((hadWork || completedWhileHidden) && !this.hasWork()) {
         this.stopPolling(false);
         await Promise.all([...(data.available ? [this.loadBooks(true)] : []), this.refreshRuns()]);
+        this.schedulePoll(MIN_POLL_MS);
         return;
       }
       if (this.shouldPoll()) {
         this.pollDelay = advanced ? MIN_POLL_MS : Math.min(MAX_POLL_MS, this.pollDelay * 2);
-        this.schedulePoll(this.pollDelay);
       }
+      this.schedulePoll(this.pollDelay);
       if (becameAvailable) await this.loadBooks(false);
     } catch {
       if (

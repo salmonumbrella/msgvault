@@ -524,9 +524,9 @@ func TestDiagnosticsClassifyPassErrors(t *testing.T) {
 			capture := &diagnosticCapture{}
 			ctx := t.Context()
 			if tt.shutdown {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
-				cancel()
+				var cancel context.CancelCauseFunc
+				ctx, cancel = context.WithCancelCause(ctx)
+				cancel(jobctx.ErrSchedulerStopped)
 			}
 			if tt.yield {
 				var cancel context.CancelFunc

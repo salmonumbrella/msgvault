@@ -161,11 +161,11 @@ type Scheduler struct {
 	visualPostRunning bool
 	visualPostPending bool
 
-	ctx     context.Context    // cancelled on Stop
-	cancel  context.CancelFunc // cancels ctx
-	wg      sync.WaitGroup     // tracks running sync goroutines
-	started bool               // true after Start(), false after Stop()
-	stopped bool               // true after Stop()
+	ctx     context.Context         // cancelled on Stop
+	cancel  context.CancelCauseFunc // cancels ctx
+	wg      sync.WaitGroup          // tracks running sync goroutines
+	started bool                    // true after Start(), false after Stop()
+	stopped bool                    // true after Stop()
 }
 
 // SetVisualPostSyncJob installs the independently consented visual lane's
@@ -178,7 +178,7 @@ func (s *Scheduler) SetVisualPostSyncJob(run func(context.Context) error) {
 
 // New creates a new Scheduler with the given sync callback.
 func New(syncFunc SyncFunc) *Scheduler {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	return &Scheduler{
 		cron: cron.New(cron.WithParser(cron.NewParser(
 			cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow,
@@ -489,7 +489,7 @@ func (s *Scheduler) Stop() context.Context {
 	s.mu.Unlock()
 
 	cronCtx := s.cron.Stop()
-	s.cancel() // signal running syncs to stop
+	s.cancel(jobctx.ErrSchedulerStopped) // signal running syncs to stop
 
 	done := make(chan struct{})
 	go func() {

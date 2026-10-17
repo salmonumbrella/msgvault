@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.kenn.io/msgvault/internal/api"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/operations"
@@ -532,6 +533,10 @@ type documentVectorJobRegistrar interface {
 	SetDocumentVectorJob(job func(context.Context) error, schedule string, runAfterSync bool, maxRuntime time.Duration) error
 }
 
+func nextDocumentVectorWorkerOwner() string {
+	return "document-vector-" + uuid.NewString()
+}
+
 func registerDocumentVectorJob(sched documentVectorJobRegistrar, vf *vectorFeatures, st *store.Store, state *invocation) error {
 	if state == nil || state.cfg == nil {
 		return errors.New("configuration is unavailable")
@@ -547,8 +552,10 @@ func registerDocumentVectorJob(sched documentVectorJobRegistrar, vf *vectorFeatu
 	if limit > 1000 {
 		limit = 1000
 	}
+	// Continuations reuse the owner so canceled requests can reclaim their unexpired leases.
+	owner := nextDocumentVectorWorkerOwner()
 	job := invocationBoundJobRun(state, func(ctx context.Context) error {
-		return runScheduledDocumentVectorGeneration(ctx, st, vf, limit)
+		return runScheduledDocumentVectorGeneration(ctx, st, vf, limit, owner)
 	})
 	if err := sched.SetDocumentVectorJob(job, cfg.Vector.Embed.Schedule.Cron, cfg.Vector.Embed.Schedule.RunAfterSync, cfg.Vector.Embed.Schedule.MaxRuntime); err != nil {
 		return fmt.Errorf("register document vector job: %w", err)

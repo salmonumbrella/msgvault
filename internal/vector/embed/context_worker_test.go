@@ -2409,6 +2409,34 @@ func TestContextWorker_ReconcileSourceUsesBoundedRowPagesDespiteCurrentCoverage(
 	assert.Equal(t, 5, total, "source enumeration must not use embed_gen as its input filter")
 }
 
+func TestContextWorker_BackstopFailureDoesNotSettleRepair(t *testing.T) {
+	require := require.New(t)
+	failure := errors.New("source page unavailable")
+	fail := false
+	f := newContextWorkerFixture(t, func(deps *ContextWorkerDeps) {
+		deps.Hooks.AfterSourcePage = func(int) error {
+			if fail {
+				return failure
+			}
+			return nil
+		}
+	})
+	conversationID, err := f.store.EnsureConversation(f.sourceID, "repair-retry", "Repair")
+	require.NoError(err)
+	f.seed("email", conversationID, time.Now().UTC(), "repair evidence")
+	_, err = f.run()
+	require.NoError(err)
+	fail = true
+	result, err := f.worker.RunBackstop(t.Context(), f.gen, testEmbeddingPassScope())
+	require.ErrorIs(err, failure)
+	require.False(result.RepairSettled, "a failed scan must remain eligible for the next repair pass")
+	fail = false
+	result, err = f.worker.RunBackstop(t.Context(), f.gen, testEmbeddingPassScope())
+	require.NoError(err)
+	require.True(result.RepairSettled)
+	require.True(result.Contextual.Converged)
+}
+
 func TestContextWorker_BackstopPreservesIncompleteReconciliationCursor(t *testing.T) {
 	var pageRows []int
 	f := newContextWorkerFixture(t, func(deps *ContextWorkerDeps) {

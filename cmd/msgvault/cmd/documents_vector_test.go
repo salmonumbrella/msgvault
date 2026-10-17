@@ -16,7 +16,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	docbankdocument "go.kenn.io/docbank/document"
 	"go.kenn.io/msgvault/internal/config"
+	"go.kenn.io/msgvault/internal/jobctx"
 	"go.kenn.io/msgvault/internal/operations"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil/storetest"
@@ -335,7 +337,7 @@ func TestDocumentVectorResumeRunsBoundedCleanupForRetiredGeneration(t *testing.T
 			return runDocumentVectorWithFeatures(ctx, st, &vectorFeatures{
 				DocumentBackend: backend,
 				Cfg:             cfg.Vector,
-			}, generationID, limit, testOperationPassScope("document-vector:retired-cleanup"))
+			}, generationID, limit, testOperationPassScope("document-vector:retired-cleanup"), nextDocumentVectorWorkerOwner())
 		},
 	}
 	command := newDocumentsCmd(deps)
@@ -489,7 +491,7 @@ func TestScheduledDocumentVectorRotationRetiresObsoleteBuildingBeforeDesiredBuil
 		DocumentBackend: backend, SemanticClient: client, Cfg: cfg.Vector,
 	}
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 2))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 2, nextDocumentVectorWorkerOwner()))
 	stillActive, err := fixture.Store.GetActiveDocumentVectorGeneration(testCtx)
 	require.NoError(err)
 	require.NotNil(stillActive)
@@ -500,7 +502,7 @@ func TestScheduledDocumentVectorRotationRetiresObsoleteBuildingBeforeDesiredBuil
 	require.Len(backend.deletes, 1)
 	assert.Len(backend.deletes[0], 2)
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 2))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 2, nextDocumentVectorWorkerOwner()))
 	_, err = fixture.Store.GetDocumentVectorGeneration(testCtx, obsolete.ID)
 	require.ErrorContains(err, "not found")
 	require.Len(backend.deletes, 2)
@@ -509,12 +511,90 @@ func TestScheduledDocumentVectorRotationRetiresObsoleteBuildingBeforeDesiredBuil
 	require.NoError(err)
 	assert.Equal(active.ID, stillActive.ID)
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 2))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 2, nextDocumentVectorWorkerOwner()))
 	newActive, err := fixture.Store.GetActiveDocumentVectorGeneration(testCtx)
 	require.NoError(err)
 	require.NotNil(newActive)
 	assert.Equal(desired, newActive.DocumentVectorGenerationSpec)
 	assert.Zero(client.documentCalls)
+}
+
+func TestRegisteredDocumentVectorJobResumesUnexpiredLease(t *testing.T) {
+	require := require.New(t)
+	fixture, spec, testCtx := documentVectorCommandFixture(t)
+	st := fixture.Store
+	consent, err := configuredDocumentVectorConsentSpec(spec, invocationFromContext(testCtx), "document_embedding")
+	require.NoError(err)
+	_, _, err = st.RecordDocumentVectorConsent(testCtx, consent, time.Now())
+	require.NoError(err)
+	require.NoError(st.RecordDocumentProviderConsent(testCtx, store.DocumentProviderConsent{
+		ProfileID: spec.TargetExtractionProfileID, ProfileFingerprint: strings.Repeat("7", 64), RetentionPosture: "standard", TrainingPosture: "opted-out",
+	}))
+	hash := strings.Repeat("b", 64)
+	messageID := fixture.CreateMessage("interrupted-document")
+	require.NoError(st.UpsertAttachmentRecord(testCtx, messageID, store.AttachmentWrite{
+		Filename: "synthetic.pdf", MIMEType: "application/pdf", Size: 128, StoragePath: hash[:2] + "/" + hash,
+		ContentHash: hash, Role: store.AttachmentRoleStandalone, RoleSource: store.AttachmentRoleSourceMIMEDisposition, SourcePartKey: "mime:1.2",
+	}))
+	var attachmentID int64
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT id FROM attachments WHERE message_id = ?`), messageID).Scan(&attachmentID))
+	_, eligible, err := st.ReconcileDocumentOccurrence(testCtx, attachmentID, 1)
+	require.NoError(err)
+	require.True(eligible)
+	var messageType string
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT COALESCE(message_type, '') FROM messages WHERE id = ?`), messageID).Scan(&messageType))
+	claim, err := st.ClaimDocumentExtraction(testCtx, store.DocumentExtractionClaimInput{
+		ExtractionID: "interrupted-extraction", ProfileID: spec.TargetExtractionProfileID, CanonicalBlobHash: hash,
+		ExtractionInputKey: "original", LeaseOwner: "extraction-worker", LeaseUntil: time.Now().Add(time.Minute),
+		LocalBytes: 128, SourceSequence: 1, OccurrenceAttachmentID: attachmentID, OccurrenceMIMEType: "application/pdf", OccurrenceMessageType: messageType,
+	})
+	require.NoError(err)
+	policy, err := docbankdocument.NewNormalizePolicy(10000)
+	require.NoError(err)
+	normalized, err := docbankdocument.NormalizeDocument(docbankdocument.SourceDocument{
+		Family: "pdf", UnitKind: "page", Units: []docbankdocument.SourceUnit{{Index: 0, Markdown: "Synthetic evidence"}},
+	}, policy)
+	require.NoError(err)
+	unit, chunk := normalized.Units[0], normalized.Chunks[0]
+	require.NoError(st.PublishDocumentExtraction(testCtx, store.DocumentExtractionPublication{
+		ExtractionID: claim.ExtractionID, ProfileID: claim.ProfileID, CanonicalBlobHash: hash, ExtractionInputKey: claim.ExtractionInputKey,
+		OccurrenceAttachmentID: attachmentID, OccurrenceMIMEType: claim.OccurrenceMIMEType, OccurrenceMessageType: messageType,
+		LeaseOwner: claim.LeaseOwner, LeaseFence: claim.LeaseFence, ReturnedModel: "extract-test", UnitsProcessed: 1,
+		ManifestChecksum: normalized.Checksum, NormalizationVersion: normalized.PolicyVersion, DocumentFamily: normalized.Family, UnitKind: normalized.UnitKind,
+		Units: []store.DocumentPublishedUnit{{Index: 0, Kind: unit.Kind, Text: unit.Text, Checksum: unit.Checksum, CharCount: unit.CharCount}},
+		Chunks: []store.DocumentPublishedChunk{{Key: chunk.Key, Ordinal: 0, Text: chunk.Text, Checksum: chunk.Checksum, CharCount: chunk.CharCount,
+			Spans: []store.DocumentPublishedSpan{{UnitIndex: 0, CharStart: chunk.Spans[0].CharStart, CharEnd: chunk.Spans[0].CharEnd}}}},
+	}))
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	client := &commandDocumentSemanticClient{embedDocuments: func(ctx context.Context, _ []vector.DocumentInput) ([][][]float32, error) {
+		if ctx.Err() == nil && context.Cause(ctx) == nil {
+			cancel(jobctx.ErrYieldedToWaiter)
+		}
+		return nil, ctx.Err()
+	}}
+	state := invocationFromContext(testCtx)
+	state.logger = testDiscardLogger()
+	features := &vectorFeatures{DocumentBackend: &commandDocumentVectorBackend{}, SemanticClient: client, Cfg: state.cfg.Vector}
+	capture := &registeredDocumentVectorJobCapture{}
+	require.NoError(registerDocumentVectorJob(capture, features, st, state))
+	require.ErrorIs(capture.job(ctx), context.Canceled)
+	var leaseUntil time.Time
+	require.NoError(st.DB().QueryRow(`SELECT lease_until FROM document_vector_publications WHERE state = 'pending'`).Scan(&leaseUntil))
+	require.True(leaseUntil.After(time.Now()), "the short sync finishes before the interrupted claim expires")
+	client.embedDocuments = func(context.Context, []vector.DocumentInput) ([][][]float32, error) {
+		return [][][]float32{{{1, 0, 0}}}, nil
+	}
+	require.NoError(capture.job(context.Background()))
+	require.Equal(2, client.documentCalls, "the continuation must reclaim the interrupted request")
+	active, err := st.GetActiveDocumentVectorGeneration(testCtx)
+	require.NoError(err)
+	require.NotNil(active)
+	coverage, err := st.GetDocumentVectorCoverage(testCtx, active.ID)
+	require.NoError(err)
+	require.True(coverage.Complete())
+	require.NoError(capture.job(context.Background()))
+	require.Equal(2, client.documentCalls, "committed publications must stay skipped")
 }
 
 func TestRegisteredDocumentVectorJobCarriesInvocation(t *testing.T) {
@@ -559,12 +639,12 @@ func TestScheduledDocumentVectorCleansRetiredWithoutConsentOrProvider(t *testing
 	backend := &commandDocumentVectorBackend{}
 	vf := &vectorFeatures{DocumentBackend: backend, Cfg: cfg.Vector}
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10, nextDocumentVectorWorkerOwner()))
 
 	assert.Equal([][]string{{token}}, backend.deletes)
 	_, err = fixture.Store.GetDocumentVectorGeneration(testCtx, generation.ID)
 	require.ErrorContains(err, "not found")
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10, nextDocumentVectorWorkerOwner()))
 }
 
 func TestScheduledDocumentVectorObservesConsentRecordedAfterRuntimeInitialization(t *testing.T) {
@@ -578,7 +658,7 @@ func TestScheduledDocumentVectorObservesConsentRecordedAfterRuntimeInitializatio
 		Cfg:             cfg.Vector,
 	}
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10, nextDocumentVectorWorkerOwner()))
 	active, err := fixture.Store.GetActiveDocumentVectorGeneration(testCtx)
 	require.NoError(err)
 	assert.Nil(active)
@@ -588,7 +668,7 @@ func TestScheduledDocumentVectorObservesConsentRecordedAfterRuntimeInitializatio
 	_, _, err = fixture.Store.RecordDocumentVectorConsent(testCtx, consentSpec, time.Now())
 	require.NoError(err)
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10, nextDocumentVectorWorkerOwner()))
 	active, err = fixture.Store.GetActiveDocumentVectorGeneration(testCtx)
 	require.NoError(err)
 	require.NotNil(active)
@@ -628,7 +708,7 @@ func TestScheduledDocumentVectorCleansObsoleteActiveTokensAfterCoverageIsComplet
 	vf := &vectorFeatures{
 		DocumentBackend: backend, SemanticClient: client, Cfg: cfg.Vector,
 	}
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10, nextDocumentVectorWorkerOwner()))
 	require.Equal([][]string{{token}}, backend.deletes)
 	assert.Zero(client.documentCalls)
 	status, err = fixture.Store.GetDocumentVectorGenerationStatus(testCtx, active.ID, "", 10)
@@ -639,19 +719,25 @@ func TestScheduledDocumentVectorCleansObsoleteActiveTokensAfterCoverageIsComplet
 		`SELECT COUNT(*) FROM document_vector_publications WHERE generation_id = ?`), active.ID).Scan(&publications))
 	assert.Zero(publications)
 
-	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10))
+	require.NoError(runScheduledDocumentVectorGeneration(testCtx, fixture.Store, vf, 10, nextDocumentVectorWorkerOwner()))
 	assert.Len(backend.deletes, 1, "a converged replay does not re-delete finalized tokens")
 	assert.Zero(client.documentCalls)
 }
 
-type commandDocumentSemanticClient struct{ documentCalls int }
+type commandDocumentSemanticClient struct {
+	documentCalls  int
+	embedDocuments func(context.Context, []vector.DocumentInput) ([][][]float32, error)
+}
 
 func (*commandDocumentSemanticClient) EmbedQuery(context.Context, string) ([]float32, error) {
 	return []float32{1, 0, 0}, nil
 }
 
-func (c *commandDocumentSemanticClient) EmbedDocuments(context.Context, []vector.DocumentInput) ([][][]float32, error) {
+func (c *commandDocumentSemanticClient) EmbedDocuments(ctx context.Context, inputs []vector.DocumentInput) ([][][]float32, error) {
 	c.documentCalls++
+	if c.embedDocuments != nil {
+		return c.embedDocuments(ctx, inputs)
+	}
 	return nil, nil
 }
 

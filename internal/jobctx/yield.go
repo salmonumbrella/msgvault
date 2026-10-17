@@ -7,6 +7,9 @@ import (
 	"strings"
 )
 
+// ErrSchedulerStopped identifies cancellation owned by scheduler shutdown.
+var ErrSchedulerStopped = errors.New("scheduler stopped")
+
 // ErrYieldedToWaiter is the cancellation cause used when a resumable job
 // steps aside so a waiting operation can acquire the work gate.
 var ErrYieldedToWaiter = errors.New("yielded to a waiting operation")
@@ -23,7 +26,7 @@ func ErrorAfterYield(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(ctx.Err(), context.Canceled) || YieldedToWaiter(ctx) || errors.Is(context.Cause(ctx), ErrRunBudgetExceeded) {
+	if errors.Is(context.Cause(ctx), ErrSchedulerStopped) || YieldedToWaiter(ctx) || errors.Is(context.Cause(ctx), ErrRunBudgetExceeded) {
 		_, filtered := filterYieldCancellation(err, errors.Is(ctx.Err(), context.DeadlineExceeded))
 		return filtered
 	}
@@ -77,7 +80,7 @@ func filterYieldCancellation(err error, deadlineExpired bool) (bool, error) {
 		}
 		return true, yieldFilteredError{message: message, cause: filtered}
 	}
-	if errors.Is(err, context.Canceled) || (deadlineExpired && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrRunBudgetExceeded))) || errors.Is(err, ErrYieldedToWaiter) {
+	if errors.Is(err, context.Canceled) || (deadlineExpired && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrRunBudgetExceeded))) || errors.Is(err, ErrYieldedToWaiter) || errors.Is(err, ErrSchedulerStopped) {
 		return true, nil
 	}
 	return false, err
