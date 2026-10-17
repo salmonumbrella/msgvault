@@ -383,7 +383,7 @@ func TestWorkerDiagnosticsCountCommittedCoverage(t *testing.T) {
 			capture := &diagnosticCapture{}
 			d := newEmbeddingDiagnosticRun(t.Context(), capture, nil, f.gen, 1)
 			d.beginBatch(2, time.Now())
-			ctx := withEmbeddingDiagnostics(t.Context(), d)
+			ctx := jobctx.WithProgress(withEmbeddingDiagnostics(t.Context(), d))
 			w := NewWorker(WorkerDeps{Store: f.store, MainDB: f.store.DB(), Backend: f.backend})
 			switch mode {
 			case "missing skip":
@@ -402,6 +402,9 @@ func TestWorkerDiagnosticsCountCommittedCoverage(t *testing.T) {
 			_, stamped, _, _, err := f.store.CoverageCounts(t.Context(), int64(f.gen))
 			require.NoError(err)
 			assert.Equal(int64(1), stamped)
+			if mode == "covered" {
+				assert.True(jobctx.HasProgress(ctx), "the first stamp committed before the second failed")
+			}
 			got := capture.read(t)
 			require.Len(got.RecentBatches, 1)
 			assert.Equal(1, got.RecentBatches[0].Completed)

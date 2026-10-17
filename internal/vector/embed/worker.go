@@ -1216,11 +1216,11 @@ func (w *Worker) stampCovered(ctx context.Context, gen vector.GenerationID, ids 
 		m, covered, err := w.deps.Store.SetEmbedGenIfUnchanged(ctx, cas, int64(gen))
 		diagnosticRun(ctx).completed(covered)
 		missed = append(missed, m...)
-		if err != nil {
-			return missed, err
-		}
 		if covered > 0 {
 			jobctx.RecordProgress(ctx)
+		}
+		if err != nil {
+			return missed, err
 		}
 	}
 	if len(plain) > 0 {

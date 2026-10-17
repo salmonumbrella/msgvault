@@ -1964,6 +1964,7 @@ type CardDAVStatusResponse struct {
 	RepairReason         *CardDAVStatusResponseRepairReason `json:"repair_reason,omitempty"`
 	Schedule             string                             `json:"schedule" validate:"required"`
 	Scheduled            bool                               `json:"scheduled"`
+	SchedulerRunning     bool                               `json:"scheduler_running"`
 }
 
 func (c CardDAVStatusResponse) Validate() error {

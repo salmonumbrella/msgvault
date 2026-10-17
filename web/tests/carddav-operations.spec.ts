@@ -290,3 +290,40 @@ async function submitConflictChoice(page: Page, label: string, confirmationLabel
   await page.keyboard.press('Enter');
   await expect(dialog).toHaveCount(0);
 }
+
+test('scheduled CardDAV queue stays visible through admission and completion', async ({ page }) => {
+  await installCardDAV(page, { configured: true });
+  await page.clock.install({ time: new Date('2026-10-01T15:00:00Z') });
+  let stage: 'idle' | 'queued' | 'admitted' | 'completed' = 'idle';
+  const completed = {
+    id: 301, account_id: 1, connection: 'default', trigger: 'scheduled', full: false,
+    state: 'succeeded', started_at: '2026-10-01T15:01:00Z', finished_at: '2026-10-01T15:02:00Z',
+    books: 1, created: 1, updated: 0, removed: 0,
+  };
+  await page.route('**/api/v1/carddav/status**', (route) => route.fulfill({ json: {
+    configured: true, available: true, credential_configured: true, enabled: true,
+    scheduled: true, schedule: '0 * * * *', next_scheduled_at: '2026-10-01T16:00:00Z',
+    scheduler_running: stage === 'admitted',
+    ...(stage === 'queued' ? { queued_at: '2026-10-01T15:00:30Z' } : {}),
+    ...(stage === 'completed' ? { latest: completed } : {}),
+  } }));
+  await page.route('**/api/v1/carddav/books**', (route) => route.fulfill({ json: {
+    books: stage === 'completed' ? [{ id: 301, name: 'Refreshed contacts', connection: 'default', account_id: 1, subscribed: true, lookup_source: false, write_target: false, needs_full_reconcile: false }] : [],
+  } }));
+  await page.route('**/api/v1/carddav/runs**', (route) => route.fulfill({ json: { runs: stage === 'completed' ? [completed] : [] } }));
+  await page.goto(`/?explore=${encodeURIComponent(JSON.stringify({ workspace: 'settings', settingsCategory: 'carddav' }))}`);
+  await expect(page.getByText('CardDAV status', { exact: true })).toBeVisible();
+  await expect(page.getByText('No discovered address books.', { exact: true })).toBeVisible();
+  stage = 'queued';
+  await page.clock.runFor(30_000);
+  await expect(page.getByText('Queued since', { exact: false })).toBeVisible();
+  stage = 'admitted';
+  await page.clock.runFor(500);
+  await expect(page.getByLabel('Active CardDAV sync')).toHaveText('Running');
+  await expect(page.getByText('Queued since', { exact: false })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Sync now', exact: true })).toBeDisabled();
+  stage = 'completed';
+  await page.clock.runFor(500);
+  await expect(page.getByText('Refreshed contacts', { exact: true })).toBeVisible();
+  await expect(page.getByRole('table', { name: 'CardDAV sync history' }).getByRole('row')).toHaveCount(2);
+});

@@ -174,6 +174,7 @@ func (w *ContextWorker) runBackstop(ctx context.Context, gen vector.GenerationID
 		}
 		return RunResult{Contextual: &ContextConvergence{}}, fmt.Errorf("reset contextual reconcile cursor: %w", err)
 	}
+	jobctx.RecordProgress(ctx)
 	return w.run(ctx, gen)
 }
 

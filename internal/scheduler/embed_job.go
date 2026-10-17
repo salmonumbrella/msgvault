@@ -186,9 +186,10 @@ type EmbedJob struct {
 // post-sync hook. Returns immediately when vector search has no
 // pending work (no active and no matching building generation), or
 // when another Run is already in flight.
-func (j *EmbedJob) Run(ctx context.Context) {
+func (j *EmbedJob) Run(ctx context.Context) error {
+	var retErr error
 	if j == nil || j.Worker == nil || j.Backend == nil {
-		return
+		return retErr
 	}
 	log := j.Log
 	if log == nil {
@@ -197,7 +198,7 @@ func (j *EmbedJob) Run(ctx context.Context) {
 
 	if !j.running.TryLock() {
 		log.Debug("embed run skipped: previous run still in flight")
-		return
+		return retErr
 	}
 	defer j.running.Unlock()
 	occurrence := j.now().UTC()
@@ -214,7 +215,7 @@ func (j *EmbedJob) Run(ctx context.Context) {
 			if j.OnScopeDrift != nil && errors.Is(err, vector.ErrScopeUnresolvable) {
 				j.OnScopeDrift(err.Error() + "; fix [vector.embed.scope] accounts and restart the daemon")
 			}
-			return
+			return retErr
 		}
 		configured := vector.NewBuildScope(j.BuildScope.MessageTypes, j.BuildScope.SourceIDs)
 		if resolved.Fingerprint() != configured.Fingerprint() {
@@ -226,33 +227,33 @@ func (j *EmbedJob) Run(ctx context.Context) {
 					"the configured embedding scope now resolves to %q but vector search was initialized with %q; restart the daemon to reinitialize, then run `msgvault embeddings build --full-rebuild` if the new scope is intended",
 					resolved.Fingerprint(), configured.Fingerprint()))
 			}
-			return
+			return retErr
 		}
 	}
 
 	if _, err := j.Worker.ReclaimStale(ctx); err != nil {
+		retErr = err
 		if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
-			return
+			return retErr
 		}
 		log.Warn("embed reclaim failed", "error", err)
 	}
 
-	j.maintainActivePeopleDuringBuild(ctx, log, occurrence)
+	retErr = errors.Join(retErr, j.maintainActivePeopleDuringBuild(ctx, log, occurrence))
 	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
-		return
+		return retErr
 	}
 
 	target, isBuilding, ok := j.pickTarget(ctx, log)
 	if !ok {
-		return
+		return retErr
 	}
 
 	res, err := j.Worker.RunOnce(ctx, target, scheduledEmbeddingPassScope(occurrence, target, "forward"))
-	// The scheduler yield cause takes precedence over an operation error:
-	// drivers can return unwrapped errors after cancellation, so the cause at
-	// this operation boundary is authoritative.
+	retErr = errors.Join(retErr, err)
+	// Preserve worker errors even when the scheduler interrupted the pass.
 	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
-		return
+		return retErr
 	}
 	if generationErr, ok := errors.AsType[*embed.GenerationRunError](err); ok {
 		if generationErr.Person != nil {
@@ -262,7 +263,7 @@ func (j *EmbedJob) Run(ctx context.Context) {
 	}
 	if err != nil {
 		log.Warn("embed run failed", "gen", target, "error", err)
-		return
+		return retErr
 	}
 	log.Info("embed run complete",
 		"gen", target,
@@ -281,7 +282,7 @@ func (j *EmbedJob) Run(ctx context.Context) {
 	if isBuilding && j.Convergence != nil {
 		state, err := j.Convergence.CheckConvergence(ctx, target)
 		if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
-			return
+			return retErr
 		}
 		if err != nil {
 			log.Warn("embed: convergence check after run failed", "gen", target, "error", err)
@@ -289,7 +290,7 @@ func (j *EmbedJob) Run(ctx context.Context) {
 			contextualState = &state
 			if state.Complete() {
 				j.activateBuilding(ctx, target, &state, log)
-				return
+				return retErr
 			}
 		}
 	}
@@ -303,13 +304,14 @@ func (j *EmbedJob) Run(ctx context.Context) {
 	// scan/embed/stamp path with the cursor pinned at 0, in modest
 	// non-locking batches, and is idempotent (already-covered rows are
 	// skipped) so it never re-embeds stamped messages.
-	backstopRan := j.maybeRunBackstop(ctx, target, log, occurrence)
+	backstopRan, backstopErr := j.maybeRunBackstop(ctx, target, log, occurrence)
+	retErr = errors.Join(retErr, backstopErr)
 	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
-		return
+		return retErr
 	}
 
 	if !isBuilding {
-		return
+		return retErr
 	}
 	// Activation gate: only flip the building generation to active when
 	// coverage is complete (no live message still needs embedding for it).
@@ -324,11 +326,11 @@ func (j *EmbedJob) Run(ctx context.Context) {
 		if backstopRan || contextualState == nil {
 			state, err := j.Convergence.CheckConvergence(ctx, target)
 			if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
-				return
+				return retErr
 			}
 			if err != nil {
 				log.Warn("embed: convergence check after run failed", "gen", target, "error", err)
-				return
+				return retErr
 			}
 			contextualState = &state
 		}
@@ -344,61 +346,65 @@ func (j *EmbedJob) Run(ctx context.Context) {
 				"latest_journal_sequence", state.LatestJournalSequence,
 				"consumed_journal_sequence", state.ConsumedJournalSequence,
 				"reconciliation_complete", state.ReconciliationComplete)
-			return
+			return retErr
 		}
 	} else if j.Store == nil {
 		log.Debug("embed: building covered but Store not wired; skipping auto-activation",
 			"gen", target)
-		return
+		return retErr
 	} else {
 		missing, err := j.missingCount(ctx, target)
 		if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
-			return
+			return retErr
 		}
 		if err != nil {
 			log.Warn("embed: coverage count after run failed", "gen", target, "error", err)
-			return
+			return retErr
 		}
 		if missing > 0 {
 			log.Info("embed: building generation still has messages needing embedding; will retry next tick",
 				"gen", target, "remaining", missing)
-			return
+			return retErr
 		}
 	}
 	j.activateBuilding(ctx, target, contextualState, log)
+	return retErr
 }
 
 func (j *EmbedJob) maintainActivePeopleDuringBuild(
 	ctx context.Context, log *slog.Logger, occurrence time.Time,
-) {
+) error {
 	runner, ok := j.Worker.(activePersonRunner)
 	if !ok || j.Fingerprint == "" {
-		return
+		return nil
 	}
 	building, err := j.Backend.BuildingGeneration(ctx)
 	if err != nil || building == nil || ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
-		return
+		return err
 	}
 	active, err := j.Backend.ActiveGeneration(ctx)
-	if errors.Is(err, vector.ErrNoActiveGeneration) || ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
-		return
+	if errors.Is(err, vector.ErrNoActiveGeneration) {
+		return nil
+	}
+	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
+		return err
 	}
 	if err != nil {
 		log.Warn("active person embedding generation lookup failed", "error", err)
-		return
+		return err
 	}
 	if active.Fingerprint != j.Fingerprint {
-		return
+		return nil
 	}
 	res, err := runner.RunPersonsOnce(
 		ctx, active.ID, scheduledEmbeddingPassScope(occurrence, active.ID, "active-people"),
 	)
 	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
-		return
+		return err
 	}
 	if err != nil {
 		log.Warn("active person embedding run failed", "gen", active.ID, "error", err)
-		return
+		return err
 	}
 	log.Info("active person embedding run complete",
 		"gen", active.ID,
@@ -407,6 +413,7 @@ func (j *EmbedJob) maintainActivePeopleDuringBuild(
 		"failed", res.Failed,
 		"truncated", res.Truncated,
 	)
+	return err
 }
 
 func (j *EmbedJob) activateBuilding(
@@ -460,15 +467,16 @@ func (j *EmbedJob) missingCount(ctx context.Context, target vector.GenerationID)
 // generation cannot suppress a different generation's first backstop. Called
 // with the running lock held (from Run), so lastBackstop needs no separate
 // guard. A negative BackstopInterval disables it; zero defaults to 24h. A
-// backstop failure is logged, not fatal — the next interval retries.
+// A failed backstop is retried at the next trigger. Contextual backstops
+// record their start so continuations resume the durable cursor via RunOnce.
 // maybeRunBackstop reports whether it invoked RunBackstop, so the caller
 // knows durable state may have changed since any earlier convergence check.
 func (j *EmbedJob) maybeRunBackstop(
 	ctx context.Context, gen vector.GenerationID, log *slog.Logger, occurrence time.Time,
-) bool {
+) (bool, error) {
 	interval := j.BackstopInterval
 	if interval < 0 {
-		return false // explicitly disabled
+		return false, nil // explicitly disabled
 	}
 	if interval == 0 {
 		interval = defaultBackstopInterval
@@ -477,11 +485,21 @@ func (j *EmbedJob) maybeRunBackstop(
 	// First run for this generation (no recorded time) always runs a backstop;
 	// thereafter gate by the interval against this generation's own last run.
 	if last, ok := j.lastBackstop[gen]; ok && t.Sub(last) < interval {
-		return false
+		return false, nil
+	}
+	if j.lastBackstop == nil {
+		j.lastBackstop = make(map[vector.GenerationID]time.Time)
+	}
+	if j.SequenceBoundActivation {
+		j.lastBackstop[gen] = t
 	}
 	res, err := j.Worker.RunBackstop(ctx, gen, scheduledEmbeddingPassScope(occurrence, gen, "backstop"))
+	workerErr := err
+	if jobctx.ErrorAfterYield(ctx, err) != nil {
+		delete(j.lastBackstop, gen)
+	}
 	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {
-		return true
+		return true, err
 	}
 	if generationErr, ok := errors.AsType[*embed.GenerationRunError](err); ok {
 		if generationErr.Person != nil {
@@ -491,11 +509,9 @@ func (j *EmbedJob) maybeRunBackstop(
 	}
 	if err != nil {
 		log.Warn("embed backstop failed", "gen", gen, "error", err)
-		// Do not advance lastBackstop on failure so the next tick retries.
-		return true
-	}
-	if j.lastBackstop == nil {
-		j.lastBackstop = make(map[vector.GenerationID]time.Time)
+		// Retry a real failure at the next trigger.
+		delete(j.lastBackstop, gen)
+		return true, err
 	}
 	j.lastBackstop[gen] = t
 	log.Info("embed backstop complete",
@@ -505,7 +521,7 @@ func (j *EmbedJob) maybeRunBackstop(
 		"failed", res.Failed,
 		"truncated", res.Truncated,
 	)
-	return true
+	return true, workerErr
 }
 
 func (j *EmbedJob) now() time.Time {

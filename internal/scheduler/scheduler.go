@@ -137,7 +137,6 @@ type Scheduler struct {
 	genericJobs        map[string]cron.EntryID
 	genericSchedules   map[string]string
 	genericRunning     map[string]bool
-	genericDone        map[string]chan struct{} // closes after the run and all continuations finish
 	genericLastRun     map[string]time.Time
 	genericLastErr     map[string]error
 	genericFuncs       map[string]func(context.Context) error
@@ -201,7 +200,6 @@ func New(syncFunc SyncFunc) *Scheduler {
 		genericJobs:        make(map[string]cron.EntryID),
 		genericSchedules:   make(map[string]string),
 		genericRunning:     make(map[string]bool),
-		genericDone:        make(map[string]chan struct{}),
 		genericLastRun:     make(map[string]time.Time),
 		genericLastErr:     make(map[string]error),
 		genericFuncs:       make(map[string]func(context.Context) error),
@@ -430,7 +428,7 @@ func (s *Scheduler) RemoveAccount(email string) {
 func (s *Scheduler) SetEmbedJob(job *EmbedJob, schedule string, runAfterSync bool) error {
 	var run func(context.Context) error
 	if job != nil {
-		run = func(ctx context.Context) error { job.Run(ctx); return nil }
+		run = job.Run
 	}
 	return s.setCronSlot(&s.embed, run, schedule, runAfterSync)
 }
@@ -572,35 +570,11 @@ func (s *Scheduler) runSync(email string) {
 			afterSync = append(afterSync, slot.jobName)
 		}
 	}
-	if len(afterSync) > 0 {
-		s.wg.Go(func() { s.runAfterSync(afterSync) })
-	}
 	s.mu.Unlock()
-	s.startVisualPostSync()
-}
-
-// runAfterSync preserves message-before-document ordering without extending
-// the sync. A chain it starts finishes before later jobs; joining a chain
-// already active queues later jobs for admission between bounded passes.
-func (s *Scheduler) runAfterSync(names []string) {
-	for _, name := range names {
-		run, disposition, err := s.reserveGenericJob(name, true)
-		if err != nil {
-			return
-		}
-		if disposition != JobStarted {
-			continue
-		}
-		s.mu.RLock()
-		done := s.genericDone[name]
-		s.mu.RUnlock()
-		_ = s.runJob(name, run)
-		select {
-		case <-done:
-		case <-s.ctx.Done():
-			return
-		}
+	for _, name := range afterSync {
+		_, _ = s.StartJob(name)
 	}
+	s.startVisualPostSync()
 }
 
 // logScheduledSyncError keeps transient network failures below the error
@@ -816,7 +790,6 @@ func (s *Scheduler) reserveGenericJob(name string, coalesce bool) (run func(cont
 		return nil, JobCoalesced, nil
 	}
 	s.genericRunning[name] = true
-	s.genericDone[name] = make(chan struct{})
 	s.genericQueued[name] = true
 	s.genericQueuedAt[name] = time.Now()
 	s.wg.Add(1)
@@ -938,10 +911,6 @@ func (s *Scheduler) finishGenericRun(name string) {
 		delete(s.genericPending, name)
 	}
 	s.genericRunning[name] = false
-	if done := s.genericDone[name]; done != nil {
-		close(done)
-		delete(s.genericDone, name)
-	}
 }
 
 // beginWork waits for the work gate. A counted wait makes preemptible

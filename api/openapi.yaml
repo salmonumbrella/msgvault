@@ -2156,6 +2156,8 @@ components:
           type: string
         scheduled:
           type: boolean
+        scheduler_running:
+          type: boolean
       required:
         - configured
         - available
@@ -2163,6 +2165,7 @@ components:
         - enabled
         - scheduled
         - schedule
+        - scheduler_running
       type: object
     CardDAVSyncRequest:
       additionalProperties: false

@@ -138,82 +138,43 @@ func TestQueueTimesClearOnAdmission(t *testing.T) {
 	}
 }
 
-func TestPostSyncDocumentOrderingAcrossEmbeddingContinuations(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		existing bool
-		wait     time.Duration
-		before   []string
-		after    []string
-	}{
-		{"fresh chain", false, 5*time.Minute + time.Second, []string{"sync", "embed", "embed"}, []string{"sync", "embed", "embed", "embed complete", "document"}},
-		{"existing chain", true, 66 * time.Second, []string{"embed", "sync", "embed"}, []string{"embed", "sync", "embed", "document"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				var order, documentOrder []string
-				runs := 0
-				release := make(chan struct{})
-				s := New(func(context.Context, string) error {
-					order = append(order, "sync")
-					return nil
-				}).WithWorkTracker(newSerialWorkTracker())
-				defer func() { <-s.Stop().Done() }()
-				require.NoError(t, s.setCronSlot(&s.embed, func(ctx context.Context) error {
-					runs++
-					order = append(order, "embed")
-					if tc.existing || runs == 1 {
-						jobctx.RecordProgress(ctx)
-						<-ctx.Done()
-						return ctx.Err()
-					}
-					select {
-					case <-release:
-					case <-ctx.Done():
-					}
-					order = append(order, "embed complete")
-					return nil
-				}, "", true))
-				require.NoError(t, s.SetDocumentVectorJob(func(context.Context) error {
-					order = append(order, "document")
-					documentOrder = append([]string(nil), order...)
-					return nil
-				}, "", true))
-				require.NoError(t, s.AddAccount("sync@example.com", "0 0 1 1 *"))
-				if tc.existing {
-					require.Equal(t, JobStarted, mustStartJob(t, s, "embed"))
-					synctest.Wait()
-				}
-				require.NoError(t, s.TriggerSync("sync@example.com"))
-				synctest.Wait()
-				time.Sleep(tc.wait)
-				synctest.Wait()
-				require.Equal(t, tc.before, order)
-				for _, status := range s.JobStatus() {
-					if status.Name == "document-vector" {
-						assert.Equal(t, tc.existing, status.Queued, "only an existing chain lets document work join the gate between passes")
-					}
-				}
-				close(release)
-				if tc.existing {
-					time.Sleep(5 * time.Minute)
-				}
-				synctest.Wait()
-				assert.Equal(t, tc.after, documentOrder)
-			})
-		})
-	}
+func TestPostSyncJobsStartIndependently(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		s := New(func(context.Context, string) error { return nil }).WithWorkTracker(newSerialWorkTracker())
+		defer func() { <-s.Stop().Done() }()
+		passes := 0
+		require.NoError(s.setCronSlot(&s.embed, func(ctx context.Context) error {
+			passes++
+			jobctx.RecordProgress(ctx)
+			<-ctx.Done()
+			return ctx.Err()
+		}, "", true))
+		documents := 0
+		require.NoError(s.SetDocumentVectorJob(func(context.Context) error { documents++; return nil }, "", true))
+		require.NoError(s.AddAccount("sync@example.com", "0 0 1 1 *"))
+		require.NoError(s.TriggerSync("sync@example.com"))
+		synctest.Wait()
+		time.Sleep(5*time.Minute + time.Second)
+		synctest.Wait()
+		assert.Equal(1, documents, "documents get a turn while the message backfill continues")
+		assert.GreaterOrEqual(passes, 2)
+		assert.False(s.Status()[0].Running)
+	})
 }
 
 func TestAddJobRejectsEmptySchedule(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	s := New(nil)
 	defer func() { <-s.Stop().Done() }()
 	job := Job{Name: "generic", Run: func(context.Context) error { return nil }}
-	require.Error(t, s.AddJob(job))
-	assert.False(t, s.IsJobScheduled(job.Name))
+	require.Error(s.AddJob(job))
+	assert.False(s.IsJobScheduled(job.Name))
 	job.Schedule = "0 0 * * *"
-	require.NoError(t, s.AddJob(job))
+	require.NoError(s.AddJob(job))
 	job.Schedule = ""
-	require.Error(t, s.AddJob(job))
-	assert.Equal(t, "0 0 * * *", s.JobStatus()[0].Schedule, "invalid replacement preserves the registered schedule")
+	require.Error(s.AddJob(job))
+	assert.Equal("0 0 * * *", s.JobStatus()[0].Schedule, "invalid replacement preserves the registered schedule")
 }

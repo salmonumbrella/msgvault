@@ -454,3 +454,22 @@ func TestCardDAVStatusReportsSelectedAndAggregateSchedules(t *testing.T) {
 		}
 	}
 }
+
+func TestCardDAVStatusReportsSchedulerAdmissionBeforeRunRow(t *testing.T) {
+	require := require.New(t)
+	cfg := config.NewDefaultConfig()
+	cfg.HomeDir = t.TempDir()
+	cfg.Data.DataDir = cfg.HomeDir
+	cfg.CardDAVConnections = map[string]config.CardDAVConfig{"work": {Enabled: true}}
+	controller := &CardDAVController{cfg: cfg, store: testutil.NewTestStore(t)}
+	sched := newMockScheduler()
+	sched.jobStatuses = []JobStatus{{Name: "carddav:work", Running: true}}
+	server := cardDAVReadServer(t, cfg, controller, sched)
+	response := getCardDAVRead(t, server, "/api/v1/carddav/status?connection=work")
+	require.Equal(http.StatusOK, response.Code)
+	var status CardDAVStatusResponse
+	require.NoError(json.NewDecoder(response.Body).Decode(&status))
+	assert.True(t, status.SchedulerRunning)
+	assert.Nil(t, status.Active)
+	assert.Nil(t, status.QueuedAt)
+}

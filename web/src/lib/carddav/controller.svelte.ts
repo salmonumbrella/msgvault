@@ -29,6 +29,7 @@ interface VisibilityDocument {
 const FIRST_PAGE_LIMIT = 25;
 const MIN_POLL_MS = 500;
 const MAX_POLL_MS = 8000;
+const IDLE_POLL_MS = 30_000;
 export class CardDAVController {
   status = $state<CardDAVStatus>();
   books = $state<CardDAVBook[]>([]);
@@ -62,7 +63,6 @@ export class CardDAVController {
   private syncAbort?: AbortController;
   private bookMutationAbort?: AbortController;
   private pollTimer?: ReturnType<typeof setTimeout>;
-  private scheduledRefreshAt?: string;
   private pollGeneration = 1;
   private pollDelay = MIN_POLL_MS;
   private pollFingerprint = '';
@@ -78,8 +78,6 @@ export class CardDAVController {
     if (this.shouldPoll()) {
       this.pollDelay = MIN_POLL_MS;
       this.schedulePoll(MIN_POLL_MS);
-    } else {
-      this.scheduleScheduledRefresh();
     }
   };
   constructor(
@@ -314,6 +312,7 @@ export class CardDAVController {
       this.status.credential_configured &&
       !this.syncUnknown &&
       !this.status.active &&
+      !this.status.scheduler_running &&
       !this.syncPending,
     );
   }
@@ -376,8 +375,7 @@ export class CardDAVController {
     } finally {
       if (schedule && this.currentStatusCommit(context, statusCommit, requestController.signal)) {
         this.pollDelay = MIN_POLL_MS;
-        if (this.shouldPoll()) this.schedulePoll(MIN_POLL_MS);
-        else this.scheduleScheduledRefresh();
+        if (this.shouldPoll()) this.schedulePoll(this.hasWork() ? MIN_POLL_MS : IDLE_POLL_MS);
       }
       if (this.current(context) && this.statusReadAbort === requestController) {
         this.statusReadAbort = undefined;
@@ -459,24 +457,11 @@ export class CardDAVController {
       }
     }
   }
-  private shouldPoll(): boolean {
-    return !this.disposed && !this.visibilityDocument?.hidden && Boolean(this.status?.active || this.status?.queued_at || this.syncPending);
+  private hasWork(): boolean {
+    return Boolean(this.status?.active || this.status?.queued_at || this.status?.scheduler_running || this.syncPending);
   }
-  private scheduleScheduledRefresh(): void {
-    if (this.shouldPoll()) return;
-    if (this.pollTimer !== undefined) clearTimeout(this.pollTimer);
-    this.pollTimer = undefined;
-    const next = this.status?.next_scheduled_at;
-    if (this.disposed || this.visibilityDocument?.hidden || !this.status?.scheduled || !next || next === this.scheduledRefreshAt) return;
-    const target = Date.parse(next) + 1000;
-    if (!Number.isFinite(target)) return;
-    const generation = ++this.pollGeneration;
-    this.pollTimer = setTimeout(() => {
-      this.pollTimer = undefined;
-      if (Date.now() < target) { this.scheduleScheduledRefresh(); return; }
-      this.scheduledRefreshAt = next;
-      void this.poll(generation);
-    }, Math.min(2_147_483_647, Math.max(0, target - Date.now())));
+  private shouldPoll(): boolean {
+    return !this.disposed && !this.visibilityDocument?.hidden && Boolean(this.hasWork() || this.status?.scheduled);
   }
   private schedulePoll(delay: number, retry = false): void {
     if (this.disposed || this.visibilityDocument?.hidden || (!retry && !this.shouldPoll())) return;
@@ -494,7 +479,8 @@ export class CardDAVController {
     this.pollAbort?.abort();
     const requestController = new AbortController();
     this.pollAbort = requestController;
-    const hadWork = Boolean(this.status?.active || this.status?.queued_at);
+    const hadWork = this.hasWork();
+    const previousLatest = this.status?.latest;
     try {
       const { data } = await generatedGetCardDAVStatus(
         this.connection ? { connection: this.connection } : undefined,
@@ -522,17 +508,16 @@ export class CardDAVController {
       this.statusError = null;
       this.pollFingerprint = fingerprint;
       this.recordSuccessfulStatusCommit(statusCommit);
-      if (hadWork && !data.active && !data.queued_at && !this.syncPending) {
+      const newTerminal = data.latest && data.latest.state !== 'running' && (data.latest.id !== previousLatest?.id || data.latest.state !== previousLatest?.state);
+      if ((hadWork || newTerminal) && !this.hasWork()) {
         this.stopPolling(false);
         await Promise.all([...(data.available ? [this.loadBooks(true)] : []), this.refreshRuns()]);
-        this.scheduleScheduledRefresh();
+        if (this.shouldPoll()) this.schedulePoll(this.hasWork() ? MIN_POLL_MS : IDLE_POLL_MS);
         return;
       }
       if (this.shouldPoll()) {
         this.pollDelay = advanced ? MIN_POLL_MS : Math.min(MAX_POLL_MS, this.pollDelay * 2);
-        this.schedulePoll(this.pollDelay);
-      } else {
-        this.scheduleScheduledRefresh();
+        this.schedulePoll(this.hasWork() ? this.pollDelay : IDLE_POLL_MS);
       }
       if (becameAvailable) await this.loadBooks(false);
     } catch {
@@ -602,6 +587,6 @@ function uniqueRuns(runs: CardDAVRun[]): CardDAVRun[] {
 }
 function statusFingerprint(status: CardDAVStatus): string {
   const run = status.active;
-  if (!run) return `idle:${status.queued_at ?? ''}:${status.latest?.id ?? 0}:${status.latest?.state ?? ''}`;
+  if (!run) return `idle:${status.queued_at ?? ''}:${status.scheduler_running ?? false}:${status.latest?.id ?? 0}:${status.latest?.state ?? ''}`;
   return [run.id, run.state, run.books, run.created, run.updated, run.removed].join(':');
 }

@@ -8,7 +8,7 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
-- Automatic embedding yields to waiting syncs and runs in five-minute passes, resuming committed work. Mail syncs finish before post-sync indexing runs. Sources and CardDAV show when a sync entered the queue, and open pages follow it through completion, including scheduled CardDAV runs. API schema 3.24.0 adds queue timestamps.
+- Automatic embedding yields to waiting syncs and runs in five-minute passes, resuming committed work. Mail syncs finish before post-sync indexing runs. Sources and CardDAV show when a sync entered the queue, and open pages follow it through completion, including scheduled CardDAV runs. API schema 3.24.0 adds queue timestamps and CardDAV scheduler admission status.
 
 - Message [search](usage/searching.md#match-any-of-several-searches) accepts up to eight pipe-separated alternatives in full-text mode. API schema 3.19.0 adds support for remote clients.
 - A standalone ` | ` between searches used to be literal text and now means OR; `"a | b"` keeps it literal.

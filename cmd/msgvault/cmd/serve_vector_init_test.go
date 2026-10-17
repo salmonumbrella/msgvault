@@ -611,7 +611,7 @@ func runRegisteredContextJob(
 	}
 	require.NoError(t, registerEmbedJob(capture, vf, nil, nil, testCfg, testDiscardLogger()))
 	require.NotNil(t, capture.job)
-	capture.job.Run(testCtx)
+	_ = capture.job.Run(testCtx)
 	return backend, runner
 }
 

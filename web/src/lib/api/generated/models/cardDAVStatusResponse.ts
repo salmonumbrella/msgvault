@@ -19,5 +19,6 @@ export interface CardDAVStatusResponse {
   repair_reason?: CardDAVStatusResponseRepairReason;
   schedule: string;
   scheduled: boolean;
+  scheduler_running: boolean;
   [key: string]: unknown;
 }

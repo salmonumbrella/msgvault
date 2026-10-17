@@ -181,7 +181,8 @@ Schema 3.23.0 adds the [Docbank attachment mirror](#docbank-attachment-mirror)
 routes, delivery receipts and status states.
 
 Schema 3.24.0 adds `queued_at` to scheduler account and CardDAV status, and
-`scheduler_queued_at` to Sources status. Queue timestamps clear on admission.
+`scheduler_queued_at` to Sources status. CardDAV `scheduler_running` covers
+admission before the active run appears. Queue timestamps clear on admission.
 
 Schema 3.0.0 removes the unguarded
 `POST /api/v1/identity/match-candidates/{id}/accept` and `/reject` routes.
@@ -2488,8 +2489,10 @@ The daemon runs scheduled work one job at a time. While a sync waits for
 another job to finish, its entry reports `"queued": true` and `"running": false`.
 `queued_at` records when the wait began and clears on admission. CardDAV status
 reports the earliest `queued_at` among the selected connections. An open CardDAV
-page refreshes just after the next scheduled run, follows queued and active
-work, then stops polling when both states clear.
+page polls every 30 seconds while idle with a schedule, then polls faster
+while queued or running. `scheduler_running` stays true between admission
+and creation of the active run. A newly completed run refreshes books and
+history even when polling missed its active state.
 `"running": true` means it acquired the operation gate; `started_at` gives when
 it began. The top-level `running` field reports whether the scheduler is active.
 A schedule tick that fires during a run
