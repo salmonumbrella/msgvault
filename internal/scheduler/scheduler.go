@@ -127,7 +127,6 @@ type Scheduler struct {
 	syncFunc                SyncFunc
 	logger                  *slog.Logger
 	work                    WorkTracker
-	vectorPassBudget        time.Duration
 	accountPreemptionPolicy func(string) bool
 
 	mu        sync.RWMutex
@@ -185,7 +184,6 @@ func New(syncFunc SyncFunc) *Scheduler {
 			cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow,
 		))),
 		syncFunc:           syncFunc,
-		vectorPassBudget:   5 * time.Minute,
 		logger:             slog.Default(),
 		jobs:               make(map[string]cron.EntryID),
 		schedules:          make(map[string]string),
@@ -217,14 +215,6 @@ func New(syncFunc SyncFunc) *Scheduler {
 // WithLogger sets the logger for the scheduler.
 func (s *Scheduler) WithLogger(logger *slog.Logger) *Scheduler {
 	s.logger = logger
-	return s
-}
-
-// WithVectorPassBudget sets the finite message and document pass budget before registration.
-func (s *Scheduler) WithVectorPassBudget(budget time.Duration) *Scheduler {
-	if budget != 0 {
-		s.vectorPassBudget = budget
-	}
 	return s
 }
 
@@ -435,19 +425,19 @@ func (s *Scheduler) RemoveAccount(email string) {
 //
 // A schedule rejected by ValidateCronExpr is caught before any state
 // mutates, so the previous job and cron entry are preserved.
-func (s *Scheduler) SetEmbedJob(job *EmbedJob, schedule string, runAfterSync bool) error {
+func (s *Scheduler) SetEmbedJob(job *EmbedJob, schedule string, runAfterSync bool, maxRuntime time.Duration) error {
 	var run func(context.Context) error
 	if job != nil {
 		run = job.Run
 	}
-	return s.setVectorJob("embed", "scheduled embedding", run, schedule, runAfterSync)
+	return s.setVectorJob("embed", "scheduled embedding", run, schedule, runAfterSync, maxRuntime)
 }
 
 // SetDocumentVectorJob installs the bounded document-vector convergence job
 // on the same cron/post-sync policy used by message embeddings.
-func (s *Scheduler) SetDocumentVectorJob(job func(context.Context) error, schedule string, runAfterSync bool) error {
+func (s *Scheduler) SetDocumentVectorJob(job func(context.Context) error, schedule string, runAfterSync bool, maxRuntime time.Duration) error {
 	if job == nil {
-		return s.setVectorJob("document-vector", "scheduled document indexing", nil, schedule, runAfterSync)
+		return s.setVectorJob("document-vector", "scheduled document indexing", nil, schedule, runAfterSync, maxRuntime)
 	}
 	return s.setVectorJob("document-vector", "scheduled document indexing", func(ctx context.Context) error {
 		err := job(ctx)
@@ -455,17 +445,17 @@ func (s *Scheduler) SetDocumentVectorJob(job func(context.Context) error, schedu
 			s.logger.Error("scheduled document indexing failed", "job", "document-vector", "error", failure)
 		}
 		return err
-	}, schedule, runAfterSync)
+	}, schedule, runAfterSync, maxRuntime)
 }
 
-func (s *Scheduler) setVectorJob(name, label string, job func(context.Context) error, schedule string, runAfterSync bool) error {
+func (s *Scheduler) setVectorJob(name, label string, job func(context.Context) error, schedule string, runAfterSync bool, maxRuntime time.Duration) error {
 	if job == nil {
 		s.RemoveJob(name)
 		return nil
 	}
 	return s.addJob(Job{
 		Name: name, Schedule: schedule, Run: job, WorkLabel: label, AfterSync: runAfterSync,
-		Preemptible: true, Background: true, MaxRuntime: s.vectorPassBudget,
+		Preemptible: true, Background: true, MaxRuntime: maxRuntime,
 	}, true)
 }
 
@@ -866,11 +856,10 @@ func (s *Scheduler) runJob(name string, run func(context.Context) error, admitte
 	}
 	budgetExpired := errors.Is(context.Cause(runCtx), jobctx.ErrRunBudgetExceeded)
 	if budgetExpired && !jobctx.HasProgress(runCtx) {
-		delete(s.genericPending, name)
 		err = errors.Join(fmt.Errorf("%w before committing progress", jobctx.ErrRunBudgetExceeded),
 			jobctx.ErrorAfterYield(runCtx, err))
 		s.genericLastErr[name] = err
-		s.logger.Warn("scheduled job reached its runtime limit before committing progress; waiting for the next trigger",
+		s.logger.Warn("scheduled job reached its runtime limit before committing progress; no automatic continuation",
 			"job", name,
 			"max_runtime", maxRuntime)
 		return err

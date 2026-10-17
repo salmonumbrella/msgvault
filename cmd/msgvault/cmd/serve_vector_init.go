@@ -525,11 +525,11 @@ func embedScopeDriftCheck(s *store.Store, initialized vector.BuildScope, state *
 // plus optional post-sync hook). Extracted from runServe so the background
 // vector init can register it once the backend is ready.
 type embedJobRegistrar interface {
-	SetEmbedJob(job *scheduler.EmbedJob, schedule string, runAfterSync bool) error
+	SetEmbedJob(job *scheduler.EmbedJob, schedule string, runAfterSync bool, maxRuntime time.Duration) error
 }
 
 type documentVectorJobRegistrar interface {
-	SetDocumentVectorJob(job func(context.Context) error, schedule string, runAfterSync bool) error
+	SetDocumentVectorJob(job func(context.Context) error, schedule string, runAfterSync bool, maxRuntime time.Duration) error
 }
 
 func registerDocumentVectorJob(sched documentVectorJobRegistrar, vf *vectorFeatures, st *store.Store, state *invocation) error {
@@ -550,7 +550,7 @@ func registerDocumentVectorJob(sched documentVectorJobRegistrar, vf *vectorFeatu
 	job := invocationBoundJobRun(state, func(ctx context.Context) error {
 		return runScheduledDocumentVectorGeneration(ctx, st, vf, limit)
 	})
-	if err := sched.SetDocumentVectorJob(job, cfg.Vector.Embed.Schedule.Cron, cfg.Vector.Embed.Schedule.RunAfterSync); err != nil {
+	if err := sched.SetDocumentVectorJob(job, cfg.Vector.Embed.Schedule.Cron, cfg.Vector.Embed.Schedule.RunAfterSync, cfg.Vector.Embed.Schedule.MaxRuntime); err != nil {
 		return fmt.Errorf("register document vector job: %w", err)
 	}
 	repairLogger(state.logger).Info("document vectors scheduled", "cron", cfg.Vector.Embed.Schedule.Cron,
@@ -576,7 +576,7 @@ func registerEmbedJob(sched embedJobRegistrar, vf *vectorFeatures, s *store.Stor
 		embedJob.OnScopeDrift = apiServer.SetVectorScopeDrift
 	}
 	schedule := cfg.Vector.Embed.Schedule.Cron
-	if err := sched.SetEmbedJob(embedJob, schedule, cfg.Vector.Embed.Schedule.RunAfterSync); err != nil {
+	if err := sched.SetEmbedJob(embedJob, schedule, cfg.Vector.Embed.Schedule.RunAfterSync, cfg.Vector.Embed.Schedule.MaxRuntime); err != nil {
 		return fmt.Errorf("register embed job: %w", err)
 	}
 	repairLogger(logger).Info("embed scheduled",

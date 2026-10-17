@@ -222,15 +222,17 @@ type registeredDocumentVectorJobCapture struct {
 	job          func(context.Context) error
 	schedule     string
 	runAfterSync bool
+	maxRuntime   time.Duration
 }
 
 func (c *registeredDocumentVectorJobCapture) SetDocumentVectorJob(
-	job func(context.Context) error, schedule string, runAfterSync bool,
+	job func(context.Context) error, schedule string, runAfterSync bool, maxRuntime time.Duration,
 ) error {
 	c.calls++
 	c.job = job
 	c.schedule = schedule
 	c.runAfterSync = runAfterSync
+	c.maxRuntime = maxRuntime
 	return nil
 }
 
@@ -505,11 +507,13 @@ func TestNewSchedulerEmbedJobThreadsGenerationRunnerAndConvergenceChecker(t *tes
 }
 
 type registeredEmbedJobCapture struct {
-	job *scheduler.EmbedJob
+	job        *scheduler.EmbedJob
+	maxRuntime time.Duration
 }
 
-func (c *registeredEmbedJobCapture) SetEmbedJob(job *scheduler.EmbedJob, _ string, _ bool) error {
+func (c *registeredEmbedJobCapture) SetEmbedJob(job *scheduler.EmbedJob, _ string, _ bool, maxRuntime time.Duration) error {
 	c.job = job
+	c.maxRuntime = maxRuntime
 	return nil
 }
 
@@ -1120,7 +1124,7 @@ func TestServeVectorPassBudgetFromConfig(t *testing.T) {
 					require.NoError(err)
 					cfg.Vector.ApplyDefaults()
 					require.NoError(cfg.Vector.Validate())
-					s, media := newServeSchedulers(nil, testDiscardLogger(), nil, api.NewSerialOperationGate(), cfg.Vector.Embed.Schedule.MaxRuntime)
+					s, media := newServeSchedulers(nil, testDiscardLogger(), nil, api.NewSerialOperationGate())
 					defer func() { <-s.Stop().Done(); <-media.Stop().Done() }()
 					committed := false
 					run := func(ctx context.Context) error {
@@ -1132,10 +1136,17 @@ func TestServeVectorPassBudgetFromConfig(t *testing.T) {
 						return nil
 					}
 					if name == "embed" {
-						job := &scheduler.EmbedJob{Worker: &budgetedProviderRunner{run: run}, Backend: &fakeCmdVectorBackend{active: &vector.Generation{ID: 1}}, BackstopInterval: -1}
-						require.NoError(s.SetEmbedJob(job, "", false))
+						capture := &registeredEmbedJobCapture{}
+						vf := &vectorFeatures{Runner: &budgetedProviderRunner{run: run}, Backend: &fakeCmdVectorBackend{active: &vector.Generation{ID: 1}}, Cfg: cfg.Vector}
+						require.NoError(registerEmbedJob(capture, vf, nil, nil, &cfg, testDiscardLogger()))
+						capture.job.BackstopInterval = -1
+						require.NoError(s.SetEmbedJob(capture.job, "", false, capture.maxRuntime))
 					} else {
-						require.NoError(s.SetDocumentVectorJob(run, "", false))
+						cfg.Attachments.Documents.Index.Embeddings.Enabled = true
+						capture := &registeredDocumentVectorJobCapture{}
+						require.NoError(registerDocumentVectorJob(capture, &vectorFeatures{DocumentBackend: startupDocumentBackend{}, Cfg: cfg.Vector}, nil,
+							&invocation{cfg: &cfg, logger: testDiscardLogger()}))
+						require.NoError(s.SetDocumentVectorJob(run, "", false, capture.maxRuntime))
 					}
 					err = s.TriggerJob(name)
 					if budget == "1ms" {

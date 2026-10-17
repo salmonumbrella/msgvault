@@ -46,18 +46,6 @@ func (c *yieldingEmbedClient) Embed(context.Context, []string) ([][]float32, err
 	return nil, errors.New("embedding operation failed")
 }
 
-type blockingEmbedClient struct {
-	EmbeddingClient
-
-	entered bool
-}
-
-func (c *blockingEmbedClient) Embed(ctx context.Context, _ []string) ([][]float32, error) {
-	c.entered = true
-	<-ctx.Done()
-	return nil, ctx.Err()
-}
-
 type yieldingStampStore struct {
 	WorkStore
 
@@ -465,13 +453,17 @@ func TestWorker_RuntimeBudgetLeavesInFlightBatchResumable(t *testing.T) {
 		assert := assert.New(t)
 		f := newWorkerFixture(t, 2)
 		recorder := testutil.NewTestStore(t)
-		client := &blockingEmbedClient{EmbeddingClient: f.FakeClient}
+		client := &blockedDiagnosticClient{inner: f.FakeClient, started: make(chan struct{})}
 		w := NewWorker(WorkerDeps{Backend: f.Backend, VectorsDB: f.VectorsDB, MainDB: f.MainDB,
 			Store: f.Store, Client: client, BatchSize: 1, MaxConsecutiveFailures: 1, Recorder: recorder})
 		ctx, cancel := context.WithTimeoutCause(t.Context(), time.Second, jobctx.ErrRunBudgetExceeded)
 		defer cancel()
 		res, err := w.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
-		assert.True(client.entered, "the runtime limit interrupts an in-flight provider call")
+		select {
+		case <-client.started:
+		default:
+			t.Fatal("the runtime limit must interrupt an in-flight provider call")
+		}
 		require.NoError(err, "a scheduled pass boundary is not a provider failure")
 		assert.Equal(RunResult{Claimed: 1}, res)
 		assert.Equal(2, countMissing(t, f.MainDB, int64(f.BuildingGen)))

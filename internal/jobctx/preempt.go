@@ -22,8 +22,3 @@ func PreemptionRequested(ctx context.Context) bool {
 	flag, ok := ctx.Value(preemptionKey{}).(*atomic.Bool)
 	return ok && flag.Load()
 }
-
-// StopRequested reports whether the job context has ended.
-func StopRequested(ctx context.Context) bool {
-	return ctx.Err() != nil
-}

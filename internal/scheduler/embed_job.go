@@ -222,7 +222,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 
 	if _, err := j.Worker.ReclaimStale(ctx); err != nil {
 		retErr = err
-		if jobctx.StopRequested(ctx) {
+		if ctx.Err() != nil {
 			logEmbedPassError(ctx, log, err)
 			return retErr
 		}
@@ -230,7 +230,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 	}
 
 	retErr = errors.Join(retErr, j.maintainActivePeopleDuringBuild(ctx, log, occurrence))
-	if jobctx.StopRequested(ctx) {
+	if ctx.Err() != nil {
 		return retErr
 	}
 
@@ -242,7 +242,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 	res, err := j.Worker.RunOnce(ctx, target, scheduledEmbeddingPassScope(occurrence, target, "forward"))
 	retErr = errors.Join(retErr, err)
 	// Preserve worker errors even when the scheduler interrupted the pass.
-	if jobctx.StopRequested(ctx) {
+	if ctx.Err() != nil {
 		logEmbedPassError(ctx, log, err)
 		return retErr
 	}
@@ -272,7 +272,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 	var contextualState *ConvergenceResult
 	if isBuilding && j.Convergence != nil {
 		state, err := j.Convergence.CheckConvergence(ctx, target)
-		if jobctx.StopRequested(ctx) {
+		if ctx.Err() != nil {
 			return retErr
 		}
 		if err != nil {
@@ -297,7 +297,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 	// skipped) so it never re-embeds stamped messages.
 	backstopRan, backstopErr := j.maybeRunBackstop(ctx, target, log, occurrence)
 	retErr = errors.Join(retErr, backstopErr)
-	if jobctx.StopRequested(ctx) {
+	if ctx.Err() != nil {
 		return retErr
 	}
 
@@ -316,7 +316,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 		// check did not produce a result.
 		if backstopRan || contextualState == nil {
 			state, err := j.Convergence.CheckConvergence(ctx, target)
-			if jobctx.StopRequested(ctx) {
+			if ctx.Err() != nil {
 				return retErr
 			}
 			if err != nil {
@@ -345,7 +345,7 @@ func (j *EmbedJob) Run(ctx context.Context) error {
 		return retErr
 	} else {
 		missing, err := j.missingCount(ctx, target)
-		if jobctx.StopRequested(ctx) {
+		if ctx.Err() != nil {
 			return retErr
 		}
 		if err != nil {
@@ -376,7 +376,7 @@ func (j *EmbedJob) maintainActivePeopleDuringBuild(
 		return nil
 	}
 	building, err := j.Backend.BuildingGeneration(ctx)
-	if err != nil || building == nil || jobctx.StopRequested(ctx) {
+	if err != nil || building == nil || ctx.Err() != nil {
 		logEmbedPassError(ctx, log, err)
 		return err
 	}
@@ -384,7 +384,7 @@ func (j *EmbedJob) maintainActivePeopleDuringBuild(
 	if errors.Is(err, vector.ErrNoActiveGeneration) {
 		return nil
 	}
-	if jobctx.StopRequested(ctx) {
+	if ctx.Err() != nil {
 		logEmbedPassError(ctx, log, err)
 		return err
 	}
@@ -398,7 +398,7 @@ func (j *EmbedJob) maintainActivePeopleDuringBuild(
 	res, err := runner.RunPersonsOnce(
 		ctx, active.ID, scheduledEmbeddingPassScope(occurrence, active.ID, "active-people"),
 	)
-	if jobctx.StopRequested(ctx) {
+	if ctx.Err() != nil {
 		logEmbedPassError(ctx, log, err)
 		return err
 	}
@@ -419,7 +419,7 @@ func (j *EmbedJob) maintainActivePeopleDuringBuild(
 func (j *EmbedJob) activateBuilding(
 	ctx context.Context, target vector.GenerationID, contextualState *ConvergenceResult, log *slog.Logger,
 ) {
-	if jobctx.StopRequested(ctx) {
+	if ctx.Err() != nil {
 		return
 	}
 	var activateErr error
@@ -438,13 +438,13 @@ func (j *EmbedJob) activateBuilding(
 		activateErr = j.Backend.ActivateGeneration(ctx, target, false)
 	}
 	if activateErr != nil {
-		if jobctx.StopRequested(ctx) {
+		if ctx.Err() != nil {
 			return
 		}
 		log.Warn("embed: activation failed", "gen", target, "error", activateErr)
 		return
 	}
-	if jobctx.StopRequested(ctx) {
+	if ctx.Err() != nil {
 		return
 	}
 	log.Info("embed: building generation activated", "gen", target)
@@ -497,7 +497,7 @@ func (j *EmbedJob) maybeRunBackstop(
 	if generationErr, ok := errors.AsType[*embed.GenerationRunError](err); ok {
 		messageErr, personErr = generationErr.Message, generationErr.Person
 	}
-	stopped := jobctx.StopRequested(ctx)
+	stopped := ctx.Err() != nil
 	if res.RepairSettled || (!stopped && messageErr == nil) {
 		if j.lastBackstop == nil {
 			j.lastBackstop = make(map[vector.GenerationID]time.Time)
@@ -565,7 +565,7 @@ func scheduledEmbeddingPassScope(
 // occurred (already logged); the caller should return.
 func (j *EmbedJob) pickTarget(ctx context.Context, log *slog.Logger) (vector.GenerationID, bool, bool) {
 	bg, bgErr := j.Backend.BuildingGeneration(ctx)
-	if jobctx.StopRequested(ctx) {
+	if ctx.Err() != nil {
 		return 0, false, false
 	}
 	if bgErr != nil {
@@ -594,7 +594,7 @@ func (j *EmbedJob) pickTarget(ctx context.Context, log *slog.Logger) (vector.Gen
 	}
 
 	active, err := j.Backend.ActiveGeneration(ctx)
-	if jobctx.StopRequested(ctx) {
+	if ctx.Err() != nil {
 		return 0, false, false
 	}
 	switch {

@@ -2,7 +2,8 @@ package scheduler
 
 import "go.kenn.io/msgvault/internal/vector"
 
-// EmbeddingStatus includes cron and post-sync passes sharing one reservation.
+// EmbeddingStatus includes cron and post-sync passes. Post-sync passes acquire
+// their own gate reservation after the sync releases its reservation.
 func (s *Scheduler) EmbeddingStatus() vector.EmbeddingStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

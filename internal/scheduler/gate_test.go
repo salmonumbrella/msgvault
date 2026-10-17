@@ -65,7 +65,7 @@ func TestEmbeddingYieldsDaemonGateToQueuedSync(t *testing.T) {
 		s := scheduler.New(func(context.Context, string) error { record(); return nil }).WithWorkTracker(gate)
 		defer func() { <-s.Stop().Done() }()
 		job := &scheduler.EmbedJob{Worker: &backfillRunner{record: record}, Backend: activeGenerationBackend{}, BackstopInterval: -1}
-		require.NoError(s.SetEmbedJob(job, "", false))
+		require.NoError(s.SetEmbedJob(job, "", false, 5*time.Minute))
 		require.NoError(s.AddAccount("sync@example.com", "0 0 1 1 *"))
 
 		_, err := s.StartJob("embed")
@@ -123,15 +123,15 @@ func TestPostSyncEmbeddingAdmission(t *testing.T) {
 				gate := &delayedEmbeddingGate{SerialOperationGate: api.NewSerialOperationGate(), ready: make(chan struct{}), release: make(chan struct{})}
 				var holders []string
 				record := func() { label, _, _ := gate.Holder(); holders = append(holders, label) }
-				s := scheduler.New(func(context.Context, string) error { record(); return nil }).WithWorkTracker(gate).WithVectorPassBudget(time.Millisecond)
+				s := scheduler.New(func(context.Context, string) error { record(); return nil }).WithWorkTracker(gate)
 				defer func() { <-s.Stop().Done() }()
 				runner := &backfillRunner{record: record}
 				if alreadyRunning {
 					runner.blockingPasses = 2
 				}
 				job := &scheduler.EmbedJob{Worker: runner, Backend: activeGenerationBackend{}, BackstopInterval: -1}
-				require.NoError(s.SetEmbedJob(job, "", true))
-				require.NoError(s.SetDocumentVectorJob(func(context.Context) error { record(); return nil }, "", true))
+				require.NoError(s.SetEmbedJob(job, "", true, time.Millisecond))
+				require.NoError(s.SetDocumentVectorJob(func(context.Context) error { record(); return nil }, "", true, time.Millisecond))
 				require.NoError(s.AddAccount("sync@example.com", "0 0 1 1 *"))
 				if alreadyRunning {
 					close(gate.release)

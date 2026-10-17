@@ -22,7 +22,7 @@ func TestEmbeddingJobStatus(t *testing.T) {
 			s := New(nil).WithWorkTracker(gate)
 			defer func() { <-s.Stop().Done() }()
 			job := &EmbedJob{}
-			require.NoError(s.SetEmbedJob(job, "0 0 * * *", true))
+			require.NoError(s.SetEmbedJob(job, "0 0 * * *", true, 5*time.Minute))
 			go s.cron.Entry(s.genericJobs["embed"]).Job.Run()
 			synctest.Wait()
 			status := s.EmbeddingStatus()
@@ -40,7 +40,7 @@ func TestPostSyncJobsStartIndependently(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		require := require.New(t)
 		assert := assert.New(t)
-		s := New(func(context.Context, string) error { return nil }).WithWorkTracker(newSerialWorkTracker()).WithVectorPassBudget(time.Millisecond)
+		s := New(func(context.Context, string) error { return nil }).WithWorkTracker(newSerialWorkTracker())
 		defer func() { <-s.Stop().Done() }()
 		passes := 0
 		require.NoError(s.setVectorJob("embed", "scheduled embedding", func(ctx context.Context) error {
@@ -48,9 +48,9 @@ func TestPostSyncJobsStartIndependently(t *testing.T) {
 			jobctx.RecordProgress(ctx)
 			<-ctx.Done()
 			return ctx.Err()
-		}, "", true))
+		}, "", true, time.Millisecond))
 		documents := 0
-		require.NoError(s.SetDocumentVectorJob(func(context.Context) error { documents++; return nil }, "", true))
+		require.NoError(s.SetDocumentVectorJob(func(context.Context) error { documents++; return nil }, "", true, time.Millisecond))
 		require.NoError(s.AddAccount("sync@example.com", "0 0 1 1 *"))
 		require.NoError(s.TriggerSync("sync@example.com"))
 		synctest.Wait()

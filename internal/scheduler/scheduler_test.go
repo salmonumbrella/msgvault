@@ -1882,7 +1882,7 @@ func TestSchedulerDocumentVectorJobRunsOnlyAfterSuccessfulSync(t *testing.T) {
 					runs.Add(1)
 					documentDone <- struct{}{}
 					return nil
-				}, "", true))
+				}, "", true, 5*time.Minute))
 				requirements.NoError(s.AddAccount("test@example.test", "0 0 1 1 *"))
 				s.Start()
 				defer func() { <-s.Stop().Done() }()
@@ -1913,7 +1913,7 @@ func TestScheduler_SetEmbedJob_InvalidCron(t *testing.T) {
 	runner := &fakeRunner{}
 	job := &EmbedJob{Worker: runner, Backend: backend}
 
-	err := s.SetEmbedJob(job, "not a cron", false)
+	err := s.SetEmbedJob(job, "not a cron", false, 5*time.Minute)
 	require.Error(t, err, "SetEmbedJob with invalid cron")
 	assert.Zero(t, s.genericJobs["embed"], "invalid schedule creates no cron entry")
 }
@@ -1930,10 +1930,10 @@ func TestScheduler_SetEmbedJob_InvalidReplacePreservesPrevious(t *testing.T) {
 		job1 := &EmbedJob{Worker: runner1, Backend: backend}
 		job2 := &EmbedJob{Worker: runner2, Backend: backend}
 
-		require.NoError(s.SetEmbedJob(job1, "*/5 * * * *", true), "SetEmbedJob(job1)")
+		require.NoError(s.SetEmbedJob(job1, "*/5 * * * *", true, 5*time.Minute), "SetEmbedJob(job1)")
 		prevEntry := s.genericJobs["embed"]
 
-		require.Error(s.SetEmbedJob(job2, "bogus cron", true), "SetEmbedJob(job2, invalid)")
+		require.Error(s.SetEmbedJob(job2, "bogus cron", true, 5*time.Minute), "SetEmbedJob(job2, invalid)")
 
 		assert.True(s.EmbeddingStatus().Scheduler.RunAfterSync, "runAfterSync should remain true")
 		assert.NotZero(s.genericJobs["embed"], "the previous cron entry remains registered")
@@ -1964,7 +1964,7 @@ func TestScheduler_RunAfterSync_Fires(t *testing.T) {
 	runner := &fakeRunner{runDone: runDone}
 	job := &EmbedJob{Worker: runner, Backend: backend}
 
-	require.NoError(s.SetEmbedJob(job, "", true), "SetEmbedJob")
+	require.NoError(s.SetEmbedJob(job, "", true, 5*time.Minute), "SetEmbedJob")
 	require.NoError(s.AddAccount("test@gmail.com", "0 0 1 1 *"), "AddAccount")
 
 	s.Start()
@@ -2000,7 +2000,7 @@ func TestScheduler_RunAfterSync_DisabledDoesNotFire(t *testing.T) {
 		job := &EmbedJob{Worker: runner, Backend: backend}
 
 		// runAfterSync = false
-		require.NoError(s.SetEmbedJob(job, "", false), "SetEmbedJob")
+		require.NoError(s.SetEmbedJob(job, "", false, 5*time.Minute), "SetEmbedJob")
 		require.NoError(s.AddAccount("test@gmail.com", "0 0 1 1 *"), "AddAccount")
 
 		s.Start()
@@ -2031,7 +2031,7 @@ func TestScheduler_RunAfterSync_SkipOnStopped(t *testing.T) {
 	runner := &fakeRunner{}
 	job := &EmbedJob{Worker: runner, Backend: backend}
 
-	require.NoError(s.SetEmbedJob(job, "", true), "SetEmbedJob")
+	require.NoError(s.SetEmbedJob(job, "", true, 5*time.Minute), "SetEmbedJob")
 	require.NoError(s.AddAccount("test@gmail.com", "0 0 1 1 *"), "AddAccount")
 
 	s.Start()
@@ -2056,7 +2056,7 @@ func TestScheduler_RunAfterSync_SkipOnSyncError(t *testing.T) {
 		runner := &fakeRunner{}
 		job := &EmbedJob{Worker: runner, Backend: backend}
 
-		require.NoError(s.SetEmbedJob(job, "", true), "SetEmbedJob")
+		require.NoError(s.SetEmbedJob(job, "", true, 5*time.Minute), "SetEmbedJob")
 		require.NoError(s.AddAccount("test@gmail.com", "0 0 1 1 *"), "AddAccount")
 
 		s.Start()
@@ -2265,7 +2265,7 @@ func TestGenericJobShutdownContextFinishesCleanly(t *testing.T) {
 						callbackErr = fmt.Errorf("document pass: %w", errors.Join(failure, callbackErr))
 					}
 					return callbackErr
-				}, "17 3 * * *", false))
+				}, "17 3 * * *", false, 5*time.Minute))
 				errCh := make(chan error, 1)
 				go func() { errCh <- s.TriggerJob("document-vector") }()
 				<-started
@@ -2300,7 +2300,7 @@ func TestScheduledDocumentVectorFailureIsLogged(t *testing.T) {
 		failure := errors.New("synthetic document indexing failure")
 		require.NoError(s.SetDocumentVectorJob(func(context.Context) error {
 			return failure
-		}, "0 0 1 1 *", false))
+		}, "0 0 1 1 *", false, 5*time.Minute))
 		s.cron.Entry(s.genericJobs["document-vector"]).Job.Run()
 		synctest.Wait()
 		assert.Equal(failure.Error(), s.JobStatus()[0].LastError)
@@ -2323,7 +2323,7 @@ func TestScheduledFailureLogsHaveOneOwner(t *testing.T) {
 			if name == "embed" {
 				job := &EmbedJob{Worker: &fakeRunner{runErr: failure},
 					Backend: &fakeBackend{active: vector.Generation{ID: 5}}, Log: logger}
-				require.NoError(s.SetEmbedJob(job, "", false))
+				require.NoError(s.SetEmbedJob(job, "", false, 5*time.Minute))
 			} else {
 				require.NoError(s.AddJob(Job{Name: name, Schedule: "17 3 * * *", Run: func(context.Context) error { return failure }}))
 			}
@@ -3275,6 +3275,35 @@ func TestJobBudgetWithoutCheckpointReportsFailureAndWaitsForTick(t *testing.T) {
 	})
 }
 
+func TestJobBudgetWithoutProgressPreservesIndependentTrigger(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		s := New(nil)
+		defer func() { <-s.Stop().Done() }()
+		runs := 0
+		require.NoError(s.AddJob(Job{Name: "slow-batch", Schedule: "0 0 1 1 *", MaxRuntime: time.Second, Run: func(ctx context.Context) error {
+			runs++
+			if runs == 1 {
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			return nil
+		}}))
+		mustStartJob(t, s, "slow-batch")
+		synctest.Wait()
+		disposition, err := s.StartJob("slow-batch")
+		require.NoError(err)
+		assert.Equal(JobPending, disposition)
+		assert.True(s.JobStatus()[0].Pending)
+		time.Sleep(time.Second)
+		synctest.Wait()
+		assert.Equal(2, runs, "the independent trigger survives the first pass's no-progress expiry")
+		assert.False(s.JobStatus()[0].Running)
+		assert.Empty(s.JobStatus()[0].LastError)
+	})
+}
+
 func TestBudgetFiltersCancellationCause(t *testing.T) {
 	require.ErrorIs(t, jobctx.ErrorAfterYield(t.Context(), context.Canceled), context.Canceled)
 	ctx, cancel := context.WithTimeoutCause(t.Context(), 0, jobctx.ErrRunBudgetExceeded)
@@ -3456,8 +3485,8 @@ func TestScheduledVectorJobsHoldGateUnderOwnLabel(t *testing.T) {
 		s := New(nil).WithWorkTracker(tracker)
 		defer func() { <-s.Stop().Done() }()
 		job := &EmbedJob{Worker: &fakeRunner{}, Backend: &fakeBackend{active: vector.Generation{ID: 1}}}
-		require.NoError(s.SetEmbedJob(job, "0 0 1 1 *", false))
-		require.NoError(s.SetDocumentVectorJob(func(context.Context) error { return nil }, "0 0 1 1 *", false))
+		require.NoError(s.SetEmbedJob(job, "0 0 1 1 *", false, 5*time.Minute))
+		require.NoError(s.SetDocumentVectorJob(func(context.Context) error { return nil }, "0 0 1 1 *", false, 5*time.Minute))
 		s.cron.Entry(s.genericJobs["embed"]).Job.Run()
 		s.cron.Entry(s.genericJobs["document-vector"]).Job.Run()
 		synctest.Wait()
