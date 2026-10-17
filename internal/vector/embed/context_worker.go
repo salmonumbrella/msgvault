@@ -165,17 +165,18 @@ func (w *ContextWorker) runBackstop(ctx context.Context, gen vector.GenerationID
 		}
 		return RunResult{Contextual: &ContextConvergence{}}, fmt.Errorf("read contextual reconcile cursor: %w", err)
 	}
-	if !strings.HasPrefix(progress.ReconcileCursor, "done:") {
-		return w.run(ctx, gen)
-	}
-	if err := w.deps.Publisher.ResetDocumentReconcileCursor(ctx, gen); err != nil {
-		if errors.Is(err, vector.ErrGenerationRetired) {
-			return RunResult{Contextual: &ContextConvergence{}}, err
+	if strings.HasPrefix(progress.ReconcileCursor, "done:") {
+		if err := w.deps.Publisher.ResetDocumentReconcileCursor(ctx, gen); err != nil {
+			if errors.Is(err, vector.ErrGenerationRetired) {
+				return RunResult{Contextual: &ContextConvergence{}}, err
+			}
+			return RunResult{Contextual: &ContextConvergence{}}, fmt.Errorf("reset contextual reconcile cursor: %w", err)
 		}
-		return RunResult{Contextual: &ContextConvergence{}}, fmt.Errorf("reset contextual reconcile cursor: %w", err)
+		jobctx.RecordProgress(ctx)
 	}
-	jobctx.RecordProgress(ctx)
-	return w.run(ctx, gen)
+	result, err := w.run(ctx, gen)
+	result.BackstopStarted = true
+	return result, err
 }
 
 func (w *ContextWorker) validate() error {

@@ -3614,35 +3614,6 @@ func TestGenericJobYieldWithProgressClearsEarlierFailure(t *testing.T) {
 	})
 }
 
-func TestContextualBackstopResumesAfterYieldAndRetriesFailure(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	ctx, cancel := context.WithCancelCause(t.Context())
-	defer cancel(nil)
-	runner := &fakeRunner{yieldBackstop: cancel}
-	now := time.Now().UTC()
-	job := &EmbedJob{
-		Worker: runner, Backend: &fakeBackend{active: vector.Generation{ID: 5}},
-		SequenceBoundActivation: true, BackstopInterval: time.Hour, Now: func() time.Time { return now },
-	}
-	require.NoError(job.Run(ctx))
-	now = now.Add(time.Minute)
-	require.NoError(job.Run(t.Context()))
-	_, forwards, _ := runner.calls()
-	backstops, _ := runner.backstops()
-	assert.Equal(2, forwards, "the continuation resumes through RunOnce")
-	assert.Equal(1, backstops, "the continuation must preserve the reconciliation cursor")
-	runner.yieldBackstop = nil
-	runner.backstopErr = errors.New("backstop failed before reset")
-	now = now.Add(time.Hour)
-	require.ErrorIs(job.Run(t.Context()), runner.backstopErr)
-	runner.backstopErr = nil
-	now = now.Add(time.Minute)
-	require.NoError(job.Run(t.Context()))
-	backstops, _ = runner.backstops()
-	assert.Equal(3, backstops, "a real failure retries at the next trigger")
-}
-
 func TestEmbedJobReturnsWorkerErrorAfterYield(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)

@@ -172,6 +172,8 @@ type RunResult struct {
 	Claimed, Succeeded, Failed, Truncated int
 	// Contextual is set by ContextWorker. The ordinary Worker leaves it nil.
 	Contextual *ContextConvergence
+	// BackstopStarted means a contextual repair cursor exists or its reset committed.
+	BackstopStarted bool
 }
 
 // msgText is the per-message preprocessed input to the chunker, carried

@@ -495,7 +495,7 @@ func (j *EmbedJob) maybeRunBackstop(
 	}
 	res, err := j.Worker.RunBackstop(ctx, gen, scheduledEmbeddingPassScope(occurrence, gen, "backstop"))
 	workerErr := err
-	if jobctx.ErrorAfterYield(ctx, err) != nil {
+	if jobctx.ErrorAfterYield(ctx, err) != nil || (j.SequenceBoundActivation && !res.BackstopStarted) {
 		delete(j.lastBackstop, gen)
 	}
 	if ctx.Err() != nil || jobctx.PreemptionRequested(ctx) {

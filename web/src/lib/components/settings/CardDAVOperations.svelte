@@ -126,17 +126,15 @@
       {#if status.queued_at && !status.active && !status.scheduler_running}
         <p class="muted">Queued since <time datetime={status.queued_at} title={status.queued_at}>{formatTimestamp(status.queued_at)}</time></p>
       {/if}
-      {#if status.active}
+      {#if status.active || status.scheduler_running}
         <div class="run-summary" aria-label="Active CardDAV sync">
           <span class="working"><Spinner size={14} label="CardDAV sync running" /> Running</span>
-          <strong>{counters(status.active)}</strong>
-          <time datetime={status.active.started_at} title={status.active.started_at}
-            >Started {formatTimestamp(status.active.started_at)}</time
-          >
-        </div>
-      {:else if status.scheduler_running}
-        <div class="run-summary" aria-label="Active CardDAV sync">
-          <span class="working"><Spinner size={14} label="CardDAV sync running" /> Running</span>
+          {#if status.active}
+            <strong>{counters(status.active)}</strong>
+            <time datetime={status.active.started_at} title={status.active.started_at}
+              >Started {formatTimestamp(status.active.started_at)}</time
+            >
+          {/if}
         </div>
       {:else if status.latest}
         <div class="run-summary" aria-label="Latest CardDAV sync">

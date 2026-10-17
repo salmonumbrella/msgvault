@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.kenn.io/msgvault/internal/jobctx"
 	"go.kenn.io/msgvault/internal/operations"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
@@ -263,4 +265,97 @@ END;`)
 	_ = job.Run(ctx)
 	assert.Equal(0, countMissingE2E(t, mainDB, int64(gen)),
 		"after interval: backstop recovers the sub-watermark straggler")
+}
+
+type backstopYieldPublisher struct {
+	vector.DocumentPublisher
+
+	phase  string
+	cancel context.CancelCauseFunc
+	resets int
+}
+
+func (p *backstopYieldPublisher) GetDocumentProgress(ctx context.Context, gen vector.GenerationID) (vector.DocumentProgress, error) {
+	progress, err := p.DocumentPublisher.GetDocumentProgress(ctx, gen)
+	if err == nil && p.phase == "existing cursor" {
+		p.phase = ""
+		p.cancel(jobctx.ErrYieldedToWaiter)
+	}
+	return progress, err
+}
+
+func (p *backstopYieldPublisher) ResetDocumentReconcileCursor(ctx context.Context, gen vector.GenerationID) error {
+	p.resets++
+	phase := p.phase
+	p.phase = ""
+	if phase == "before reset" {
+		p.cancel(jobctx.ErrYieldedToWaiter)
+	}
+	err := p.DocumentPublisher.ResetDocumentReconcileCursor(ctx, gen)
+	if err == nil && phase == "after reset" {
+		p.cancel(jobctx.ErrYieldedToWaiter)
+	}
+	return err
+}
+
+func TestContextualBackstopYieldRetainsOnlyDurableCursor(t *testing.T) {
+	for _, phase := range []string{"before reset", "after reset", "existing cursor"} {
+		t.Run(phase, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			dir := t.TempDir()
+			mainPath := filepath.Join(dir, "main.db")
+			st, err := store.OpenForTest(mainPath)
+			require.NoError(err)
+			t.Cleanup(func() { _ = st.Close() })
+			require.NoError(st.InitSchema())
+			require.NoError(sqlitevec.RegisterExtension())
+			backend, err := sqlitevec.Open(t.Context(), sqlitevec.Options{Path: filepath.Join(dir, "vectors.db"), MainPath: mainPath, MainDB: st.DB(), Dimension: 4})
+			require.NoError(err)
+			t.Cleanup(func() { _ = backend.Close() })
+			gen, err := backend.CreateGeneration(t.Context(), "synthetic", 4, "synthetic:4")
+			require.NoError(err)
+			cursor := "done:0"
+			if phase == "existing cursor" {
+				cursor = "source:0"
+			}
+			require.NoError(backend.SetDocumentReconcileCursor(t.Context(), gen, cursor))
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			ctx = jobctx.WithProgress(ctx)
+			publisher := &backstopYieldPublisher{DocumentPublisher: backend, phase: phase, cancel: cancel}
+			worker := embed.NewContextWorker(embed.ContextWorkerDeps{
+				Backend: backend, Publisher: publisher, Store: st, Assembler: embed.CompositeAssembler{}, Recorder: st,
+				Client: embed.NewVoyageClient(embed.VoyageConfig{Endpoint: "http://127.0.0.1:1", Model: "synthetic", Dimension: 4}),
+			})
+			job := &EmbedJob{Worker: worker, Backend: backend, SequenceBoundActivation: true, BackstopInterval: time.Hour}
+			now := time.Now().UTC()
+			ran, err := job.maybeRunBackstop(ctx, gen, slog.Default(), now)
+			assert.True(ran)
+			require.ErrorIs(err, context.Canceled)
+			progress, err := backend.GetDocumentProgress(t.Context(), gen)
+			require.NoError(err)
+			if phase == "after reset" {
+				assert.Empty(progress.ReconcileCursor)
+				assert.True(jobctx.HasProgress(ctx), "the committed reset remains resumable progress")
+			} else {
+				assert.Equal(cursor, progress.ReconcileCursor)
+			}
+			ran, err = job.maybeRunBackstop(t.Context(), gen, slog.Default(), now.Add(time.Minute))
+			require.NoError(err)
+			assert.Equal(phase == "before reset", ran, "retry only when cancellation prevented the durable reset")
+			if phase == "before reset" {
+				assert.Equal(2, publisher.resets)
+				progress, err = backend.GetDocumentProgress(t.Context(), gen)
+				require.NoError(err)
+				assert.True(strings.HasPrefix(progress.ReconcileCursor, "done:"))
+			} else {
+				_, err = worker.RunOnce(t.Context(), gen, scheduledEmbeddingPassScope(now.Add(time.Minute), gen, "forward"))
+				require.NoError(err)
+				progress, err = backend.GetDocumentProgress(t.Context(), gen)
+				require.NoError(err)
+				assert.True(strings.HasPrefix(progress.ReconcileCursor, "done:"), "RunOnce finishes the preserved repair cursor")
+			}
+		})
+	}
 }
