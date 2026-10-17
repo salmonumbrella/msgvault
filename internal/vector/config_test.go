@@ -41,6 +41,10 @@ max_page_size_hybrid = 50
 [embed.schedule]
 cron = "*/5 * * * *"
 run_after_sync = true
+
+[multimodal.schedule]
+cron = "0 * * * *"
+run_after_sync = false
 `
 	var c Config
 	_, err := toml.Decode(input, &c)
@@ -50,6 +54,10 @@ run_after_sync = true
 	assert.Equal(768, c.Embeddings.Dimension)
 	assert.Equal(15*time.Second, c.Embeddings.Timeout)
 	assert.Equal(60, c.Search.RRFK)
+	assert.Equal("*/5 * * * *", c.Embed.Schedule.Cron)
+	assert.True(c.Embed.Schedule.RunAfterSync)
+	assert.Equal("0 * * * *", c.Multimodal.Schedule.Cron)
+	assert.False(c.Multimodal.Schedule.RunAfterSync)
 	c.ApplyDefaults()
 	assert.Equal(5*time.Minute, c.Embed.Schedule.MaxRuntime)
 }
@@ -83,7 +91,8 @@ func TestConfig_Validate(t *testing.T) {
 		{"NegativeDim", func(c *Config) { c.Embeddings.Dimension = -1 }, "dimension"},
 		{"UnknownBackend", func(c *Config) { c.Backend = "mystery" }, "backend"},
 		{"ZeroBatch", func(c *Config) { c.Embeddings.BatchSize = 0 }, "batch_size"},
-		{"NegativePassBudget", func(c *Config) { c.Embed.Schedule.MaxRuntime = -time.Second }, "vector.embed.schedule.max_runtime"},
+		{"ZeroPassBudget", func(c *Config) { c.Embed.Schedule.MaxRuntime = 0 }, ""},
+		{"NegativePassBudget", func(c *Config) { c.Embed.Schedule.MaxRuntime = -time.Second }, "vector.embed.schedule.max_runtime: must be non-negative; zero selects five minutes"},
 		{"MissingModel", func(c *Config) { c.Embeddings.Model = "" }, "model"},
 		{"DocumentPrefixTooLarge", func(c *Config) {
 			c.Embeddings.DocumentPrefix = strings.Repeat("x", maxEmbeddingTaskPrefixUTF8Bytes+1)

@@ -29,6 +29,7 @@ interface VisibilityDocument {
 const FIRST_PAGE_LIMIT = 25;
 const MIN_POLL_MS = 500;
 const MAX_POLL_MS = 8000;
+const MAX_TIMEOUT_MS = 2_147_483_647;
 export class CardDAVController {
   status = $state<CardDAVStatus>();
   books = $state<CardDAVBook[]>([]);
@@ -480,7 +481,7 @@ export class CardDAVController {
     this.pollTimer = setTimeout(() => {
       this.pollTimer = undefined;
       void this.poll(generation, revalidateIdle);
-    }, delay);
+    }, Math.min(delay, MAX_TIMEOUT_MS));
   }
   private async poll(generation: number, revalidateIdle = false): Promise<void> {
     if (this.disposed || generation !== this.pollGeneration || this.visibilityDocument?.hidden) return;

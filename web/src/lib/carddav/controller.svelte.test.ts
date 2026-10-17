@@ -304,6 +304,36 @@ describe('CardDAVController', () => {
     controller.destroy();
   });
 
+  it('waits for a distant scheduled run without overflowing the timer and discovers queued work', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-01T15:00:00Z'));
+    let statusReads = 0;
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(requestOf(input).url).pathname;
+      if (path.endsWith('/books')) return Response.json({ books: [] });
+      if (path.endsWith('/runs')) return Response.json({ runs: [] });
+      statusReads += 1;
+      return Response.json({ ...idleStatus, scheduled: true, next_scheduled_at: '2026-10-31T15:00:00Z',
+        ...(Date.now() >= Date.parse('2026-10-31T15:00:00Z') ? { queued_at: '2026-10-31T15:00:00Z' } : {}) });
+    });
+    const controller = new CardDAVController(createAPIClient(fetchFn));
+    try {
+      await controller.load();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(statusReads).toBe(1);
+      await vi.advanceTimersByTimeAsync(2_147_483_597);
+      expect(statusReads).toBe(2);
+      expect(controller.status?.queued_at).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(444_516_852);
+      expect(statusReads).toBe(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(statusReads).toBe(3);
+      expect(controller.status?.queued_at).toBe('2026-10-31T15:00:00Z');
+    } finally {
+      controller.destroy();
+    }
+  });
+
   it('retries failed scheduled reads and follows discovered queued work', async () => {
     vi.useFakeTimers();
     const start = Date.now();
