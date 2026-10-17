@@ -99,7 +99,7 @@ func (p *operationPass) finish(
 }
 
 func operationPublicError(ctx context.Context, runErr error) *operations.PublicError {
-	if errors.Is(runErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+	if scheduledPassStopped(ctx) || errors.Is(runErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 		return operations.FixedPublicError(operations.PublicErrorInvocationCancelled)
 	}
 	if errors.Is(runErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {

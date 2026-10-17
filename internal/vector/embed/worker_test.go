@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 
@@ -43,6 +44,18 @@ type yieldingEmbedClient struct {
 func (c *yieldingEmbedClient) Embed(context.Context, []string) ([][]float32, error) {
 	c.cancel(jobctx.ErrYieldedToWaiter)
 	return nil, errors.New("embedding operation failed")
+}
+
+type blockingEmbedClient struct {
+	EmbeddingClient
+
+	entered bool
+}
+
+func (c *blockingEmbedClient) Embed(ctx context.Context, _ []string) ([][]float32, error) {
+	c.entered = true
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 type yieldingStampStore struct {
@@ -446,6 +459,41 @@ func TestWorker_YieldCancellationDuringEmbedStopsCleanly(t *testing.T) {
 	}
 }
 
+func TestWorker_RuntimeBudgetLeavesInFlightBatchResumable(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		f := newWorkerFixture(t, 2)
+		recorder := testutil.NewTestStore(t)
+		client := &blockingEmbedClient{EmbeddingClient: f.FakeClient}
+		w := NewWorker(WorkerDeps{Backend: f.Backend, VectorsDB: f.VectorsDB, MainDB: f.MainDB,
+			Store: f.Store, Client: client, BatchSize: 1, MaxConsecutiveFailures: 1, Recorder: recorder})
+		ctx, cancel := context.WithTimeoutCause(t.Context(), time.Second, jobctx.ErrRunBudgetExceeded)
+		defer cancel()
+		res, err := w.RunOnce(ctx, f.BuildingGen, testEmbeddingPassScope())
+		assert.True(client.entered, "the runtime limit interrupts an in-flight provider call")
+		require.NoError(err, "a scheduled pass boundary is not a provider failure")
+		assert.Equal(RunResult{Claimed: 1}, res)
+		assert.Equal(2, countMissing(t, f.MainDB, int64(f.BuildingGen)))
+		runs := messageEmbeddingOperationRuns(t, recorder)
+		require.Len(runs, 1)
+		assert.Equal(operations.StateCancelled, runs[0].State)
+		require.NotNil(runs[0].Error)
+		assert.Equal(operations.PublicErrorInvocationCancelled, runs[0].Error.Code)
+		var failed int
+		require.NoError(f.VectorsDB.QueryRow("SELECT failed FROM embed_runs ORDER BY id DESC LIMIT 1").Scan(&failed))
+		assert.Zero(failed, "the persisted batch counters exclude interrupted work")
+
+		w.deps.Client = f.FakeClient
+		scope := testEmbeddingPassScope()
+		scope.Key += ":resume"
+		res, err = w.RunOnce(t.Context(), f.BuildingGen, scope)
+		require.NoError(err)
+		assert.Equal(RunResult{Claimed: 2, Succeeded: 2}, res)
+		assert.Zero(countMissing(t, f.MainDB, int64(f.BuildingGen)), "the next pass covers the interrupted batch and later rows")
+	})
+}
+
 func TestWorker_YieldCancellationDuringDownshiftStampLogsOnce(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -480,7 +528,7 @@ func TestWorker_YieldCancellationDuringDownshiftStampLogsOnce(t *testing.T) {
 		assert.NotEqual(slog.LevelError, record.Level, "yield must not log an error: %q", record.Message)
 	}
 	for _, record := range logs.records {
-		if record.Level == slog.LevelInfo && record.Message == "embed run yielded to a waiting operation; stopping" {
+		if record.Level == slog.LevelInfo && record.Message == "embed run reached a scheduled pass boundary; stopping" {
 			yieldInfo++
 		}
 	}

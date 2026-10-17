@@ -211,11 +211,16 @@ type inputChunk struct {
 // and the next scan re-finds them. Always returns (0, nil).
 func (w *Worker) ReclaimStale(ctx context.Context) (int, error) { return 0, nil }
 
-func (w *Worker) stopIfYielded(ctx context.Context, gen vector.GenerationID) bool {
-	if !jobctx.YieldedToWaiter(ctx) {
+// scheduledPassStopped separates scheduler pass boundaries from ordinary deadlines.
+func scheduledPassStopped(ctx context.Context) bool {
+	return jobctx.YieldedToWaiter(ctx) || errors.Is(context.Cause(ctx), jobctx.ErrRunBudgetExceeded)
+}
+
+func (w *Worker) stopIfInterrupted(ctx context.Context, gen vector.GenerationID) bool {
+	if !scheduledPassStopped(ctx) {
 		return false
 	}
-	w.deps.Log.Info("embed run yielded to a waiting operation; stopping", "gen", gen)
+	w.deps.Log.Info("embed run reached a scheduled pass boundary; stopping", "gen", gen)
 	return true
 }
 
@@ -230,7 +235,7 @@ func (w *Worker) startEmbedRun(ctx context.Context, gen vector.GenerationID, now
 		w.rebind(`INSERT INTO embed_runs (generation_id, started_at) VALUES (?, ?) RETURNING id`),
 		int64(gen), now).Scan(&id)
 	if err != nil {
-		if jobctx.YieldedToWaiter(ctx) {
+		if scheduledPassStopped(ctx) {
 			return 0
 		}
 		w.deps.Log.Warn("embed_runs: start insert failed", "error", err)
@@ -346,7 +351,7 @@ func (w *Worker) run(
 	if !backstop {
 		wm, err := w.wm.GetWatermark(ctx, gen)
 		if err != nil {
-			if w.stopIfYielded(ctx, gen) {
+			if w.stopIfInterrupted(ctx, gen) {
 				return res, nil
 			}
 			// Non-fatal: a missing/unreadable watermark just restarts the
@@ -361,7 +366,7 @@ func (w *Worker) run(
 
 	for {
 		if err := ctx.Err(); err != nil {
-			if w.stopIfYielded(ctx, gen) {
+			if w.stopIfInterrupted(ctx, gen) {
 				return res, nil
 			}
 			return res, fmt.Errorf("RunOnce: %w", err)
@@ -371,7 +376,7 @@ func (w *Worker) run(
 		batchStart := time.Now()
 		ids, err := w.scanForEmbedding(ctx, int64(gen), afterID)
 		if err != nil {
-			if w.stopIfYielded(ctx, gen) {
+			if w.stopIfInterrupted(ctx, gen) {
 				return res, nil
 			}
 			return res, fmt.Errorf("scan for embedding: %w", err)
@@ -393,7 +398,7 @@ func (w *Worker) run(
 
 		eb, err := w.embedBatch(ctx, ids)
 		if err != nil {
-			if w.stopIfYielded(ctx, gen) {
+			if w.stopIfInterrupted(ctx, gen) {
 				return res, nil
 			}
 			// The downshift drain below recovers a rejected batch one message
@@ -414,7 +419,7 @@ func (w *Worker) run(
 				embedded, embeddedOK, stamped, safeAdvanceID, drainErr := w.downshiftDrain(
 					ctx, gen, ids, &res, &completedRows, outcomes,
 				)
-				if w.stopIfYielded(ctx, gen) {
+				if w.stopIfInterrupted(ctx, gen) {
 					return res, nil
 				}
 				w.deps.Log.Warn("embed batch failed", "gen", gen, "ids", len(ids), "error", err)
@@ -513,7 +518,7 @@ func (w *Worker) run(
 				}
 				missed, serr := w.stampSkipped(ctx, gen, skipIDs, eb.lastModified)
 				if serr != nil {
-					if w.stopIfYielded(ctx, gen) {
+					if w.stopIfInterrupted(ctx, gen) {
 						return res, nil
 					}
 					res.Failed += len(skipIDs)
@@ -551,7 +556,7 @@ func (w *Worker) run(
 				w.deps.Log.Info("embed: generation retired mid-run; stopping", "gen", gen)
 				return res, err
 			}
-			if w.stopIfYielded(ctx, gen) {
+			if w.stopIfInterrupted(ctx, gen) {
 				return res, nil
 			}
 			res.Failed += len(eb.embeddedIDs)
@@ -575,7 +580,7 @@ func (w *Worker) run(
 			var err error
 			skipMissed, err = w.stampSkipped(ctx, gen, skipIDs, eb.lastModified)
 			if err != nil {
-				if w.stopIfYielded(ctx, gen) {
+				if w.stopIfInterrupted(ctx, gen) {
 					return res, nil
 				}
 				res.Failed += len(skipIDs)
@@ -594,7 +599,7 @@ func (w *Worker) run(
 		// before this stamp just re-does the embedded rows next scan.
 		missed, serr := w.stampCovered(ctx, gen, eb.embeddedIDs, eb.lastModified)
 		if serr != nil {
-			if w.stopIfYielded(ctx, gen) {
+			if w.stopIfInterrupted(ctx, gen) {
 				return res, nil
 			}
 			res.Failed += len(eb.embeddedIDs)
@@ -677,7 +682,7 @@ func (w *Worker) advanceWatermark(ctx context.Context, gen vector.GenerationID, 
 		return
 	}
 	if err := w.wm.SetWatermark(ctx, gen, id); err != nil {
-		if jobctx.YieldedToWaiter(ctx) {
+		if scheduledPassStopped(ctx) {
 			return
 		}
 		w.deps.Log.Warn("embed: advance watermark failed (non-critical)",
@@ -999,7 +1004,7 @@ func (w *Worker) downshiftDrain(
 		batchStart := time.Now()
 		eb, e := w.embedBatch(ctx, []int64{id})
 		if e != nil {
-			if jobctx.YieldedToWaiter(ctx) {
+			if scheduledPassStopped(ctx) {
 				return embedded, embeddedOK, stamped, contiguousStampedID, e
 			}
 			if errors.Is(e, ErrPermanent4xx) {
@@ -1031,7 +1036,7 @@ func (w *Worker) downshiftDrain(
 			if len(skip) > 0 {
 				missed, serr := w.stampSkipped(ctx, gen, skip, eb.lastModified)
 				if serr != nil {
-					if jobctx.YieldedToWaiter(ctx) {
+					if scheduledPassStopped(ctx) {
 						return embedded, embeddedOK, stamped, contiguousStampedID, serr
 					}
 					res.Failed += len(skip)
@@ -1084,7 +1089,7 @@ func (w *Worker) downshiftDrain(
 		embeddedOK++
 		missed, serr := w.stampCovered(ctx, gen, eb.embeddedIDs, eb.lastModified)
 		if serr != nil {
-			if jobctx.YieldedToWaiter(ctx) {
+			if scheduledPassStopped(ctx) {
 				return embedded, embeddedOK, stamped, contiguousStampedID, serr
 			}
 			return embedded, embeddedOK, stamped, contiguousStampedID, fmt.Errorf("stamp embed_gen: %w", serr)
@@ -1137,7 +1142,7 @@ func (w *Worker) downshiftDrain(
 		// CAS-missed its stamp still proves the endpoint is healthy, and must
 		// not let a genuine 4xx sibling be misclassified as an all-drop.
 		// Stamp the deferred 4xxs so they drop out of future scans.
-		if jobctx.YieldedToWaiter(ctx) {
+		if scheduledPassStopped(ctx) {
 			return embedded, embeddedOK, stamped, contiguousStampedID, nil
 		}
 		for _, id := range deferredDrops {
@@ -1150,7 +1155,7 @@ func (w *Worker) downshiftDrain(
 		// deletes stale vectors only for rows whose drop stamp actually landed.
 		missed, serr := w.stampSkipped(ctx, gen, deferredDrops, lm)
 		if serr != nil {
-			if jobctx.YieldedToWaiter(ctx) {
+			if scheduledPassStopped(ctx) {
 				return embedded, embeddedOK, stamped, contiguousStampedID, serr
 			}
 			res.Failed += len(deferredDrops)

@@ -875,8 +875,9 @@ func TestEmbedJob_Run_YieldedCleanRunStopsBeforeCompletionWork(t *testing.T) {
 	assert := assert.New(t)
 	building := &vector.Generation{ID: 77, State: vector.GenerationBuilding, Fingerprint: "m:768"}
 	backend := &fakeBackend{activeErr: vector.ErrNoActiveGeneration, building: building}
-	ctx, request := jobctx.WithPreemption(t.Context())
-	runner := &fakeRunner{onRunOnce: func(vector.GenerationID) { request() }}
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	runner := &fakeRunner{onRunOnce: func(vector.GenerationID) { cancel(jobctx.ErrYieldedToWaiter) }}
 	coverage := &fakeCoverage{}
 	var logs bytes.Buffer
 	job := &EmbedJob{

@@ -2514,7 +2514,7 @@ Other jobs keep their own runtime budgets. Waiting API requests can still
 interrupt scheduled work. `GET /api/v1/sources/status` reports the same
 state for every scheduled source as `scheduler_queued`, `scheduler_queued_at`,
 `scheduler_pending`, and `scheduler_started_at`. Compare queued state and the last successful sync
-to detect a source that is waiting too long. Health's `operation.label` names
+to detect a source that is waiting too long. For generic scheduled source jobs, `scheduler_last_error` retains independent failures joined with shutdown cancellation and omits the cancellation text. Cancellation alone leaves the prior error unchanged. Health's `operation.label` names
 the job holding the gate, such as `activity-projection` or `attachment-pack`.
 
 ---
@@ -3121,6 +3121,7 @@ A diagnostics-only read or decode failure returns coverage and job state with
 `diagnostics=null`. `coverage_sampled_at` gives the count time; stale counts
 suppress ETA. `diagnostics_stale` marks an unfinished snapshot older than a
 minute, and an active run with that snapshot has phase `diagnostics_stale`.
+Embedding diagnostics also retain independent failures joined with shutdown cancellation; cancellation alone does not create a diagnostic `last_error`.
 It never sends message content to a provider.
 See the [CLI field semantics](cli-reference.md#embeddings-status) and the
 [published OpenAPI schema](https://github.com/kenn-io/msgvault/blob/main/api/openapi.yaml).
