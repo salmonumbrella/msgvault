@@ -60,6 +60,10 @@ func TestRoomRecipientsMigration(t *testing.T) {
 	requirements := require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
 	seedLegacyRoomEdges(t, st)
+	var baseline int64
+	if !st.IsPostgreSQL() {
+		requirements.NoError(st.DB().QueryRow(`SELECT coalesce(max(seq), 0) FROM cache_related_change_journal`).Scan(&baseline))
+	}
 	_, err := st.DB().Exec(st.Rebind(`DELETE FROM applied_migrations WHERE name = ?`), migrationRoomRecipientsV1)
 	requirements.NoError(err)
 	requirements.NoError(st.InitSchemaContext(t.Context()))
@@ -67,9 +71,13 @@ func TestRoomRecipientsMigration(t *testing.T) {
 	requirements.NoError(st.InitSchemaContext(t.Context()))
 	assertRepairedRoomEdges(t, st)
 	if !st.IsPostgreSQL() {
-		var count int
-		requirements.NoError(st.DB().QueryRow(`SELECT count(*) FROM cache_related_change_journal WHERE dataset = 'message_facts'`).Scan(&count))
-		assert.Positive(t, count)
+		for _, kind := range []string{"calendar_event", "meeting_transcript"} {
+			var count int
+			requirements.NoError(st.DB().QueryRow(`SELECT count(*) FROM cache_related_change_journal j
+				JOIN messages m ON m.id = j.message_id
+				WHERE j.dataset = 'message_facts' AND j.seq > ? AND m.message_type = ?`, baseline, kind).Scan(&count))
+			assert.Positive(t, count, "migration invalidates repaired %s facts", kind)
+		}
 	}
 }
 
