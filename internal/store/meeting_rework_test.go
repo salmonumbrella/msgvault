@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,28 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMeetingSchemaPlainSQLiteIntegrity(t *testing.T) {
+	require := require.New(t)
+	path := filepath.Join(t.TempDir(), "archive.db")
+	st, err := OpenForTest(path)
+	require.NoError(err)
+	t.Cleanup(func() { assert.NoError(t, st.db.Close()) })
+	require.NoError(st.InitSchemaContext(t.Context()))
+	projectionFixture(t, st, "scheduled", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"startsAt":"2027-03-14T06:30:00-04:00"}}`)
+	_, note := projectionFixture(t, st, "recording", "plaud_json", `{}`)
+	_, err = st.db.Exec(`UPDATE messages SET sent_at = ? WHERE id = ?`, "2027-03-14T06:30:00-04:00", note)
+	require.NoError(err)
+	require.NoError(st.Close())
+
+	// Backup restore checks use the plain driver, without Store functions.
+	db, err := sql.Open("sqlite3", path)
+	require.NoError(err)
+	t.Cleanup(func() { assert.NoError(t, db.Close()) })
+	var integrity string
+	require.NoError(db.QueryRowContext(t.Context(), `PRAGMA integrity_check`).Scan(&integrity))
+	assert.Equal(t, "ok", integrity)
+}
 
 func TestMeetingLinksUnsupportedMasterException(t *testing.T) {
 	st := newRFC822IDBackfillBackendStore(t)

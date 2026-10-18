@@ -11,7 +11,6 @@ import (
 	"unicode"
 
 	"go.kenn.io/msgvault/internal/calrecur"
-	"go.kenn.io/msgvault/internal/sqliteutil"
 )
 
 type MeetingSuggestion struct {
@@ -218,21 +217,22 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref MeetingLinkR
 		}
 		lower := target.Start.Add(-time.Duration(max(1800, longest) * float64(time.Second)))
 		scheduledStart, messageStart := "scheduled_at", "COALESCE(sent_at,received_at,internal_date)"
-		var lowerBound, upperBound any = lower, target.End
+		bound := "?"
 		if !s.IsPostgreSQL() {
-			scheduledStart = sqliteutil.TimestampKeyFunction + "(" + scheduledStart + ")"
-			messageStart = sqliteutil.TimestampKeyFunction + "(" + messageStart + ")"
-			lowerBound, upperBound = sqliteutil.TimestampKey(lower), sqliteutil.TimestampKey(target.End)
+			// Normalize offsets in both the indexed expressions and query bounds.
+			scheduledStart = "julianday(" + scheduledStart + ")"
+			messageStart = "julianday(" + messageStart + ")"
+			bound = "julianday(?)"
 		}
 		filter := `effective_start < ? AND effective_start + duration_seconds * INTERVAL '1 second' > ?`
 		if !s.IsPostgreSQL() {
 			filter = `julianday(effective_start) < julianday(?) AND julianday(effective_start) + duration_seconds / 86400.0 > julianday(?)`
 		}
 		rows, err := r.QueryContext(ctx, `WITH window_ids AS (
- SELECT message_id AS id FROM meeting_link_key WHERE `+scheduledStart+` >= ? AND `+scheduledStart+` < ?
+ SELECT message_id AS id FROM meeting_link_key WHERE `+scheduledStart+` >= `+bound+` AND `+scheduledStart+` < `+bound+`
  UNION ALL
  SELECT id FROM messages m WHERE message_type = 'meeting_transcript' AND deleted_at IS NULL
- AND `+messageStart+` >= ? AND `+messageStart+` < ?
+ AND `+messageStart+` >= `+bound+` AND `+messageStart+` < `+bound+`
  AND NOT EXISTS (SELECT 1 FROM meeting_link_key k WHERE k.message_id = m.id AND k.scheduled_at IS NOT NULL)
 ), candidates AS (
  SELECT m.id, COALESCE(k.scheduled_at,m.sent_at,m.received_at,m.internal_date) AS effective_start,
@@ -240,7 +240,7 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref MeetingLinkR
  FROM window_ids w JOIN messages m ON m.id = w.id
  LEFT JOIN meeting_details d ON d.message_id = m.id LEFT JOIN meeting_link_key k ON k.message_id = m.id
  WHERE m.message_type = 'meeting_transcript' AND m.deleted_at IS NULL)
- SELECT id FROM candidates WHERE `+filter+` ORDER BY id LIMIT 2001`, lowerBound, upperBound, lowerBound, upperBound, target.End, target.Start)
+ SELECT id FROM candidates WHERE `+filter+` ORDER BY id LIMIT 2001`, lower, target.End, lower, target.End, target.End, target.Start)
 		if err != nil {
 			return nil, err
 		}

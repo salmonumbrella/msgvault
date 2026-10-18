@@ -1638,7 +1638,7 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 	if err := s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
 		start := "COALESCE(sent_at,received_at,internal_date)"
 		if !s.IsPostgreSQL() {
-			start = sqliteutil.TimestampKeyFunction + "(" + start + ")"
+			start = "julianday(" + start + ")"
 		}
 		_, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_messages_meeting_start ON messages(`+start+`) WHERE message_type = 'meeting_transcript' AND deleted_at IS NULL`)
 		return err

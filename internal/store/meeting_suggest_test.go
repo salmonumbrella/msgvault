@@ -80,6 +80,7 @@ func TestMeetingLinksSuggestionsTimeWindow(t *testing.T) {
 		{name: "scheduled without UID", sent: "2020-01-01T00:00:00Z", raw: `{"schema_version":1,"recording":{"startedAt":"2020-01-01T00:00:00Z","endedAt":"2020-01-01T00:30:00Z"},"calendar_event":{"startsAt":"2027-03-14T10:00:00Z"}}`, include: true},
 		{name: "long recording", sent: "2027-03-12T10:00:00Z", raw: `{"started_at":"2027-03-12T10:00:00Z","ended_at":"2027-03-14T10:30:00Z"}`, include: true},
 		{name: "offset", sent: "2027-03-14T06:30:00-04:00", raw: `{}`, include: true},
+		{name: "scheduled offset", sent: "2020-01-01T00:00:00Z", raw: `{"schema_version":1,"recording":{},"calendar_event":{"startsAt":"2027-03-14T06:30:00-04:00"}}`, include: true},
 		{name: "received", received: "2027-03-14T10:00:00Z", raw: `{}`, include: true},
 		{name: "internal", internal: "2027-03-14T10:00:00Z", raw: `{}`, include: true},
 		{name: "past", sent: "2020-01-01T00:00:00Z", raw: `{}`},
