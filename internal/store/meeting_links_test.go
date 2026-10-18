@@ -183,7 +183,19 @@ func TestMeetingLinksCalendarUIDLookupPlan(t *testing.T) {
 	if st.IsPostgreSQL() {
 		explain = "EXPLAIN "
 	}
-	rows, err := st.db.QueryContext(t.Context(), explain+query, args...)
+	planQuery := st.db.QueryContext
+	if st.IsPostgreSQL() {
+		// The fixture has one calendar row, so PostgreSQL prefers a sequential
+		// scan even though this predicate can use the partial index. Force the
+		// planner to expose the indexable plan for this assertion.
+		tx, err := st.db.BeginTx(t.Context(), nil)
+		requirements.NoError(err)
+		defer func() { _ = tx.Rollback() }()
+		_, err = tx.ExecContext(t.Context(), `SET LOCAL enable_seqscan = off`)
+		requirements.NoError(err)
+		planQuery = tx.QueryContext
+	}
+	rows, err := planQuery(t.Context(), explain+query, args...)
 	requirements.NoError(err)
 	defer func() { requirements.NoError(rows.Close()) }()
 	var plan []string
