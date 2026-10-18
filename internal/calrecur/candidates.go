@@ -105,12 +105,10 @@ type ruleIterator struct {
 	first        bool
 }
 
-func (s Set) ruleIterator(line string, until time.Time, budget *candidateBudget) (*ruleIterator, error) {
-	rule, err := s.rule(line, until)
-	if err != nil {
-		return nil, err
+func (s Set) ruleIterator(opt rrule.ROption, until time.Time, budget *candidateBudget) (*ruleIterator, error) {
+	if !until.IsZero() && (opt.Until.IsZero() || until.Before(opt.Until)) {
+		opt.Until = until
 	}
-	opt := rule.OrigOptions
 	iterator := &ruleIterator{budget: budget, set: s, start: opt.Dtstart, until: opt.Until, count: opt.Count, first: true}
 	if !s.AllDay {
 		opt.Dtstart = civilTime(opt.Dtstart.In(s.location()))
@@ -118,9 +116,9 @@ func (s Set) ruleIterator(line string, until time.Time, budget *candidateBudget)
 	}
 	// COUNT applies to existing civil dates and wall times.
 	opt.Count = 0
-	rule, err = rrule.NewRRule(opt)
+	rule, err := rrule.NewRRule(opt)
 	if err != nil {
-		return nil, unsupported(line, err)
+		return nil, unsupported("RRULE", err)
 	}
 	iterator.nextRaw = rule.Iterator()
 	return iterator, nil

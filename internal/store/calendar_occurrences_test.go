@@ -14,7 +14,7 @@ func TestListCalendarOccurrences(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 
-	st := newCalendarStore(t)
+	st := newRFC822IDBackfillBackendStore(t)
 	_, master := calendarFixture(t, st, "master", `{"id":"weekly","status":"confirmed","start":{"dateTime":"2027-03-02T17:00:00Z"},"end":{"dateTime":"2027-03-02T18:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=3"],"attendees":[{"email":"guest@example.com","responseStatus":"accepted"}]}`)
 	_, cancelled := calendarFixture(t, st, "cancelled", `{"id":"cancelled","recurringEventId":"weekly","originalStartTime":{"dateTime":"2027-03-09T17:00:00Z"},"status":"cancelled"}`)
 	_, moved := calendarFixture(t, st, "moved", `{"id":"moved","recurringEventId":"weekly","status":"confirmed","originalStartTime":{"dateTime":"2027-03-16T17:00:00Z"},"start":{"dateTime":"2027-04-02T19:00:00Z"},"end":{"dateTime":"2027-04-02T20:00:00Z"}}`)
@@ -29,7 +29,6 @@ func TestListCalendarOccurrences(t *testing.T) {
 	assertions.Empty(page.Unexpandable)
 	assertions.Equal(master, page.Occurrences[0].MessageID)
 	assertions.Equal(single, page.Occurrences[1].MessageID)
-	assertions.True(page.Occurrences[2].Cancelled)
 	assertions.Equal("cancelled", page.Occurrences[2].Status)
 	assertions.Equal(master, page.Occurrences[2].SeriesMessageID)
 	assertions.Equal(cancelled, page.Occurrences[2].MessageID)
@@ -47,7 +46,7 @@ func TestListCalendarOccurrencesUnexpandable(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 
-	st := newCalendarStore(t)
+	st := newRFC822IDBackfillBackendStore(t)
 	_, id := calendarFixture(t, st, "unsupported", `{"id":"unsupported","start":{"date":"2027-03-01"},"end":{"date":"2027-03-02"},"recurrence":["RRULE:FREQ=HOURLY"]}`)
 	from, err := time.Parse(time.DateOnly, "2027-03-01")
 	requirements.NoError(err)
@@ -60,7 +59,7 @@ func TestListCalendarOccurrencesUnexpandable(t *testing.T) {
 
 func TestListCalendarOccurrencesSharesRequestBudget(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
-	st := newCalendarStore(t)
+	st := newRFC822IDBackfillBackendStore(t)
 	from, err := time.Parse(time.DateOnly, "2027-03-01")
 	requirements.NoError(err)
 	for i := range 10 {
@@ -78,7 +77,7 @@ func TestListCalendarOccurrencesSharesRequestBudget(t *testing.T) {
 
 func TestListCalendarOccurrencesOrphanExceptions(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
-	st := newCalendarStore(t)
+	st := newRFC822IDBackfillBackendStore(t)
 	_, complete := calendarFixture(t, st, "orphan", `{"id":"orphan","recurringEventId":"missing","status":"confirmed","originalStartTime":{"dateTime":"2027-03-02T17:00:00Z"},"start":{"dateTime":"2027-03-03T17:00:00Z"},"end":{"dateTime":"2027-03-03T18:00:00Z"}}`)
 	_, incomplete := calendarFixture(t, st, "sparse-orphan", `{"id":"sparse-orphan","recurringEventId":"missing","status":"cancelled","originalStartTime":{"dateTime":"2027-03-04T17:00:00Z"}}`)
 	_, unidentified := calendarFixture(t, st, "unidentified-orphan", `{"id":"unidentified-orphan","recurringEventId":"missing","status":"cancelled"}`)
@@ -96,7 +95,7 @@ func TestListCalendarOccurrencesAllDayQueryZone(t *testing.T) {
 	for _, recurring := range []bool{false, true} {
 		t.Run(strconv.FormatBool(recurring), func(t *testing.T) {
 			assertions, requirements := assert.New(t), require.New(t)
-			st := newCalendarStore(t)
+			st := newRFC822IDBackfillBackendStore(t)
 			recurrence := ""
 			if recurring {
 				recurrence = `,"recurrence":["RRULE:FREQ=DAILY;COUNT=2"]`
@@ -130,7 +129,7 @@ func TestListCalendarOccurrencesCancellationSuppliedFields(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assertions, requirements := assert.New(t), require.New(t)
-			st := newCalendarStore(t)
+			st := newRFC822IDBackfillBackendStore(t)
 			_, master := calendarFixture(t, st, "master", `{"id":"weekly","status":"confirmed","start":{"dateTime":"2027-03-02T17:00:00Z"},"end":{"dateTime":"2027-03-02T18:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=2"],"attendees":[{"email":"guest@example.com","responseStatus":"accepted"}]}`)
 			_, cancelled := calendarFixture(t, st, "cancelled", `{"id":"cancelled","recurringEventId":"weekly","originalStartTime":{"dateTime":"2027-03-09T17:00:00Z"},"status":"cancelled"`+tc.fields+`}`)
 			subject := tc.subject
@@ -148,11 +147,37 @@ func TestListCalendarOccurrencesCancellationSuppliedFields(t *testing.T) {
 			assertions.Equal(master, o.SeriesMessageID)
 			assertions.Equal(tc.subject, o.Subject)
 			assertions.Equal("cancelled", o.Status)
-			assertions.True(o.Cancelled)
 			requirements.Len(o.Attendees, tc.attendees)
 			if tc.name == "supplied" {
 				assertions.Equal("other@example.com", o.Attendees[0].Email)
 			}
+		})
+	}
+}
+
+func TestListCalendarOccurrencesAllDayPartialWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name, endDate, from, to string
+		want                    int
+	}{
+		{"inside", "2027-03-03", "2027-03-02T09:00:00Z", "2027-03-02T17:00:00Z", 1},
+		{"end midnight", "2027-03-03", "2027-03-01T09:00:00Z", "2027-03-02T00:00:00Z", 0},
+		{"start midday", "2027-03-03", "2027-03-02T17:00:00Z", "2027-03-03T00:00:00Z", 1},
+		{"after", "2027-03-03", "2027-03-03T00:00:00Z", "2027-03-03T17:00:00Z", 0},
+		{"multi day", "2027-03-05", "2027-03-04T09:00:00-05:00", "2027-03-04T17:00:00-05:00", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requirements := require.New(t)
+
+			st := newRFC822IDBackfillBackendStore(t)
+			calendarFixture(t, st, "partial", fmt.Sprintf(`{"id":"partial","start":{"date":"2027-03-02"},"end":{"date":%q}}`, tc.endDate))
+			from, err := time.Parse(time.RFC3339, tc.from)
+			requirements.NoError(err)
+			to, err := time.Parse(time.RFC3339, tc.to)
+			requirements.NoError(err)
+			page, err := st.ListCalendarOccurrencesContext(t.Context(), from, to)
+			requirements.NoError(err)
+			assert.Len(t, page.Occurrences, tc.want)
 		})
 	}
 }

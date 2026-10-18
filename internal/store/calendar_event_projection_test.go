@@ -19,18 +19,6 @@ import (
 
 const calendarRaw = `{"id":"event-example","status":"confirmed","start":{"dateTime":"2027-03-02T17:00:00Z"},"end":{"dateTime":"2027-03-02T18:00:00Z"},"iCalUID":"event-uid@example.com","description":"Raw description","attendees":[{"email":"PERSON@EXAMPLE.COM","responseStatus":"accepted"}]}`
 
-func newCalendarStore(t *testing.T) *Store {
-	t.Helper()
-	if dbURL := os.Getenv("MSGVAULT_TEST_DB"); IsPostgresURL(dbURL) {
-		return newPGStoreInternal(t, dbURL)
-	}
-	st, err := OpenForTest(filepath.Join(t.TempDir(), "calendar.db"))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = st.Close() })
-	require.NoError(t, st.InitSchemaContext(t.Context()))
-	return st
-}
-
 func calendarFixture(t *testing.T, st *Store, key, raw string) (*MessagePersistData, int64) {
 	t.Helper()
 	source, err := st.GetOrCreateSource("gcal", "calendar@example.com")
@@ -76,7 +64,7 @@ func rejectCalendarWrites(t *testing.T, st *Store) {
 
 func TestCalendarEventProjectionPersistRefreshDelete(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
-	st := newCalendarStore(t)
+	st := newRFC822IDBackfillBackendStore(t)
 	data, id := calendarFixture(t, st, "persist", calendarRaw)
 	rows := calendarRows(t, st, id)
 	requirements.Len(rows, 1)
@@ -106,7 +94,7 @@ func TestCalendarEventProjectionPersistRefreshDelete(t *testing.T) {
 
 func TestCalendarEventProjectionSkipsUnchanged(t *testing.T) {
 	requirements := require.New(t)
-	st := newCalendarStore(t)
+	st := newRFC822IDBackfillBackendStore(t)
 	data, id := calendarFixture(t, st, "unchanged", calendarRaw)
 	rejectCalendarWrites(t, st)
 	requirements.NoError(st.withTxContext(t.Context(), func(tx *loggedTx) error { return st.refreshCalendarEventProjectionWith(t.Context(), tx, id) }))
@@ -117,7 +105,7 @@ func TestCalendarEventProjectionSkipsUnchanged(t *testing.T) {
 
 func TestCalendarEventProjectionStorageFailureRollsBack(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
-	st := newCalendarStore(t)
+	st := newRFC822IDBackfillBackendStore(t)
 	_, id := calendarFixture(t, st, "rollback", calendarRaw)
 	rejectCalendarWrites(t, st)
 	err := st.SetMessageMetadata(id, sql.NullString{String: `{"status":"cancelled"}`, Valid: true})
@@ -130,7 +118,7 @@ func TestCalendarEventProjectionStorageFailureRollsBack(t *testing.T) {
 
 func TestCalendarEventBackfillResumesAfterCancel(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
-	base := newCalendarStore(t)
+	base := newRFC822IDBackfillBackendStore(t)
 	// More than one page, with real raw snapshots and real commits.
 	for i := range 103 {
 		calendarFixture(t, base, fmt.Sprintf("backfill-%d", i), calendarRaw)
@@ -177,7 +165,7 @@ func TestCalendarEventBackfillResumesAfterCancel(t *testing.T) {
 
 func TestCalendarEventBackfillMalformedRecurrenceDoesNotFailInit(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
-	st := newCalendarStore(t)
+	st := newRFC822IDBackfillBackendStore(t)
 	_, id := calendarFixture(t, st, "bad-rule", `{"id":"bad-series","start":{"date":"2027-03-14"},"end":{"date":"2027-03-15"},"recurrence":["RRULE:FREQ=NOT_A_FREQUENCY"]}`)
 	_, err := st.db.Exec(`DELETE FROM calendar_events`)
 	requirements.NoError(err)
@@ -187,14 +175,16 @@ func TestCalendarEventBackfillMalformedRecurrenceDoesNotFailInit(t *testing.T) {
 	rows := calendarRows(t, st, id)
 	requirements.Len(rows, 1)
 	assertions.NotEmpty(rows[0].RecurrenceError)
-	assertions.Nil(rows[0].RecurrenceEndAt)
+	var end sql.NullTime
+	requirements.NoError(st.db.QueryRow(`SELECT recurrence_end_at FROM calendar_events WHERE message_id = ?`, id).Scan(&end))
+	assertions.False(end.Valid)
 }
 
 func TestCalendarEventUpgradeRebuildsProjection(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 
-	st := newCalendarStore(t)
+	st := newRFC822IDBackfillBackendStore(t)
 	_, id := calendarFixture(t, st, "upgrade", calendarRaw)
 	for _, query := range []string{`DROP TABLE calendar_event_attendees`, `DROP TABLE calendar_events`, `DELETE FROM applied_migrations WHERE name = 'calendar_event_projection_v1'`, `UPDATE archive_metadata SET value = '10' WHERE key = 'schema_version'`} {
 		_, err := st.db.Exec(query)

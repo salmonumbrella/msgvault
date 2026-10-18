@@ -256,11 +256,11 @@ func TestConservativeEndCountUntilRdate(t *testing.T) {
 		assertions.True(bounded)
 		assertions.Equal(instant(t, "2027-03-10T18:00:00Z"), end)
 	}
-	for _, s := range []Set{parsed(t, "RRULE:FREQ=DAILY"), {DTStart: instant(t, "2027-03-02T17:00:00Z"), RRules: []string{"RRULE:invalid"}}} {
-		_, bounded := ConservativeEnd(t.Context(), s, time.Hour, 0, 100)
-		assertions.False(bounded)
-	}
-	_, bounded := ConservativeEnd(t.Context(), parsed(t, "RRULE:FREQ=DAILY;COUNT=101"), time.Hour, 0, 100)
+	_, err := ParseSet(instant(t, "2027-03-02T17:00:00Z"), false, "", time.UTC, []string{"RRULE:invalid"})
+	require.ErrorIs(t, err, ErrUnsupportedRecurrence)
+	_, bounded := ConservativeEnd(t.Context(), parsed(t, "RRULE:FREQ=DAILY"), time.Hour, 0, 100)
+	assertions.False(bounded)
+	_, bounded = ConservativeEnd(t.Context(), parsed(t, "RRULE:FREQ=DAILY;COUNT=101"), time.Hour, 0, 100)
 	assertions.False(bounded)
 }
 

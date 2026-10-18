@@ -6,7 +6,6 @@ import type { Attendee } from "./attendee";
 export interface CalendarOccurrence {
   all_day: boolean;
   attendees: Attendee[];
-  cancelled: boolean;
   deleted_from_source: boolean;
   end: string;
   end_date: string;

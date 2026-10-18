@@ -35,6 +35,8 @@ func newCalendarEventsCommand(open calendarEventsOpen) *cobra.Command {
 	command.Flags().StringVar(&from, "from", "", "window start: YYYY-MM-DD or RFC3339")
 	command.Flags().StringVar(&to, "to", "", "exclusive window end: YYYY-MM-DD or RFC3339")
 	command.Flags().BoolVar(&jsonOutput, "json", false, "print occurrences and attendees as JSON")
+	_ = command.MarkFlagRequired("from")
+	_ = command.MarkFlagRequired("to")
 	command.RunE = func(cmd *cobra.Command, _ []string) error {
 		for _, name := range []string{"account", "dry-run", "read-only", "send-updates"} {
 			if cmd.Flags().Changed(name) {
@@ -43,16 +45,14 @@ func newCalendarEventsCommand(open calendarEventsOpen) *cobra.Command {
 		}
 		bounds := make([]time.Time, 2)
 		for i, value := range []string{from, to} {
-			dt, err := parseCalendarBound(value, "", len(value) == len(time.DateOnly))
-			if err != nil {
-				return usageErr(cmd, err)
+			var err error
+			if len(value) == len(time.DateOnly) {
+				bounds[i], err = time.ParseInLocation(time.DateOnly, value, time.Local)
+			} else {
+				bounds[i], err = time.Parse(time.RFC3339, value)
 			}
-			bounds[i] = dt.DateTime
-			if dt.IsAllDay() {
-				bounds[i], err = time.ParseInLocation(time.DateOnly, dt.Date, time.Local)
-				if err != nil {
-					return usageErr(cmd, err)
-				}
+			if err != nil {
+				return usageErr(cmd, fmt.Errorf("--%s: use YYYY-MM-DD or RFC3339 with an offset", []string{"from", "to"}[i]))
 			}
 		}
 		if !bounds[1].After(bounds[0]) {
@@ -112,9 +112,9 @@ func newCalendarEventsCommand(open calendarEventsOpen) *cobra.Command {
 			}
 		}
 		if len(page.Unexpandable) > 0 {
-			noun := "repeating events"
+			noun := "events"
 			if len(page.Unexpandable) == 1 {
-				noun = "repeating event"
+				noun = "event"
 			}
 			if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "%d %s could not be expanded: ", len(page.Unexpandable), noun); err != nil {
 				return fmt.Errorf("write calendar events: %w", err)

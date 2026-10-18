@@ -1142,7 +1142,6 @@ func (c CalendarEventTarget) Validate() error {
 type CalendarOccurrence struct {
 	AllDay            bool       `json:"all_day"`
 	Attendees         []Attendee `json:"attendees" validate:"required"`
-	Cancelled         bool       `json:"cancelled"`
 	DeletedFromSource bool       `json:"deleted_from_source"`
 	End               time.Time  `json:"end" validate:"required"`
 	EndDate           string     `json:"end_date" validate:"required"`

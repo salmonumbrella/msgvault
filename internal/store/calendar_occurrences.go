@@ -23,7 +23,6 @@ type CalendarOccurrence struct {
 	StartDate         string              `json:"start_date"`
 	EndDate           string              `json:"end_date"`
 	Status            string              `json:"status"`
-	Cancelled         bool                `json:"cancelled"`
 	DeletedFromSource bool                `json:"deleted_from_source"`
 	Attendees         []calevent.Attendee `json:"attendees"`
 }
@@ -85,7 +84,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 		if attendees == nil {
 			attendees = []calevent.Attendee{}
 		}
-		page.Occurrences = append(page.Occurrences, CalendarOccurrence{MessageID: row.MessageID, SeriesMessageID: seriesID, SourceID: row.SourceID, Subject: row.Subject, Start: o.Start, End: o.End, AllDay: o.AllDay, StartDate: o.StartDate, EndDate: o.EndDate, Status: status, Cancelled: o.Cancelled, DeletedFromSource: row.DeletedFromSource, Attendees: attendees})
+		page.Occurrences = append(page.Occurrences, CalendarOccurrence{MessageID: row.MessageID, SeriesMessageID: seriesID, SourceID: row.SourceID, Subject: row.Subject, Start: o.Start, End: o.End, AllDay: o.AllDay, StartDate: o.StartDate, EndDate: o.EndDate, Status: status, DeletedFromSource: row.DeletedFromSource, Attendees: attendees})
 	}
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
@@ -99,8 +98,12 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 			}
 			if e.Start != nil && e.End != nil {
 				add(row, 0, calrecur.Occurrence{Start: *e.Start, End: *e.End, AllDay: e.AllDay, StartDate: e.StartDate, EndDate: e.EndDate, Cancelled: e.Status == "cancelled"})
-			} else if e.Kind == "exception" {
-				page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: "missing series master and event bounds"})
+			} else {
+				reason := "missing event bounds"
+				if e.Kind == "exception" {
+					reason = "missing series master and event bounds"
+				}
+				page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: reason})
 			}
 		case "series":
 			fail := func() {
@@ -193,7 +196,11 @@ func calendarEventZone(e calevent.Event) (*time.Location, error) {
 // All-day dates belong to the query's civil days, independent of the calendar zone.
 func calendarOccurrenceOverlaps(o calrecur.Occurrence, from, to time.Time) bool {
 	if o.AllDay {
-		return o.StartDate < to.Format(time.DateOnly) && o.EndDate > from.Format(time.DateOnly)
+		endDate := to.Format(time.DateOnly)
+		if to.Hour() != 0 || to.Minute() != 0 || to.Second() != 0 || to.Nanosecond() != 0 {
+			endDate = to.AddDate(0, 0, 1).Format(time.DateOnly)
+		}
+		return o.StartDate < endDate && o.EndDate > from.Format(time.DateOnly)
 	}
 	return o.Start.Before(to) && o.End.After(from)
 }

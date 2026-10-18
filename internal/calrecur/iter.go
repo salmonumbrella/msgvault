@@ -61,11 +61,11 @@ func iter(ctx context.Context, s Set, until time.Time, budgetCounter *candidateB
 		return d, true
 	}
 	streams := []stream{{next: func() (time.Time, bool, error) { return budgetCounter.pull(dateNext) }}}
-	for _, line := range s.RRules {
+	for _, opt := range s.rules {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		rule, err := s.ruleIterator(line, ruleUntil, budgetCounter)
+		rule, err := s.ruleIterator(opt, ruleUntil, budgetCounter)
 		if err != nil {
 			return err
 		}

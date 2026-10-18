@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"go.kenn.io/msgvault/internal/gcal"
+	"go.kenn.io/msgvault/internal/gcal/gcalmodel"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
 )
@@ -938,6 +940,45 @@ func TestSnippet(t *testing.T) {
 			assert.Equal(tt.want, got)
 			assert.LessOrEqual(len(got), maxSnippetBytes)
 			assert.True(utf8.ValidString(got))
+		})
+	}
+}
+
+func TestSparseStandaloneCancellationOccurrences(t *testing.T) {
+	for _, known := range []bool{false, true} {
+		t.Run(strconv.FormatBool(known), func(t *testing.T) {
+			assertions := assert.New(t)
+			requirements := require.New(t)
+
+			s, st := newSyncer(t, gcal.NewMockAPI(), Options{})
+			src, err := st.GetOrCreateSource("gcal", "calendar@example.com")
+			requirements.NoError(err)
+			cal := gcal.Calendar{ID: "primary", TimeZone: "UTC"}
+			from := time.Date(2027, 3, 2, 0, 0, 0, 0, time.UTC)
+			if known {
+				_, err = s.ingestEvent(src.ID, cal, gcal.Event{ID: "single", Status: "confirmed", Start: gcal.EventDateTime{DateTime: from.Add(9 * time.Hour)}, End: gcal.EventDateTime{DateTime: from.Add(10 * time.Hour)}})
+				requirements.NoError(err)
+			}
+			ev, err := gcalmodel.DecodeEvent([]byte(`{"id":"single","status":"cancelled"}`))
+			requirements.NoError(err)
+			id, _, err := s.flagCancelled(src.ID, cal, ev)
+			requirements.NoError(err)
+			var kind, status string
+			var start, end sql.NullTime
+			requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT kind, status, start_at, end_at FROM calendar_events WHERE message_id = ?`), id).Scan(&kind, &status, &start, &end))
+			assertions.Equal("single", kind)
+			assertions.Equal("cancelled", status)
+			assertions.Equal(known, start.Valid)
+			assertions.Equal(known, end.Valid)
+			page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+			requirements.NoError(err)
+			if known {
+				requirements.Len(page.Occurrences, 1)
+				assertions.Equal("cancelled", page.Occurrences[0].Status)
+				assertions.Equal(id, page.Occurrences[0].MessageID)
+			} else {
+				assertions.Equal([]store.CalendarUnexpandable{{MessageID: id, Reason: "missing event bounds"}}, page.Unexpandable)
+			}
 		})
 	}
 }

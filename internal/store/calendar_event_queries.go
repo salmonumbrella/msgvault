@@ -21,7 +21,6 @@ type CalendarEventRow struct {
 	Subject             string
 	DeletedFromSource   bool
 	Event               calevent.Event
-	RecurrenceEndAt     *time.Time
 	RecurrenceError     string
 }
 
@@ -33,7 +32,7 @@ const calendarEventSelect = `SELECT e.message_id, m.source_id, COALESCE(m.subjec
  m.deleted_from_source_at IS NOT NULL,
  e.provider_event_id, e.series_provider_id, e.kind, e.original_start_at, e.original_start_date,
  e.status, e.all_day, e.start_at, e.end_at, e.start_date, e.end_date,
- e.event_time_zone, e.calendar_time_zone, e.recurrence_json, e.recurrence_end_at, e.recurrence_error
+ e.event_time_zone, e.calendar_time_zone, e.recurrence_json, e.recurrence_error
  ` + calendarEventFrom
 
 const calendarEventFrom = `FROM calendar_events e JOIN messages m ON m.id = e.message_id
@@ -76,11 +75,11 @@ func queryCalendarEventRows(ctx context.Context, r *loggedDB, predicate string, 
 	for result.Next() {
 		var row CalendarEventRow
 		e := &row.Event
-		var original, start, end, recurrenceEnd sql.NullTime
+		var original, start, end sql.NullTime
 		var originalDate, recurrence string
 		err := result.Scan(&row.MessageID, &row.SourceID, &row.Subject, &row.DeletedFromSource,
 			&e.ProviderEventID, &e.SeriesProviderID, &e.Kind, &original, &originalDate, &e.Status, &e.AllDay,
-			&start, &end, &e.StartDate, &e.EndDate, &e.EventTimeZone, &e.CalendarTimeZone, &recurrence, &recurrenceEnd, &row.RecurrenceError)
+			&start, &end, &e.StartDate, &e.EndDate, &e.EventTimeZone, &e.CalendarTimeZone, &recurrence, &row.RecurrenceError)
 		if err != nil {
 			_ = result.Close()
 			return nil, fmt.Errorf("scan calendar event: %w", err)
@@ -97,10 +96,6 @@ func queryCalendarEventRows(ctx context.Context, r *loggedDB, predicate string, 
 		if end.Valid {
 			value := end.Time.UTC()
 			e.End = &value
-		}
-		if recurrenceEnd.Valid {
-			value := recurrenceEnd.Time.UTC()
-			row.RecurrenceEndAt = &value
 		}
 		if err := json.Unmarshal([]byte(recurrence), &e.Recurrence); err != nil {
 			_ = result.Close()
@@ -166,15 +161,17 @@ func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, from, to time.T
 		return nil, err
 	}
 	// Standalones count toward the request budget; cap them before materializing
-	// more candidates than any occurrence reader could consider.
-	singles, err := queryCalendarEventRowsWithinBudget(ctx, r, `e.kind = 'single' AND e.start_at < ? AND e.end_at >= ?`, []any{upper, lower}, calrecur.RequestReadBudget)
+	// more candidates than any occurrence reader could consider. Unknown bounds
+	// remain candidates so the reader can report them.
+	singles, err := queryCalendarEventRowsWithinBudget(ctx, r, `e.kind = 'single' AND ((e.start_at < ? AND e.end_at >= ?) OR e.start_at IS NULL OR e.end_at IS NULL)`, []any{upper, lower}, calrecur.RequestReadBudget)
 	if err != nil {
 		return nil, err
 	}
+	// Exceptions can remove an original occurrence from the window or move into it.
 	predicate := `e.kind = 'exception' AND ((e.start_at < ? AND e.end_at >= ?) OR
-  ((e.start_at IS NULL OR e.end_at IS NULL) AND ((e.original_start_at >= ? AND e.original_start_at < ?) OR
+  (e.original_start_at >= ? AND e.original_start_at < ?) OR
    (e.original_start_date >= ? AND e.original_start_date < ?) OR
-   (e.original_start_at IS NULL AND e.original_start_date = ''))))`
+   (e.original_start_at IS NULL AND e.original_start_date = ''))`
 	exceptions, err := queryCalendarEventRowsWithinBudget(ctx, r, predicate, []any{upper, lower, lower, upper, lower.Format(time.DateOnly), upper.AddDate(0, 0, 1).Format(time.DateOnly)}, maxCalendarExceptions)
 	if err != nil {
 		return nil, err
@@ -207,30 +204,6 @@ func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, from, to time.T
 				masters = append(masters, row)
 				seriesCount++
 				if seriesCount > maxCalendarSeries {
-					return nil, ErrQueryTooBroad
-				}
-			}
-		}
-	}
-	exceptionCount := len(exceptions)
-	for start := 0; start < len(masters); start += 500 {
-		end := min(start+500, len(masters))
-		args := make([]any, end-start)
-		for i := start; i < end; i++ {
-			args[i-start] = masters[i].MessageID
-		}
-		predicate := `e.kind = 'exception' AND EXISTS (SELECT 1 FROM calendar_events x JOIN messages mx ON mx.id = x.message_id
-   WHERE x.message_id IN (` + placeholders(len(args)) + `)
-   AND x.provider_event_id = e.series_provider_id AND mx.source_id = m.source_id)`
-		children, err := queryCalendarEventRowsWithinBudget(ctx, r, predicate, args, maxCalendarExceptions)
-		if err != nil {
-			return nil, err
-		}
-		for _, row := range children {
-			if _, exists := byID[row.MessageID]; !exists {
-				byID[row.MessageID] = row
-				exceptionCount++
-				if exceptionCount > maxCalendarExceptions {
 					return nil, ErrQueryTooBroad
 				}
 			}

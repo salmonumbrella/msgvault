@@ -1360,8 +1360,6 @@ components:
           items:
             $ref: "#/components/schemas/Attendee"
           type: array
-        cancelled:
-          type: boolean
         deleted_from_source:
           type: boolean
         end:
@@ -1398,7 +1396,6 @@ components:
         - start_date
         - end_date
         - status
-        - cancelled
         - deleted_from_source
         - attendees
       type: object

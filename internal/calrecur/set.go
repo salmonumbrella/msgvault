@@ -22,7 +22,7 @@ type Set struct {
 	AllDay          bool
 	StartDate       string
 	Zone            *time.Location
-	RRules          []string
+	rules           []rrule.ROption
 	RDates, ExDates []Identity
 }
 
@@ -210,7 +210,7 @@ func unsupported(line string, err error) error {
 	return fmt.Errorf("%w: %q: %w", ErrUnsupportedRecurrence, line, err)
 }
 
-func (s Set) rule(line string, until time.Time) (*rrule.RRule, error) {
+func (s Set) parseRule(line string) (*rrule.ROption, error) {
 	if !strings.HasPrefix(line, "RRULE:") || strings.ContainsAny(line, "\r\n") {
 		return nil, unsupported(line, errors.New("expected RRULE"))
 	}
@@ -240,15 +240,11 @@ func (s Set) rule(line string, until time.Time) (*rrule.RRule, error) {
 	if err := supportedRule(opt, seen, start); err != nil {
 		return nil, unsupported(line, err)
 	}
-	if !until.IsZero() && (opt.Until.IsZero() || until.Before(opt.Until)) {
-		opt.Until = until
-	}
 	opt.Dtstart = start
-	rule, err := rrule.NewRRule(*opt)
-	if err != nil {
+	if _, err := rrule.NewRRule(*opt); err != nil {
 		return nil, unsupported(line, err)
 	}
-	return rule, nil
+	return opt, nil
 }
 
 // UNTIL is checked only after rrule-go finds a matching date. Verify that
@@ -467,10 +463,11 @@ func ParseSet(dtstart time.Time, allDay bool, startDate string, zone *time.Locat
 	}
 	for _, line := range lines {
 		if strings.HasPrefix(line, "RRULE:") {
-			if _, err := s.rule(line, time.Time{}); err != nil {
+			opt, err := s.parseRule(line)
+			if err != nil {
 				return Set{}, err
 			}
-			s.RRules = append(s.RRules, line)
+			s.rules = append(s.rules, *opt)
 			continue
 		}
 		ids, property, err := s.parseDates(line)

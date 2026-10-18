@@ -25,7 +25,7 @@ Repeating events expand into occurrences. Edited occurrences appear at their new
 
 Date-only bounds use midnight in your machine's time zone. You can also pass RFC3339 timestamps with offsets. The end is exclusive and must follow the start. Timed events print in your machine's time zone; all-day events show their dates, with an exclusive end date. The ID identifies the effective archive message, including the edited or cancelled copy. JSON carries the series master ID separately in `series_message_id`.
 
-JSON includes attendees, roles, RSVPs, and series that could not be expanded. The table prints a warning for those series. Narrow the window when the command reports that a query is too broad.
+JSON includes status, attendees, roles, RSVPs, and events that could not be expanded. The table prints a warning for those events. Narrow the window when the command reports that a query is too broad.
 
 This archive read requires daemon API schema 3.24.0 or newer and owner access. Use the live commands below for `--account`, `--dry-run`, `--read-only`, and `--send-updates`. See the [CLI reference](https://msgvault.io/docs/cli-reference/#calendar) for the command contract.
 

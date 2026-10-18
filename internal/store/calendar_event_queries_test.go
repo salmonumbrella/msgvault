@@ -61,17 +61,26 @@ func bulkCalendarCandidates(t *testing.T, st *Store, sourceID, conversationID in
 
 func TestCalendarEventRowsManyExceptionsBounded(t *testing.T) {
 	assertions := assert.New(t)
-	st := newCalendarStore(t)
+	st := newRFC822IDBackfillBackendStore(t)
 	data, _ := calendarFixture(t, st, "cap-master", `{"id":"cap-series","start":{"date":"1970-01-01"},"end":{"date":"1970-01-02"},"recurrence":["RRULE:FREQ=DAILY"]}`)
 	bulkCalendarCandidates(t, st, data.Message.SourceID, data.Message.ConversationID, "exception", 20001)
 	rows, err := calendarWindow(t, st, "2027-03-14T00:00:00Z", "2027-03-15T00:00:00Z")
-	require.ErrorIs(t, err, ErrQueryTooBroad)
-	assertions.Empty(rows)
+	require.NoError(t, err)
+	assertions.Len(rows, 1)
+	from := time.Date(2027, 3, 14, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	require.NoError(t, err)
+	assertions.Len(page.Occurrences, 1)
+	// The same budget still rejects exceptions that actually affect the window.
+	_, err = st.db.Exec(`UPDATE calendar_events SET original_start_date = '2027-03-14' WHERE kind = 'exception'`)
+	require.NoError(t, err)
+	_, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	assertions.ErrorIs(err, ErrQueryTooBroad)
 }
 
 func TestCalendarEventRowsHardSeriesCap(t *testing.T) {
 	assertions := assert.New(t)
-	st := newCalendarStore(t)
+	st := newRFC822IDBackfillBackendStore(t)
 	data, _ := calendarFixture(t, st, "cap-master", calendarRaw)
 	bulkCalendarCandidates(t, st, data.Message.SourceID, data.Message.ConversationID, "series", 2001)
 	rows, err := calendarWindow(t, st, "2027-03-14T00:00:00Z", "2027-03-15T00:00:00Z")
@@ -80,7 +89,7 @@ func TestCalendarEventRowsHardSeriesCap(t *testing.T) {
 }
 
 func TestCalendarEventRowsBudgetRejectsBeforeDecoding(t *testing.T) {
-	st := newCalendarStore(t)
+	st := newRFC822IDBackfillBackendStore(t)
 	calendarFixture(t, st, "one", calendarRaw)
 	calendarFixture(t, st, "two", calendarRaw)
 	_, err := st.db.Exec(`UPDATE calendar_events SET recurrence_json = 'invalid'`)
@@ -95,7 +104,7 @@ func TestCalendarEventSourceZoneRebuild(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 
-	st := newCalendarStore(t)
+	st := newRFC822IDBackfillBackendStore(t)
 	data, id := calendarFixture(t, st, "zone", `{"id":"all-day","start":{"date":"2027-03-14"},"end":{"date":"2027-03-15"}}`)
 	requirements.NoError(st.UpdateSourceSyncConfig(data.Message.SourceID, `{"time_zone":"America/Los_Angeles"}`))
 	row := calendarRows(t, st, id)[0]
@@ -109,4 +118,23 @@ func TestCalendarEventSourceZoneRebuild(t *testing.T) {
 	row = calendarRows(t, st, id)[0]
 	assertions.Equal(dest.ID, row.SourceID)
 	assertions.Equal("2027-03-13T15:00:00Z", row.Event.Start.Format(time.RFC3339))
+}
+
+func TestCalendarExceptionsOriginalAndEffectiveWindows(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+
+	st := newRFC822IDBackfillBackendStore(t)
+	_, master := calendarFixture(t, st, "master", `{"id":"weekly","start":{"dateTime":"2027-03-02T09:00:00Z"},"end":{"dateTime":"2027-03-02T10:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=2"]}`)
+	_, moved := calendarFixture(t, st, "moved", `{"id":"moved","recurringEventId":"weekly","originalStartTime":{"dateTime":"2027-03-02T09:00:00Z"},"start":{"dateTime":"2027-04-02T09:00:00Z"},"end":{"dateTime":"2027-04-02T10:00:00Z"}}`)
+	from := time.Date(2027, 3, 2, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	requirements.NoError(err)
+	assertions.Empty(page.Occurrences, "the original occurrence moved outside the window")
+	from = from.AddDate(0, 1, 0)
+	page, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	requirements.NoError(err)
+	requirements.Len(page.Occurrences, 1)
+	assertions.Equal(moved, page.Occurrences[0].MessageID)
+	assertions.Equal(master, page.Occurrences[0].SeriesMessageID)
 }

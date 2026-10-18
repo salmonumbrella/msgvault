@@ -38,7 +38,7 @@ func TestCalendarEventsCommand(t *testing.T) {
 		want, wantErr, wantWarning string
 		err                        error
 	}{
-		{name: "table", page: store.CalendarOccurrencePage{Occurrences: []store.CalendarOccurrence{{MessageID: 378, SeriesMessageID: 377, Subject: "Standup", Status: "confirmed", Start: start, End: start.Add(time.Hour)}, {MessageID: 412, Subject: "Offsite", Status: "confirmed", AllDay: true, StartDate: "2027-03-03", EndDate: "2027-03-04"}}, Unexpandable: []store.CalendarUnexpandable{{MessageID: 500, Reason: "unsupported recurrence"}}}, want: "Standup", wantWarning: "1 repeating event could not be expanded: message 500 (unsupported recurrence)"},
+		{name: "table", page: store.CalendarOccurrencePage{Occurrences: []store.CalendarOccurrence{{MessageID: 378, SeriesMessageID: 377, Subject: "Standup", Status: "confirmed", Start: start, End: start.Add(time.Hour)}, {MessageID: 412, Subject: "Offsite", Status: "confirmed", AllDay: true, StartDate: "2027-03-03", EndDate: "2027-03-04"}}, Unexpandable: []store.CalendarUnexpandable{{MessageID: 500, Reason: "unsupported recurrence"}}}, want: "Standup", wantWarning: "1 event could not be expanded: message 500 (unsupported recurrence)"},
 		{name: "empty", want: "No archived calendar events from 2027-03-01 to 2027-04-01."},
 		{name: "json", args: []string{"--json"}, page: store.CalendarOccurrencePage{Occurrences: []store.CalendarOccurrence{{MessageID: 378, SeriesMessageID: 377, Subject: "Standup", Start: start, End: start.Add(time.Hour)}}, Unexpandable: []store.CalendarUnexpandable{}}, want: `"message_id":378`},
 		{name: "too broad", err: &daemonclient.APIError{Status: 400, Code: "query_too_broad", Message: "window too broad"}, wantErr: "calendar query is too broad; narrow the window"},
@@ -105,4 +105,28 @@ func TestCalendarEventsRFC3339Bounds(t *testing.T) {
 	cmd.SetArgs([]string{"--from", "2027-03-01T12:00:00-05:00", "--to", "2027-03-02T12:00:00-05:00"})
 	require.NoError(t, cmd.Execute())
 	assert.Equal(t, "2027-03-01T17:00:00Z", fake.from.UTC().Format(time.RFC3339))
+}
+
+func TestCalendarEventsInvalidBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"missing from", []string{"--to", "2027-03-03"}, `required flag(s) "from" not set`},
+		{"missing to", []string{"--from", "2027-03-02"}, `required flag(s) "to" not set`},
+		{"local from", []string{"--from", "2027-03-02T09:00", "--to", "2027-03-03"}, "--from: use YYYY-MM-DD or RFC3339 with an offset"},
+		{"local to", []string{"--from", "2027-03-02", "--to", "2027-03-03T17:00"}, "--to: use YYYY-MM-DD or RFC3339 with an offset"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newCalendarEventsCommand(func(context.Context) (calendarEventsClient, func(), error) {
+				require.FailNow(t, "invalid bounds reached daemon")
+				return nil, nil, nil
+			})
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs(tc.args)
+			require.ErrorContains(t, cmd.Execute(), tc.want)
+		})
+	}
 }

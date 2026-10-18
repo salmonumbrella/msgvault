@@ -270,15 +270,10 @@ func conservativeEnd(ctx context.Context, s Set, duration time.Duration, duratio
 			return time.Time{}, false
 		}
 	}
-	for _, line := range s.RRules {
+	for _, opt := range s.rules {
 		if ctx.Err() != nil {
 			return time.Time{}, false
 		}
-		rule, err := s.rule(line, time.Time{})
-		if err != nil {
-			return time.Time{}, false
-		}
-		opt := rule.OrigOptions
 		if opt.Count == 0 && opt.Until.IsZero() {
 			return time.Time{}, false
 		}
@@ -286,7 +281,7 @@ func conservativeEnd(ctx context.Context, s Set, duration time.Duration, duratio
 		if until.IsZero() {
 			until = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 		}
-		iterator, err := s.ruleIterator(line, until, budgetCounter)
+		iterator, err := s.ruleIterator(opt, until, budgetCounter)
 		if err != nil {
 			return time.Time{}, false
 		}
