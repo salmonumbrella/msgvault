@@ -305,6 +305,40 @@ func TestArchiverUnchangedDetectsSnapshotChangesAndPreservesIdenticalRows(t *tes
 	}
 }
 
+func TestArchiverUnchangedCanonicalMergedParticipantsPreservesRevision(t *testing.T) {
+	checks, must := assert.New(t), require.New(t)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource("meeting_import", "work")
+	must.NoError(err)
+	snapshot := testSnapshot(source.ID)
+	snapshot.Organizer = nil
+	snapshot.Attendees = []Person{{Phone: "+16045550100"}, {Phone: "+16045550101"}}
+	archiver := New(st)
+	first, err := archiver.Upsert(t.Context(), snapshot, UpsertOptions{})
+	must.NoError(err)
+	for i, email := range []string{"attendee-a@example.com", "attendee-b@example.com"} {
+		canonical, err := st.EnsureParticipant(email, "", "example.com")
+		must.NoError(err)
+		phone, err := st.PhoneParticipantContext(t.Context(), snapshot.Attendees[i].Phone)
+		must.NoError(err)
+		must.NotZero(phone)
+		must.NoError(st.MergeParticipants(phone, canonical))
+	}
+	before, err := st.DerivedDataRevision()
+	must.NoError(err)
+	unchanged, err := archiver.Unchanged(t.Context(), snapshot)
+	must.NoError(err)
+	checks.True(unchanged)
+	second, err := archiver.Upsert(t.Context(), snapshot, UpsertOptions{})
+	must.NoError(err)
+	checks.Equal(first.MessageID, second.MessageID)
+	checks.False(second.Created)
+	checks.False(second.Changed)
+	after, err := st.DerivedDataRevision()
+	must.NoError(err)
+	checks.Equal(before, after)
+}
+
 func TestArchiverWithoutOrganizerDoesNotInventSender(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)

@@ -283,10 +283,28 @@ func (a *Archiver) storedMatches(ctx context.Context, snapshot Snapshot, existin
 			return false, nil
 		}
 	}
-	// A zero participant ID is resolved from its canonical address when the
-	// write is needed. Compare the normalized roster here so new room/contact
-	// evidence cannot leave stale recipient and conversation projections.
-	match, err := a.store.MessageRecipientsMatchContext(ctx, existing.ID, recipients(organizer, attendees))
+	// Resolve identities before recipient deduplication: distinct phone-only
+	// attendees share an empty envelope email but can be different people.
+	people := append([]Person{organizer}, attendees...)
+	for i := range people {
+		person := &people[i]
+		if person.ParticipantID != 0 || person.PrimaryKey() == "" {
+			continue
+		}
+		var err error
+		if person.Email != "" {
+			person.ParticipantID, err = a.store.EmailParticipantContext(ctx, person.Email)
+		} else {
+			person.ParticipantID, err = a.store.PhoneParticipantContext(ctx, person.Phone)
+		}
+		if err != nil {
+			return false, fmt.Errorf("resolve meeting participant: %w", err)
+		}
+		if person.ParticipantID == 0 {
+			return false, nil
+		}
+	}
+	match, err := a.store.MessageRecipientsMatchContext(ctx, existing.ID, recipients(people[0], people[1:]))
 	if err != nil {
 		return false, fmt.Errorf("compare meeting recipients: %w", err)
 	}
