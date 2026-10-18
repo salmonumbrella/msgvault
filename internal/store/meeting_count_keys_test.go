@@ -102,9 +102,31 @@ func TestCalendarSourceZoneChangeJournalsMeetingLinks(t *testing.T) {
 	if !st.IsPostgreSQL() {
 		var journaled int
 		requirements.NoError(st.db.QueryRow(`SELECT count(*) FROM cache_related_change_journal
-         WHERE dataset = 'meeting_links' AND message_id = ? AND seq > ?`, note, seq).Scan(&journaled))
+         WHERE dataset = 'meeting_links' AND message_id = 0 AND seq > ?`, seq).Scan(&journaled))
 		assertions.Equal(1, journaled, "the source-config transaction invalidates cached meeting keys")
 	}
+}
+
+func TestCalendarMutationsJournalLinearMeetingLinks(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	if st.IsPostgreSQL() {
+		t.Skip("SQLite cache journal")
+	}
+	for i := range 5 {
+		projectionFixture(t, st, fmt.Sprintf("note-%d", i), "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org"}}`)
+	}
+	var baseline int64
+	requirements.NoError(st.DB().QueryRow(`SELECT coalesce(max(seq), 0) FROM cache_related_change_journal`).Scan(&baseline))
+	for i := range 3 {
+		key := fmt.Sprintf("event-%d", i)
+		calendarFixture(t, st, key, singleLinkRaw(key, "shared@example.org"))
+	}
+	var total, global int
+	requirements.NoError(st.DB().QueryRow(`SELECT count(*), count(*) FILTER (WHERE message_id = 0)
+		FROM cache_related_change_journal WHERE dataset = 'meeting_links' AND seq > ?`, baseline).Scan(&total, &global))
+	assertions.Equal(3, total, "each calendar mutation writes one invalidation regardless of transcript count")
+	assertions.Equal(3, global, "calendar evidence invalidates all meeting keys")
 }
 
 func TestMeetingCountKeysJournalSnapshot(t *testing.T) {

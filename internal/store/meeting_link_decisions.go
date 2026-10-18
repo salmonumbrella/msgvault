@@ -235,14 +235,7 @@ func (s *Store) journalMeetingLinks(ctx context.Context, tx *loggedTx, memberID 
 // journalCalendarMeetingLinks invalidates cached count keys after calendar
 // projection changes. Calendar evidence can alter automatic links for any
 // transcript key and can make a previously stored decision stop resolving.
+// Message ID zero marks the complete meeting-key dataset dirty.
 func (s *Store) journalCalendarMeetingLinks(ctx context.Context, tx *loggedTx) error {
-	if s.IsPostgreSQL() {
-		return nil
-	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO cache_related_change_journal(dataset,message_id)
-         SELECT 'meeting_links', m.id FROM messages m
-         WHERE m.message_type = 'meeting_transcript' AND m.deleted_at IS NULL
-           AND (EXISTS (SELECT 1 FROM meeting_link_key k WHERE k.message_id = m.id)
-             OR EXISTS (SELECT 1 FROM meeting_link_decisions d WHERE d.member_message_id = m.id))`)
-	return err
+	return s.journalMeetingLinks(ctx, tx, 0)
 }
