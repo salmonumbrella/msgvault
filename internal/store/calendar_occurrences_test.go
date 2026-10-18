@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/calrecur"
 )
 
 func TestListCalendarOccurrences(t *testing.T) {
@@ -97,9 +98,40 @@ func TestListCalendarOccurrencesSharesRequestBudget(t *testing.T) {
 			assertions.Contains(page.Unexpandable[0].Reason, "budget")
 		}
 	}
-	_, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 1, 0))
-	requirements.ErrorIs(err, ErrQueryTooBroad)
-	requirements.ErrorContains(err, "long-running series count steps from their start; a narrower window may not reduce the work")
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 1, 0))
+	requirements.NoError(err)
+	requirements.Len(page.Unexpandable, 10)
+	assertions.Contains(page.Unexpandable[9].Reason, "request work limit reached")
+}
+
+func TestListCalendarOccurrencesRequestBudgetKeepsCompletedResults(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, completed := calendarFixture(t, st, "completed", `{"id":"completed","start":{"dateTime":"2027-03-02T17:00:00Z"},"end":{"dateTime":"2027-03-02T18:00:00Z"},"recurrence":["RRULE:FREQ=DAILY;COUNT=2"]}`)
+	_, completedException := calendarFixture(t, st, "completed-exception", `{"id":"completed-exception","recurringEventId":"completed","originalStartTime":{"dateTime":"2027-03-03T17:00:00Z"},"status":"cancelled"}`)
+	var interrupted int64
+	for i := range calrecur.RequestReadBudget / calrecur.SeriesReadBudget {
+		_, interrupted = calendarFixture(t, st, fmt.Sprintf("long-%d", i), fmt.Sprintf(`{"id":"long-%d","start":{"dateTime":"1800-01-01T17:00:00Z"},"end":{"dateTime":"1800-01-01T18:00:00Z"},"recurrence":["RRULE:FREQ=DAILY"]}`, i))
+	}
+	_, interruptedException := calendarFixture(t, st, "interrupted-exception", `{"id":"interrupted-exception","recurringEventId":"long-9","originalStartTime":{"dateTime":"2027-03-02T17:00:00Z"},"status":"cancelled"}`)
+	_, later := calendarFixture(t, st, "later", `{"id":"later","start":{"dateTime":"2027-03-02T17:00:00Z"},"end":{"dateTime":"2027-03-02T18:00:00Z"},"recurrence":["RRULE:FREQ=DAILY;COUNT=1"]}`)
+	_, laterException := calendarFixture(t, st, "later-exception", `{"id":"later-exception","recurringEventId":"later","originalStartTime":{"dateTime":"2027-03-02T17:00:00Z"},"status":"cancelled"}`)
+	_, single := calendarFixture(t, st, "single", calendarRaw)
+	// Include the long series' early occurrences to catch partial expansion leaks.
+	from := time.Date(1800, 1, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2027, 4, 1, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, to)
+	requirements.NoError(err)
+	var ids []int64
+	for _, occurrence := range page.Occurrences {
+		ids = append(ids, occurrence.MessageID)
+	}
+	assertions.ElementsMatch([]int64{completed, completedException, interruptedException, laterException, single}, ids)
+	requirements.Len(page.Unexpandable, 11)
+	assertions.Equal([]CalendarUnexpandable{
+		{MessageID: interrupted, Reason: "request work limit reached; long-running series count their steps from their start"},
+		{MessageID: later, Reason: "request work limit reached; long-running series count their steps from their start"},
+	}, page.Unexpandable[9:])
 }
 
 func TestListCalendarOccurrencesOrphanExceptions(t *testing.T) {

@@ -54,7 +54,8 @@ func nominal(s Set, id Identity, duration time.Duration, durationDays int) (Occu
 	return o, nil
 }
 
-func effective(s Set, e Exception, duration time.Duration, durationDays int) (Occurrence, error) {
+// EffectiveException resolves an archived exception without iterating its series.
+func EffectiveException(s Set, e Exception, duration time.Duration, durationDays int) (Occurrence, error) {
 	start, err := s.identityStart(e.Original)
 	if err != nil {
 		return Occurrence{}, unsupported("original identity", err)
@@ -179,7 +180,7 @@ func expand(ctx context.Context, s Set, duration time.Duration, durationDays int
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		o, err := effective(s, e, duration, durationDays)
+		o, err := EffectiveException(s, e, duration, durationDays)
 		if err != nil {
 			return nil, err
 		}

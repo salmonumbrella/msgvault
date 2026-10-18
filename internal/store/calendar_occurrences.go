@@ -83,6 +83,46 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 		}
 		page.Occurrences = append(page.Occurrences, CalendarOccurrence{MessageID: row.MessageID, SeriesMessageID: seriesID, SourceID: row.SourceID, Subject: row.Subject, Start: o.Start, End: o.End, AllDay: o.AllDay, StartDate: o.StartDate, EndDate: o.EndDate, Status: status, DeletedFromSource: row.DeletedFromSource, Attendees: attendees})
 	}
+	addSeriesOccurrence := func(row CalendarEventRow, o calrecur.Occurrence) error {
+		effective := row
+		if o.ExceptionRef != 0 {
+			effective = byID[o.ExceptionRef]
+			if effective.Event.Status == "cancelled" {
+				effective, err = inheritCalendarCancellation(ctx, s.db, effective, row)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if row.Event.Status == "cancelled" {
+			o.Cancelled = true
+		}
+		add(effective, row.MessageID, o)
+		return nil
+	}
+	requestLimited := func(row CalendarEventRow) error {
+		page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: "request work limit reached; long-running series count their steps from their start"})
+		// Archived exceptions remain readable without generating the series.
+		set, duration, days, err := prepareCalendarRecurrence(row.Event)
+		if err == nil {
+			exc, err := calendarRecurrenceExceptions(exceptions[seriesKey{row.SourceID, row.Event.ProviderEventID}])
+			if err == nil {
+				for _, exception := range exc {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					o, err := calrecur.EffectiveException(set, exception, duration, days)
+					if err != nil {
+						continue
+					}
+					if err := addSeriesOccurrence(row, o); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		return nil
+	}
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
 			return page, err
@@ -103,6 +143,12 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 				page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: reason})
 			}
 		case "series":
+			if remaining <= 0 {
+				if err := requestLimited(row); err != nil {
+					return page, err
+				}
+				continue
+			}
 			fail := func() {
 				page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: "unsupported recurrence"})
 			}
@@ -128,7 +174,10 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 				}
 				if errors.Is(err, calrecur.ErrBudgetExceeded) {
 					if remaining < 0 {
-						return page, calendarRecurrenceBudgetError()
+						if err := requestLimited(row); err != nil {
+							return page, err
+						}
+						continue
 					}
 					page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: err.Error()})
 					continue
@@ -137,20 +186,9 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 				continue
 			}
 			for _, o := range occurrences {
-				effective := row
-				if o.ExceptionRef != 0 {
-					effective = byID[o.ExceptionRef]
-					if effective.Event.Status == "cancelled" {
-						effective, err = inheritCalendarCancellation(ctx, s.db, effective, row)
-						if err != nil {
-							return page, err
-						}
-					}
+				if err := addSeriesOccurrence(row, o); err != nil {
+					return page, err
 				}
-				if e.Status == "cancelled" {
-					o.Cancelled = true
-				}
-				add(effective, row.MessageID, o)
 			}
 		}
 	}
