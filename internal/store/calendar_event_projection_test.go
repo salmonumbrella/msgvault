@@ -32,7 +32,10 @@ func calendarFixture(t *testing.T, st *Store, key, raw string, calendars ...stri
 	var event struct {
 		ICalUID string `json:"iCalUID"`
 	}
-	require.NoError(t, json.Unmarshal([]byte(raw), &event))
+	// Projection failure fixtures deliberately include malformed provider data.
+	if err := json.Unmarshal([]byte(raw), &event); err != nil {
+		event.ICalUID = ""
+	}
 	data := &MessagePersistData{
 		Message:      &Message{SourceID: source.ID, SourceMessageID: key, MessageType: "calendar_event", Subject: sql.NullString{String: "Example event", Valid: true}},
 		Conversation: &ConversationPersistData{SourceConversationID: key, ConversationType: "calendar", Title: "Example event"},
