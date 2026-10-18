@@ -18,6 +18,10 @@ import (
 
 const calendarEventProjectionVersion = 1
 
+// Decode failures have no provider status. Keep a marker while retaining the
+// single kind so unknown bounds remain candidates for the occurrence reader.
+const calendarEventDecodeFailureStatus = "decode_error"
+
 func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *loggedTx, messageID int64) error {
 	q := boundQuerier{ctx: ctx, q: tx}
 	var messageType, metadata sql.NullString
@@ -124,8 +128,7 @@ func decodeCalendarProjection(stored []byte, compression sql.NullString, metadat
 		event, ok, err = calevent.Decode(gcalmodel.RawFormat, raw, metadata, zone)
 	}
 	if err != nil {
-		// Unknown bounds keep this message visible in the reader's unexpandable list.
-		return calevent.Event{Kind: "single"}, true
+		return calevent.Event{Kind: "single", Status: calendarEventDecodeFailureStatus}, true
 	}
 	return event, ok
 }

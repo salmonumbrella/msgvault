@@ -113,11 +113,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 			if e.Start != nil && e.End != nil {
 				add(row, 0, calrecur.Occurrence{Start: *e.Start, End: *e.End, AllDay: e.AllDay, StartDate: e.StartDate, EndDate: e.EndDate, Cancelled: e.Status == "cancelled"})
 			} else {
-				reason := "missing event bounds"
-				if e.Kind == "exception" {
-					reason = "missing series master and event bounds"
-				}
-				page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: reason})
+				page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: calendarMissingBoundsReason(e)})
 			}
 		case "series":
 			occurrences, count, reason, err := expandCalendarSeries(ctx, row, exceptions[seriesKey{row.SourceID, e.ProviderEventID}], from, to, remaining)
@@ -142,6 +138,16 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 		return cmp.Compare(a.MessageID, b.MessageID)
 	})
 	return page, nil
+}
+
+func calendarMissingBoundsReason(event calevent.Event) string {
+	if event.Status == calendarEventDecodeFailureStatus {
+		return "event data could not be decoded"
+	}
+	if event.Kind == "exception" {
+		return "missing series master and event bounds"
+	}
+	return "missing event bounds"
 }
 
 // Resolve archived exceptions once, then suppress their original generated instances.

@@ -4,6 +4,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,6 +61,20 @@ func TestListCalendarOccurrencesUnexpandable(t *testing.T) {
 	assertions.Equal(id, page.Unexpandable[0].MessageID)
 }
 
+func TestListCalendarOccurrencesOffsetFreeTime(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, id := calendarFixture(t, st, "offset-free", `{"id":"offset-free","start":{"dateTime":"2027-03-02T09:00:00","timeZone":"America/New_York"},"end":{"dateTime":"2027-03-02T10:00:00","timeZone":"America/New_York"}}`)
+	from := time.Date(2027, 3, 2, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	requirements.NoError(err)
+	assertions.Empty(page.Unexpandable)
+	requirements.Len(page.Occurrences, 1)
+	assertions.Equal(id, page.Occurrences[0].MessageID)
+	assertions.Equal("2027-03-02T14:00:00Z", page.Occurrences[0].Start.Format(time.RFC3339))
+	assertions.Equal("2027-03-02T15:00:00Z", page.Occurrences[0].End.Format(time.RFC3339))
+}
+
 func TestListCalendarOccurrencesYearlyByMonth(t *testing.T) {
 	assert, require := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
@@ -74,16 +89,25 @@ func TestListCalendarOccurrencesYearlyByMonth(t *testing.T) {
 }
 
 func TestListCalendarOccurrencesUndecodableEvent(t *testing.T) {
-	assert, require := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
-	_, id := calendarFixture(t, st, "unknown-zone", `{"id":"unknown-zone","start":{"date":"2027-03-02","timeZone":"Unknown/Zone"},"end":{"date":"2027-03-03","timeZone":"Unknown/Zone"}}`)
+	var expected []CalendarUnexpandable
+	for _, tt := range []struct {
+		name, raw, reason string
+	}{
+		{"unknown-zone", `{"id":"unknown-zone","start":{"date":"2027-03-02","timeZone":"Unknown/Zone"},"end":{"date":"2027-03-03","timeZone":"Unknown/Zone"}}`, "event data could not be decoded"},
+		{"corrupt", `{"id":`, "event data could not be decoded"},
+		{"oversized", `{"id":"oversized","description":"` + strings.Repeat("a", maxMeetingRawBytes) + `"}`, "event data could not be decoded"},
+		{"missing-bounds", `{"id":"missing-bounds"}`, "missing event bounds"},
+	} {
+		_, id := calendarFixture(t, st, tt.name, tt.raw)
+		expected = append(expected, CalendarUnexpandable{MessageID: id, Reason: tt.reason})
+	}
+	assertions, requirements := assert.New(t), require.New(t)
 	from := time.Date(2027, time.March, 1, 0, 0, 0, 0, time.UTC)
 	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 1, 0))
-	require.NoError(err)
-	assert.Empty(page.Occurrences)
-	require.Len(page.Unexpandable, 1)
-	assert.Equal(id, page.Unexpandable[0].MessageID)
-	assert.Equal("missing event bounds", page.Unexpandable[0].Reason)
+	requirements.NoError(err)
+	assertions.Empty(page.Occurrences)
+	assertions.Equal(expected, page.Unexpandable)
 }
 
 func TestListCalendarOccurrencesSharesRequestBudget(t *testing.T) {
