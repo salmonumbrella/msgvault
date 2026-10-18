@@ -153,7 +153,7 @@ func loadCalendarAttendees(ctx context.Context, r *loggedDB, events []CalendarEv
 	return nil
 }
 
-func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, from, to time.Time) ([]CalendarEventRow, error) {
+func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, dialect Dialect, from, to time.Time) ([]CalendarEventRow, error) {
 	lower, upper := from.UTC().Add(-calendarCandidateMargin), to.UTC().Add(calendarCandidateMargin)
 	// RDATE can precede DTSTART by any amount. Retain those masters for exact
 	// expansion rather than treating their stored start as the earliest instance.
@@ -168,7 +168,7 @@ func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, from, to time.T
 	if err != nil {
 		return nil, err
 	}
-	exceptions, err := queryCalendarExceptionsInWindow(ctx, r, masters, lower, upper)
+	exceptions, err := queryCalendarExceptionsInWindow(ctx, r, dialect, lower, upper)
 	if err != nil {
 		return nil, err
 	}
@@ -225,34 +225,35 @@ func queryCalendarSeriesWithinBudget(ctx context.Context, r *loggedDB, predicate
 	return rows, err
 }
 
-func queryCalendarExceptionsInWindow(ctx context.Context, r *loggedDB, masters []CalendarEventRow, lower, upper time.Time) ([]CalendarEventRow, error) {
-	// Include the full nominal interval of an occurrence cancelled or moved away.
-	originalLower := lower.Add(-calendarMasterDuration(masters))
+func queryCalendarExceptionsInWindow(ctx context.Context, r *loggedDB, dialect Dialect, lower, upper time.Time) ([]CalendarEventRow, error) {
+	// A shortened series may end before the window. Look up each exception's
+	// own visible master to retain its full original interval without loading
+	// unrelated series or charging them against the series budget.
+	// Resolve source visibility by message ID so PostgreSQL can use the provider
+	// index first instead of scanning the source's messages for every exception.
+	timedEnd := `julianday(e.original_start_at) + (julianday(p.end_at) - julianday(p.start_at)) >= julianday(?)`
+	dateEnd := `julianday(e.original_start_date) + (julianday(p.end_date) - julianday(p.start_date)) >= julianday(?)`
+	if dialect.DriverName() == postgresDriverName {
+		timedEnd = `e.original_start_at + (p.end_at - p.start_at) >= ?`
+		dateEnd = `NULLIF(e.original_start_date, '')::date + (NULLIF(p.end_date, '')::date - NULLIF(p.start_date, '')::date) >= ?::date`
+	}
 	predicate := `e.kind = 'exception' AND ((e.start_at < ? AND e.end_at >= ?) OR
   (e.start_at IS NULL AND e.end_at >= ?) OR
   (e.end_at IS NULL AND e.start_at < ?) OR
   (e.original_start_at >= ? AND e.original_start_at < ?) OR
    (e.original_start_date >= ? AND e.original_start_date < ?) OR
+   EXISTS (SELECT 1 FROM calendar_events p
+    WHERE p.kind = 'series' AND p.provider_event_id = e.series_provider_id
+    AND (SELECT pm.source_id FROM messages pm WHERE pm.id = p.message_id AND pm.deleted_at IS NULL
+     AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = pm.id)) = m.source_id
+    AND ((e.original_start_at < ? AND ` + timedEnd + `) OR
+    (e.original_start_date < ? AND ` + dateEnd + `))) OR
    (e.original_start_at IS NULL AND e.original_start_date = ''))`
-	return queryCalendarEventRowsWithinBudget(ctx, r, predicate, []any{upper, lower, lower, upper, originalLower, upper, originalLower.Format(time.DateOnly), upper.AddDate(0, 0, 1).Format(time.DateOnly)}, maxCalendarExceptions)
-}
-
-func calendarMasterDuration(masters []CalendarEventRow) time.Duration {
-	var longest time.Duration
-	for _, row := range masters {
-		e := row.Event
-		if e.Start != nil && e.End != nil {
-			longest = max(longest, e.End.Sub(*e.Start))
-		}
-		if e.AllDay {
-			start, startErr := time.Parse(time.DateOnly, e.StartDate)
-			end, endErr := time.Parse(time.DateOnly, e.EndDate)
-			if startErr == nil && endErr == nil {
-				longest = max(longest, end.Sub(start))
-			}
-		}
-	}
-	return longest
+	dateLower, dateUpper := lower.Format(time.DateOnly), upper.AddDate(0, 0, 1).Format(time.DateOnly)
+	return queryCalendarEventRowsWithinBudget(ctx, r, predicate, []any{
+		upper, lower, lower, upper, lower, upper, dateLower, dateUpper,
+		upper, dialect.TimestampParam(lower), dateUpper, dateLower,
+	}, maxCalendarExceptions)
 }
 
 // Only sparse cancellations inherit omitted details from the master.

@@ -19,7 +19,7 @@ func calendarWindow(t *testing.T, st *Store, from, to string) ([]CalendarEventRo
 	ctx, release, err := st.BeginReadSnapshotContext(t.Context())
 	require.NoError(t, err)
 	defer release()
-	return calendarEventRowsInWindow(ctx, st.db, start, end)
+	return calendarEventRowsInWindow(ctx, st.db, st.dialect, start, end)
 }
 func bulkCalendarCandidates(t *testing.T, st *Store, sourceID, conversationID int64, kind string, count int) {
 	t.Helper()
@@ -175,4 +175,49 @@ func TestCalendarExceptionsPartialBounds(t *testing.T) {
 			assertions.Equal(tc.end, o.End.Format(time.RFC3339))
 		})
 	}
+}
+
+func TestCalendarExceptionsShortenedSeriesDuration(t *testing.T) {
+	for _, tc := range []struct {
+		name, start, end, original, recurrence string
+	}{
+		{"timed count", `{"dateTime":"2027-03-02T09:00:00Z"}`, `{"dateTime":"2027-03-05T09:00:00Z"}`, `{"dateTime":"2027-03-09T09:00:00Z"}`, "RRULE:FREQ=WEEKLY;COUNT=1"},
+		{"all-day until", `{"date":"2027-03-02"}`, `{"date":"2027-03-06"}`, `{"date":"2027-03-09"}`, "RRULE:FREQ=WEEKLY;UNTIL=20270302"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert, require := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			raw := fmt.Sprintf(`{"id":"weekly","start":%s,"end":%s,"recurrence":["RRULE:FREQ=WEEKLY;COUNT=3"]}`, tc.start, tc.end)
+			_, master := calendarFixture(t, st, "master", raw)
+			_, cancelled := calendarFixture(t, st, "cancelled", fmt.Sprintf(`{"id":"cancelled","recurringEventId":"weekly","originalStartTime":%s,"status":"cancelled"}`, tc.original))
+			shortened := strings.Replace(raw, "RRULE:FREQ=WEEKLY;COUNT=3", tc.recurrence, 1)
+			require.NoError(st.UpsertMessageRawWithFormat(master, []byte(shortened), "gcal_json"))
+			from := time.Date(2027, 3, 12, 0, 0, 0, 0, time.UTC)
+			wide, err := st.ListCalendarOccurrencesContext(t.Context(), from.AddDate(0, 0, -3), from.AddDate(0, 0, 1))
+			require.NoError(err)
+			require.Len(wide.Occurrences, 1)
+			assert.Equal(cancelled, wide.Occurrences[0].MessageID)
+			assert.Equal(master, wide.Occurrences[0].SeriesMessageID)
+			assert.Equal("cancelled", wide.Occurrences[0].Status)
+			narrow, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+			require.NoError(err)
+			assert.Empty(narrow.Unexpandable)
+			assert.Equal(wide.Occurrences, narrow.Occurrences)
+		})
+	}
+}
+
+func TestCalendarEventRowsEndedSeriesOutsideWindow(t *testing.T) {
+	assert, require := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	data, event := calendarFixture(t, st, "current", `{"id":"current","start":{"dateTime":"2027-03-12T09:00:00Z"},"end":{"dateTime":"2027-03-12T10:00:00Z"}}`)
+	bulkCalendarCandidates(t, st, data.Message.SourceID, data.Message.ConversationID, "series", 2001)
+	_, err := st.db.Exec(`UPDATE calendar_events SET start_at = '2027-03-01 00:00:00+00:00', end_at = '2027-03-02 00:00:00+00:00', start_date = '2027-03-01', end_date = '2027-03-02', recurrence_end_at = '2027-03-02 00:00:00+00:00', recurrence_json = '["RRULE:FREQ=DAILY;COUNT=1"]' WHERE kind = 'series'`)
+	require.NoError(err)
+	from := time.Date(2027, 3, 12, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	require.NoError(err)
+	assert.Empty(page.Unexpandable)
+	require.Len(page.Occurrences, 1)
+	assert.Equal(event, page.Occurrences[0].MessageID)
 }

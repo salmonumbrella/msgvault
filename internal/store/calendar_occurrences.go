@@ -43,7 +43,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 		return page, err
 	}
 	defer release()
-	rows, err := calendarEventRowsInWindow(ctx, s.db, from, to)
+	rows, err := calendarEventRowsInWindow(ctx, s.db, s.dialect, from, to)
 	if err != nil {
 		return page, err
 	}
