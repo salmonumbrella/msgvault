@@ -542,7 +542,7 @@ func (a AttachmentSearchResult) Validate() error {
 }
 
 type Attendee struct {
-	DisplayName string `json:"display_name" validate:"required"`
+	DisplayName string `json:"display_name" validate:"omitempty"`
 	Email       string `json:"email" validate:"required"`
 	IsSelf      bool   `json:"is_self"`
 	Role        string `json:"role" validate:"required"`
@@ -1144,14 +1144,14 @@ type CalendarOccurrence struct {
 	Attendees         []Attendee `json:"attendees" validate:"required"`
 	DeletedFromSource bool       `json:"deleted_from_source"`
 	End               time.Time  `json:"end" validate:"required"`
-	EndDate           string     `json:"end_date" validate:"required"`
+	EndDate           string     `json:"end_date" validate:"omitempty"`
 	MessageID         int64      `json:"message_id"`
 	SeriesMessageID   int64      `json:"series_message_id"`
 	SourceID          int64      `json:"source_id"`
 	Start             time.Time  `json:"start" validate:"required"`
-	StartDate         string     `json:"start_date" validate:"required"`
+	StartDate         string     `json:"start_date" validate:"omitempty"`
 	Status            string     `json:"status" validate:"required"`
-	Subject           string     `json:"subject" validate:"required"`
+	Subject           string     `json:"subject" validate:"omitempty"`
 }
 
 func (c CalendarOccurrence) Validate() error {
@@ -1166,20 +1166,11 @@ func (c CalendarOccurrence) Validate() error {
 	if err := typesValidator.Var(c.End, "required"); err != nil {
 		errors = errors.Append("End", err)
 	}
-	if err := typesValidator.Var(c.EndDate, "required"); err != nil {
-		errors = errors.Append("EndDate", err)
-	}
 	if err := typesValidator.Var(c.Start, "required"); err != nil {
 		errors = errors.Append("Start", err)
 	}
-	if err := typesValidator.Var(c.StartDate, "required"); err != nil {
-		errors = errors.Append("StartDate", err)
-	}
 	if err := typesValidator.Var(c.Status, "required"); err != nil {
 		errors = errors.Append("Status", err)
-	}
-	if err := typesValidator.Var(c.Subject, "required"); err != nil {
-		errors = errors.Append("Subject", err)
 	}
 	if len(errors) == 0 {
 		return nil
