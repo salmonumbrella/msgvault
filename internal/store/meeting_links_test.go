@@ -118,8 +118,6 @@ func TestMeetingLinksSplitSurvivesUIDAcquisitionAndSourceRemoval(t *testing.T) {
 			requirements.Equal(copyRef, linkedMeetingRefs(t, st, note)[note], "the UID copy is initially matched automatically")
 			requirements.NoError(st.LinkMeetingContext(t.Context(), note, ref))
 			requirements.Equal(fmt.Sprintf("evt:%d@%s", masterID, ref.Key), linkedMeetingRefs(t, st, note)[note], "the explicit link replaces the automatic copy")
-			_, independentID := calendarFixture(t, st, "independent", singleLinkRaw("independent", noteUID))
-			independentRef := fmt.Sprintf("evt:%d", independentID)
 
 			requirements.NoError(st.SetMessageMetadata(masterID, sql.NullString{String: `{"calendar_id":"master-calendar@example.com","ical_uid":"weekly@example.org"}`, Valid: true}))
 			requirements.NoError(st.UpsertMessageRawWithFormat(masterID, []byte(linkSeriesRaw), "gcal_json"))
@@ -131,10 +129,13 @@ func TestMeetingLinksSplitSurvivesUIDAcquisitionAndSourceRemoval(t *testing.T) {
 				requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, ref))
 				requirements.NoError(st.UpsertMessageRawWithFormat(masterID, []byte(removedOccurrence), "gcal_json"))
 			}
-			assertions.Equal(independentRef, linkedMeetingRefs(t, st, note)[note], "the split suppresses the removed occurrence without hiding another automatic match")
+			var legacyDecision string
+			requirements.NoError(st.db.QueryRow(`SELECT decision FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = '' AND target_message_id = ? AND occurrence_key = ?`, note, masterID, ref.Key).Scan(&legacyDecision))
+			assertions.Equal("split", legacyDecision, "the old message-based link is superseded")
+			assertions.Empty(linkedMeetingRefs(t, st, note)[note], "the split suppresses the copy after the occurrence is removed")
 
 			requirements.NoError(st.RemoveSource(masterData.Message.SourceID))
-			assertions.Equal(independentRef, linkedMeetingRefs(t, st, note)[note], "the UID split survives source removal and continues to suppress the surviving copy")
+			assertions.Empty(linkedMeetingRefs(t, st, note)[note], "the UID split survives source removal and continues to suppress the surviving copy")
 		})
 	}
 }
