@@ -225,10 +225,6 @@ func (s *Server) humaAuthMiddleware(ctx huma.Context, next func(huma.Context)) {
 			next(ctx)
 			return
 		}
-		if op := ctx.Operation(); op != nil && op.OperationID == "listCalendarEvents" {
-			writeHumaError(ctx, http.StatusForbidden, "permission_denied", "Archived calendar events require owner access")
-			return
-		}
 		s.logUnauthorizedAPIRequest(req)
 		writeHumaError(ctx, http.StatusUnauthorized, "unauthorized", "Invalid or missing API key")
 		return

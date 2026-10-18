@@ -1,10 +1,11 @@
 package calrecur
 
 import (
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExplicitGapAndFold(t *testing.T) {
@@ -47,4 +48,15 @@ func TestAllDaySkippedDateDoesNotConsumeCount(t *testing.T) {
 		dates = append(dates, o.StartDate)
 	}
 	assertions.Equal([]string{"2011-12-28", "2011-12-29", "2011-12-31", "2012-01-01"}, dates)
+}
+
+func TestDTStartMismatchUntilOnly(t *testing.T) {
+	s := parsed(t, "RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20270315T170000Z")
+	got, _, err := Expand(t.Context(), s, time.Hour, 0, nil, instant(t, "2027-03-01T00:00:00Z"), instant(t, "2027-04-01T00:00:00Z"), 100)
+	require.NoError(t, err)
+	var starts []string
+	for _, o := range got {
+		starts = append(starts, o.Start.UTC().Format(time.RFC3339))
+	}
+	assert.Equal(t, []string{"2027-03-02T17:00:00Z", "2027-03-08T17:00:00Z", "2027-03-15T17:00:00Z"}, starts)
 }

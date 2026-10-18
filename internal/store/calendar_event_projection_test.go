@@ -8,14 +8,28 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 const calendarRaw = `{"id":"event-example","status":"confirmed","start":{"dateTime":"2027-03-02T17:00:00Z"},"end":{"dateTime":"2027-03-02T18:00:00Z"},"iCalUID":"event-uid@example.com","description":"Raw description","attendees":[{"email":"PERSON@EXAMPLE.COM","responseStatus":"accepted"}]}`
+
+func newCalendarStore(t *testing.T) *Store {
+	t.Helper()
+	if dbURL := os.Getenv("MSGVAULT_TEST_DB"); IsPostgresURL(dbURL) {
+		return newPGStoreInternal(t, dbURL)
+	}
+	st, err := OpenForTest(filepath.Join(t.TempDir(), "calendar.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+	require.NoError(t, st.InitSchemaContext(t.Context()))
+	return st
+}
 
 func calendarFixture(t *testing.T, st *Store, key, raw string) (*MessagePersistData, int64) {
 	t.Helper()
@@ -62,7 +76,7 @@ func rejectCalendarWrites(t *testing.T, st *Store) {
 
 func TestCalendarEventProjectionPersistRefreshDelete(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
+	st := newCalendarStore(t)
 	data, id := calendarFixture(t, st, "persist", calendarRaw)
 	rows := calendarRows(t, st, id)
 	requirements.Len(rows, 1)
@@ -92,7 +106,7 @@ func TestCalendarEventProjectionPersistRefreshDelete(t *testing.T) {
 
 func TestCalendarEventProjectionSkipsUnchanged(t *testing.T) {
 	requirements := require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
+	st := newCalendarStore(t)
 	data, id := calendarFixture(t, st, "unchanged", calendarRaw)
 	rejectCalendarWrites(t, st)
 	requirements.NoError(st.withTxContext(t.Context(), func(tx *loggedTx) error { return st.refreshCalendarEventProjectionWith(t.Context(), tx, id) }))
@@ -103,7 +117,7 @@ func TestCalendarEventProjectionSkipsUnchanged(t *testing.T) {
 
 func TestCalendarEventProjectionStorageFailureRollsBack(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
+	st := newCalendarStore(t)
 	_, id := calendarFixture(t, st, "rollback", calendarRaw)
 	rejectCalendarWrites(t, st)
 	err := st.SetMessageMetadata(id, sql.NullString{String: `{"status":"cancelled"}`, Valid: true})
@@ -116,7 +130,7 @@ func TestCalendarEventProjectionStorageFailureRollsBack(t *testing.T) {
 
 func TestCalendarEventBackfillResumesAfterCancel(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
-	base := newRFC822IDBackfillBackendStore(t)
+	base := newCalendarStore(t)
 	// More than one page, with real raw snapshots and real commits.
 	for i := range 103 {
 		calendarFixture(t, base, fmt.Sprintf("backfill-%d", i), calendarRaw)
@@ -163,7 +177,7 @@ func TestCalendarEventBackfillResumesAfterCancel(t *testing.T) {
 
 func TestCalendarEventBackfillMalformedRecurrenceDoesNotFailInit(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
+	st := newCalendarStore(t)
 	_, id := calendarFixture(t, st, "bad-rule", `{"id":"bad-series","start":{"date":"2027-03-14"},"end":{"date":"2027-03-15"},"recurrence":["RRULE:FREQ=NOT_A_FREQUENCY"]}`)
 	_, err := st.db.Exec(`DELETE FROM calendar_events`)
 	requirements.NoError(err)
@@ -180,7 +194,7 @@ func TestCalendarEventUpgradeRebuildsProjection(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 
-	st := newRFC822IDBackfillBackendStore(t)
+	st := newCalendarStore(t)
 	_, id := calendarFixture(t, st, "upgrade", calendarRaw)
 	for _, query := range []string{`DROP TABLE calendar_event_attendees`, `DROP TABLE calendar_events`, `DELETE FROM applied_migrations WHERE name = 'calendar_event_projection_v1'`, `UPDATE archive_metadata SET value = '10' WHERE key = 'schema_version'`} {
 		_, err := st.db.Exec(query)
@@ -219,4 +233,47 @@ func TestCopySubsetRebuildsCalendarEvents(t *testing.T) {
 	rows := calendarRows(t, copied, id)
 	requirements.Len(rows, 1)
 	assert.Equal(t, "event-example", rows[0].Event.ProviderEventID)
+}
+
+func TestCalendarSourceZoneRefreshKeepsConcurrentRawUpdate(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	dbURL := skipUnlessPostgresInternal(t)
+	base := newPGStoreInternal(t, dbURL)
+	data, id := calendarFixture(t, base, "race", calendarRaw)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	held, err := base.db.BeginTx(ctx, nil)
+	requirements.NoError(err)
+	defer func() { _ = held.Rollback() }()
+	requirements.NoError(base.lockMeetingEvidenceWith(ctx, held, id))
+	requirements.NoError(upsertMessageRawWithFormat(boundQuerier{ctx: ctx, q: held}, id, []byte(strings.ReplaceAll(calendarRaw, "event-example", "new-example")), "gcal_json"))
+	requirements.NoError(base.refreshCalendarEventProjectionWith(ctx, held, id))
+	reached := make(chan struct{}, 1)
+	var once sync.Once
+	gate := &meetingProjectionGate{before: func(_ context.Context, query string, _ []driver.NamedValue) error {
+		// With the evidence lock the refresh waits before reading raw. Without it,
+		// it reaches the projection write with the old committed raw snapshot.
+		if strings.Contains(query, "FROM messages WHERE id =") && strings.Contains(query, "FOR UPDATE") || strings.HasPrefix(query, "INSERT INTO calendar_events") {
+			once.Do(func() { reached <- struct{}{} })
+		}
+		return nil
+	}}
+	st := gatedMeetingProjectionStore(t, base, gate)
+	done := make(chan error, 1)
+	go func() { done <- st.UpdateSourceSyncConfig(data.Message.SourceID, `{"time_zone":"Asia/Tokyo"}`) }()
+	select {
+	case <-reached:
+	case <-ctx.Done():
+		requirements.NoError(ctx.Err(), "zone refresh did not reach the message")
+	}
+	requirements.NoError(held.Commit())
+	select {
+	case err := <-done:
+		requirements.NoError(err)
+	case <-ctx.Done():
+		requirements.NoError(ctx.Err(), "zone refresh did not finish")
+	}
+	row := calendarRows(t, base, id)[0]
+	assertions.Equal("new-example", row.Event.ProviderEventID)
+	assertions.Equal("Asia/Tokyo", row.Event.CalendarTimeZone)
 }

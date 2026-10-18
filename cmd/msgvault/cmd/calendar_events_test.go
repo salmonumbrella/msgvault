@@ -38,9 +38,9 @@ func TestCalendarEventsCommand(t *testing.T) {
 		want, wantErr, wantWarning string
 		err                        error
 	}{
-		{name: "table", page: store.CalendarOccurrencePage{Occurrences: []store.CalendarOccurrence{{MessageID: 377, Subject: "Standup", Status: "confirmed", Start: start, End: start.Add(time.Hour)}, {MessageID: 412, Subject: "Offsite", Status: "confirmed", AllDay: true, StartDate: "2027-03-03", EndDate: "2027-03-04"}}, Unexpandable: []store.CalendarUnexpandable{{MessageID: 500, Reason: "unsupported recurrence"}}}, want: "Standup", wantWarning: "1 repeating event could not be expanded: message 500 (unsupported recurrence)"},
+		{name: "table", page: store.CalendarOccurrencePage{Occurrences: []store.CalendarOccurrence{{MessageID: 378, SeriesMessageID: 377, Subject: "Standup", Status: "confirmed", Start: start, End: start.Add(time.Hour)}, {MessageID: 412, Subject: "Offsite", Status: "confirmed", AllDay: true, StartDate: "2027-03-03", EndDate: "2027-03-04"}}, Unexpandable: []store.CalendarUnexpandable{{MessageID: 500, Reason: "unsupported recurrence"}}}, want: "Standup", wantWarning: "1 repeating event could not be expanded: message 500 (unsupported recurrence)"},
 		{name: "empty", want: "No archived calendar events from 2027-03-01 to 2027-04-01."},
-		{name: "json", args: []string{"--json"}, page: store.CalendarOccurrencePage{Occurrences: []store.CalendarOccurrence{{MessageID: 377, Subject: "Standup", Start: start, End: start.Add(time.Hour)}}, Unexpandable: []store.CalendarUnexpandable{}}, want: `"message_id":377`},
+		{name: "json", args: []string{"--json"}, page: store.CalendarOccurrencePage{Occurrences: []store.CalendarOccurrence{{MessageID: 378, SeriesMessageID: 377, Subject: "Standup", Start: start, End: start.Add(time.Hour)}}, Unexpandable: []store.CalendarUnexpandable{}}, want: `"message_id":378`},
 		{name: "too broad", err: &daemonclient.APIError{Status: 400, Code: "query_too_broad", Message: "window too broad"}, wantErr: "calendar query is too broad; narrow the window"},
 		{name: "old daemon", version: "3.23.0", wantErr: "calendar events require daemon API schema 3.24.0 or newer"},
 		{name: "account", args: []string{"--account", "calendar@example.com"}, wantErr: "--account is only valid"},
@@ -84,12 +84,15 @@ func TestCalendarEventsCommand(t *testing.T) {
 				assertions.Contains(out.String(), "2027-03-03")
 				assertions.Contains(out.String(), "2027-03-04")
 				assertions.Contains(out.String(), "ID")
+				assertions.Regexp(`\s378\s+Standup`, out.String())
 			}
 			if tc.name == "json" {
 				var page store.CalendarOccurrencePage
 				requirements.NoError(json.Unmarshal(out.Bytes(), &page))
 				requirements.Len(page.Occurrences, 1)
 				assertions.Equal("Standup", page.Occurrences[0].Subject)
+				assertions.Equal(int64(378), page.Occurrences[0].MessageID)
+				assertions.Equal(int64(377), page.Occurrences[0].SeriesMessageID)
 			}
 		})
 	}

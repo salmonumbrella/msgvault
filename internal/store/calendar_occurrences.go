@@ -56,9 +56,13 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 		id     string
 	}
 	exceptions := map[seriesKey][]CalendarEventRow{}
+	masters := map[seriesKey]bool{}
 	byID := make(map[int64]CalendarEventRow, len(rows))
 	for _, row := range rows {
 		byID[row.MessageID] = row
+		if row.Event.Kind == "series" {
+			masters[seriesKey{row.SourceID, row.Event.ProviderEventID}] = true
+		}
 		if row.Event.Kind == "exception" {
 			key := seriesKey{row.SourceID, row.Event.SeriesProviderID}
 			exceptions[key] = append(exceptions[key], row)
@@ -70,9 +74,8 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 	}
 	add := func(row CalendarEventRow, seriesID int64, o calrecur.Occurrence) {
 		e := row.Event
-		messageID := row.MessageID
-		if seriesID != 0 {
-			messageID = seriesID
+		if !calendarOccurrenceOverlaps(o, from, to) {
+			return
 		}
 		status := e.Status
 		if o.Cancelled {
@@ -82,7 +85,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 		if attendees == nil {
 			attendees = []calevent.Attendee{}
 		}
-		page.Occurrences = append(page.Occurrences, CalendarOccurrence{MessageID: messageID, SeriesMessageID: seriesID, SourceID: row.SourceID, Subject: row.Subject, Start: o.Start, End: o.End, AllDay: o.AllDay, StartDate: o.StartDate, EndDate: o.EndDate, Status: status, Cancelled: o.Cancelled, DeletedFromSource: row.DeletedFromSource, Attendees: attendees})
+		page.Occurrences = append(page.Occurrences, CalendarOccurrence{MessageID: row.MessageID, SeriesMessageID: seriesID, SourceID: row.SourceID, Subject: row.Subject, Start: o.Start, End: o.End, AllDay: o.AllDay, StartDate: o.StartDate, EndDate: o.EndDate, Status: status, Cancelled: o.Cancelled, DeletedFromSource: row.DeletedFromSource, Attendees: attendees})
 	}
 	for _, row := range rows {
 		if err := ctx.Err(); err != nil {
@@ -90,9 +93,14 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 		}
 		e := row.Event
 		switch e.Kind {
-		case "single":
-			if e.Start != nil && e.End != nil && e.Start.Before(to) && e.End.After(from) {
+		case "exception", "single":
+			if e.Kind == "exception" && masters[seriesKey{row.SourceID, e.SeriesProviderID}] {
+				continue
+			}
+			if e.Start != nil && e.End != nil {
 				add(row, 0, calrecur.Occurrence{Start: *e.Start, End: *e.End, AllDay: e.AllDay, StartDate: e.StartDate, EndDate: e.EndDate, Cancelled: e.Status == "cancelled"})
+			} else if e.Kind == "exception" {
+				page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: "missing series master and event bounds"})
 			}
 		case "series":
 			fail := func() {
@@ -102,29 +110,10 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 				fail()
 				continue
 			}
-			zone, err := calendarEventZone(e)
+			set, duration, days, err := prepareCalendarRecurrence(e)
 			if err != nil {
 				fail()
 				continue
-			}
-			set, err := calrecur.ParseSet(*e.Start, e.AllDay, e.StartDate, zone, e.Recurrence)
-			if err != nil {
-				fail()
-				continue
-			}
-			days := 0
-			if e.AllDay {
-				first, err := time.Parse(time.DateOnly, e.StartDate)
-				if err != nil {
-					fail()
-					continue
-				}
-				last, err := time.Parse(time.DateOnly, e.EndDate)
-				if err != nil {
-					fail()
-					continue
-				}
-				days = int(last.Sub(first) / (24 * time.Hour))
 			}
 			var exc []calrecur.Exception
 			invalid := false
@@ -144,7 +133,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 				fail()
 				continue
 			}
-			occurrences, count, err := calrecur.Expand(ctx, set, e.End.Sub(*e.Start), days, exc, from, to, min(remaining, calrecur.SeriesReadBudget))
+			occurrences, count, err := calrecur.Expand(ctx, set, duration, days, exc, from.Add(-calendarCandidateMargin), to.Add(calendarCandidateMargin), min(remaining, calrecur.SeriesReadBudget))
 			remaining -= count
 			if err != nil {
 				if ctx.Err() != nil {
@@ -164,6 +153,12 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 				effective := row
 				if o.ExceptionRef != 0 {
 					effective = byID[o.ExceptionRef]
+					if effective.Event.Status == "cancelled" {
+						effective, err = inheritCalendarCancellation(ctx, s.db, effective, row)
+						if err != nil {
+							return page, err
+						}
+					}
 				}
 				if e.Status == "cancelled" {
 					o.Cancelled = true
@@ -193,4 +188,39 @@ func calendarEventZone(e calevent.Event) (*time.Location, error) {
 		return nil, fmt.Errorf("calendar time zone: %w", err)
 	}
 	return zone, nil
+}
+
+// All-day dates belong to the query's civil days, independent of the calendar zone.
+func calendarOccurrenceOverlaps(o calrecur.Occurrence, from, to time.Time) bool {
+	if o.AllDay {
+		return o.StartDate < to.Format(time.DateOnly) && o.EndDate > from.Format(time.DateOnly)
+	}
+	return o.Start.Before(to) && o.End.After(from)
+}
+
+func prepareCalendarRecurrence(e calevent.Event) (calrecur.Set, time.Duration, int, error) {
+	if e.Start == nil || e.End == nil {
+		return calrecur.Set{}, 0, 0, errors.New("missing event bounds")
+	}
+	zone, err := calendarEventZone(e)
+	if err != nil {
+		return calrecur.Set{}, 0, 0, err
+	}
+	set, err := calrecur.ParseSet(*e.Start, e.AllDay, e.StartDate, zone, e.Recurrence)
+	if err != nil {
+		return set, 0, 0, err
+	}
+	days := 0
+	if e.AllDay {
+		first, err := time.Parse(time.DateOnly, e.StartDate)
+		if err != nil {
+			return set, 0, 0, fmt.Errorf("calendar start date: %w", err)
+		}
+		last, err := time.Parse(time.DateOnly, e.EndDate)
+		if err != nil {
+			return set, 0, 0, fmt.Errorf("calendar end date: %w", err)
+		}
+		days = int(last.Sub(first) / (24 * time.Hour))
+	}
+	return set, e.End.Sub(*e.Start), days, nil
 }

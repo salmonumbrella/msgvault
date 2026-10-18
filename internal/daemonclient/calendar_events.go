@@ -2,11 +2,10 @@ package daemonclient
 
 import (
 	"context"
-	"encoding/json/v2"
 	"errors"
-	"fmt"
 	"time"
 
+	"go.kenn.io/msgvault/internal/calevent"
 	"go.kenn.io/msgvault/internal/store"
 	apiclient "go.kenn.io/msgvault/pkg/client"
 	"go.kenn.io/msgvault/pkg/client/generated"
@@ -22,9 +21,17 @@ func (c *Client) ListCalendarOccurrencesContext(ctx context.Context, from, to ti
 	if response.JSON200 == nil {
 		return store.CalendarOccurrencePage{}, errors.New("calendar events: empty response")
 	}
-	var page store.CalendarOccurrencePage
-	if err := json.Unmarshal(response.Body, &page); err != nil {
-		return page, fmt.Errorf("decode calendar events: %w", err)
+	decoded := response.JSON200
+	page := store.CalendarOccurrencePage{Occurrences: make([]store.CalendarOccurrence, 0, len(decoded.Occurrences)), Unexpandable: make([]store.CalendarUnexpandable, 0, len(decoded.Unexpandable))}
+	for _, o := range decoded.Occurrences {
+		attendees := make([]calevent.Attendee, 0, len(o.Attendees))
+		for _, a := range o.Attendees {
+			attendees = append(attendees, calevent.Attendee{Email: a.Email, DisplayName: a.DisplayName, Role: a.Role, RSVP: a.Rsvp, IsCopySelf: a.IsSelf})
+		}
+		page.Occurrences = append(page.Occurrences, store.CalendarOccurrence{MessageID: o.MessageID, SeriesMessageID: o.SeriesMessageID, SourceID: o.SourceID, Subject: o.Subject, Start: o.Start, End: o.End, AllDay: o.AllDay, StartDate: o.StartDate, EndDate: o.EndDate, Status: o.Status, Cancelled: o.Cancelled, DeletedFromSource: o.DeletedFromSource, Attendees: attendees})
+	}
+	for _, u := range decoded.Unexpandable {
+		page.Unexpandable = append(page.Unexpandable, store.CalendarUnexpandable(u))
 	}
 	return page, nil
 }

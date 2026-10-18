@@ -127,41 +127,9 @@ func calendarRecurrenceEnd(ctx context.Context, event calevent.Event) (*time.Tim
 	if event.Kind != "series" {
 		return nil, ""
 	}
-	zoneName := event.EventTimeZone
-	if zoneName == "" {
-		zoneName = event.CalendarTimeZone
-	}
-	zone := time.UTC
-	if zoneName != "" {
-		var err error
-		zone, err = time.LoadLocation(zoneName)
-		if err != nil {
-			return nil, err.Error()
-		}
-	}
-	var start time.Time
-	if event.Start != nil {
-		start = *event.Start
-	}
-	set, err := calrecur.ParseSet(start, event.AllDay, event.StartDate, zone, event.Recurrence)
+	set, duration, days, err := prepareCalendarRecurrence(event)
 	if err != nil {
 		return nil, err.Error()
-	}
-	if event.Start == nil || event.End == nil {
-		return nil, "missing event bounds"
-	}
-	duration := event.End.Sub(*event.Start)
-	days := 0
-	if event.AllDay {
-		first, err := time.Parse(time.DateOnly, event.StartDate)
-		if err != nil {
-			return nil, err.Error()
-		}
-		last, err := time.Parse(time.DateOnly, event.EndDate)
-		if err != nil {
-			return nil, err.Error()
-		}
-		days = int(last.Sub(first) / (24 * time.Hour))
 	}
 	end, bounded := calrecur.ConservativeEnd(ctx, set, duration, days, calrecur.SeriesReadBudget)
 	if !bounded {
@@ -206,6 +174,9 @@ func (s *Store) refreshSourceCalendarEventsTx(ctx context.Context, tx *loggedTx,
 			return nil
 		}
 		for _, id := range ids {
+			if err := s.lockMeetingEvidenceWith(ctx, tx, id); err != nil {
+				return err
+			}
 			if err := s.refreshCalendarEventProjectionWith(ctx, tx, id); err != nil {
 				return err
 			}

@@ -55,14 +55,7 @@ func queryCalendarEventRowsWithinBudget(ctx context.Context, r *loggedDB, predic
 	if count > budget {
 		return nil, ErrQueryTooBroad
 	}
-	rows, err := queryCalendarEventRows(ctx, r, predicate, args, budget+1)
-	if err != nil {
-		return nil, err
-	}
-	if len(rows) > budget {
-		return nil, ErrQueryTooBroad
-	}
-	return rows, nil
+	return queryCalendarEventRows(ctx, r, predicate, args, budget+1)
 }
 
 func queryCalendarEventRows(ctx context.Context, r *loggedDB, predicate string, args []any, limit int) ([]CalendarEventRow, error) {
@@ -180,7 +173,8 @@ func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, from, to time.T
 	}
 	predicate := `e.kind = 'exception' AND ((e.start_at < ? AND e.end_at >= ?) OR
   ((e.start_at IS NULL OR e.end_at IS NULL) AND ((e.original_start_at >= ? AND e.original_start_at < ?) OR
-   (e.original_start_date >= ? AND e.original_start_date < ?))))`
+   (e.original_start_date >= ? AND e.original_start_date < ?) OR
+   (e.original_start_at IS NULL AND e.original_start_date = ''))))`
 	exceptions, err := queryCalendarEventRowsWithinBudget(ctx, r, predicate, []any{upper, lower, lower, upper, lower.Format(time.DateOnly), upper.AddDate(0, 0, 1).Format(time.DateOnly)}, maxCalendarExceptions)
 	if err != nil {
 		return nil, err
@@ -248,4 +242,34 @@ func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, from, to time.T
 	}
 	slices.SortFunc(out, func(a, b CalendarEventRow) int { return cmp.Compare(a.MessageID, b.MessageID) })
 	return out, nil
+}
+
+// Sparse cancellations retain details omitted by the provider. Raw field presence
+// distinguishes omission from an explicitly cleared summary or attendee list.
+func inheritCalendarCancellation(ctx context.Context, r *loggedDB, row, master CalendarEventRow) (CalendarEventRow, error) {
+	var stored []byte
+	var compression sql.NullString
+	if err := r.QueryRowContext(ctx, `SELECT raw_data, compression FROM message_raw WHERE message_id = ?`, row.MessageID).Scan(&stored, &compression); err != nil {
+		return row, fmt.Errorf("read cancellation evidence: %w", err)
+	}
+	raw, _, err := decodeMessageRawBounded(stored, compression, maxMeetingRawBytes, errMeetingRawTooLarge)
+	if err != nil {
+		return row, err
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return row, fmt.Errorf("decode cancellation evidence: %w", err)
+	}
+	if _, supplied := fields["summary"]; !supplied {
+		row.Subject = master.Subject
+	}
+	if _, supplied := fields["attendees"]; !supplied {
+		attendees := slices.Clone(master.Event.Attendees)
+		if _, supplied := fields["organizer"]; supplied {
+			attendees = slices.DeleteFunc(attendees, func(a calevent.Attendee) bool { return a.Role == "organizer" })
+			attendees = append(attendees, row.Event.Attendees...)
+		}
+		row.Event.Attendees = attendees
+	}
+	return row, nil
 }

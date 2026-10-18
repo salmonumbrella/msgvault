@@ -2,6 +2,7 @@ package gcalmodel
 
 import (
 	"encoding/json/jsontext"
+	"strings"
 	"time"
 )
 
@@ -101,4 +102,9 @@ type Reminder struct {
 type Reminders struct {
 	UseDefault bool       `json:"useDefault"`
 	Overrides  []Reminder `json:"overrides"`
+}
+
+// NormalizeParticipantEmail is the comparison form used for calendar participants.
+func NormalizeParticipantEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
 }

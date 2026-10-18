@@ -2,20 +2,24 @@ package store
 
 import (
 	"fmt"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestListCalendarOccurrences(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 
-	st := newRFC822IDBackfillBackendStore(t)
+	st := newCalendarStore(t)
 	_, master := calendarFixture(t, st, "master", `{"id":"weekly","status":"confirmed","start":{"dateTime":"2027-03-02T17:00:00Z"},"end":{"dateTime":"2027-03-02T18:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=3"],"attendees":[{"email":"guest@example.com","responseStatus":"accepted"}]}`)
-	calendarFixture(t, st, "cancelled", `{"id":"cancelled","recurringEventId":"weekly","originalStartTime":{"dateTime":"2027-03-09T17:00:00Z"},"status":"cancelled"}`)
-	calendarFixture(t, st, "moved", `{"id":"moved","recurringEventId":"weekly","status":"confirmed","originalStartTime":{"dateTime":"2027-03-16T17:00:00Z"},"start":{"dateTime":"2027-04-02T19:00:00Z"},"end":{"dateTime":"2027-04-02T20:00:00Z"}}`)
+	_, cancelled := calendarFixture(t, st, "cancelled", `{"id":"cancelled","recurringEventId":"weekly","originalStartTime":{"dateTime":"2027-03-09T17:00:00Z"},"status":"cancelled"}`)
+	_, moved := calendarFixture(t, st, "moved", `{"id":"moved","recurringEventId":"weekly","status":"confirmed","originalStartTime":{"dateTime":"2027-03-16T17:00:00Z"},"start":{"dateTime":"2027-04-02T19:00:00Z"},"end":{"dateTime":"2027-04-02T20:00:00Z"}}`)
+	_, err := st.db.Exec(`UPDATE messages SET subject = '' WHERE id = ?`, cancelled)
+	requirements.NoError(err)
 	_, single := calendarFixture(t, st, "single", calendarRaw)
 	from, err := time.Parse(time.RFC3339, "2027-03-01T00:00:00Z")
 	requirements.NoError(err)
@@ -28,18 +32,22 @@ func TestListCalendarOccurrences(t *testing.T) {
 	assertions.True(page.Occurrences[2].Cancelled)
 	assertions.Equal("cancelled", page.Occurrences[2].Status)
 	assertions.Equal(master, page.Occurrences[2].SeriesMessageID)
+	assertions.Equal(cancelled, page.Occurrences[2].MessageID)
+	assertions.Equal("Example event", page.Occurrences[2].Subject)
+	assertions.Equal(page.Occurrences[0].Attendees, page.Occurrences[2].Attendees)
 	assertions.Equal("accepted", page.Occurrences[0].Attendees[0].RSVP)
 	page, err = st.ListCalendarOccurrencesContext(t.Context(), from.AddDate(0, 1, 0), from.AddDate(0, 2, 0))
 	requirements.NoError(err)
 	requirements.Len(page.Occurrences, 1)
 	assertions.Equal(master, page.Occurrences[0].SeriesMessageID)
+	assertions.Equal(moved, page.Occurrences[0].MessageID)
 	assertions.Equal("2027-04-02T19:00:00Z", page.Occurrences[0].Start.Format(time.RFC3339))
 }
 func TestListCalendarOccurrencesUnexpandable(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 
-	st := newRFC822IDBackfillBackendStore(t)
+	st := newCalendarStore(t)
 	_, id := calendarFixture(t, st, "unsupported", `{"id":"unsupported","start":{"date":"2027-03-01"},"end":{"date":"2027-03-02"},"recurrence":["RRULE:FREQ=HOURLY"]}`)
 	from, err := time.Parse(time.DateOnly, "2027-03-01")
 	requirements.NoError(err)
@@ -52,7 +60,7 @@ func TestListCalendarOccurrencesUnexpandable(t *testing.T) {
 
 func TestListCalendarOccurrencesSharesRequestBudget(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
+	st := newCalendarStore(t)
 	from, err := time.Parse(time.DateOnly, "2027-03-01")
 	requirements.NoError(err)
 	for i := range 10 {
@@ -66,4 +74,85 @@ func TestListCalendarOccurrencesSharesRequestBudget(t *testing.T) {
 	}
 	_, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 1, 0))
 	assertions.ErrorIs(err, ErrQueryTooBroad)
+}
+
+func TestListCalendarOccurrencesOrphanExceptions(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newCalendarStore(t)
+	_, complete := calendarFixture(t, st, "orphan", `{"id":"orphan","recurringEventId":"missing","status":"confirmed","originalStartTime":{"dateTime":"2027-03-02T17:00:00Z"},"start":{"dateTime":"2027-03-03T17:00:00Z"},"end":{"dateTime":"2027-03-03T18:00:00Z"}}`)
+	_, incomplete := calendarFixture(t, st, "sparse-orphan", `{"id":"sparse-orphan","recurringEventId":"missing","status":"cancelled","originalStartTime":{"dateTime":"2027-03-04T17:00:00Z"}}`)
+	_, unidentified := calendarFixture(t, st, "unidentified-orphan", `{"id":"unidentified-orphan","recurringEventId":"missing","status":"cancelled"}`)
+	from := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 1, 0))
+	requirements.NoError(err)
+	requirements.Len(page.Occurrences, 1)
+	assertions.Equal(complete, page.Occurrences[0].MessageID)
+	assertions.Zero(page.Occurrences[0].SeriesMessageID)
+	assertions.Equal("2027-03-03T17:00:00Z", page.Occurrences[0].Start.Format(time.RFC3339))
+	assertions.ElementsMatch([]CalendarUnexpandable{{MessageID: incomplete, Reason: "missing series master and event bounds"}, {MessageID: unidentified, Reason: "missing series master and event bounds"}}, page.Unexpandable)
+}
+
+func TestListCalendarOccurrencesAllDayQueryZone(t *testing.T) {
+	for _, recurring := range []bool{false, true} {
+		t.Run(strconv.FormatBool(recurring), func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newCalendarStore(t)
+			recurrence := ""
+			if recurring {
+				recurrence = `,"recurrence":["RRULE:FREQ=DAILY;COUNT=2"]`
+			}
+			data, id := calendarFixture(t, st, "all-day", `{"id":"all-day","start":{"date":"2027-03-02"},"end":{"date":"2027-03-03"}`+recurrence+`}`)
+			requirements.NoError(st.UpdateSourceSyncConfig(data.Message.SourceID, `{"time_zone":"Pacific/Auckland"}`))
+			zone, err := time.LoadLocation("America/Los_Angeles")
+			requirements.NoError(err)
+			from := time.Date(2027, 3, 1, 0, 0, 0, 0, zone)
+			page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+			requirements.NoError(err)
+			assertions.Empty(page.Occurrences, "March 2 is outside March 1")
+			from = from.AddDate(0, 0, 1)
+			page, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+			requirements.NoError(err)
+			requirements.Len(page.Occurrences, 1)
+			assertions.Equal(id, page.Occurrences[0].MessageID)
+			assertions.Equal("2027-03-02", page.Occurrences[0].StartDate)
+		})
+	}
+}
+
+func TestListCalendarOccurrencesCancellationSuppliedFields(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields, subject string
+		attendees             int
+	}{
+		{"omitted", "", "Example event", 1},
+		{"supplied", `,"summary":"Cancelled planning","attendees":[{"email":"other@example.com","responseStatus":"declined"}]`, "Cancelled planning", 1},
+		{"cleared", `,"summary":"","attendees":[]`, "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newCalendarStore(t)
+			_, master := calendarFixture(t, st, "master", `{"id":"weekly","status":"confirmed","start":{"dateTime":"2027-03-02T17:00:00Z"},"end":{"dateTime":"2027-03-02T18:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=2"],"attendees":[{"email":"guest@example.com","responseStatus":"accepted"}]}`)
+			_, cancelled := calendarFixture(t, st, "cancelled", `{"id":"cancelled","recurringEventId":"weekly","originalStartTime":{"dateTime":"2027-03-09T17:00:00Z"},"status":"cancelled"`+tc.fields+`}`)
+			subject := tc.subject
+			if tc.name == "omitted" {
+				subject = ""
+			}
+			_, err := st.db.Exec(`UPDATE messages SET subject = ? WHERE id = ?`, subject, cancelled)
+			requirements.NoError(err)
+			from := time.Date(2027, 3, 9, 0, 0, 0, 0, time.UTC)
+			page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+			requirements.NoError(err)
+			requirements.Len(page.Occurrences, 1)
+			o := page.Occurrences[0]
+			assertions.Equal(cancelled, o.MessageID)
+			assertions.Equal(master, o.SeriesMessageID)
+			assertions.Equal(tc.subject, o.Subject)
+			assertions.Equal("cancelled", o.Status)
+			assertions.True(o.Cancelled)
+			requirements.Len(o.Attendees, tc.attendees)
+			if tc.name == "supplied" {
+				assertions.Equal("other@example.com", o.Attendees[0].Email)
+			}
+		})
+	}
 }

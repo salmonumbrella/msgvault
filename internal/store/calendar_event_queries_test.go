@@ -2,11 +2,12 @@ package store
 
 import (
 	"fmt"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func calendarWindow(t *testing.T, st *Store, from, to string) ([]CalendarEventRow, error) {
@@ -60,7 +61,7 @@ func bulkCalendarCandidates(t *testing.T, st *Store, sourceID, conversationID in
 
 func TestCalendarEventRowsManyExceptionsBounded(t *testing.T) {
 	assertions := assert.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
+	st := newCalendarStore(t)
 	data, _ := calendarFixture(t, st, "cap-master", `{"id":"cap-series","start":{"date":"1970-01-01"},"end":{"date":"1970-01-02"},"recurrence":["RRULE:FREQ=DAILY"]}`)
 	bulkCalendarCandidates(t, st, data.Message.SourceID, data.Message.ConversationID, "exception", 20001)
 	rows, err := calendarWindow(t, st, "2027-03-14T00:00:00Z", "2027-03-15T00:00:00Z")
@@ -70,7 +71,7 @@ func TestCalendarEventRowsManyExceptionsBounded(t *testing.T) {
 
 func TestCalendarEventRowsHardSeriesCap(t *testing.T) {
 	assertions := assert.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
+	st := newCalendarStore(t)
 	data, _ := calendarFixture(t, st, "cap-master", calendarRaw)
 	bulkCalendarCandidates(t, st, data.Message.SourceID, data.Message.ConversationID, "series", 2001)
 	rows, err := calendarWindow(t, st, "2027-03-14T00:00:00Z", "2027-03-15T00:00:00Z")
@@ -79,7 +80,7 @@ func TestCalendarEventRowsHardSeriesCap(t *testing.T) {
 }
 
 func TestCalendarEventRowsBudgetRejectsBeforeDecoding(t *testing.T) {
-	st := newRFC822IDBackfillBackendStore(t)
+	st := newCalendarStore(t)
 	calendarFixture(t, st, "one", calendarRaw)
 	calendarFixture(t, st, "two", calendarRaw)
 	_, err := st.db.Exec(`UPDATE calendar_events SET recurrence_json = 'invalid'`)
@@ -94,7 +95,7 @@ func TestCalendarEventSourceZoneRebuild(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 
-	st := newRFC822IDBackfillBackendStore(t)
+	st := newCalendarStore(t)
 	data, id := calendarFixture(t, st, "zone", `{"id":"all-day","start":{"date":"2027-03-14"},"end":{"date":"2027-03-15"}}`)
 	requirements.NoError(st.UpdateSourceSyncConfig(data.Message.SourceID, `{"time_zone":"America/Los_Angeles"}`))
 	row := calendarRows(t, st, id)[0]

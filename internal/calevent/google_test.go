@@ -139,3 +139,8 @@ func TestGoogleInvalidMetadataKeepsRaw(t *testing.T) {
 	event := decodeGoogle(t, `{"id":"event-example","status":"confirmed"}`, `{`, "")
 	assertions.Equal("confirmed", event.Status)
 }
+
+func TestGoogleSeparateOrganizer(t *testing.T) {
+	event := decodeGoogle(t, `{"id":"event-example","organizer":{"email":" ORGANIZER@EXAMPLE.COM ","displayName":"Organizer","self":true},"attendees":[{"email":"guest@example.com","responseStatus":"accepted"}]}`, `{}`, "")
+	assert.Equal(t, []Attendee{{Email: "guest@example.com", Role: "required", RSVP: "accepted"}, {Email: "organizer@example.com", DisplayName: "Organizer", Role: "organizer", RSVP: "unknown", IsCopySelf: true}}, event.Attendees)
+}

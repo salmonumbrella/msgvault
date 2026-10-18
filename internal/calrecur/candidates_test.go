@@ -76,7 +76,7 @@ func TestTimedRecurrenceGapHonorsUntilAndBudget(t *testing.T) {
 	zone, err := time.LoadLocation("America/Los_Angeles")
 	requirements.NoError(err)
 	start := instant(t, "2027-03-07T10:30:00Z")
-	s, err := ParseSet(start, false, "", zone, []string{"RRULE:FREQ=WEEKLY;COUNT=2;UNTIL=20270314T110000Z"})
+	s, err := ParseSet(start, false, "", zone, []string{"RRULE:FREQ=WEEKLY;UNTIL=20270314T110000Z"})
 	requirements.NoError(err)
 	var got []string
 	err = testIter(t.Context(), s, instant(t, "2027-03-22T00:00:00Z"), 100, func(i instance) bool {

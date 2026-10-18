@@ -29,7 +29,7 @@ func (s *calendarEventsTestStore) ListCalendarOccurrencesContext(_ context.Conte
 }
 func TestCalendarEventsRoute(t *testing.T) {
 	backend := &calendarEventsTestStore{mockStore: &mockStore{stats: &StoreStats{}}}
-	srv := NewServer(&config.Config{Server: config.ServerConfig{APIKey: "synthetic-owner-key", AgentAccess: true}}, backend, nil, testLogger())
+	srv := NewServer(&config.Config{Server: config.ServerConfig{APIKey: "synthetic-owner-key", AgentAccess: true, RemoteClients: []config.RemoteClientConfig{{ClientID: "synthetic-reader", APIKey: "synthetic-reader-key"}}}}, backend, nil, testLogger())
 	srv.agentGrants = agentgrant.NewRegistry()
 	_, secret, _, err := srv.agentGrants.Issue("calendar", []agentgrant.Permission{agentgrant.PermissionCalendarWrite}, []agentgrant.SourceRef{{ID: 1, Type: "gcal", Identifier: "calendar@example.com"}}, time.Time{})
 	require.NoError(t, err)
@@ -41,7 +41,8 @@ func TestCalendarEventsRoute(t *testing.T) {
 		want              string
 	}{
 		{"owner", path, "", nil, 200, `"message_id":42`},
-		{"delegated", path, secret, nil, 403, ""},
+		{"delegated", path, secret, nil, 401, ""},
+		{"remote", path, "synthetic-reader-key", nil, 403, ""},
 		{"missing", "/api/v1/calendar/events", "", nil, 400, "invalid_argument"},
 		{"reversed", strings.Replace(path, "2027-04-01", "2027-02-01", 1), "", nil, 400, "invalid_argument"},
 		{"broad", path, "", store.ErrQueryTooBroad, 400, "query_too_broad"},
@@ -50,7 +51,9 @@ func TestCalendarEventsRoute(t *testing.T) {
 			backend.err = tc.err
 			before := backend.calls
 			r := httptest.NewRequest(http.MethodGet, tc.path, nil)
-			if tc.token != "" {
+			if tc.name == "remote" {
+				r.Header.Set("X-Api-Key", tc.token)
+			} else if tc.token != "" {
 				r.Header.Set(apiprotocol.AgentTokenHeader, tc.token)
 			} else {
 				r.Header.Set("X-Api-Key", "synthetic-owner-key")
@@ -59,7 +62,7 @@ func TestCalendarEventsRoute(t *testing.T) {
 			srv.Router().ServeHTTP(w, r)
 			require.Equal(t, tc.status, w.Code, w.Body.String())
 			assert.Contains(t, w.Body.String(), tc.want)
-			if tc.status == 403 {
+			if tc.status == 401 || tc.status == 403 {
 				assert.Equal(t, before, backend.calls)
 			}
 		})

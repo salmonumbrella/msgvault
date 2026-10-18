@@ -4,7 +4,6 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"go.kenn.io/msgvault/internal/calrecur"
@@ -94,7 +93,14 @@ func decodeGoogleEvent(raw, metadata []byte, calendarZone string) (Event, bool, 
 	} else if len(g.Recurrence) != 0 {
 		e.Kind, e.SeriesProviderID = "series", g.ID
 	}
+	organizerEmail := gcalmodel.NormalizeParticipantEmail(g.Organizer.Email)
+	organizerSeen := false
 	for _, a := range g.Attendees {
+		email := gcalmodel.NormalizeParticipantEmail(a.Email)
+		if organizerEmail != "" && email == organizerEmail {
+			a.Organizer = true
+			organizerSeen = true
+		}
 		role := "required"
 		switch {
 		case IsRoomAttendee(a.Email, a.Resource):
@@ -111,9 +117,10 @@ func decodeGoogleEvent(raw, metadata []byte, calendarZone string) (Event, bool, 
 		case "needsAction":
 			rsvp = "needs_action"
 		}
-		e.Attendees = append(e.Attendees, Attendee{Email: normalizeEmail(a.Email), DisplayName: a.DisplayName, Role: role, RSVP: rsvp, IsCopySelf: a.Self})
+		e.Attendees = append(e.Attendees, Attendee{Email: email, DisplayName: a.DisplayName, Role: role, RSVP: rsvp, IsCopySelf: a.Self})
+	}
+	if organizerEmail != "" && !organizerSeen {
+		e.Attendees = append(e.Attendees, Attendee{Email: organizerEmail, DisplayName: g.Organizer.DisplayName, Role: "organizer", RSVP: "unknown", IsCopySelf: g.Organizer.Self})
 	}
 	return e, true, nil
 }
-
-func normalizeEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
