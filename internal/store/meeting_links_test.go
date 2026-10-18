@@ -83,7 +83,7 @@ func TestMeetingLinksTwentyExactInstant(t *testing.T) {
 	_, master := calendarFixture(t, st, "master", linkSeriesRaw)
 	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"weekly@example.org","startsAt":"2027-03-14T10:00:30Z"}}`)
 	assertions.Equal(fmt.Sprintf("msg:%d", note), exportedMeetingKeys(t, st, note)[note])
-	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), fmt.Sprintf("msg:%d", note), 10)
+	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: note}}, 10)
 	requirements.NoError(err)
 	requirements.Len(suggestions, 1)
 	assertions.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", master), suggestions[0].Ref)
@@ -169,12 +169,19 @@ func TestMeetingLinksGranolaOwnCalendar(t *testing.T) {
 	_, other := calendarFixture(t, st, "other", raw, "other@example.com")
 	note := granolaLinkFixture(t, st, "note", "event")
 	assertions.Equal(fmt.Sprintf("msg:%d", note), exportedMeetingKeys(t, st, note)[note])
-	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), fmt.Sprintf("msg:%d", note), 10)
+	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: note}}, 10)
 	requirements.NoError(err)
 	requirements.Len(suggestions, 1)
 	assertions.Equal(fmt.Sprintf("evt:%d", other), suggestions[0].Ref)
 	calendarFixture(t, st, "own", raw)
 	assertions.Equal(`["own@example.org",0,""]`, exportedMeetingKeys(t, st, note)[note])
+}
+
+func TestMeetingLinksGranolaEmailCase(t *testing.T) {
+	st := newRFC822IDBackfillBackendStore(t)
+	calendarFixture(t, st, "own", singleLinkRaw("event", "own@example.org"), " Calendar@Example.COM ")
+	_, note := projectionFixture(t, st, "note", "granola_json", `{"owner":{"email":" CALENDAR@example.com "},"calendar_event":{"calendar_event_id":"event"}}`)
+	assert.Equal(t, `["own@example.org",0,""]`, exportedMeetingKeys(t, st, note)[note])
 }
 
 func TestMeetingLinksIdentityHasSeparateFields(t *testing.T) {
@@ -388,4 +395,20 @@ func TestMeetingLinksIgnoreUnresolvableDecision(t *testing.T) {
 	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: master, Key: "20270314T100000Z"}))
 	requirements.NoError(st.UpsertMessageRawWithFormat(master, []byte(`{"id":"series","recurrence":["RRULE:FREQ=WEEKLY"]}`), "gcal_json"))
 	assert.Equal(t, fmt.Sprintf("msg:%d", note), exportedMeetingKeys(t, st, note)[note])
+}
+
+func TestMeetingLinksBreadthBeforeDecode(t *testing.T) {
+	st := newRFC822IDBackfillBackendStore(t)
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"dense@example.org"}}`)
+	for i := range 201 {
+		_, event := calendarFixture(t, st, fmt.Sprintf("event-%d", i), singleLinkRaw(fmt.Sprintf("event-%d", i), "dense@example.org"))
+		_, err := st.db.Exec(`UPDATE calendar_events SET recurrence_json = 'broken' WHERE message_id = ?`, event)
+		require.NoError(t, err)
+	}
+	ctx, release, err := st.BeginReadSnapshotContext(t.Context())
+	require.NoError(t, err)
+	defer release()
+	keys, err := st.ExportLogicalMeetingKeysContext(ctx, ReadDBContext(ctx, st.db.DB), []int64{note})
+	require.NoError(t, err)
+	assert.Equal(t, fmt.Sprintf("msg:%d", note), keys[note])
 }

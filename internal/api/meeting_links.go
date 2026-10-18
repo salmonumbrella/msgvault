@@ -16,7 +16,7 @@ import (
 type MeetingLinkStore interface {
 	LinkMeetingContext(ctx context.Context, memberID int64, ref store.OccurrenceRef) error
 	UnlinkMeetingContext(ctx context.Context, memberID int64, ref store.OccurrenceRef) error
-	SuggestMeetingLinksContext(ctx context.Context, ref string, limit int) ([]store.MeetingSuggestion, error)
+	SuggestMeetingLinksContext(ctx context.Context, ref store.MeetingLinkRef, limit int) ([]store.MeetingSuggestion, error)
 }
 
 type MeetingLinkDecisionRequest struct {
@@ -46,22 +46,22 @@ func (s *Server) registerMeetingLinkRoutes(api huma.API) {
 	registerRawHumaRoute(api, op, s.handleMeetingLinkSuggestions)
 }
 
-func parseMeetingLinkRef(value string, eventOnly bool) (store.OccurrenceRef, error) {
+func parseMeetingLinkRef(value string, eventOnly bool) (store.MeetingLinkRef, error) {
 	kind, value, ok := strings.Cut(value, ":")
 	if !ok || kind != "evt" && (eventOnly || kind != "msg") {
-		return store.OccurrenceRef{}, errors.New("use msg:<id> or evt:<id>[@occurrence key]; decisions require an event reference")
+		return store.MeetingLinkRef{}, errors.New("use msg:<id> or evt:<id>[@occurrence key]; decisions require an event reference")
 	}
 	message, key, hasKey := strings.Cut(value, "@")
 	id, err := strconv.ParseInt(message, 10, 64)
 	if err != nil || id <= 0 || id > 9007199254740991 || hasKey && (kind != "evt" || key == "") {
-		return store.OccurrenceRef{}, errors.New("invalid meeting reference")
+		return store.MeetingLinkRef{}, errors.New("invalid meeting reference")
 	}
 	if hasKey {
 		if _, identity, ok := calrecur.ParseInstanceID("event_" + key); !ok || identity.Key() != key {
-			return store.OccurrenceRef{}, errors.New("invalid occurrence key")
+			return store.MeetingLinkRef{}, errors.New("invalid occurrence key")
 		}
 	}
-	return store.OccurrenceRef{MessageID: id, Key: key}, nil
+	return store.MeetingLinkRef{Kind: kind, OccurrenceRef: store.OccurrenceRef{MessageID: id, Key: key}}, nil
 }
 
 func (s *Server) handleMeetingLinkDecision(w http.ResponseWriter, r *http.Request) {
@@ -80,9 +80,9 @@ func (s *Server) handleMeetingLinkDecision(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if request.Decision == "link" {
-		err = backend.LinkMeetingContext(r.Context(), request.MessageID, ref)
+		err = backend.LinkMeetingContext(r.Context(), request.MessageID, ref.OccurrenceRef)
 	} else {
-		err = backend.UnlinkMeetingContext(r.Context(), request.MessageID, ref)
+		err = backend.UnlinkMeetingContext(r.Context(), request.MessageID, ref.OccurrenceRef)
 	}
 	if err != nil {
 		s.writeMeetingLinkError(w, err)
@@ -92,8 +92,8 @@ func (s *Server) handleMeetingLinkDecision(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleMeetingLinkSuggestions(w http.ResponseWriter, r *http.Request) {
-	ref := r.URL.Query().Get("ref")
-	if _, err := parseMeetingLinkRef(ref, false); err != nil {
+	ref, err := parseMeetingLinkRef(r.URL.Query().Get("ref"), false)
+	if err != nil {
 		writeError(w, 400, "invalid_argument", err.Error())
 		return
 	}

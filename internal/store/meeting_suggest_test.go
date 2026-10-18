@@ -39,7 +39,7 @@ func TestMeetingLinksSuggestionsBatchParticipants(t *testing.T) {
 		}
 		return nil
 	}})
-	suggestions, err := observed.SuggestMeetingLinksContext(t.Context(), fmt.Sprintf("evt:%d", event), 10)
+	suggestions, err := observed.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "evt", OccurrenceRef: OccurrenceRef{MessageID: event}}, 10)
 	requirements.NoError(err)
 	requirements.Len(suggestions, 3)
 	assertions.Equal(int64(1), queries.Load())
@@ -49,16 +49,16 @@ func TestMeetingLinksSuggestionsBatchParticipants(t *testing.T) {
 	}
 	// Circleback's room URL stays a suggestion, including when the times overlap.
 	assertions.Equal(fmt.Sprintf("msg:%d", notes[0]), exportedMeetingKeys(t, st, notes[0])[notes[0]])
-	reverse, err := observed.SuggestMeetingLinksContext(t.Context(), fmt.Sprintf("msg:%d", notes[0]), 1)
+	reverse, err := observed.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: notes[0]}}, 1)
 	requirements.NoError(err)
 	requirements.Len(reverse, 1)
 	assertions.Equal(fmt.Sprintf("evt:%d", event), reverse[0].Ref)
 	assertions.Equal(int64(2), queries.Load())
 	requirements.NoError(st.UpsertMessageRawWithFormat(event, []byte(`{"id":"event","status":"cancelled","start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"}}`), "gcal_json"))
-	suggestions, err = observed.SuggestMeetingLinksContext(t.Context(), fmt.Sprintf("evt:%d", event), 10)
+	suggestions, err = observed.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "evt", OccurrenceRef: OccurrenceRef{MessageID: event}}, 10)
 	requirements.NoError(err)
 	assertions.Empty(suggestions)
-	reverse, err = observed.SuggestMeetingLinksContext(t.Context(), fmt.Sprintf("msg:%d", notes[0]), 10)
+	reverse, err = observed.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: notes[0]}}, 10)
 	requirements.NoError(err)
 	assertions.Empty(reverse)
 	var count int
@@ -77,6 +77,7 @@ func TestMeetingLinksSuggestionsTimeWindow(t *testing.T) {
 	}{
 		{name: "scheduled", sent: "2020-01-01T00:00:00Z", raw: `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"window@example.org","startsAt":"2027-03-14T10:00:00Z"}}`, include: true},
 		{name: "long recording", sent: "2027-03-12T10:00:00Z", raw: `{"started_at":"2027-03-12T10:00:00Z","ended_at":"2027-03-14T10:30:00Z"}`, include: true},
+		{name: "offset", sent: "2027-03-14T06:30:00-04:00", raw: `{}`, include: true},
 		{name: "received", received: "2027-03-14T10:00:00Z", raw: `{}`, include: true},
 		{name: "internal", internal: "2027-03-14T10:00:00Z", raw: `{}`, include: true},
 		{name: "past", sent: "2020-01-01T00:00:00Z", raw: `{}`},
@@ -103,11 +104,27 @@ func TestMeetingLinksSuggestionsTimeWindow(t *testing.T) {
 			want = append(want, id)
 		}
 	}
-	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), fmt.Sprintf("evt:%d", event), 100)
+	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "evt", OccurrenceRef: OccurrenceRef{MessageID: event}}, 100)
 	requirements.NoError(err)
 	var got []int64
 	for _, suggestion := range suggestions {
 		got = append(got, suggestion.MemberMessageID)
 	}
 	assert.ElementsMatch(t, want, got)
+}
+
+func TestMeetingLinksSuggestionsOffset(t *testing.T) {
+	st := newRFC822IDBackfillBackendStore(t)
+	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "offset@example.org"))
+	data, note := projectionFixture(t, st, "note", "meeting_json", `{}`)
+	at, err := time.Parse(time.RFC3339, "2027-03-14T06:30:00-04:00")
+	require.NoError(t, err)
+	data.Message.SentAt = sql.NullTime{Time: at, Valid: true}
+	_, err = st.UpsertMessage(data.Message)
+	require.NoError(t, err)
+	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "evt", OccurrenceRef: OccurrenceRef{MessageID: event}}, 10)
+	require.NoError(t, err)
+	require.Len(t, suggestions, 1)
+	assert.Equal(t, note, suggestions[0].MemberMessageID)
+	assert.Equal(t, 30, suggestions[0].OverlapMinutes)
 }

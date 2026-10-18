@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
 	"go.kenn.io/msgvault/internal/calrecur"
+	"go.kenn.io/msgvault/internal/sqliteutil"
 )
 
 type MeetingSuggestion struct {
@@ -137,18 +137,14 @@ func suggestionMembers(ctx context.Context, r SQLReader, ids []int64) (out []sug
 	return out, nil
 }
 
-// SuggestMeetingLinksContext ranks overlapping events or transcripts for an
-// owner reference, msg:<message ID> or evt:<message ID>[@<occurrence key>].
-func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref string, limit int) ([]MeetingSuggestion, error) {
-	kind, value, ok := strings.Cut(ref, ":")
-	if !ok || kind != "msg" && kind != "evt" {
-		return nil, errors.New("invalid meeting reference")
-	}
-	message, key, _ := strings.Cut(value, "@")
-	id, err := strconv.ParseInt(message, 10, 64)
-	if err != nil || id <= 0 || kind == "msg" && key != "" {
-		return nil, errors.New("invalid meeting reference")
-	}
+// MeetingLinkRef identifies a note or calendar occurrence for suggestions.
+type MeetingLinkRef struct {
+	Kind string
+	OccurrenceRef
+}
+
+// SuggestMeetingLinksContext ranks overlapping events or transcripts.
+func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref MeetingLinkRef, limit int) ([]MeetingSuggestion, error) {
 	ctx, release, err := s.BeginReadSnapshotContext(ctx)
 	if err != nil {
 		return nil, err
@@ -156,8 +152,8 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref string, limi
 	defer release()
 	budget := calrecur.RequestReadBudget
 	var out []MeetingSuggestion
-	if kind == "msg" {
-		members, err := suggestionMembers(ctx, s.meetingReader(ctx), []int64{id})
+	if ref.Kind == "msg" {
+		members, err := suggestionMembers(ctx, s.meetingReader(ctx), []int64{ref.MessageID})
 		if err != nil {
 			return nil, err
 		}
@@ -206,7 +202,7 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref string, limi
 			}
 		}
 	} else {
-		target, err := resolveMeetingOccurrence(ctx, s.meetingReader(ctx), OccurrenceRef{MessageID: id, Key: key}, &budget)
+		target, err := resolveMeetingOccurrence(ctx, s.meetingReader(ctx), ref.OccurrenceRef, &budget)
 		if err != nil {
 			return nil, err
 		}
@@ -221,15 +217,22 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref string, limi
 			return nil, err
 		}
 		lower := target.Start.Add(-time.Duration(max(1800, longest) * float64(time.Second)))
+		scheduledStart, messageStart := "scheduled_at", "COALESCE(sent_at,received_at,internal_date)"
+		var lowerBound, upperBound any = lower, target.End
+		if !s.IsPostgreSQL() {
+			scheduledStart = sqliteutil.TimestampKeyFunction + "(" + scheduledStart + ")"
+			messageStart = sqliteutil.TimestampKeyFunction + "(" + messageStart + ")"
+			lowerBound, upperBound = sqliteutil.TimestampKey(lower), sqliteutil.TimestampKey(target.End)
+		}
 		filter := `effective_start < ? AND effective_start + duration_seconds * INTERVAL '1 second' > ?`
 		if !s.IsPostgreSQL() {
 			filter = `julianday(effective_start) < julianday(?) AND julianday(effective_start) + duration_seconds / 86400.0 > julianday(?)`
 		}
 		rows, err := r.QueryContext(ctx, `WITH window_ids AS (
- SELECT message_id AS id FROM meeting_link_keys WHERE scheduled_at >= ? AND scheduled_at < ?
+ SELECT message_id AS id FROM meeting_link_keys WHERE `+scheduledStart+` >= ? AND `+scheduledStart+` < ?
  UNION ALL
  SELECT id FROM messages m WHERE message_type = 'meeting_transcript' AND deleted_at IS NULL
- AND COALESCE(sent_at,received_at,internal_date) >= ? AND COALESCE(sent_at,received_at,internal_date) < ?
+ AND `+messageStart+` >= ? AND `+messageStart+` < ?
  AND NOT EXISTS (SELECT 1 FROM meeting_link_keys k WHERE k.message_id = m.id AND k.scheduled_at IS NOT NULL)
 ), candidates AS (
  SELECT m.id, COALESCE(k.scheduled_at,m.sent_at,m.received_at,m.internal_date) AS effective_start,
@@ -237,7 +240,7 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref string, limi
  FROM window_ids w JOIN messages m ON m.id = w.id
  LEFT JOIN meeting_details d ON d.message_id = m.id LEFT JOIN meeting_link_keys k ON k.message_id = m.id
  WHERE m.message_type = 'meeting_transcript' AND m.deleted_at IS NULL)
- SELECT id FROM candidates WHERE `+filter+` ORDER BY id LIMIT 2001`, lower, target.End, lower, target.End, target.End, target.Start)
+ SELECT id FROM candidates WHERE `+filter+` ORDER BY id LIMIT 2001`, lowerBound, upperBound, lowerBound, upperBound, target.End, target.Start)
 		if err != nil {
 			return nil, err
 		}

@@ -6,6 +6,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.kenn.io/msgvault/internal/calrecur"
@@ -64,12 +65,9 @@ func spendMeetingBudget(ctx context.Context, budget *int, count int) error {
 }
 
 func meetingEventRows(ctx context.Context, r SQLReader, predicate string, args []any, budget *int) ([]CalendarEventRow, error) {
-	rows, err := queryCalendarEventRows(ctx, r, predicate, args, 201)
+	rows, err := queryCalendarEventRowsWithinBudget(ctx, r, predicate, args, min(200, *budget))
 	if err != nil {
 		return nil, err
-	}
-	if len(rows) > 200 {
-		return nil, ErrQueryTooBroad
 	}
 	if err := spendMeetingBudget(ctx, budget, len(rows)); err != nil {
 		return nil, err
@@ -253,7 +251,7 @@ func (s *Store) automaticMeetingOccurrences(ctx context.Context, r SQLReader, ke
 			if err := sources.Scan(&id, &config); err != nil {
 				return nil, err
 			}
-			if decodeCalendarSourceConfig(config).CalendarID == key.CalendarID {
+			if NormalizeIdentifierForCompare(strings.TrimSpace(decodeCalendarSourceConfig(config).CalendarID)) == key.CalendarID {
 				sourceIDs = append(sourceIDs, id)
 			}
 		}
