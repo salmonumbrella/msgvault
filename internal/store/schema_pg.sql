@@ -4284,4 +4284,3 @@ CREATE TABLE IF NOT EXISTS meeting_link_decisions (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_link_decisions_identity ON meeting_link_decisions(member_message_id, target_ical_uid, COALESCE(target_message_id, 0), occurrence_key);
 CREATE INDEX IF NOT EXISTS idx_meeting_link_decisions_target ON meeting_link_decisions(target_message_id);
-CREATE INDEX IF NOT EXISTS idx_messages_calendar_ical_uid ON messages((metadata ->> 'ical_uid')) WHERE message_type = 'calendar_event';
