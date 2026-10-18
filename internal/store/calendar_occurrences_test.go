@@ -388,7 +388,7 @@ func TestListCalendarOccurrencesCancelledSinglesWithoutBounds(t *testing.T) {
 		calendarFixture(t, st, fmt.Sprintf("cancelled-%d", i), fmt.Sprintf(`{"id":"cancelled-%d","status":"cancelled"}`, i))
 	}
 	from := time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC)
-	rows, err := calendarEventRowsInWindow(t.Context(), st.db, from, from.AddDate(0, 0, 1))
+	rows, err := calendarEventRowsInWindow(t.Context(), st.meetingReader(t.Context()), from, from.AddDate(0, 0, 1))
 	requirements.NoError(err)
 	assertions.Empty(rows, "tombstones must consume no request budget")
 	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))

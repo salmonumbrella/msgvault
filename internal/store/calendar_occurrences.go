@@ -44,7 +44,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 		return page, err
 	}
 	defer release()
-	rows, err := calendarEventRowsInWindow(ctx, s.db, from, to)
+	rows, err := calendarEventRowsInWindow(ctx, s.meetingReader(ctx), from, to)
 	if err != nil {
 		return page, err
 	}
@@ -93,7 +93,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 		if o.HasException {
 			effective = byID[o.ExceptionRef]
 			if effective.Event.Status == "cancelled" {
-				effective, err = inheritCalendarCancellation(ctx, s.db, effective, row)
+				effective, err = inheritCalendarCancellation(ctx, s.meetingReader(ctx), effective, row)
 				if err != nil {
 					return err
 				}

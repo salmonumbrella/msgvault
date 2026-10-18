@@ -100,16 +100,35 @@ func expandMeetingSeries(ctx context.Context, r SQLReader, master CalendarEventR
 	if err != nil {
 		return nil, err
 	}
-	expanded, err := expandCalendarSeries(ctx, r, master, related, from, to, budget)
+	expanded, count, reason, err := expandCalendarSeries(ctx, master, related, from, to, *budget)
+	*budget -= count
 	if err != nil {
 		return nil, err
 	}
+	if reason != "" {
+		if *budget <= 0 || reason == calrecur.ErrBudgetExceeded.Error() {
+			return nil, calendarRecurrenceBudgetError()
+		}
+		return nil, fmt.Errorf("%w: %s", calrecur.ErrUnsupportedRecurrence, reason)
+	}
+	byID := make(map[int64]CalendarEventRow, len(related))
+	for _, row := range related {
+		byID[row.MessageID] = row
+	}
 	out := make([]linkOccurrence, 0, len(expanded))
 	for _, instance := range expanded {
-		o := occurrenceFromRow(master, instance.Occurrence.Original.Key())
-		o.Row = instance.Row
-		o.Start, o.End = instance.Occurrence.Start, instance.Occurrence.End
-		if instance.Occurrence.Cancelled {
+		o := occurrenceFromRow(master, instance.Original.Key())
+		if instance.HasException {
+			o.Row = byID[instance.ExceptionRef]
+			if o.Row.Event.Status == meetingCancelledStatus {
+				o.Row, err = inheritCalendarCancellation(ctx, r, o.Row, master)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		o.Start, o.End = instance.Start, instance.End
+		if instance.Cancelled || master.Event.Status == meetingCancelledStatus {
 			o.Row.Event.Status = meetingCancelledStatus
 		}
 		out = append(out, o)
