@@ -167,6 +167,11 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref string, limi
 		if err != nil {
 			return nil, err
 		}
+		// Charge both the master-index pass and the candidate pass. Exceptions
+		// are read per series through the bounded calendar query.
+		if err := spendMeetingBudget(ctx, &budget, 2*len(rows)); err != nil {
+			return nil, err
+		}
 		masters := map[string]bool{}
 		for _, row := range rows {
 			if row.Event.Kind == "series" {
