@@ -63,7 +63,9 @@ func TestCalendarEventsRoute(t *testing.T) {
 			w := httptest.NewRecorder()
 			srv.Router().ServeHTTP(w, r)
 			require.Equal(t, tc.status, w.Code, w.Body.String())
-			assert.Contains(t, w.Body.String(), tc.want)
+			if tc.want != "" {
+				assert.Contains(t, w.Body.String(), tc.want)
+			}
 			if tc.status == 401 || tc.status == 403 {
 				assert.Equal(t, before, backend.calls)
 			}

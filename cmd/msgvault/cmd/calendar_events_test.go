@@ -82,7 +82,11 @@ func TestCalendarEventsCommand(t *testing.T) {
 			}
 			requirements.NoError(err)
 			assertions.Contains(out.String(), tc.want)
-			assertions.Contains(stderr.String(), tc.wantWarning)
+			if tc.wantWarning == "" {
+				assertions.Empty(stderr.String())
+			} else {
+				assertions.Contains(stderr.String(), tc.wantWarning)
+			}
 			if tc.name == "terminal controls" {
 				assertions.NotContains(out.String(), "\x1b")
 				assertions.Len(bytes.Split(bytes.TrimSpace(out.Bytes()), []byte("\n")), 2)
