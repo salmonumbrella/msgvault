@@ -78,7 +78,7 @@ func meetingEventRows(ctx context.Context, r SQLReader, predicate string, args [
 }
 
 func occurrenceFromRow(row CalendarEventRow, key string) linkOccurrence {
-	id := meetingIdentity{ICalUID: row.Event.ICalUID, OccurrenceKey: key}
+	id := meetingIdentity{ICalUID: row.ICalUID, OccurrenceKey: key}
 	if id.ICalUID == "" {
 		id.EventMessageID = row.MessageID
 	}
@@ -228,8 +228,16 @@ func memberLinkKeys(ctx context.Context, r SQLReader, id int64) (keys []meetingL
 	return keys, rows.Err()
 }
 
-func automaticMeetingOccurrences(ctx context.Context, r SQLReader, key meetingLinkKey, budget *int) ([]linkOccurrence, error) {
-	predicate, args := `e.ical_uid = ?`, []any{key.Value}
+func (s *Store) calendarUIDPredicate() string {
+	uidExpr := "json_extract(m.metadata, '$.ical_uid')"
+	if s.IsPostgreSQL() {
+		uidExpr = "m.metadata ->> 'ical_uid'"
+	}
+	return uidExpr + ` = ? AND m.message_type = 'calendar_event'`
+}
+
+func (s *Store) automaticMeetingOccurrences(ctx context.Context, r SQLReader, key meetingLinkKey, budget *int) ([]linkOccurrence, error) {
+	predicate, args := s.calendarUIDPredicate(), []any{key.Value}
 	base, instance, _ := calrecur.ParseInstanceID(key.Value)
 	if key.Kind == "google_event_id" {
 		// Parse the same source configuration used by calendar persistence.
@@ -339,7 +347,7 @@ type meetingLinkDecision struct {
 	CreatedAt time.Time
 }
 
-func meetingMemberOccurrences(ctx context.Context, r SQLReader, memberID int64, budget *int) ([]linkOccurrence, error) {
+func (s *Store) meetingMemberOccurrences(ctx context.Context, r SQLReader, memberID int64, budget *int) ([]linkOccurrence, error) {
 	decisions, err := readMeetingLinkDecisions(ctx, r, memberID)
 	if err != nil {
 		return nil, err
@@ -378,7 +386,7 @@ func meetingMemberOccurrences(ctx context.Context, r SQLReader, memberID int64, 
 		return nil, err
 	}
 	for _, key := range keys {
-		matches, err := automaticMeetingOccurrences(ctx, r, key, budget)
+		matches, err := s.automaticMeetingOccurrences(ctx, r, key, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -428,7 +436,7 @@ func (s *Store) ExportLogicalMeetingKeysContext(ctx context.Context, reader SQLR
 	var memberErrors error
 	for _, id := range members {
 		budget := calrecur.RequestReadBudget
-		occurrences, err := meetingMemberOccurrences(ctx, r, id, &budget)
+		occurrences, err := s.meetingMemberOccurrences(ctx, r, id, &budget)
 		key := fmt.Sprintf("msg:%d", id)
 		if err != nil {
 			out[id] = key

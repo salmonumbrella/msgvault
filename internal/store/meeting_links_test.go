@@ -14,6 +14,37 @@ import (
 
 const linkSeriesRaw = `{"id":"series","iCalUID":"weekly@example.org","start":{"dateTime":"2027-03-07T10:00:00Z","timeZone":"UTC"},"end":{"dateTime":"2027-03-07T11:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=6"]}`
 
+func TestMeetingLinksCalendarUIDLookupPlan(t *testing.T) {
+	st := newRFC822IDBackfillBackendStore(t)
+	_, id := calendarFixture(t, st, "event", singleLinkRaw("event", "shared@example.org"))
+	// Metadata is the UID source even if the archived provider payload differs.
+	require.NoError(t, st.SetMessageMetadata(id, sql.NullString{String: `{"ical_uid":"metadata@example.org"}`, Valid: true}))
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"metadata@example.org"}}`)
+	assert.Equal(t, `["metadata@example.org",0,""]`, exportedMeetingKeys(t, st, note)[note])
+
+	explain := "EXPLAIN QUERY PLAN "
+	if st.IsPostgreSQL() {
+		explain = "EXPLAIN "
+	}
+	rows, err := st.db.QueryContext(t.Context(), explain+calendarEventSelect+"("+st.calendarUIDPredicate()+" AND e.kind != 'exception') ORDER BY e.message_id LIMIT 201", "metadata@example.org")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, rows.Close()) }()
+	var plan []string
+	for rows.Next() {
+		var detail string
+		if st.IsPostgreSQL() {
+			require.NoError(t, rows.Scan(&detail))
+		} else {
+			var id, parent, unused int
+			require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+		}
+		t.Log(detail)
+		plan = append(plan, detail)
+	}
+	require.NoError(t, rows.Err())
+	assert.Contains(t, strings.Join(plan, "\n"), "idx_messages_calendar_ical_uid")
+}
+
 func TestMeetingLinksWindowedExceptions(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
@@ -335,19 +366,16 @@ func TestMeetingLinksUpgradeFromSchema11(t *testing.T) {
 	requirements := require.New(t)
 
 	st := newRFC822IDBackfillBackendStore(t)
-	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "upgraded@example.org"))
+	calendarFixture(t, st, "event", singleLinkRaw("event", "upgraded@example.org"))
 	note := granolaLinkFixture(t, st, "note", "event")
-	_, err := st.db.Exec(`DROP TABLE meeting_link_decisions; DROP TABLE meeting_link_keys; DROP INDEX idx_calendar_events_ical_uid; ALTER TABLE calendar_events DROP COLUMN ical_uid`)
+	_, err := st.db.Exec(`DROP TABLE meeting_link_decisions; DROP TABLE meeting_link_keys; DROP INDEX idx_messages_calendar_ical_uid`)
 	requirements.NoError(err)
-	_, err = st.db.Exec(`UPDATE calendar_events SET projection_version = 1; UPDATE meeting_details SET projection_version = 1; UPDATE archive_metadata SET value = '11' WHERE key = 'schema_version'`)
+	_, err = st.db.Exec(`UPDATE meeting_details SET projection_version = 1; UPDATE archive_metadata SET value = '11' WHERE key = 'schema_version'`)
 	requirements.NoError(err)
-	_, err = st.db.Exec(`UPDATE applied_migrations SET version = 1 WHERE name IN (?,?)`, migrationCalendarEventProjectionV1, migrationMeetingProjectionV1)
+	_, err = st.db.Exec(`UPDATE applied_migrations SET version = 1 WHERE name = ?`, migrationMeetingProjectionV1)
 	requirements.NoError(err)
 	requirements.NoError(st.InitSchemaContext(t.Context()))
 	assertions.Equal(`["upgraded@example.org",0,""]`, exportedMeetingKeys(t, st, note)[note])
-	var uid string
-	requirements.NoError(st.db.QueryRow(`SELECT ical_uid FROM calendar_events WHERE message_id = ?`, event).Scan(&uid))
-	assertions.Equal("upgraded@example.org", uid)
 	requirements.NoError(st.InitSchemaContext(t.Context()))
 	assertions.Equal(`["upgraded@example.org",0,""]`, exportedMeetingKeys(t, st, note)[note])
 }

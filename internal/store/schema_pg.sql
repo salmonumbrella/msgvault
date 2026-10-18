@@ -4232,7 +4232,6 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     message_id BIGINT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     projection_version INTEGER NOT NULL,
     content_hash TEXT NOT NULL,
-    ical_uid TEXT NOT NULL DEFAULT '',
     provider_event_id TEXT NOT NULL DEFAULT '',
     series_provider_id TEXT NOT NULL DEFAULT '',
     kind TEXT NOT NULL DEFAULT '',
@@ -4284,3 +4283,4 @@ CREATE TABLE IF NOT EXISTS meeting_link_decisions (
     PRIMARY KEY (member_message_id, target_message_id, occurrence_key)
 );
 CREATE INDEX IF NOT EXISTS idx_meeting_link_decisions_target ON meeting_link_decisions(target_message_id);
+CREATE INDEX IF NOT EXISTS idx_messages_calendar_ical_uid ON messages((metadata ->> 'ical_uid')) WHERE message_type = 'calendar_event';

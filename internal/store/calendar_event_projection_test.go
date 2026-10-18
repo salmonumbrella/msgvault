@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json/v2"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,11 +29,15 @@ func calendarFixture(t *testing.T, st *Store, key, raw string, calendars ...stri
 	source, err := st.GetOrCreateSource("gcal", calendar)
 	require.NoError(t, err)
 	require.NoError(t, st.UpdateSourceSyncConfig(source.ID, fmt.Sprintf(`{"calendar_id":%q,"time_zone":"UTC"}`, calendar)))
+	var event struct {
+		ICalUID string `json:"iCalUID"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(raw), &event))
 	data := &MessagePersistData{
 		Message:      &Message{SourceID: source.ID, SourceMessageID: key, MessageType: "calendar_event", Subject: sql.NullString{String: "Example event", Valid: true}},
 		Conversation: &ConversationPersistData{SourceConversationID: key, ConversationType: "calendar", Title: "Example event"},
 		RawMIME:      []byte(raw), RawFormat: "gcal_json",
-		Metadata: &sql.NullString{String: fmt.Sprintf(`{"calendar_id":%q}`, calendar), Valid: true},
+		Metadata: &sql.NullString{String: fmt.Sprintf(`{"calendar_id":%q,"ical_uid":%q}`, calendar, event.ICalUID), Valid: true},
 	}
 	id, err := st.PersistMessage(data)
 	require.NoError(t, err)

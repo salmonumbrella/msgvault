@@ -19,6 +19,7 @@ var ErrQueryTooBroad = errors.New("calendar query is too broad")
 type CalendarEventRow struct {
 	MessageID, SourceID int64
 	Subject             string
+	ICalUID             string
 	DeletedFromSource   bool
 	Event               calevent.Event
 }
@@ -29,7 +30,7 @@ const calendarCandidateMargin = 28 * time.Hour
 
 const calendarEventSelect = `SELECT e.message_id, m.source_id, COALESCE(m.subject, ''),
  m.deleted_from_source_at IS NOT NULL,
- e.ical_uid, e.provider_event_id, e.series_provider_id, e.kind, e.original_start_at, e.original_start_date,
+ m.metadata, e.provider_event_id, e.series_provider_id, e.kind, e.original_start_at, e.original_start_date,
  e.status, e.all_day, e.start_at, e.end_at, e.start_date, e.end_date,
  e.event_time_zone, e.calendar_time_zone, e.recurrence_json
  ` + calendarEventFrom
@@ -78,13 +79,23 @@ func queryCalendarEventRows(ctx context.Context, r SQLReader, predicate string, 
 		e := &row.Event
 		var original, start, end sql.NullTime
 		var originalDate, recurrence string
+		var metadata sql.NullString
 		err := result.Scan(&row.MessageID, &row.SourceID, &row.Subject, &row.DeletedFromSource,
-			&e.ICalUID, &e.ProviderEventID, &e.SeriesProviderID, &e.Kind, &original, &originalDate, &e.Status, &e.AllDay,
+			&metadata, &e.ProviderEventID, &e.SeriesProviderID, &e.Kind, &original, &originalDate, &e.Status, &e.AllDay,
 			&start, &end, &e.StartDate, &e.EndDate, &e.EventTimeZone, &e.CalendarTimeZone, &recurrence)
 		if err != nil {
 			_ = result.Close()
 			return nil, fmt.Errorf("scan calendar event: %w", err)
 		}
+		var meta struct {
+			ICalUID string `json:"ical_uid"`
+		}
+		if metadata.Valid {
+			if err := json.Unmarshal([]byte(metadata.String), &meta); err != nil {
+				return nil, fmt.Errorf("decode calendar metadata %d: %w", row.MessageID, err)
+			}
+		}
+		row.ICalUID = meta.ICalUID
 		if originalDate != "" {
 			e.Original = &calrecur.Identity{Date: originalDate, AllDay: true}
 		} else if original.Valid {

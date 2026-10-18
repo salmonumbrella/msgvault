@@ -2,6 +2,7 @@ package twenty
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -617,6 +618,7 @@ func TestImportTwentyLinksArchivedCalendarUID(t *testing.T) {
 	_, err = st.PersistMessage(&store.MessagePersistData{
 		Message:      &store.Message{SourceID: calendar.ID, SourceMessageID: "event", MessageType: "calendar_event"},
 		Conversation: &store.ConversationPersistData{SourceConversationID: "event", ConversationType: "calendar", Title: "Planning"},
+		Metadata:     &sql.NullString{String: `{"calendar_id":"calendar@example.com","ical_uid":"shared@example.org"}`, Valid: true},
 		RawMIME:      []byte(`{"id":"event","iCalUID":"shared@example.org","start":{"dateTime":"2026-09-01T09:30:00Z"},"end":{"dateTime":"2026-09-01T10:30:00Z"}}`), RawFormat: "gcal_json",
 	})
 	requirements.NoError(err)
