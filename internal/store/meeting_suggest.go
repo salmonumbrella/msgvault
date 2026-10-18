@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -35,7 +37,7 @@ func titleTokenSet(title string) map[string]bool {
 }
 
 func rankMeetingSuggestion(member suggestMember, event linkOccurrence) (MeetingSuggestion, bool) {
-	if event.Row.Event.Status == meetingLinkCancelledStatus {
+	if event.Row.Event.Status == "cancelled" {
 		return MeetingSuggestion{}, false
 	}
 	start, end := member.Start, member.End
@@ -45,10 +47,10 @@ func rankMeetingSuggestion(member suggestMember, event linkOccurrence) (MeetingS
 	if event.End.Before(end) {
 		end = event.End
 	}
-	if !event.BoundsKnown || !end.After(start) {
+	if event.Start.IsZero() || event.End.IsZero() || !end.After(start) {
 		return MeetingSuggestion{}, false
 	}
-	suggestion := MeetingSuggestion{Ref: FormatOccurrenceRef(event.Ref), MemberMessageID: member.ID, OverlapMinutes: int(end.Sub(start) / time.Minute), Reasons: []string{"time_overlap"}}
+	suggestion := MeetingSuggestion{Ref: formatMeetingOccurrence(event.Ref), MemberMessageID: member.ID, OverlapMinutes: int(end.Sub(start) / time.Minute), Reasons: []string{"time_overlap"}}
 	seen := map[string]bool{}
 	for _, attendee := range event.Row.Event.Attendees {
 		email := strings.ToLower(strings.TrimSpace(attendee.Email))
@@ -72,205 +74,151 @@ func rankMeetingSuggestion(member suggestMember, event linkOccurrence) (MeetingS
 	return suggestion, true
 }
 
-func suggestionMember(ctx context.Context, r rowReader, scope SourceScope, id int64) (suggestMember, error) {
-	clause, args := linkScopeSQL(scope)
-	var member suggestMember
-	var sent, received, internal sql.NullTime
-	var duration sql.NullFloat64
-	err := r.QueryRowContext(ctx, `SELECT m.id,COALESCE(m.subject,''),m.sent_at,m.received_at,m.internal_date,d.duration_seconds FROM messages m LEFT JOIN meeting_details d ON d.message_id = m.id WHERE m.id = ? AND m.message_type = 'meeting_transcript' AND m.deleted_at IS NULL`+clause, append([]any{id}, args...)...).Scan(&member.ID, &member.Title, &sent, &received, &internal, &duration)
+func formatMeetingOccurrence(ref OccurrenceRef) string {
+	value := fmt.Sprintf("evt:%d", ref.MessageID)
+	if ref.Key != "" {
+		value += "@" + ref.Key
+	}
+	return value
+}
+
+func suggestionMembers(ctx context.Context, r SQLReader, ids []int64) (out []suggestMember, err error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := r.QueryContext(ctx, `SELECT m.id,COALESCE(m.subject,''),m.sent_at,m.received_at,m.internal_date,d.duration_seconds,k.scheduled_at
+ FROM messages m LEFT JOIN meeting_details d ON d.message_id = m.id LEFT JOIN meeting_link_keys k ON k.message_id = m.id AND k.ordinal = 0
+ WHERE m.message_type = 'meeting_transcript' AND m.deleted_at IS NULL AND m.id IN (`+placeholders(len(ids))+`) ORDER BY m.id`, args...)
 	if err != nil {
-		return member, err
+		return nil, err
 	}
-	keys, err := memberLinkKeys(ctx, r, id)
-	if err != nil {
-		return member, err
-	}
-	for _, at := range []sql.NullTime{sent, received, internal} {
-		if at.Valid {
-			member.Start = at.Time
-			break
-		}
-	}
-	for _, key := range keys {
-		if key.ScheduledAt != nil {
-			member.Start = *key.ScheduledAt
-			break
-		}
-	}
-	d := 30 * time.Minute
-	if duration.Valid && duration.Float64 > 0 {
-		d = time.Duration(duration.Float64 * float64(time.Second))
-	}
-	member.End = member.Start.Add(d)
-	member.Emails = map[string]bool{}
-	rows, err := r.QueryContext(ctx, `SELECT COALESCE(p.email_address,'') FROM participants p WHERE EXISTS (SELECT 1 FROM message_recipients mr WHERE mr.message_id = ? AND mr.participant_id = p.id) OR EXISTS (SELECT 1 FROM messages m WHERE m.id = ? AND m.sender_id = p.id)`, id, id)
-	if err != nil {
-		return member, err
-	}
-	defer func() { _ = rows.Close() }()
 	for rows.Next() {
-		var email string
-		if err := rows.Scan(&email); err != nil {
-			return member, err
+		var member suggestMember
+		var sent, received, internal, scheduled sql.NullTime
+		var duration sql.NullFloat64
+		if err := rows.Scan(&member.ID, &member.Title, &sent, &received, &internal, &duration, &scheduled); err != nil {
+			_ = rows.Close()
+			return nil, err
 		}
-		email = strings.ToLower(strings.TrimSpace(email))
-		if email != "" {
-			member.Emails[email] = true
+		for _, at := range []sql.NullTime{scheduled, sent, received, internal} {
+			if at.Valid {
+				member.Start = at.Time
+				break
+			}
 		}
+		d := 30 * time.Minute
+		if duration.Valid && duration.Float64 > 0 {
+			d = time.Duration(duration.Float64 * float64(time.Second))
+		}
+		member.End = member.Start.Add(d)
+		out = append(out, member)
 	}
-	return member, rows.Err()
-}
-
-type suggestionSeriesIdentity struct {
-	sourceID                   int64
-	provider, namespace, event string
-}
-
-// Suggestions expand only the requested local window. They share scope and
-// snapshot semantics with links and never write a decision.
-func linkOccurrencesInWindow(ctx context.Context, r rowReader, rows []CalendarEventRow, from, to time.Time, budget *int) ([]linkOccurrence, error) {
-	var out []linkOccurrence
-	seriesMasters := make(map[suggestionSeriesIdentity]struct{})
-	for _, row := range rows {
-		if err := spendLinkBudget(ctx, budget, 1); err != nil {
-			return nil, err
-		}
-		if row.Event.Kind == meetingLinkSeriesKind {
-			e := row.Event
-			seriesMasters[suggestionSeriesIdentity{sourceID: row.SourceID, provider: e.Provider, namespace: e.Namespace, event: e.ProviderEventID}] = struct{}{}
-		}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
 	}
-	for _, row := range rows {
-		if err := spendLinkBudget(ctx, budget, 1); err != nil {
-			return nil, err
-		}
-		e := row.Event
-		if e.Status == meetingLinkCancelledStatus {
-			continue
-		}
-		if e.Kind == meetingLinkSeriesKind {
-			set, duration, days, err := linkSeriesSet(ctx, r, row)
-			if errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
-				continue
+	participants, err := loadMeetingContextParticipantsPage(ctx, r, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Emails = map[string]bool{}
+		for _, participant := range participants[out[i].ID] {
+			if email := strings.ToLower(strings.TrimSpace(participant.Email)); email != "" {
+				out[i].Emails[email] = true
 			}
-			if err != nil {
-				return nil, err
-			}
-			exceptions, err := linkReadExceptions(ctx, r, row, rows)
-			if err != nil {
-				return nil, err
-			}
-			expanded, err := expandLinkRecurrence(ctx, set, duration, days, exceptions, from, to, budget)
-			if errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
-				continue
-			}
-			if err != nil {
-				return nil, linkRecurrenceError(err)
-			}
-			for _, o := range expanded {
-				if !o.Cancelled {
-					out = append(out, linkOccurrence{Ref: OccurrenceRef{MessageID: row.MessageID, Key: o.Original.Key()}, Row: effectiveLinkRow(row, o.Original, rows), Original: o.Original, Start: o.Start, End: o.End, BoundsKnown: o.BoundsKnown})
-				}
-			}
-			continue
-		}
-		if e.Kind == "exception" {
-			key := suggestionSeriesIdentity{sourceID: row.SourceID, provider: e.Provider, namespace: e.Namespace, event: e.SeriesProviderID}
-			if _, hasMaster := seriesMasters[key]; hasMaster {
-				continue
-			}
-		}
-		o, err := standaloneLinkOccurrence(ctx, r, row)
-		if err != nil {
-			return nil, err
-		}
-		if o.Start.Before(to) && o.End.After(from) {
-			out = append(out, o)
 		}
 	}
 	return out, nil
 }
 
-func (s *Store) SuggestMeetingLinksContext(ctx context.Context, scope SourceScope, ref string, limit int) ([]MeetingSuggestion, error) {
-	kind, occ, memberID, err := ParseMeetingRef(ref)
-	if err != nil {
-		return nil, err
+// SuggestMeetingLinksContext ranks overlapping events or transcripts for an
+// owner reference, msg:<message ID> or evt:<message ID>[@<occurrence key>].
+func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref string, limit int) ([]MeetingSuggestion, error) {
+	kind, value, ok := strings.Cut(ref, ":")
+	if !ok || kind != "msg" && kind != "evt" {
+		return nil, errors.New("invalid meeting reference")
+	}
+	message, key, _ := strings.Cut(value, "@")
+	id, err := strconv.ParseInt(message, 10, 64)
+	if err != nil || id <= 0 || kind == "msg" && key != "" {
+		return nil, errors.New("invalid meeting reference")
 	}
 	ctx, release, err := s.BeginReadSnapshotContext(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
-	r := s.snapshotReader(ctx)
 	budget := calrecur.RequestReadBudget
-	if limit <= 0 {
-		limit = 10
-	}
-	limit = min(limit, 100)
 	var out []MeetingSuggestion
 	if kind == "msg" {
-		member, err := suggestionMember(ctx, r, scope, memberID)
+		members, err := suggestionMembers(ctx, s.meetingReader(ctx), []int64{id})
 		if err != nil {
 			return nil, err
 		}
-		from, to := member.Start.Add(-24*time.Hour), member.End.Add(24*time.Hour)
-		rows, err := calendarEventRowsInWindow(ctx, r, scope, from, to)
+		if len(members) == 0 {
+			return nil, sql.ErrNoRows
+		}
+		member := members[0]
+		rows, err := calendarEventRowsInWindow(ctx, s.meetingReader(ctx), member.Start, member.End)
 		if err != nil {
 			return nil, err
 		}
-		occurrences, err := linkOccurrencesInWindow(ctx, r, rows, from, to, &budget)
-		if err != nil {
-			return nil, err
-		}
-		extraReasons := []string{}
-		keys, err := memberLinkKeys(ctx, r, memberID)
-		if err != nil {
-			return nil, err
-		}
-		for _, key := range keys {
-			_, broad, err := linkKeyCandidates(ctx, r, scope, key)
-			if err != nil {
-				return nil, err
-			}
-			if broad {
-				extraReasons = append(extraReasons, "too_many_candidates")
-				break
+		masters := map[string]bool{}
+		for _, row := range rows {
+			if row.Event.Kind == "series" {
+				masters[fmt.Sprintf("%d:%s", row.SourceID, row.Event.ProviderEventID)] = true
 			}
 		}
-		for _, o := range occurrences {
-			if suggestion, ok := rankMeetingSuggestion(member, o); ok {
-				suggestion.Reasons = append(suggestion.Reasons, extraReasons...)
-				out = append(out, suggestion)
+		for _, row := range rows {
+			if row.Event.Status == "cancelled" {
+				continue
+			}
+			var occurrences []linkOccurrence
+			if row.Event.Kind == "series" {
+				occurrences, err = expandMeetingSeries(ctx, s.meetingReader(ctx), row, member.Start, member.End, &budget)
+				if errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				if row.Event.Kind == "exception" && masters[fmt.Sprintf("%d:%s", row.SourceID, row.Event.SeriesProviderID)] {
+					continue
+				}
+				occurrences = []linkOccurrence{occurrenceFromRow(row, "")}
+			}
+			for _, o := range occurrences {
+				if suggestion, ok := rankMeetingSuggestion(member, o); ok {
+					out = append(out, suggestion)
+				}
 			}
 		}
 	} else {
-		target, err := readLinkOccurrence(ctx, r, scope, occ, &budget, true)
-		if errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
-			return nil, nil
-		}
+		target, err := resolveMeetingOccurrence(ctx, s.meetingReader(ctx), OccurrenceRef{MessageID: id, Key: key}, &budget)
 		if err != nil {
 			return nil, err
 		}
-		if target.Row.Event.Status == meetingLinkCancelledStatus {
-			return nil, nil
+		if target.Row.Event.Status == "cancelled" {
+			return []MeetingSuggestion{}, nil
 		}
-		clause, args := linkScopeSQL(scope)
-		candidateFilter := `SELECT id FROM candidates WHERE effective_start IS NOT NULL AND effective_start < ? AND effective_start + duration_seconds * INTERVAL '1 second' > ? ORDER BY id LIMIT 2001`
+		filter := `effective_start < ? AND effective_start + duration_seconds * INTERVAL '1 second' > ?`
 		if !s.IsPostgreSQL() {
-			candidateFilter = `SELECT id FROM candidates WHERE effective_start IS NOT NULL AND julianday(effective_start) < julianday(?) AND julianday(effective_start) + duration_seconds / 86400.0 > julianday(?) ORDER BY id LIMIT 2001`
+			filter = `julianday(effective_start) < julianday(?) AND julianday(effective_start) + duration_seconds / 86400.0 > julianday(?)`
 		}
-		query := `WITH candidates AS (
-			SELECT m.id,
-				COALESCE((SELECT k.scheduled_at FROM meeting_link_keys k WHERE k.message_id = m.id AND k.scheduled_at IS NOT NULL ORDER BY k.ordinal LIMIT 1), COALESCE(m.sent_at,m.received_at,m.internal_date)) AS effective_start,
-				CASE WHEN d.duration_seconds > 0 THEN d.duration_seconds ELSE 1800 END AS duration_seconds
-			FROM messages m LEFT JOIN meeting_details d ON d.message_id = m.id
-			WHERE m.message_type = 'meeting_transcript' AND m.deleted_at IS NULL` + clause + `
-		) ` + candidateFilter
-		rows, err := r.QueryContext(ctx, query, append(args, target.End, target.Start)...)
+		rows, err := s.db.QueryContext(ctx, `WITH candidates AS (
+ SELECT m.id, COALESCE(k.scheduled_at,m.sent_at,m.received_at,m.internal_date) AS effective_start,
+ CASE WHEN d.duration_seconds > 0 THEN d.duration_seconds ELSE 1800 END AS duration_seconds
+ FROM messages m LEFT JOIN meeting_details d ON d.message_id = m.id LEFT JOIN meeting_link_keys k ON k.message_id = m.id AND k.ordinal = 0
+ WHERE m.message_type = 'meeting_transcript' AND m.deleted_at IS NULL)
+ SELECT id FROM candidates WHERE `+filter+` ORDER BY id LIMIT 2001`, target.End, target.Start)
 		if err != nil {
 			return nil, err
 		}
-		defer func() { _ = rows.Close() }()
 		var ids []int64
 		for rows.Next() {
 			var id int64
@@ -280,24 +228,21 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, scope SourceScop
 			}
 			ids = append(ids, id)
 		}
-		err = rows.Err()
-		_ = rows.Close()
-		if err != nil {
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 			return nil, err
 		}
 		if len(ids) > 2000 {
 			return nil, ErrQueryTooBroad
 		}
-		for _, id := range ids {
-			if err := spendLinkBudget(ctx, &budget, 1); err != nil {
-				return nil, err
-			}
-			member, err := suggestionMember(ctx, r, scope, id)
+		for start := 0; start < len(ids); start += 500 {
+			members, err := suggestionMembers(ctx, s.meetingReader(ctx), ids[start:min(start+500, len(ids))])
 			if err != nil {
 				return nil, err
 			}
-			if suggestion, ok := rankMeetingSuggestion(member, target); ok {
-				out = append(out, suggestion)
+			for _, member := range members {
+				if suggestion, ok := rankMeetingSuggestion(member, target); ok {
+					out = append(out, suggestion)
+				}
 			}
 		}
 	}
@@ -322,6 +267,10 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, scope SourceScop
 		}
 		return 0
 	})
+	if limit <= 0 {
+		limit = 10
+	}
+	limit = min(limit, 100)
 	if len(out) > limit {
 		out = out[:limit]
 	}

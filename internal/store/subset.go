@@ -19,19 +19,17 @@ import (
 
 // CopyResult holds the summary of a subset copy operation.
 type CopyResult struct {
-	MeetingLinkDecisions        int64
-	OmittedMeetingLinkDecisions int64
-	Messages                    int64
-	Conversations               int64
-	Participants                int64
-	Labels                      int64
-	Sources                     int64
-	Organizations               int64
-	Employments                 int64
-	PersonMergePackets          int64
-	OmittedPersonMergePackets   int64
-	DBSize                      int64
-	Elapsed                     time.Duration
+	Messages                  int64
+	Conversations             int64
+	Participants              int64
+	Labels                    int64
+	Sources                   int64
+	Organizations             int64
+	Employments               int64
+	PersonMergePackets        int64
+	OmittedPersonMergePackets int64
+	DBSize                    int64
+	Elapsed                   time.Duration
 }
 
 // ErrSubsetVCardResourcesRequireProfiles reports IncludeVCardResources
@@ -225,7 +223,7 @@ func CopySubsetWithOptions(
 	// The empty destination's schema initialization already recorded this
 	// migration. Rebuild derived meetings from copied raw, including old sources
 	// with no projection tables, through the normal resumable upgrade below.
-	if _, err := tx.Exec(`DELETE FROM applied_migrations WHERE name IN (?, ?)`, migrationMeetingProjectionV1, migrationMeetingLinkKeysV1); err != nil {
+	if _, err := tx.Exec(`DELETE FROM applied_migrations WHERE name = ?`, migrationMeetingProjectionV1); err != nil {
 		_ = tx.Rollback()
 		closeAndCleanup()
 		return nil, fmt.Errorf("reset copied meeting projection migration: %w", err)
@@ -287,11 +285,6 @@ func CopySubsetWithOptions(
 		_ = normalized.Close()
 		cleanup()
 		return nil, fmt.Errorf("reconcile copied subset derived data: %w", err)
-	}
-	if err := normalized.validateSubsetMeetingDecisions(context.Background(), result); err != nil {
-		_ = normalized.Close()
-		cleanup()
-		return nil, fmt.Errorf("validate copied meeting decisions: %w", err)
 	}
 	// Initial schema creation ledgered the inference migration before any
 	// people existed. Recheck the transferred projection for legacy source
@@ -966,8 +959,12 @@ func copyData(tx *sql.Tx, rowCount int, options CopySubsetOptions) (*CopyResult,
 		return nil, fmt.Errorf("copy message_labels: %w", err)
 	}
 
-	if err := copySubsetMeetingLinkDecisions(tx, result); err != nil {
+	if present, err := sourceTableExists(tx, "meeting_link_decisions"); err != nil {
 		return nil, err
+	} else if present {
+		if _, err := tx.Exec(`INSERT INTO meeting_link_decisions SELECT d.* FROM src.meeting_link_decisions d WHERE d.member_message_id IN (SELECT id FROM messages) AND d.target_message_id IN (SELECT id FROM messages)`); err != nil {
+			return nil, fmt.Errorf("copy meeting decisions: %w", err)
+		}
 	}
 
 	// A Matrix cursor can carry pending relation events from rooms outside

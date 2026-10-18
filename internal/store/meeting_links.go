@@ -3,591 +3,376 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"slices"
-	"strings"
 	"time"
 
 	"go.kenn.io/msgvault/internal/calrecur"
 )
 
-const meetingLinkSeriesKind = "series"
-const meetingLinkCalendarType = "calendar_event"
-const meetingLinkCancelledStatus = "cancelled"
+// OccurrenceRef identifies an event, or one original occurrence of a series.
+type OccurrenceRef struct {
+	MessageID int64
+	Key       string
+}
 
-// EffectiveLink is computed from visible exact evidence or a user decision.
-type EffectiveLink struct {
-	MemberMessageID int64
-	Target          OccurrenceRef
-	Basis, Origin   string
+type meetingIdentity struct {
+	ICalUID        string
+	EventMessageID int64
+	OccurrenceKey  string
+}
+
+func (id meetingIdentity) encode() string {
+	data, _ := json.Marshal([3]any{id.ICalUID, id.EventMessageID, id.OccurrenceKey})
+	return string(data)
 }
 
 type linkOccurrence struct {
-	Ref         OccurrenceRef
-	Row         CalendarEventRow
-	Original    calrecur.Identity
-	Start, End  time.Time
-	BoundsKnown bool
+	Ref        OccurrenceRef
+	Row        CalendarEventRow
+	Identity   meetingIdentity
+	Start, End time.Time
 }
 
-func linkMemberVisible(ctx context.Context, r rowReader, scope SourceScope, id int64) (bool, error) {
-	clause, args := linkScopeSQL(scope)
-	var found int64
-	err := r.QueryRowContext(ctx, `SELECT m.id FROM messages m WHERE m.id = ? AND m.message_type = 'meeting_transcript' AND m.deleted_at IS NULL`+clause, append([]any{id}, args...)...).Scan(&found)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+type reboundReader struct {
+	reader SQLReader
+	rebind func(string) string
+}
+
+func (r reboundReader) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return r.reader.QueryContext(ctx, r.rebind(query), args...)
+}
+func (r reboundReader) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return r.reader.QueryRowContext(ctx, r.rebind(query), args...)
+}
+
+func spendMeetingBudget(ctx context.Context, budget *int, count int) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return err == nil, err
+	*budget -= count
+	if *budget < 0 {
+		return ErrQueryTooBroad
+	}
+	return nil
 }
 
-func memberLinkKeys(ctx context.Context, r rowReader, id int64) ([]meetingLinkKey, error) {
-	rows, err := r.QueryContext(ctx, `SELECT kind,value,base,instance_key,scheduled_at FROM meeting_link_keys WHERE message_id = ? ORDER BY ordinal`, id)
+func meetingEventRows(ctx context.Context, r SQLReader, predicate string, args []any, budget *int) ([]CalendarEventRow, error) {
+	rows, err := queryCalendarEventRows(ctx, r, predicate, args, 201)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []meetingLinkKey
-	for rows.Next() {
-		var k meetingLinkKey
-		var at sql.NullTime
-		if err := rows.Scan(&k.Kind, &k.Value, &k.Base, &k.InstanceKey, &at); err != nil {
+	if len(rows) > 200 {
+		return nil, ErrQueryTooBroad
+	}
+	if err := spendMeetingBudget(ctx, budget, len(rows)); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func occurrenceFromRow(row CalendarEventRow, key string) linkOccurrence {
+	id := meetingIdentity{ICalUID: row.Event.ICalUID, OccurrenceKey: key}
+	if id.ICalUID == "" {
+		id.EventMessageID = row.MessageID
+	}
+	o := linkOccurrence{Ref: OccurrenceRef{MessageID: row.MessageID, Key: key}, Row: row, Identity: id}
+	if row.Event.Start != nil {
+		o.Start = *row.Event.Start
+	}
+	if row.Event.End != nil {
+		o.End = *row.Event.End
+	}
+	return o
+}
+
+func expandMeetingSeries(ctx context.Context, r SQLReader, master CalendarEventRow, from, to time.Time, budget *int) ([]linkOccurrence, error) {
+	set, duration, days, err := prepareCalendarRecurrence(master.Event)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", calrecur.ErrUnsupportedRecurrence, err)
+	}
+	related, err := meetingEventRows(ctx, r, `e.kind = 'exception' AND m.source_id = ? AND e.series_provider_id = ?`, []any{master.SourceID, master.Event.ProviderEventID}, budget)
+	if err != nil {
+		return nil, err
+	}
+	var exceptions []calrecur.Exception
+	byID := make(map[int64]CalendarEventRow, len(related))
+	for _, row := range related {
+		e := row.Event
+		if e.Original == nil {
+			continue
+		}
+		zone, err := calendarEventZone(e)
+		if err != nil {
 			return nil, err
 		}
-		if at.Valid {
-			k.ScheduledAt = &at.Time
-		}
-		out = append(out, k)
+		exceptions = append(exceptions, calrecur.Exception{Original: *e.Original, Start: e.Start, End: e.End, StartDate: e.StartDate, EndDate: e.EndDate, Zone: zone, Cancelled: e.Status == "cancelled", Ref: row.MessageID})
+		byID[row.MessageID] = row
 	}
-	return out, rows.Err()
-}
-
-// Scope precedes LIMIT. A 201st candidate proves ambiguity; it is never
-// silently omitted and cannot yield a false unique automatic match.
-func boundedLinkEventRows(ctx context.Context, r rowReader, scope SourceScope, predicate string, args []any) ([]CalendarEventRow, bool, error) {
-	ids, broad, err := boundedLinkEventIDs(ctx, r, scope, predicate, args)
-	if err != nil || broad {
-		return nil, broad, err
+	expanded, count, err := calrecur.Expand(ctx, set, duration, days, exceptions, from, to, min(*budget, calrecur.SeriesReadBudget))
+	if budgetErr := spendMeetingBudget(ctx, budget, count); budgetErr != nil {
+		return nil, budgetErr
 	}
-	result, err := calendarEventRowsByMessageIDs(ctx, r, scope, ids)
-	return result, false, err
-}
-
-func linkKeyCandidates(ctx context.Context, r rowReader, scope SourceScope, key meetingLinkKey) ([]CalendarEventRow, bool, error) {
-	predicate, args := linkKeyPredicate(key)
-	rows, broad, err := boundedLinkEventRows(ctx, r, scope, predicate, args)
-	if err != nil || broad {
-		return nil, broad, err
+	if errors.Is(err, calrecur.ErrBudgetExceeded) {
+		return nil, fmt.Errorf("%w: %w", ErrQueryTooBroad, err)
 	}
-	// Sparse exceptions may have no UID/join key. Include them and the master
-	// of a directly matched exception, but preserve the per-key total cap.
-	seen := map[int64]bool{}
-	for _, row := range rows {
-		seen[row.MessageID] = true
+	if err != nil {
+		return nil, err
 	}
-	original := slices.Clone(rows)
-	type seriesKey struct {
-		source                    int64
-		provider, namespace, base string
-	}
-	fetched := map[seriesKey]bool{}
-	for _, row := range original {
-		if row.Event.Kind == "single" {
-			continue
-		}
-		base := row.Event.SeriesProviderID
-		if row.Event.Kind == meetingLinkSeriesKind {
-			base = row.Event.ProviderEventID
-		}
-		group := seriesKey{row.SourceID, row.Event.Provider, row.Event.Namespace, base}
-		if fetched[group] {
-			continue
-		}
-		fetched[group] = true
-		var related []CalendarEventRow
-		var tooMany bool
-		if key.Kind == "google_event_id" && (key.Base != "" || row.Event.Original != nil) {
-			var id calrecur.Identity
-			if key.Base != "" {
-				var parseErr error
-				id, parseErr = calrecur.ParseKey(key.InstanceKey)
-				if parseErr != nil {
-					return nil, false, parseErr
+	out := make([]linkOccurrence, 0, len(expanded))
+	for _, instance := range expanded {
+		o := occurrenceFromRow(master, instance.Original.Key())
+		o.Start, o.End = instance.Start, instance.End
+		if instance.ExceptionRef != 0 {
+			o.Row = byID[instance.ExceptionRef]
+			if o.Row.Event.Status == "cancelled" {
+				o.Row, err = inheritCalendarCancellation(ctx, r, o.Row, master)
+				if err != nil {
+					return nil, err
 				}
-			} else {
-				id = *row.Event.Original
-			}
-			master := row
-			master.Event.ProviderEventID = base
-			related, tooMany, err = linkOccurrenceExceptionRows(ctx, r, scope, master, id)
-			if err == nil && !tooMany && row.Event.Kind == "exception" {
-				var parents []CalendarEventRow
-				parents, tooMany, err = boundedLinkEventRows(ctx, r, scope, `m.source_id = ? AND e.provider = ? AND e.namespace = ? AND e.kind = 'series' AND e.provider_event_id = ?`, []any{row.SourceID, row.Event.Provider, row.Event.Namespace, base})
-				related = append(related, parents...)
-			}
-		} else {
-			related, tooMany, err = boundedLinkEventRows(ctx, r, scope, `m.source_id = ? AND e.provider = ? AND e.namespace = ? AND (e.provider_event_id = ? OR e.series_provider_id = ?)`, []any{row.SourceID, row.Event.Provider, row.Event.Namespace, base, base})
-		}
-		if err != nil || tooMany {
-			return nil, tooMany, err
-		}
-		for _, extra := range related {
-			if !seen[extra.MessageID] {
-				seen[extra.MessageID] = true
-				rows = append(rows, extra)
 			}
 		}
-		if len(rows) > meetingLinkCandidateLimit {
-			return nil, true, nil
+		if instance.Cancelled || master.Event.Status == "cancelled" {
+			o.Row.Event.Status = "cancelled"
 		}
+		out = append(out, o)
 	}
-	return rows, false, nil
+	return out, nil
 }
 
-func linkSeriesSet(ctx context.Context, r rowReader, row CalendarEventRow) (calrecur.Set, time.Duration, int, error) {
-	zone, err := currentCalendarZone(ctx, r, row.SourceID)
-	if err != nil {
-		return calrecur.Set{}, 0, 0, err
-	}
-	e := row.Event
-	if !e.AllDay && e.EventTimeZone != "" {
-		if loc, err := time.LoadLocation(e.EventTimeZone); err == nil {
-			zone = loc
-		}
-	}
-	var start time.Time
-	if e.Start != nil {
-		start = *e.Start
-	}
-	set, err := calrecur.ParseSet(start, e.AllDay, e.StartDate, zone, e.Recurrence)
-	if err != nil {
-		return set, 0, 0, err
-	}
-	var duration time.Duration
-	days := 0
-	if e.Start != nil && e.End != nil {
-		duration = e.End.Sub(*e.Start)
-	}
-	if e.AllDay {
-		from, err := time.Parse("2006-01-02", e.StartDate)
-		if err != nil {
-			return set, 0, 0, fmt.Errorf("parse all-day meeting bounds: %w", err)
-		}
-		to, err := time.Parse("2006-01-02", e.EndDate)
-		if err != nil {
-			return set, 0, 0, fmt.Errorf("parse all-day meeting bounds: %w", err)
-		}
-		days = int(to.Sub(from) / (24 * time.Hour))
-	}
-	return set, duration, days, nil
-}
-
-func linkExceptions(master CalendarEventRow, rows []CalendarEventRow) []calrecur.Exception {
-	var out []calrecur.Exception
-	for _, row := range rows {
-		e := row.Event
-		if e.Kind == "exception" && e.Original != nil && row.SourceID == master.SourceID && e.Provider == master.Event.Provider && e.Namespace == master.Event.Namespace && e.SeriesProviderID == master.Event.ProviderEventID {
-			out = append(out, calrecur.Exception{Original: *e.Original, Start: e.Start, End: e.End, StartDate: e.StartDate, EndDate: e.EndDate, Cancelled: e.Status == "cancelled", Ref: row.MessageID})
-		}
-	}
-	return out
-}
-
-func standaloneLinkOccurrence(ctx context.Context, r rowReader, row CalendarEventRow) (linkOccurrence, error) {
-	e := row.Event
-	o := linkOccurrence{Ref: OccurrenceRef{MessageID: row.MessageID}, Row: row, BoundsKnown: e.HasBounds}
-	if e.Start != nil {
-		o.Start = *e.Start
-	}
-	if e.End != nil {
-		o.End = *e.End
-	}
-	if e.Original != nil {
-		o.Original = *e.Original
-		if e.Start == nil {
-			o.Start = e.Original.Instant
-			o.End = o.Start
-		}
-	}
-	if e.AllDay {
-		zone, err := currentCalendarZone(ctx, r, row.SourceID)
-		if err != nil {
-			return o, err
-		}
-		date := e.StartDate
-		if date == "" && e.Original != nil {
-			date = e.Original.Date
-		}
-		var errStart error
-		o.Start, _, errStart = calrecur.ResolveCivilDateBoundary(date, zone)
-		if errStart != nil {
-			return o, fmt.Errorf("parse all-day meeting bounds: %w", errStart)
-		}
-		if e.EndDate != "" {
-			o.End, _, errStart = calrecur.ResolveCivilDateBoundary(e.EndDate, zone)
-		} else {
-			o.End = o.Start
-		}
-		if errStart != nil {
-			return o, fmt.Errorf("parse all-day meeting bounds: %w", errStart)
-		}
-	}
-	return o, nil
-}
-
-func occurrenceLogical(o linkOccurrence) string {
-	if o.Row.Event.ICalUID != "" {
-		key := "ical:" + o.Row.Event.ICalUID
-		identity := o.Ref.Key
-		if identity == "" && o.Row.Event.Original != nil {
-			identity = o.Row.Event.Original.Key()
-		}
-		if identity != "" {
-			key += "@" + identity
-		}
-		return key
-	}
-	return FormatOccurrenceRef(o.Ref)
-}
-
-func resolveLinkOccurrence(ctx context.Context, r rowReader, scope SourceScope, ref OccurrenceRef, budget *int) (linkOccurrence, error) {
-	return readLinkOccurrence(ctx, r, scope, ref, budget, false)
-}
-
-// Suggestions exclude cancellation before expansion. Exact links and user
-// decisions can still refer to cancelled historical occurrences.
-func readLinkOccurrence(ctx context.Context, r rowReader, scope SourceScope, ref OccurrenceRef, budget *int, hideCancelled bool) (linkOccurrence, error) {
-	if err := ctx.Err(); err != nil {
-		return linkOccurrence{}, err
-	}
-	resolved, err := resolveOccurrenceRefAlias(ctx, r, scope, ref)
-	if err != nil {
-		return linkOccurrence{}, err
-	}
-	rows, err := calendarEventRowsByMessageIDs(ctx, r, scope, []int64{resolved.MessageID})
+func resolveMeetingOccurrence(ctx context.Context, r SQLReader, ref OccurrenceRef, budget *int) (linkOccurrence, error) {
+	rows, err := meetingEventRows(ctx, r, `e.message_id = ?`, []any{ref.MessageID}, budget)
 	if err != nil {
 		return linkOccurrence{}, err
 	}
 	if len(rows) != 1 {
 		return linkOccurrence{}, sql.ErrNoRows
 	}
-	if err := spendLinkBudget(ctx, budget, 1); err != nil {
-		return linkOccurrence{}, err
-	}
 	row := rows[0]
-	if resolved.Key == "" {
-		if row.Event.Kind == meetingLinkSeriesKind {
-			return linkOccurrence{}, fmt.Errorf("series target requires an occurrence key: %w", sql.ErrNoRows)
+	if row.Event.Kind == "exception" && row.Event.Original != nil && ref.Key == "" {
+		masters, err := meetingEventRows(ctx, r, `e.kind = 'series' AND m.source_id = ? AND e.provider_event_id = ?`, []any{row.SourceID, row.Event.SeriesProviderID}, budget)
+		if err != nil {
+			return linkOccurrence{}, err
 		}
-		return standaloneLinkOccurrence(ctx, r, row)
-	}
-	if row.Event.Kind != meetingLinkSeriesKind {
-		return linkOccurrence{}, sql.ErrNoRows
-	}
-	id, err := calrecur.ParseKey(resolved.Key)
-	if err != nil {
-		return linkOccurrence{}, err
-	}
-	if hideCancelled && row.Event.Status == meetingLinkCancelledStatus {
-		return linkOccurrence{Ref: resolved, Row: row, Original: id}, nil
-	}
-	related, broad, err := linkOccurrenceExceptionRows(ctx, r, scope, row, id)
-	if err != nil {
-		return linkOccurrence{}, err
-	}
-	if broad {
-		return linkOccurrence{}, ErrQueryTooBroad
-	}
-	if hideCancelled {
-		effective := effectiveLinkRow(row, id, related)
-		if effective.Event.Status == meetingLinkCancelledStatus {
-			return linkOccurrence{Ref: resolved, Row: effective, Original: id}, nil
+		if len(masters) == 1 {
+			row, ref = masters[0], OccurrenceRef{MessageID: masters[0].MessageID, Key: row.Event.Original.Key()}
+		} else {
+			o := occurrenceFromRow(row, row.Event.Original.Key())
+			o.Ref.Key = ""
+			return o, nil
 		}
 	}
-	set, duration, days, err := linkSeriesSet(ctx, r, row)
-	if err != nil {
-		return linkOccurrence{}, err
+	if ref.Key == "" {
+		if row.Event.Kind == "series" {
+			return linkOccurrence{}, sql.ErrNoRows
+		}
+		return occurrenceFromRow(row, ""), nil
 	}
-	exc, err := linkReadExceptions(ctx, r, row, related)
-	if err != nil {
-		return linkOccurrence{}, err
-	}
-	exists, err := containsLinkRecurrence(ctx, set, exc, id, budget)
-	if err != nil {
-		return linkOccurrence{}, err
-	}
-	if !exists {
+	if row.Event.Kind != "series" {
 		return linkOccurrence{}, sql.ErrNoRows
 	}
-	// Expand around the effective time of this particular identity, including a move.
+	_, id, ok := calrecur.ParseInstanceID("event_" + ref.Key)
+	if !ok {
+		return linkOccurrence{}, fmt.Errorf("invalid occurrence key %q", ref.Key)
+	}
 	at := id.Instant
 	if id.AllDay {
-		at, _, err = calrecur.ResolveCivilDateBoundary(id.Date, set.Zone)
+		zone, err := calendarEventZone(row.Event)
 		if err != nil {
-			return linkOccurrence{}, fmt.Errorf("parse occurrence civil date: %w", err)
+			return linkOccurrence{}, err
+		}
+		at, _, err = calrecur.CivilDateBoundary(id.Date, zone)
+		if err != nil {
+			return linkOccurrence{}, err
 		}
 	}
-	for _, e := range exc {
-		if e.Original.Key() != id.Key() {
-			continue
-		}
-		if e.Start != nil {
-			at = *e.Start
-		}
-		if e.StartDate != "" || e.EndDate != "" {
-			date := e.StartDate
-			if date == "" {
-				date = at.In(e.Zone).Format(time.DateOnly)
-			}
-			at, _, err = calrecur.ResolveCivilDateBoundary(date, e.Zone)
-			if err != nil {
-				return linkOccurrence{}, fmt.Errorf("parse occurrence civil date: %w", err)
-			}
+	// A moved exception is expanded at its effective start, retaining Original.
+	originalColumn, originalValue := "e.original_start_at", any(id.Instant)
+	if id.AllDay {
+		originalColumn, originalValue = "e.original_start_date", id.Date
+	}
+	moved, err := meetingEventRows(ctx, r, `e.kind = 'exception' AND m.source_id = ? AND e.series_provider_id = ? AND `+originalColumn+` = ?`, []any{row.SourceID, row.Event.ProviderEventID, originalValue}, budget)
+	if err != nil {
+		return linkOccurrence{}, err
+	}
+	for _, x := range moved {
+		if x.Event.Start != nil {
+			at = *x.Event.Start
 		}
 	}
-
-	occurrences, err := expandLinkRecurrence(ctx, set, duration, days, exc, at.Add(-24*time.Hour), at.Add(24*time.Hour), budget)
+	occurrences, err := expandMeetingSeries(ctx, r, row, at.Add(-calendarCandidateMargin), at.Add(calendarCandidateMargin), budget)
 	if err != nil {
 		return linkOccurrence{}, err
 	}
 	for _, o := range occurrences {
-		if o.Original.Key() == id.Key() {
-			return linkOccurrence{Ref: resolved, Row: effectiveLinkRow(row, id, related), Original: id, Start: o.Start, End: o.End, BoundsKnown: o.BoundsKnown}, nil
+		if o.Ref.Key == ref.Key {
+			return o, nil
 		}
 	}
 	return linkOccurrence{}, sql.ErrNoRows
 }
 
-func linkRecurrenceError(err error) error {
-	if errors.Is(err, calrecur.ErrBudgetExceeded) {
-		return fmt.Errorf("%w: %w", ErrQueryTooBroad, err)
+func memberLinkKeys(ctx context.Context, r SQLReader, id int64) (keys []meetingLinkKey, err error) {
+	rows, err := r.QueryContext(ctx, `SELECT kind,value,calendar_id,base,instance_key,scheduled_at FROM meeting_link_keys WHERE message_id = ? ORDER BY ordinal`, id)
+	if err != nil {
+		return nil, err
 	}
-	return err
+	defer func() { err = errors.Join(err, rows.Close()) }()
+	for rows.Next() {
+		var key meetingLinkKey
+		var at sql.NullTime
+		if err := rows.Scan(&key.Kind, &key.Value, &key.CalendarID, &key.Base, &key.InstanceKey, &at); err != nil {
+			return nil, err
+		}
+		if at.Valid {
+			key.ScheduledAt = &at.Time
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
 }
 
-func autoLinkOccurrences(ctx context.Context, r rowReader, scope SourceScope, key meetingLinkKey, rows []CalendarEventRow, budget *int) ([]linkOccurrence, string, error) {
-	var out []linkOccurrence
-	basis := key.Kind
-	seen := map[string]bool{}
-	add := func(o linkOccurrence) {
-		ref := FormatOccurrenceRef(o.Ref)
-		if !seen[ref] {
-			seen[ref] = true
-			out = append(out, o)
-		}
+func calendarConfigID(config sql.NullString) string {
+	var fields struct {
+		CalendarID string `json:"calendar_id"`
 	}
-	for _, row := range rows {
-		if err := spendLinkBudget(ctx, budget, 1); err != nil {
-			return nil, basis, err
+	if json.Unmarshal([]byte(config.String), &fields) != nil {
+		return ""
+	}
+	return fields.CalendarID
+}
+
+func automaticMeetingOccurrences(ctx context.Context, r SQLReader, key meetingLinkKey, budget *int) ([]linkOccurrence, error) {
+	predicate, args := `e.ical_uid = ?`, []any{key.Value}
+	if key.Kind == "google_event_id" {
+		// Parse the same source configuration used by calendar persistence.
+		sources, err := r.QueryContext(ctx, `SELECT id,sync_config FROM sources WHERE source_type = 'gcal'`)
+		if err != nil {
+			return nil, err
 		}
-		e := row.Event
-		direct := key.Kind == "google_event_id" && e.Provider == "google" && e.ProviderEventID == key.Value
-		if key.Kind == "google_event_id" {
-			if direct && e.Kind != meetingLinkSeriesKind {
-				o, err := resolveLinkOccurrence(ctx, r, scope, OccurrenceRef{MessageID: row.MessageID}, budget)
-				if errors.Is(err, sql.ErrNoRows) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
-					continue
-				}
-				if err != nil {
-					return nil, basis, err
-				}
-				basis = "provider_event_id"
-				add(o)
-			} else if e.Kind == "exception" && e.Provider == "google" && key.Base != "" && e.SeriesProviderID == key.Base && e.Original != nil && e.Original.Key() == key.InstanceKey {
-				o, err := resolveLinkOccurrence(ctx, r, scope, OccurrenceRef{MessageID: row.MessageID}, budget)
-				if errors.Is(err, sql.ErrNoRows) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
-					continue
-				}
-				if err != nil {
-					return nil, basis, err
-				}
-				basis = "instance_id"
-				add(o)
-			} else if e.Kind == meetingLinkSeriesKind && e.Provider == "google" && key.Base != "" && e.ProviderEventID == key.Base {
-				o, err := resolveLinkOccurrence(ctx, r, scope, OccurrenceRef{MessageID: row.MessageID, Key: key.InstanceKey}, budget)
-				if errors.Is(err, sql.ErrNoRows) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
-					continue
-				}
-				if err != nil {
-					return nil, basis, err
-				}
-				basis = "instance_id"
-				add(o)
+		var sourceIDs []any
+		for sources.Next() {
+			var id int64
+			var config sql.NullString
+			if err := sources.Scan(&id, &config); err != nil {
+				_ = sources.Close()
+				return nil, err
 			}
-			continue
+			if calendarConfigID(config) == key.CalendarID {
+				sourceIDs = append(sourceIDs, id)
+			}
 		}
-		if key.Kind == "ical_uid" && e.ICalUID != key.Value || key.Kind == "join_key" && e.JoinKey != key.Value {
-			continue
+		err = errors.Join(sources.Err(), sources.Close())
+		if err != nil {
+			return nil, err
+		}
+		if len(sourceIDs) == 0 {
+			return nil, nil
+		}
+		predicate = `m.source_id IN (` + placeholders(len(sourceIDs)) + `) AND (e.provider_event_id = ? OR (e.kind = 'series' AND e.provider_event_id = ?))`
+		args = append(sourceIDs, key.Value, key.Base)
+	}
+	rows, err := meetingEventRows(ctx, r, predicate, args, budget)
+	if err != nil {
+		return nil, err
+	}
+	var out []linkOccurrence
+candidatesLoop:
+	for _, row := range rows {
+		if row.Event.Kind == "exception" {
+			for _, master := range rows {
+				if master.Event.Kind == "series" && master.SourceID == row.SourceID && master.Event.ProviderEventID == row.Event.SeriesProviderID {
+					continue candidatesLoop
+				}
+			}
 		}
 		var candidates []linkOccurrence
-		if e.Kind == meetingLinkSeriesKind {
-			if key.ScheduledAt == nil {
-				continue
+		if key.Kind == "google_event_id" {
+			ref := OccurrenceRef{MessageID: row.MessageID}
+			if row.Event.Kind == "series" {
+				if key.Base == "" {
+					continue
+				}
+				ref.Key = key.InstanceKey
 			}
-			set, duration, days, err := linkSeriesSet(ctx, r, row)
-			if errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
-				continue
-			}
-			if err != nil {
-				return nil, basis, err
-			}
-			exceptions, err := linkReadExceptions(ctx, r, row, rows)
-			if err != nil {
-				return nil, basis, err
-			}
-			expanded, err := expandLinkRecurrence(ctx, set, duration, days, exceptions, key.ScheduledAt.Add(-24*time.Hour), key.ScheduledAt.Add(24*time.Hour), budget)
-			if errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
-				continue
-			}
-			if err != nil {
-				return nil, basis, linkRecurrenceError(err)
-			}
-			for _, o := range expanded {
-				candidates = append(candidates, linkOccurrence{Ref: OccurrenceRef{MessageID: row.MessageID, Key: o.Original.Key()}, Row: effectiveLinkRow(row, o.Original, rows), Original: o.Original, Start: o.Start, End: o.End, BoundsKnown: o.BoundsKnown})
-			}
-		} else {
-			o, err := resolveLinkOccurrence(ctx, r, scope, OccurrenceRef{MessageID: row.MessageID}, budget)
+			o, err := resolveMeetingOccurrence(ctx, r, ref, budget)
 			if errors.Is(err, sql.ErrNoRows) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
 				continue
 			}
 			if err != nil {
-				return nil, basis, err
+				return nil, err
+			}
+			candidates = append(candidates, o)
+		} else if row.Event.Kind == "series" {
+			if key.ScheduledAt == nil {
+				continue
+			}
+			candidates, err = expandMeetingSeries(ctx, r, row, key.ScheduledAt.Add(-time.Minute), key.ScheduledAt.Add(time.Minute+time.Nanosecond), budget)
+			if errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			o, err := resolveMeetingOccurrence(ctx, r, OccurrenceRef{MessageID: row.MessageID}, budget)
+			if err != nil {
+				return nil, err
 			}
 			candidates = append(candidates, o)
 		}
 		for _, o := range candidates {
-			if key.Kind == "join_key" && o.Row.Event.JoinKey != key.Value {
-				continue
+			if key.Kind == "ical_uid" && row.Event.Kind != "single" {
+				if key.ScheduledAt == nil || o.Start.Sub(*key.ScheduledAt) < -time.Minute || o.Start.Sub(*key.ScheduledAt) > time.Minute {
+					continue
+				}
 			}
-			if key.Kind == "ical_uid" && e.Kind == "single" {
-				add(o)
-				continue
-			}
-			if key.ScheduledAt == nil {
-				continue
-			}
-			delta := key.ScheduledAt.Sub(o.Start)
-			if key.Kind == "ical_uid" && delta >= -time.Minute && delta <= time.Minute || key.Kind == "join_key" && delta >= -10*time.Minute && delta < 10*time.Minute {
-				add(o)
-			}
+			out = append(out, o)
 		}
 	}
-	return out, basis, nil
+	for _, o := range out {
+		if o.Identity != out[0].Identity {
+			return nil, nil
+		}
+	}
+	return out, nil
 }
 
 type meetingLinkDecision struct {
-	Ref, Logical, Decision string
-	CreatedAt              time.Time
+	Ref       OccurrenceRef
+	Decision  string
+	CreatedAt time.Time
 }
 
-type linkDecisionIndex struct {
-	newestSplitByLogical map[string]time.Time
-	splitByRef           map[OccurrenceRef]struct{}
-	splitLogicals        map[string]struct{}
-}
-
-func visibleLinkDecisions(ctx context.Context, r rowReader, scope SourceScope, memberID int64, budget *int) ([]meetingLinkDecision, []linkOccurrence, error) {
-	rows, err := r.QueryContext(ctx, `SELECT target_ref,target_logical,decision,created_at FROM meeting_link_decisions WHERE member_message_id = ? ORDER BY target_ref`, memberID)
+func meetingMemberOccurrences(ctx context.Context, r SQLReader, memberID int64, budget *int) ([]linkOccurrence, error) {
+	decisions, err := readMeetingLinkDecisions(ctx, r, memberID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var decisions []meetingLinkDecision
-	for rows.Next() {
-		var d meetingLinkDecision
-		if err := rows.Scan(&d.Ref, &d.Logical, &d.Decision, &d.CreatedAt); err != nil {
-			_ = rows.Close()
-			return nil, nil, err
-		}
-		decisions = append(decisions, d)
+	type resolvedDecision struct {
+		meetingLinkDecision
+		target linkOccurrence
 	}
-	err = rows.Err()
-	closeErr := rows.Close()
-	if err != nil {
-		return nil, nil, err
-	}
-	if closeErr != nil {
-		return nil, nil, closeErr
-	}
-	var visible []meetingLinkDecision
-	var targets []linkOccurrence
+	var resolved []resolvedDecision
+	splits := map[meetingIdentity]time.Time{}
 	for _, d := range decisions {
-		kind, ref, _, err := ParseMeetingRef(d.Ref)
-		if err != nil || kind != "evt" {
-			continue
-		}
-		target, err := resolveLinkOccurrence(ctx, r, scope, ref, budget)
+		o, err := resolveMeetingOccurrence(ctx, r, d.Ref, budget)
 		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
 			continue
 		}
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		visible = append(visible, d)
-		targets = append(targets, target)
-	}
-	return visible, targets, nil
-}
-
-func indexLinkDecisions(ctx context.Context, decisions []meetingLinkDecision, targets []linkOccurrence, budget *int) (linkDecisionIndex, error) {
-	if err := spendLinkBudget(ctx, budget, len(decisions)); err != nil {
-		return linkDecisionIndex{}, err
-	}
-	index := linkDecisionIndex{
-		newestSplitByLogical: make(map[string]time.Time),
-		splitByRef:           make(map[OccurrenceRef]struct{}),
-		splitLogicals:        make(map[string]struct{}),
-	}
-	for i, decision := range decisions {
-		if decision.Decision != "split" {
-			continue
-		}
-		target := targets[i]
-		logical := occurrenceLogical(target)
-		if created, ok := index.newestSplitByLogical[logical]; !ok || decision.CreatedAt.After(created) {
-			index.newestSplitByLogical[logical] = decision.CreatedAt
-		}
-		index.splitByRef[target.Ref] = struct{}{}
-		index.splitLogicals[logical] = struct{}{}
-		if decision.Logical != "" {
-			index.splitLogicals[decision.Logical] = struct{}{}
+		resolved = append(resolved, resolvedDecision{d, o})
+		if d.Decision == "split" && !d.CreatedAt.Before(splits[o.Identity]) {
+			splits[o.Identity] = d.CreatedAt
 		}
 	}
-	return index, nil
-}
-
-func linksForMember(ctx context.Context, r rowReader, scope SourceScope, memberID int64, budget *int) ([]EffectiveLink, error) {
-	if err := spendLinkBudget(ctx, budget, 1); err != nil {
-		return nil, err
-	}
-	visible, err := linkMemberVisible(ctx, r, scope, memberID)
-	if err != nil || !visible {
-		return nil, err
-	}
-	decisions, targets, err := visibleLinkDecisions(ctx, r, scope, memberID, budget)
-	if err != nil {
-		return nil, err
-	}
-	decisionIndex, err := indexLinkDecisions(ctx, decisions, targets, budget)
-	if err != nil {
-		return nil, err
-	}
-	var out []EffectiveLink
-	seen := map[string]bool{}
-	add := func(o linkOccurrence, basis, origin string) {
-		ref := FormatOccurrenceRef(o.Ref)
-		if !seen[ref] {
-			seen[ref] = true
-			out = append(out, EffectiveLink{MemberMessageID: memberID, Target: o.Ref, Basis: basis, Origin: origin})
-		}
-	}
-	for i, d := range decisions {
-		if d.Decision != "link" {
-			continue
-		}
-		logical := occurrenceLogical(targets[i])
-		if splitAt, hasSplit := decisionIndex.newestSplitByLogical[logical]; !hasSplit || !splitAt.After(d.CreatedAt) {
-			add(targets[i], "user", "user")
+	var out []linkOccurrence
+	for _, d := range resolved {
+		if d.Decision == "link" && d.CreatedAt.After(splits[d.target.Identity]) {
+			out = append(out, d.target)
 		}
 	}
 	if len(out) > 0 {
@@ -598,223 +383,75 @@ func linksForMember(ctx context.Context, r rowReader, scope SourceScope, memberI
 		return nil, err
 	}
 	for _, key := range keys {
-		rows, broad, err := linkKeyCandidates(ctx, r, scope, key)
+		matches, err := automaticMeetingOccurrences(ctx, r, key, budget)
 		if err != nil {
 			return nil, err
-		}
-		if broad {
-			continue
-		}
-		matches, basis, err := autoLinkOccurrences(ctx, r, scope, key, rows, budget)
-		if err != nil {
-			return nil, err
-		}
-		if len(matches) > 1 {
-			logical := occurrenceLogical(matches[0])
-			// A ref without a UID can never prove that two rows are copies.
-			ambiguous := matches[0].Row.Event.ICalUID == ""
-			for _, o := range matches[1:] {
-				if o.Row.Event.ICalUID == "" || occurrenceLogical(o) != logical {
-					ambiguous = true
-				}
-			}
-			if ambiguous {
-				continue
-			}
 		}
 		for _, o := range matches {
-			logical := occurrenceLogical(o)
-			_, exactSplit := decisionIndex.splitByRef[o.Ref]
-			_, logicalSplit := decisionIndex.splitLogicals[logical]
-			split := exactSplit || logicalSplit
-			if !split {
-				add(o, basis, "auto")
-			}
-		}
-	}
-	slices.SortFunc(out, func(a, b EffectiveLink) int {
-		return strings.Compare(FormatOccurrenceRef(a.Target), FormatOccurrenceRef(b.Target))
-	})
-	return out, nil
-}
-
-func logicalMeetingKey(ctx context.Context, r rowReader, scope SourceScope, memberID int64, budget *int) (string, error) {
-	fallback := fmt.Sprintf("msg:%d", memberID)
-	links, err := linksForMember(ctx, r, scope, memberID, budget)
-	if err != nil {
-		return "", err
-	}
-	var key string
-	for _, link := range links {
-		o, err := resolveLinkOccurrence(ctx, r, scope, link.Target, budget)
-		if err != nil {
-			return "", err
-		}
-		logical := occurrenceLogical(o)
-		if key != "" && key != logical {
-			return fallback, nil
-		}
-		key = logical
-	}
-	if key == "" {
-		return fallback, nil
-	}
-	return key, nil
-}
-
-// Only indexed key/decision candidates enter this lookup. Verification uses
-// the forward function so user overrides and splits agree in both directions.
-func membersForOccurrence(ctx context.Context, r rowReader, scope SourceScope, occ OccurrenceRef, budget *int) ([]EffectiveLink, error) {
-	target, err := resolveLinkOccurrence(ctx, r, scope, occ, budget)
-	if err != nil {
-		return nil, err
-	}
-	e := target.Row.Event
-	ids := map[int64]bool{}
-	clause, scopeArgs := linkScopeSQL(scope)
-	// Direct exception IDs are candidates alongside master IDs and parsed bases.
-	var related []CalendarEventRow
-	if e.Kind == meetingLinkSeriesKind {
-		var broad bool
-		related, broad, err = linkOccurrenceExceptionRows(ctx, r, scope, target.Row, target.Original)
-		if err != nil {
-			return nil, err
-		}
-		if broad {
-			return nil, ErrQueryTooBroad
-		}
-	}
-	providerValues := make([]any, 0, len(related)+1)
-	providerMarks := make([]string, 0, len(related)+1)
-	if e.Kind != meetingLinkSeriesKind || target.Ref.Key == "" {
-		providerValues = append(providerValues, e.ProviderEventID)
-		providerMarks = append(providerMarks, "?")
-	}
-	for _, row := range related {
-		if row.Event.Original != nil && row.Event.Original.Key() == target.Ref.Key {
-			providerValues = append(providerValues, row.Event.ProviderEventID)
-			providerMarks = append(providerMarks, "?")
-		}
-	}
-	googleBase, instanceKey := e.ProviderEventID, target.Ref.Key
-	if e.Kind == "exception" && e.Original != nil {
-		googleBase = e.SeriesProviderID
-		if instanceKey == "" {
-			instanceKey = e.Original.Key()
-		}
-	}
-	googleValueMatch := "1=0"
-	if len(providerMarks) > 0 {
-		googleValueMatch = "k.value IN (" + strings.Join(providerMarks, ",") + ")"
-	}
-	searchStart := target.Start.UTC()
-	keyArgs := append([]any{e.Provider}, providerValues...)
-	keyArgs = append(keyArgs, googleBase, instanceKey, e.ICalUID, e.Kind, searchStart.Add(-time.Minute), searchStart.Add(time.Minute), e.JoinKey, searchStart.Add(-10*time.Minute), searchStart.Add(10*time.Minute))
-	keyRows, err := r.QueryContext(ctx, `SELECT m.id FROM messages m WHERE m.deleted_at IS NULL AND m.message_type = 'meeting_transcript' AND m.id IN (SELECT k.message_id FROM meeting_link_keys k WHERE ((k.kind = 'google_event_id' AND ? = 'google' AND (`+googleValueMatch+` OR (k.base = ? AND k.instance_key = ?))) OR (k.kind = 'ical_uid' AND k.value = ? AND k.value <> '' AND (? = 'single' OR (k.scheduled_at >= ? AND k.scheduled_at <= ?))) OR (k.kind = 'join_key' AND k.value = ? AND k.value <> '' AND k.scheduled_at >= ? AND k.scheduled_at < ?)))`+clause+` ORDER BY m.id LIMIT 201`, append(keyArgs, scopeArgs...)...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = keyRows.Close() }()
-	for keyRows.Next() {
-		var id int64
-		if err := keyRows.Scan(&id); err != nil {
-			_ = keyRows.Close()
-			return nil, err
-		}
-		ids[id] = true
-	}
-	err = keyRows.Err()
-	_ = keyRows.Close()
-	if err != nil {
-		return nil, err
-	}
-	if len(ids) > meetingLinkCandidateLimit {
-		return nil, ErrQueryTooBroad
-	}
-	refs := []any{FormatOccurrenceRef(target.Ref)}
-	marks := []string{"?"}
-	for _, row := range related {
-		if row.Event.Original != nil && row.Event.Original.Key() == target.Ref.Key {
-			refs = append(refs, FormatOccurrenceRef(OccurrenceRef{MessageID: row.MessageID}))
-			marks = append(marks, "?")
-		}
-	}
-	decisionRows, err := r.QueryContext(ctx, `SELECT m.id FROM messages m WHERE m.deleted_at IS NULL AND m.message_type = 'meeting_transcript' AND m.id IN (SELECT d.member_message_id FROM meeting_link_decisions d WHERE d.decision = 'link' AND d.target_ref IN (`+strings.Join(marks, ",")+`))`+clause+` ORDER BY m.id LIMIT 201`, append(refs, scopeArgs...)...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = decisionRows.Close() }()
-	for decisionRows.Next() {
-		var id int64
-		if err := decisionRows.Scan(&id); err != nil {
-			_ = decisionRows.Close()
-			return nil, err
-		}
-		ids[id] = true
-	}
-	err = decisionRows.Err()
-	_ = decisionRows.Close()
-	if err != nil {
-		return nil, err
-	}
-	if len(ids) > meetingLinkCandidateLimit {
-		return nil, ErrQueryTooBroad
-	}
-	ordered := make([]int64, 0, len(ids))
-	for id := range ids {
-		ordered = append(ordered, id)
-	}
-	slices.Sort(ordered)
-	var out []EffectiveLink
-	for _, id := range ordered {
-		links, err := linksForMember(ctx, r, scope, id, budget)
-		if err != nil {
-			return nil, err
-		}
-		for _, link := range links {
-			if link.Target == target.Ref {
-				out = append(out, link)
+			if _, split := splits[o.Identity]; !split {
+				out = append(out, o)
 			}
 		}
 	}
 	return out, nil
 }
 
-// An exception changes effective evidence while retaining its master's identity.
-func effectiveLinkRow(master CalendarEventRow, id calrecur.Identity, rows []CalendarEventRow) CalendarEventRow {
-	for _, row := range rows {
-		e := row.Event
-		if e.Kind == "exception" && e.Original != nil && e.Original.Key() == id.Key() && row.SourceID == master.SourceID && e.Provider == master.Event.Provider && e.Namespace == master.Event.Namespace && e.SeriesProviderID == master.Event.ProviderEventID {
-			if e.StartDate != "" || e.EndDate != "" {
-				master.Event.AllDay = true
-			} else if e.Start != nil || e.End != nil {
-				master.Event.AllDay = false
+// ExportLogicalMeetingKeysContext resolves owner-only transcript identities.
+// The caller keeps a pinned reader from this archive alive for the whole call.
+// Each of at most 100 members gets its own recurrence budget.
+func (s *Store) ExportLogicalMeetingKeysContext(ctx context.Context, reader SQLReader, ids []int64) (map[int64]string, error) {
+	if len(ids) > 100 {
+		return nil, errors.New("export meeting keys: batch exceeds 100 messages")
+	}
+	out := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return out, ctx.Err()
+	}
+	r := reboundReader{reader: reader, rebind: s.dialect.Rebind}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := r.QueryContext(ctx, `SELECT id FROM messages WHERE message_type = 'meeting_transcript' AND deleted_at IS NULL AND id IN (`+placeholders(len(ids))+`) ORDER BY id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	var members []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		members = append(members, id)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	for _, id := range members {
+		budget := calrecur.RequestReadBudget
+		occurrences, err := meetingMemberOccurrences(ctx, r, id, &budget)
+		if err != nil {
+			return nil, fmt.Errorf("resolve meeting key for message %d: %w", id, err)
+		}
+		key := fmt.Sprintf("msg:%d", id)
+		if len(occurrences) > 0 {
+			identity := occurrences[0].Identity
+			same := true
+			for _, o := range occurrences[1:] {
+				if o.Identity != identity {
+					same = false
+				}
 			}
-			if e.Status == meetingLinkCancelledStatus {
-				master.Event.Status = meetingLinkCancelledStatus
-			}
-			if e.HasBounds || e.JoinURL != "" || e.JoinKey != "" {
-				master.Event.JoinURL = e.JoinURL
-				master.Event.JoinKey = e.JoinKey
-			}
-			if row.Subject != "" {
-				master.Subject = row.Subject
-			}
-			if e.HasBounds || len(e.Attendees) > 0 {
-				master.Event.Attendees = e.Attendees
+			if same {
+				key = identity.encode()
 			}
 		}
+		out[id] = key
 	}
-	return master
+	return out, ctx.Err()
 }
 
-// Qualified targets need only the exceptions of their original identity. Other
-// occurrences cannot change this target's existence, move, or alias refs.
-func linkOccurrenceExceptionRows(ctx context.Context, r rowReader, scope SourceScope, master CalendarEventRow, id calrecur.Identity) ([]CalendarEventRow, bool, error) {
-	predicate := `e.kind = 'exception' AND m.source_id = ? AND e.provider = ? AND e.namespace = ? AND e.series_provider_id = ?`
-	args := []any{master.SourceID, master.Event.Provider, master.Event.Namespace, master.Event.ProviderEventID}
-	original, identityArgs := linkOriginalIdentityPredicate(id)
-	predicate += ` AND ` + original
-	args = append(args, identityArgs...)
-	return boundedLinkEventRows(ctx, r, scope, predicate, args)
+func (s *Store) meetingReader(ctx context.Context) SQLReader {
+	return reboundReader{reader: ReadDBContext(ctx, s.db.DB), rebind: s.dialect.Rebind}
 }

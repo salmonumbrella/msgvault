@@ -2,9 +2,10 @@ package store
 
 import (
 	"context"
-	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,222 +13,54 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func suggestionNoteFixture(t *testing.T, st *Store) int64 {
-	t.Helper()
-	data, id := projectionFixture(t, st, "suggestion", "plaud_json", `{"summary":"Project planning"}`)
-	at, err := time.Parse(time.RFC3339, "2027-03-14T10:00:00Z")
-	require.NoError(t, err)
-	data.Message.SentAt = sql.NullTime{Time: at, Valid: true}
-	data.Message.Subject = sql.NullString{String: "Project planning", Valid: true}
-	_, err = st.UpsertMessage(data.Message)
-	require.NoError(t, err)
-	return id
-}
-
-func TestSuggestRequiresOverlap(t *testing.T) {
+func TestMeetingLinksSuggestionsBatchParticipants(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 
 	st := newRFC822IDBackfillBackendStore(t)
-	calendarLinkFixture(t, st, "primary@example.com", singleLinkRaw("before", "before@example.org", "2027-03-14T09:00:00Z", "2027-03-14T10:00:00Z"))
-	matching, _ := calendarLinkFixture(t, st, "primary@example.com", singleLinkRaw("match", "match@example.org", "2027-03-14T10:15:00Z", "2027-03-14T11:00:00Z"))
-	calendarLinkFixture(t, st, "primary@example.com", singleLinkRaw("after", "after@example.org", "2027-03-14T10:30:00Z", "2027-03-14T11:00:00Z"))
-	note := suggestionNoteFixture(t, st)
-	suggestions, err := st.SuggestMeetingLinksContext(context.Background(), OwnerScope(), fmt.Sprintf("msg:%d", note), 10)
+	_, event := calendarFixture(t, st, "event", `{"id":"event","start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"},"attendees":[{"email":"guest@example.com"}]}`)
+	participant, err := st.EnsureParticipant("guest@example.com", "Guest Example", "")
 	requirements.NoError(err)
-	requirements.Len(suggestions, 1)
-	assertions.Equal(fmt.Sprintf("evt:%d", matching), suggestions[0].Ref)
-	assertions.Equal(15, suggestions[0].OverlapMinutes)
-}
-
-func TestSuggestionsChargeSkippedDSTCandidate(t *testing.T) {
-	assertions, requirements := assert.New(t), require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
-	master, _ := calendarLinkFixture(t, st, "primary@example.com", dstGapLinkSeriesRaw)
-	note := suggestionNoteFixture(t, st)
-	at := time.Date(2027, time.March, 21, 9, 30, 0, 0, time.UTC)
-	_, err := st.db.Exec(`UPDATE messages SET sent_at = ? WHERE id = ?`, at, note)
-	requirements.NoError(err)
-
-	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), OwnerScope(), fmt.Sprintf("msg:%d", note), 10)
-	requirements.NoError(err)
-	requirements.Len(suggestions, 1)
-	assertions.Equal(FormatOccurrenceRef(OccurrenceRef{MessageID: master, Key: "20270321T093000Z"}), suggestions[0].Ref)
-}
-
-func TestSuggestionsChargeSkippedCandidatesAcrossMultipleDSTGaps(t *testing.T) {
-	assertions, requirements := assert.New(t), require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
-	master, _ := calendarLinkFixture(t, st, "primary@example.com", dstMultiGapLinkSeriesRaw)
-	note := suggestionNoteFixture(t, st)
-	at := time.Date(2032, time.April, 4, 9, 30, 0, 0, time.UTC)
-	_, err := st.db.Exec(`UPDATE messages SET sent_at = ? WHERE id = ?`, at, note)
-	requirements.NoError(err)
-
-	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), OwnerScope(), fmt.Sprintf("msg:%d", note), 10)
-	requirements.NoError(err)
-	requirements.Len(suggestions, 1)
-	assertions.Equal(FormatOccurrenceRef(OccurrenceRef{MessageID: master, Key: "20320404T093000Z"}), suggestions[0].Ref)
-}
-
-func TestSuggestionExceptionMasterIndexIsChargedToBudget(t *testing.T) {
-	requirements := require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
-	calendarLinkFixture(t, st, "primary@example.com", linkSeriesRaw)
-	calendarLinkFixture(t, st, "primary@example.com", `{"id":"edited","recurringEventId":"series","iCalUID":"weekly@example.org","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`)
-	rows, err := calendarWindow(t, st, OwnerScope(), "2027-03-07T00:00:00Z", "2027-03-15T00:00:00Z")
-	requirements.NoError(err)
-	requirements.Len(rows, 2)
-
-	ctx, release, err := st.BeginReadSnapshotContext(t.Context())
-	requirements.NoError(err)
-	defer release()
-	budget := 6 // Two row visits and three recurrence pulls leave no room for the master-index pass.
-	_, err = linkOccurrencesInWindow(ctx, st.snapshotReader(ctx), rows, time.Date(2027, 3, 7, 0, 0, 0, 0, time.UTC), time.Date(2027, 3, 15, 0, 0, 0, 0, time.UTC), &budget)
-	requirements.ErrorIs(err, ErrQueryTooBroad, "the additional linear master-index pass must be charged to the read budget")
-
-	budget = 7
-	occurrences, err := linkOccurrencesInWindow(ctx, st.snapshotReader(ctx), rows, time.Date(2027, 3, 7, 0, 0, 0, 0, time.UTC), time.Date(2027, 3, 15, 0, 0, 0, 0, time.UTC), &budget)
-	requirements.NoError(err, "a sufficient budget should complete the same indexed expansion")
-	requirements.Len(occurrences, 2)
-	requirements.Zero(budget)
-}
-
-func TestSuggestPlaud(t *testing.T) {
-	assertions := assert.New(t)
-	requirements := require.New(t)
-
-	st := newRFC822IDBackfillBackendStore(t)
-	event, _ := calendarLinkFixture(t, st, "primary@example.com", singleLinkRaw("plausible", "plausible@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
-	note := suggestionNoteFixture(t, st)
-	assertions.Empty(memberLinks(t, st, OwnerScope(), note))
-	suggestions, err := st.SuggestMeetingLinksContext(context.Background(), OwnerScope(), fmt.Sprintf("evt:%d", event), 10)
-	requirements.NoError(err)
-	requirements.Len(suggestions, 1)
-	assertions.Equal(note, suggestions[0].MemberMessageID)
-}
-
-func TestSuggestionsUseDurationForReverseOverlap(t *testing.T) {
-	assertions, requirements := assert.New(t), require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
-	event, _ := calendarLinkFixture(t, st, "primary@example.com", singleLinkRaw("long-recording-target", "target@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
-	note := suggestionNoteFixture(t, st)
-	start := time.Date(2027, 3, 13, 9, 0, 0, 0, time.UTC)
-	metadata := sql.NullString{String: `{"platform":"granola","calendar_event_id":"unmatched-event","scheduled_start":"2027-03-13T09:00:00Z"}`, Valid: true}
-	requirements.NoError(st.SetMessageMetadata(note, metadata))
-	_, err := st.db.Exec(`UPDATE messages SET sent_at = ? WHERE id = ?`, start, note)
-	requirements.NoError(err)
-	_, err = st.db.Exec(`UPDATE meeting_details SET duration_seconds = ? WHERE message_id = ?`, float64((26*time.Hour)/time.Second), note)
-	requirements.NoError(err)
-
-	forward, err := st.SuggestMeetingLinksContext(t.Context(), OwnerScope(), fmt.Sprintf("msg:%d", note), 10)
-	requirements.NoError(err)
-	requirements.Len(forward, 1)
-	assertions.Equal(fmt.Sprintf("evt:%d", event), forward[0].Ref)
-	assertions.Equal(60, forward[0].OverlapMinutes)
-
-	reverse, err := st.SuggestMeetingLinksContext(t.Context(), OwnerScope(), fmt.Sprintf("evt:%d", event), 10)
-	requirements.NoError(err)
-	requirements.Len(reverse, 1)
-	assertions.Equal(note, reverse[0].MemberMessageID)
-	assertions.Equal(forward[0].OverlapMinutes, reverse[0].OverlapMinutes)
-}
-
-func TestSuggestionsExcludeMovedExceptionAtOriginalSlot(t *testing.T) {
-	assertions, requirements := assert.New(t), require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
-	calendarLinkFixture(t, st, "primary@example.com", linkSeriesRaw)
-	calendarLinkFixture(t, st, "primary@example.com", `{"id":"moved","recurringEventId":"series","iCalUID":"weekly@example.org","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-18T10:00:00Z"},"end":{"dateTime":"2027-03-18T11:00:00Z"}}`)
-	note := suggestionNoteFixture(t, st)
-
-	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), OwnerScope(), fmt.Sprintf("msg:%d", note), 10)
-	requirements.NoError(err)
-	assertions.Empty(suggestions, "a moved instance must suppress its original nominal occurrence")
-}
-
-func TestSuggestScopeHidesCandidates(t *testing.T) {
-	st := newRFC822IDBackfillBackendStore(t)
-	calendarLinkFixture(t, st, "hidden@example.org", singleLinkRaw("hidden", "hidden@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
-	note := suggestionNoteFixture(t, st)
-	var source int64
-	require.NoError(t, st.db.QueryRow(`SELECT source_id FROM messages WHERE id = ?`, note).Scan(&source))
-	suggestions, err := st.SuggestMeetingLinksContext(context.Background(), SourceScope{IDs: []int64{source}}, fmt.Sprintf("msg:%d", note), 10)
-	require.NoError(t, err)
-	assert.Empty(t, suggestions)
-}
-
-func TestSuggestionsRankVisibleEvidenceAndRooms(t *testing.T) {
-	assertions := assert.New(t)
-	requirements := require.New(t)
-
-	st := newRFC822IDBackfillBackendStore(t)
-	note := suggestionNoteFixture(t, st)
-	participant, err := st.EnsureParticipant("guest@example.org", "Guest Example", "example.org")
-	requirements.NoError(err)
-	requirements.NoError(st.ReplaceMessageRecipients(note, "to", []int64{participant}, []string{"Guest Example"}))
-	a, _ := calendarLinkFixture(t, st, "primary@example.com", singleLinkRaw("no-attendee", "a@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
-	raw := strings.Replace(singleLinkRaw("attendee", "b@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"), `"start":`, `"attendees":[{"email":"guest@example.org"},{"email":"guest@example.org","resource":true}],"start":`, 1)
-	b, _ := calendarLinkFixture(t, st, "primary@example.com", raw)
-	got, err := st.SuggestMeetingLinksContext(context.Background(), OwnerScope(), fmt.Sprintf("msg:%d", note), 10)
-	requirements.NoError(err)
-	requirements.Len(got, 2)
-	assertions.Equal(fmt.Sprintf("evt:%d", b), got[0].Ref)
-	assertions.Equal(1, got[0].SharedAttendees)
-	assertions.Equal(fmt.Sprintf("evt:%d", a), got[1].Ref)
-	reverse, err := st.SuggestMeetingLinksContext(context.Background(), OwnerScope(), fmt.Sprintf("evt:%d", b), 10)
-	requirements.NoError(err)
-	requirements.Len(reverse, 1)
-	assertions.Equal(note, reverse[0].MemberMessageID)
-}
-
-func TestSuggestionsExcludeCancelledEventsInBothDirections(t *testing.T) {
-	for _, kind := range []string{"single", "series", "series-unsupported", "orphan", "override"} {
-		t.Run(kind, func(t *testing.T) {
-			assertions, requirements := assert.New(t), require.New(t)
-			st := newRFC822IDBackfillBackendStore(t)
-			raw := strings.Replace(singleLinkRaw("cancelled", "cancelled@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"), `"start":`, `"status":"cancelled","start":`, 1)
-			key := ""
-			if kind == "series" || kind == "series-unsupported" {
-				raw = strings.Replace(linkSeriesRaw, `"start":`, `"status":"cancelled","start":`, 1)
-				key = "20270314T100000Z"
-				if kind == "series-unsupported" {
-					raw = strings.Replace(raw, "FREQ=WEEKLY", "FREQ=SECONDLY", 1)
-				}
-			}
-			if kind == "orphan" || kind == "override" {
-				raw = `{"id":"cancelled-instance","recurringEventId":"series","status":"cancelled","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"}}`
-			}
-			var master int64
-			if kind == "override" {
-				master, _ = calendarLinkFixture(t, st, "primary@example.com", linkSeriesRaw)
-			}
-			event, _ := calendarLinkFixture(t, st, "primary@example.com", raw)
-			note := suggestionNoteFixture(t, st)
-			got, err := st.SuggestMeetingLinksContext(t.Context(), OwnerScope(), fmt.Sprintf("msg:%d", note), 10)
-			requirements.NoError(err)
-			assertions.Empty(got)
-			if kind == "override" {
-				event, key = master, "20270314T100000Z"
-			}
-			ref := FormatOccurrenceRef(OccurrenceRef{MessageID: event, Key: key})
-			got, err = st.SuggestMeetingLinksContext(t.Context(), OwnerScope(), ref, 10)
-			requirements.NoError(err)
-			assertions.Empty(got)
-		})
+	var notes []int64
+	for i := range 3 {
+		data, id := projectionFixture(t, st, fmt.Sprintf("note-%d", i), "circleback_json", `{"meeting":{"url":"https://meet.example.com/room"}}`)
+		data.Message.SentAt.Time = time.Date(2027, 3, 14, 10, 0, 0, 0, time.UTC)
+		data.Message.SentAt.Valid = true
+		_, err := st.UpsertMessage(data.Message)
+		requirements.NoError(err)
+		requirements.NoError(st.ReplaceMessageRecipients(id, "to", []int64{participant}, nil))
+		notes = append(notes, id)
 	}
-}
-
-func TestSuggestionsKeepLiveSiblingOfCancelledOverride(t *testing.T) {
-	assertions, requirements := assert.New(t), require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
-	master, _ := calendarLinkFixture(t, st, "primary@example.com", linkSeriesRaw)
-	calendarLinkFixture(t, st, "primary@example.com", `{"id":"cancelled","recurringEventId":"series","status":"cancelled","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"}}`)
-	note := suggestionNoteFixture(t, st)
-	at := time.Date(2027, 3, 21, 10, 0, 0, 0, time.UTC)
-	_, err := st.db.Exec(`UPDATE messages SET sent_at = ? WHERE id = ?`, at, note)
+	var queries atomic.Int64
+	observed := gatedMeetingProjectionStore(t, st, &meetingProjectionGate{before: func(_ context.Context, query string, _ []driver.NamedValue) error {
+		if strings.Contains(query, "FROM message_recipients mr JOIN participants p") {
+			queries.Add(1)
+		}
+		return nil
+	}})
+	suggestions, err := observed.SuggestMeetingLinksContext(t.Context(), fmt.Sprintf("evt:%d", event), 10)
 	requirements.NoError(err)
-	got, err := st.SuggestMeetingLinksContext(t.Context(), OwnerScope(), fmt.Sprintf("msg:%d", note), 10)
+	requirements.Len(suggestions, 3)
+	assertions.Equal(int64(1), queries.Load())
+	for _, suggestion := range suggestions {
+		assertions.Equal(30, suggestion.OverlapMinutes)
+		assertions.Equal(1, suggestion.SharedAttendees)
+	}
+	// Circleback's room URL stays a suggestion, including when the times overlap.
+	assertions.Equal(fmt.Sprintf("msg:%d", notes[0]), exportedMeetingKeys(t, st, notes[0])[notes[0]])
+	reverse, err := observed.SuggestMeetingLinksContext(t.Context(), fmt.Sprintf("msg:%d", notes[0]), 1)
 	requirements.NoError(err)
-	requirements.Len(got, 1)
-	assertions.Equal(FormatOccurrenceRef(OccurrenceRef{MessageID: master, Key: "20270321T100000Z"}), got[0].Ref)
+	requirements.Len(reverse, 1)
+	assertions.Equal(fmt.Sprintf("evt:%d", event), reverse[0].Ref)
+	assertions.Equal(int64(2), queries.Load())
+	requirements.NoError(st.UpsertMessageRawWithFormat(event, []byte(`{"id":"event","status":"cancelled","start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"}}`), "gcal_json"))
+	suggestions, err = observed.SuggestMeetingLinksContext(t.Context(), fmt.Sprintf("evt:%d", event), 10)
+	requirements.NoError(err)
+	assertions.Empty(suggestions)
+	reverse, err = observed.SuggestMeetingLinksContext(t.Context(), fmt.Sprintf("msg:%d", notes[0]), 10)
+	requirements.NoError(err)
+	assertions.Empty(reverse)
+	var count int
+	requirements.NoError(st.db.QueryRow(`SELECT count(*) FROM meeting_link_decisions`).Scan(&count))
+	assertions.Zero(count)
 }

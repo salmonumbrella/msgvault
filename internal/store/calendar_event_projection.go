@@ -16,12 +16,7 @@ import (
 	"go.kenn.io/msgvault/internal/gcal/gcalmodel"
 )
 
-// v3 rebuilds recurrence ends when nonexistent timed wall times no longer
-// consume COUNT.
-const (
-	calendarEventProjectionVersion       = 3
-	calendarEventProjectionLedgerVersion = 1
-)
+const calendarEventProjectionVersion = 1
 
 // Decode failures have no provider status. Keep a marker while retaining the
 // single kind so unknown bounds remain candidates for the occurrence reader.

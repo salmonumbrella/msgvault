@@ -110,9 +110,6 @@ func normalizeEntry(entry Entry) Entry {
 				if strings.TrimSpace(participants[index].Name) == "" {
 					participants[index].Name = strings.TrimSpace(source.Name)
 				}
-				if provenance := strings.TrimSpace(source.Provenance); provenance != "" {
-					participants[index].Provenance = provenance
-				}
 				continue
 			}
 			byEmailRole[key] = len(participants)
@@ -560,11 +557,6 @@ func writeMarkdownParticipants(builder *strings.Builder, participants []Particip
 		}
 		if participant.ParticipantID != nil {
 			fmt.Fprintf(builder, " (participant %d)", *participant.ParticipantID)
-		}
-		if provenance := markdownSingleLine(participant.Provenance); provenance != "" {
-			builder.WriteString(" (")
-			builder.WriteString(provenance)
-			builder.WriteByte(')')
 		}
 		builder.WriteByte('\n')
 	}

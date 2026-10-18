@@ -19,7 +19,6 @@ import (
 	"go.kenn.io/msgvault/internal/meetingcontent"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
-	"golang.org/x/time/rate"
 )
 
 type fakeSource struct {
@@ -153,55 +152,6 @@ func TestImportTwentyArchivesAndConverges(t *testing.T) {
 	require.NoError(err)
 	assert.Equal(id, archivedID(t, st, "r1"))
 }
-
-func TestImportTwentyArchivesCalendarUIDAsMeetingLinkKey(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-	st, _, opts := newImportFixture(t)
-	requests := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		var request struct {
-			Query string `json:"query"`
-		}
-		if !assert.NoError(json.UnmarshalRead(r.Body, &request)) {
-			return
-		}
-		switch {
-		case strings.Contains(request.Query, "calendarEventParticipants("):
-			assert.NoError(json.MarshalWrite(w, map[string]any{"data": map[string]any{"calendarEventParticipants": map[string]any{
-				"edges": []any{}, "pageInfo": map[string]any{"hasNextPage": false, "endCursor": ""},
-			}}}))
-		case strings.Contains(request.Query, "callRecordings("):
-			assert.Contains(request.Query, "iCalUid")
-			assert.NoError(json.MarshalWrite(w, map[string]any{"data": map[string]any{"callRecordings": map[string]any{
-				"edges": []any{map[string]any{"node": map[string]any{
-					"id": "r1", "title": "Planning", "status": "COMPLETED", "createdAt": "2026-09-01T10:00:00Z",
-					"updatedAt": "2026-09-01T11:00:00Z", "startedAt": "2026-09-01T10:00:00Z", "endedAt": "2026-09-01T10:30:00Z",
-					"calendarEventId": "event-1", "summary": map[string]any{"markdown": "Launch decision"},
-					"calendarEvent": map[string]any{"id": "event-1", "iCalUid": "shared@example.org", "title": "Planning", "startsAt": "2026-09-01T10:00:00Z", "endsAt": "2026-09-01T10:30:00Z"},
-				}}},
-				"pageInfo": map[string]any{"hasNextPage": false, "endCursor": ""},
-			}}}))
-		default:
-			assert.Fail("unexpected Twenty query")
-		}
-	}))
-	defer srv.Close()
-	client, err := NewClient(srv.URL, "import-example-key")
-	require.NoError(err)
-	client.limiter = rate.NewLimiter(rate.Inf, 1)
-	sum, err := NewImporter(st, client).Import(t.Context(), opts)
-	require.NoError(err)
-	assert.Equal(2, requests)
-	assert.Equal(int64(1), sum.MeetingsAdded)
-	note := archivedID(t, st, "r1")
-	var kind, value string
-	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT kind,value FROM meeting_link_keys WHERE message_id=?`), note).Scan(&kind, &value))
-	assert.Equal("ical_uid", kind)
-	assert.Equal("shared@example.org", value)
-}
-
 func TestImportTwentyRevisitsPendingAndLateEvidence(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
@@ -656,4 +606,27 @@ func TestTwentyArchiveBoundsUnicodeSnippet(t *testing.T) {
 			assert.Contains(snapshot.Body, text)
 		})
 	}
+}
+
+func TestImportTwentyLinksArchivedCalendarUID(t *testing.T) {
+	requirements := require.New(t)
+	st, source, options := newImportFixture(t)
+	source.pages[""].Records[0].Calendar.Raw = jsontext.Value(`{"id":"event-1","iCalUid":"shared@example.org","startsAt":"2026-09-01T09:30:00Z","endsAt":"2026-09-01T10:30:00Z"}`)
+	calendar, err := st.GetOrCreateSource("gcal", "calendar@example.com")
+	requirements.NoError(err)
+	_, err = st.PersistMessage(&store.MessagePersistData{
+		Message:      &store.Message{SourceID: calendar.ID, SourceMessageID: "event", MessageType: "calendar_event"},
+		Conversation: &store.ConversationPersistData{SourceConversationID: "event", ConversationType: "calendar", Title: "Planning"},
+		RawMIME:      []byte(`{"id":"event","iCalUID":"shared@example.org","start":{"dateTime":"2026-09-01T09:30:00Z"},"end":{"dateTime":"2026-09-01T10:30:00Z"}}`), RawFormat: "gcal_json",
+	})
+	requirements.NoError(err)
+	_, err = NewImporter(st, source).Import(t.Context(), options)
+	requirements.NoError(err)
+	note := archivedID(t, st, "r1")
+	ctx, release, err := st.BeginReadSnapshotContext(t.Context())
+	requirements.NoError(err)
+	defer release()
+	keys, err := st.ExportLogicalMeetingKeysContext(ctx, store.ReadDBContext(ctx, st.DB()), []int64{note})
+	requirements.NoError(err)
+	assert.Equal(t, `["shared@example.org",0,""]`, keys[note])
 }

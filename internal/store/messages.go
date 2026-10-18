@@ -1201,7 +1201,7 @@ func (s *Store) MigrateSourceMessageID(sourceID, conversationID int64, legacySou
 				return fmt.Errorf("find legacy message id: %w", legacyErr)
 			}
 			if legacyErr == nil {
-				if err := s.repointMeetingLinkDecisionsWith(context.Background(), tx, legacyID, newID); err != nil {
+				if err := copyMeetingLinkDecisionsTx(context.Background(), tx, legacyID, newID); err != nil {
 					return err
 				}
 				if _, err = tx.Exec(

@@ -57,7 +57,7 @@ func (s *Store) refreshMeetingProjectionWith(ctx context.Context, tx *loggedTx, 
 		if err != nil {
 			return fmt.Errorf("read prior meeting projection: %w", err)
 		}
-		if err := s.refreshMeetingLinkKeysWith(ctx, tx, messageID, messageType.String, "", nil, nil); err != nil {
+		if err := replaceMeetingLinkKeys(ctx, tx, messageID, nil); err != nil {
 			return err
 		}
 		if _, err := q.Exec(`DELETE FROM meeting_action_items WHERE message_id = ?`, messageID); err != nil {
@@ -75,9 +75,6 @@ func (s *Store) refreshMeetingProjectionWith(ctx context.Context, tx *loggedTx, 
 		return fmt.Errorf("read meeting projection raw: %w", err)
 	}
 	raw, _, decodeErr := decodeMessageRawBounded(stored, compression, maxMeetingRawBytes, errMeetingRawTooLarge)
-	if err := s.refreshMeetingLinkKeysWith(ctx, tx, messageID, messageType.String, format.String, raw, []byte(metadata.String)); err != nil {
-		return err
-	}
 	content := meetingcontent.Decode(format.String, raw, []byte(metadata.String))
 	if decodeErr != nil {
 		reason := "invalid_raw"
@@ -93,7 +90,11 @@ func (s *Store) refreshMeetingProjectionWith(ctx context.Context, tx *loggedTx, 
 			ActionReason:   reason,
 		}
 	}
-	full, err := json.Marshal(content)
+	keys := deriveMeetingLinkKeys(content)
+	full, err := json.Marshal(struct {
+		Content meetingcontent.Content
+		Keys    []meetingLinkKey
+	}{content, keys})
 	if err != nil {
 		return fmt.Errorf("marshal meeting content hash: %w", err)
 	}
@@ -107,6 +108,9 @@ func (s *Store) refreshMeetingProjectionWith(ctx context.Context, tx *loggedTx, 
 	}
 	if err == nil && oldVersion == meetingProjectionVersion && oldHash == hash {
 		return nil
+	}
+	if err := replaceMeetingLinkKeys(ctx, tx, messageID, keys); err != nil {
+		return err
 	}
 	compact, err := json.Marshal(meetingcontent.ProjectionContent(content))
 	if err != nil {

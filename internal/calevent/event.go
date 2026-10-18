@@ -27,6 +27,7 @@ type Attendee struct {
 	IsCopySelf  bool   `json:"is_self"`
 }
 type Event struct {
+	ICalUID                                 string
 	ProviderEventID, SeriesProviderID, Kind string
 	Original                                *calrecur.Identity
 	Status                                  string

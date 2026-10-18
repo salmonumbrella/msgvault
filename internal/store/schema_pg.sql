@@ -4232,6 +4232,7 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     message_id BIGINT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     projection_version INTEGER NOT NULL,
     content_hash TEXT NOT NULL,
+    ical_uid TEXT NOT NULL DEFAULT '',
     provider_event_id TEXT NOT NULL DEFAULT '',
     series_provider_id TEXT NOT NULL DEFAULT '',
     kind TEXT NOT NULL DEFAULT '',
@@ -4248,6 +4249,8 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     recurrence_json TEXT NOT NULL DEFAULT '[]',
     recurrence_end_at TIMESTAMPTZ
 );
+CREATE INDEX IF NOT EXISTS idx_calendar_events_provider_id ON calendar_events(provider_event_id);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_series_id ON calendar_events(series_provider_id);
 CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_at);
 CREATE INDEX IF NOT EXISTS idx_calendar_events_recurrence_end ON calendar_events(recurrence_end_at);
 CREATE TABLE IF NOT EXISTS calendar_event_attendees (
@@ -4260,3 +4263,25 @@ CREATE TABLE IF NOT EXISTS calendar_event_attendees (
     is_copy_self BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (message_id, ordinal)
 );
+
+CREATE TABLE IF NOT EXISTS meeting_link_keys (
+    message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL,
+    calendar_id TEXT NOT NULL DEFAULT '',
+    base TEXT NOT NULL DEFAULT '',
+    instance_key TEXT NOT NULL DEFAULT '',
+    scheduled_at TIMESTAMPTZ,
+    PRIMARY KEY (message_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_meeting_link_keys_value ON meeting_link_keys(kind, value);
+CREATE TABLE IF NOT EXISTS meeting_link_decisions (
+    member_message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    target_message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    occurrence_key TEXT NOT NULL DEFAULT '',
+    decision TEXT NOT NULL CHECK(decision IN ('link', 'split')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (member_message_id, target_message_id, occurrence_key)
+);
+CREATE INDEX IF NOT EXISTS idx_meeting_link_decisions_target ON meeting_link_decisions(target_message_id);
