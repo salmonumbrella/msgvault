@@ -85,7 +85,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 	}
 	addSeriesOccurrence := func(row CalendarEventRow, o calrecur.Occurrence) error {
 		effective := row
-		if o.ExceptionRef != 0 {
+		if o.HasException {
 			effective = byID[o.ExceptionRef]
 			if effective.Event.Status == "cancelled" {
 				effective, err = inheritCalendarCancellation(ctx, s.db, effective, row)
@@ -98,29 +98,6 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 			o.Cancelled = true
 		}
 		add(effective, row.MessageID, o)
-		return nil
-	}
-	requestLimited := func(row CalendarEventRow) error {
-		page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: "request work limit reached; long-running series count their steps from their start"})
-		// Archived exceptions remain readable without generating the series.
-		set, duration, days, err := prepareCalendarRecurrence(row.Event)
-		if err == nil {
-			exc, err := calendarRecurrenceExceptions(exceptions[seriesKey{row.SourceID, row.Event.ProviderEventID}])
-			if err == nil {
-				for _, exception := range exc {
-					if err := ctx.Err(); err != nil {
-						return err
-					}
-					o, err := calrecur.EffectiveException(set, exception, duration, days)
-					if err != nil {
-						continue
-					}
-					if err := addSeriesOccurrence(row, o); err != nil {
-						return err
-					}
-				}
-			}
-		}
 		return nil
 	}
 	for _, row := range rows {
@@ -143,47 +120,13 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 				page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: reason})
 			}
 		case "series":
-			if remaining <= 0 {
-				if err := requestLimited(row); err != nil {
-					return page, err
-				}
-				continue
-			}
-			fail := func() {
-				page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: "unsupported recurrence"})
-			}
-			if row.RecurrenceError != "" || e.Start == nil || e.End == nil {
-				fail()
-				continue
-			}
-			set, duration, days, err := prepareCalendarRecurrence(e)
-			if err != nil {
-				fail()
-				continue
-			}
-			exc, err := calendarRecurrenceExceptions(exceptions[seriesKey{row.SourceID, e.ProviderEventID}])
-			if err != nil {
-				fail()
-				continue
-			}
-			occurrences, count, err := calrecur.Expand(ctx, set, duration, days, exc, from.Add(-calendarCandidateMargin), to.Add(calendarCandidateMargin), min(remaining, calrecur.SeriesReadBudget))
+			occurrences, count, reason, err := expandCalendarSeries(ctx, row, exceptions[seriesKey{row.SourceID, e.ProviderEventID}], from, to, remaining)
 			remaining -= count
 			if err != nil {
-				if ctx.Err() != nil {
-					return page, ctx.Err()
-				}
-				if errors.Is(err, calrecur.ErrBudgetExceeded) {
-					if remaining < 0 {
-						if err := requestLimited(row); err != nil {
-							return page, err
-						}
-						continue
-					}
-					page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: err.Error()})
-					continue
-				}
-				fail()
-				continue
+				return page, err
+			}
+			if reason != "" {
+				page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: reason})
 			}
 			for _, o := range occurrences {
 				if err := addSeriesOccurrence(row, o); err != nil {
@@ -199,6 +142,73 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 		return cmp.Compare(a.MessageID, b.MessageID)
 	})
 	return page, nil
+}
+
+// Resolve archived exceptions once, then suppress their original generated instances.
+func expandCalendarSeries(ctx context.Context, row CalendarEventRow, exceptionRows []CalendarEventRow, from, to time.Time, remaining int) ([]calrecur.Occurrence, int, string, error) {
+	set, duration, days, prepareErr := prepareCalendarRecurrence(row.Event)
+	var prepared *calrecur.Set
+	if prepareErr == nil && row.RecurrenceError == "" {
+		prepared = &set
+	}
+	resolved, bounded, err := resolveCalendarExceptions(ctx, prepared, exceptionRows, duration, days)
+	if ctx.Err() != nil {
+		return nil, 0, "", ctx.Err()
+	}
+	if prepared == nil || err != nil {
+		return bounded, 0, "unsupported recurrence", nil //nolint:nilerr // Report an unsupported series alongside readable occurrences.
+	}
+	const requestLimit = "request work limit reached; long-running series count their steps from their start"
+	if remaining <= 0 {
+		return resolved, 0, requestLimit, nil
+	}
+	occurrences, count, err := calrecur.Expand(ctx, set, duration, days, nil, from.Add(-calendarCandidateMargin), to.Add(calendarCandidateMargin), min(remaining, calrecur.SeriesReadBudget))
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, count, "", ctx.Err()
+		}
+		if errors.Is(err, calrecur.ErrBudgetExceeded) {
+			if count > remaining {
+				return resolved, count, requestLimit, nil
+			}
+			return bounded, count, err.Error(), nil
+		}
+		return bounded, count, "unsupported recurrence", nil
+	}
+	return append(occurrences, resolved...), count, "", nil
+}
+
+// Keep independently bounded edits alongside resolved overrides for generation failures.
+func resolveCalendarExceptions(ctx context.Context, set *calrecur.Set, rows []CalendarEventRow, duration time.Duration, days int) (resolved, bounded []calrecur.Occurrence, err error) {
+	for _, row := range rows {
+		e := row.Event
+		if e.Status != "cancelled" && e.Start != nil && e.End != nil {
+			bounded = append(bounded, calrecur.Occurrence{Start: *e.Start, End: *e.End, AllDay: e.AllDay, StartDate: e.StartDate, EndDate: e.EndDate, ExceptionRef: row.MessageID, HasException: true})
+		}
+	}
+	if set == nil {
+		return nil, bounded, nil
+	}
+	exceptions, err := calendarRecurrenceExceptions(rows)
+	if err != nil {
+		return nil, bounded, err
+	}
+	overrides := make(map[string]calrecur.Exception, len(exceptions))
+	for _, exception := range exceptions {
+		overrides[exception.Original.Key()] = exception
+	}
+	for _, exception := range overrides {
+		if err := ctx.Err(); err != nil {
+			return nil, bounded, err
+		}
+		o, err := calrecur.EffectiveException(*set, exception, duration, days)
+		if err != nil {
+			return nil, bounded, err
+		}
+		resolved = append(resolved, o)
+		set.ExDates = append(set.ExDates, exception.Original)
+	}
+	return resolved, bounded, nil
 }
 
 func calendarRecurrenceBudgetError() error {

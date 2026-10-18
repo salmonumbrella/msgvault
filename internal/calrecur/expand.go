@@ -28,6 +28,7 @@ type Occurrence struct {
 	StartDate, EndDate string
 	AllDay, Cancelled  bool
 	ExceptionRef       int64
+	HasException       bool
 }
 
 func nominal(s Set, id Identity, duration time.Duration, durationDays int) (Occurrence, error) {
@@ -140,6 +141,7 @@ func EffectiveException(s Set, e Exception, duration time.Duration, durationDays
 		return Occurrence{}, unsupported("exception bounds", errors.New("end precedes start"))
 	}
 	o.Cancelled, o.ExceptionRef = e.Cancelled, e.Ref
+	o.HasException = true
 	return o, nil
 }
 

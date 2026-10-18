@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json/v2"
 	"fmt"
 	"strconv"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/calrecur"
+	"go.kenn.io/msgvault/pkg/client/generated"
 )
 
 func TestListCalendarOccurrences(t *testing.T) {
@@ -300,6 +302,85 @@ func TestListCalendarOccurrencesSparseCancellationZone(t *testing.T) {
 			assertions.Equal("cancelled", o.Status)
 			assertions.Equal(tc.wantStart, o.Start.UTC().Format(time.RFC3339))
 			assertions.Equal(tc.wantEnd, o.End.UTC().Format(time.RFC3339))
+		})
+	}
+}
+
+func TestListCalendarOccurrencesUnexpandableKeepsEditedExceptions(t *testing.T) {
+	for _, recurrence := range []string{"RRULE:FREQ=HOURLY", "RRULE:FREQ=DAILY"} {
+		t.Run(recurrence, func(t *testing.T) {
+			assert, require := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			_, master := calendarFixture(t, st, "master", fmt.Sprintf(`{"id":"master","status":"confirmed","start":{"dateTime":"1800-01-01T17:00:00Z"},"end":{"dateTime":"1800-01-01T18:00:00Z"},"recurrence":[%q]}`, recurrence))
+			_, edited := calendarFixture(t, st, "edited", `{"id":"edited","recurringEventId":"master","status":"confirmed","originalStartTime":{"dateTime":"2027-03-02T17:00:00Z"},"start":{"dateTime":"2027-03-03T19:00:00Z"},"end":{"dateTime":"2027-03-03T20:00:00Z"}}`)
+			calendarFixture(t, st, "cancelled", `{"id":"cancelled","recurringEventId":"master","status":"cancelled","originalStartTime":{"dateTime":"2027-03-04T17:00:00Z"}}`)
+			from := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+			page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 1, 0))
+			require.NoError(err)
+			require.Len(page.Unexpandable, 1)
+			assert.Equal(master, page.Unexpandable[0].MessageID)
+			require.Len(page.Occurrences, 1)
+			assert.Equal(edited, page.Occurrences[0].MessageID)
+			assert.Equal(master, page.Occurrences[0].SeriesMessageID)
+			assert.Equal("2027-03-03T19:00:00Z", page.Occurrences[0].Start.Format(time.RFC3339))
+			assert.Equal("2027-03-03T20:00:00Z", page.Occurrences[0].End.Format(time.RFC3339))
+		})
+	}
+}
+
+func TestListCalendarOccurrencesExceptionMessageIDZero(t *testing.T) {
+	assert, require := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	data, master := calendarFixture(t, st, "master", `{"id":"master","status":"confirmed","start":{"dateTime":"2027-03-02T17:00:00Z"},"end":{"dateTime":"2027-03-02T18:00:00Z"},"recurrence":["RRULE:FREQ=DAILY;COUNT=1"]}`)
+	override := ""
+	if st.IsPostgreSQL() {
+		override = " OVERRIDING SYSTEM VALUE"
+	}
+	_, err := st.db.Exec(`INSERT INTO messages (id, source_id, conversation_id, source_message_id, message_type, subject, deleted_from_source_at)`+override+` VALUES (0, ?, ?, 'zero', 'calendar_event', 'Edited event', ?)`, data.Message.SourceID, data.Message.ConversationID, time.Date(2027, 3, 4, 0, 0, 0, 0, time.UTC))
+	require.NoError(err)
+	require.NoError(st.UpsertMessageRawWithFormat(0, []byte(`{"id":"edited","recurringEventId":"master","status":"tentative","originalStartTime":{"dateTime":"2027-03-02T17:00:00Z"},"start":{"dateTime":"2027-03-03T19:00:00Z"},"end":{"dateTime":"2027-03-03T20:00:00Z"},"attendees":[{"email":"edited@example.com","responseStatus":"declined"}]}`), "gcal_json"))
+	from := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 1, 0))
+	require.NoError(err)
+	assert.Empty(page.Unexpandable)
+	require.Len(page.Occurrences, 1)
+	o := page.Occurrences[0]
+	assert.Equal(int64(0), o.MessageID)
+	assert.Equal(master, o.SeriesMessageID)
+	assert.Equal("Edited event", o.Subject)
+	assert.Equal("tentative", o.Status)
+	assert.True(o.DeletedFromSource)
+	require.Len(o.Attendees, 1)
+	assert.Equal("edited@example.com", o.Attendees[0].Email)
+	assert.Equal("declined", o.Attendees[0].RSVP)
+	assert.Equal("2027-03-03T19:00:00Z", o.Start.Format(time.RFC3339))
+}
+
+func TestListCalendarOccurrencesDefaultGoogleStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name, rawStatus, metadata, want string
+	}{
+		{"omitted", "", `{"calendar_id":"calendar@example.com"}`, "confirmed"},
+		{"raw cancellation", `"status":"cancelled",`, `{"calendar_id":"calendar@example.com"}`, "cancelled"},
+		{"metadata cancellation", "", `{"status":"cancelled"}`, "cancelled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert, require := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			data, _ := calendarFixture(t, st, "event", fmt.Sprintf(`{"id":"event",%s"start":{"dateTime":"2027-03-02T17:00:00Z"},"end":{"dateTime":"2027-03-02T18:00:00Z"}}`, tc.rawStatus))
+			data.Metadata.String = tc.metadata
+			_, err := st.PersistMessage(data)
+			require.NoError(err)
+			from := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+			page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 1, 0))
+			require.NoError(err)
+			require.Len(page.Occurrences, 1)
+			body, err := json.Marshal(page)
+			require.NoError(err)
+			var response generated.CalendarOccurrencePage
+			require.NoError(json.Unmarshal(body, &response))
+			assert.NoError(response.Validate())
+			assert.Equal(tc.want, page.Occurrences[0].Status)
 		})
 	}
 }

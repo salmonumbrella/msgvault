@@ -454,3 +454,15 @@ func TestExpandAllDayExceptionUsesCalendarZone(t *testing.T) {
 	assertions.Equal(start, got[0].Start.UTC())
 	assertions.Equal(end, got[0].End.UTC())
 }
+
+func TestExpandExceptionRefZero(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	s := parsed(t, "RRULE:FREQ=DAILY;COUNT=2")
+	got, _, err := Expand(t.Context(), s, time.Hour, 0, []Exception{{Original: timed(t, "2027-03-03T17:00:00Z"), Cancelled: true, Ref: 0}}, instant(t, "2027-03-01T00:00:00Z"), instant(t, "2027-03-04T00:00:00Z"), 100)
+	requirements.NoError(err)
+	requirements.Len(got, 2)
+	assertions.False(got[0].HasException)
+	assertions.True(got[1].HasException)
+	assertions.Zero(got[1].ExceptionRef)
+	assertions.True(got[1].Cancelled)
+}

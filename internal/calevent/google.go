@@ -60,6 +60,9 @@ func decodeGoogleEvent(raw, metadata []byte, calendarZone string) (Event, bool, 
 	if meta.Status != "" {
 		status = meta.Status
 	}
+	if status == "" {
+		status = "confirmed"
+	}
 	e := Event{
 		ProviderEventID: g.ID, Status: status, Kind: "single", AllDay: g.Start.Date != "", StartDate: g.Start.Date, EndDate: g.End.Date,
 		EventTimeZone: g.Start.TimeZone, CalendarTimeZone: calendarZone, Recurrence: g.Recurrence,
