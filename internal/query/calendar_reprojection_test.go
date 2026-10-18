@@ -46,6 +46,6 @@ func TestCalendarDiscoveryTimezoneChangeJournalsMeetingKeys(t *testing.T) {
 	requirements.NoError(err)
 	assertions.NotContains(keys, note, "the occurrence instant no longer matches the transcript")
 	var pending int
-	requirements.NoError(st.DB().QueryRow(`SELECT count(*) FROM cache_related_change_journal WHERE dataset = 'meeting_links' AND seq > ? AND message_id = ?`, seq, note).Scan(&pending))
-	assertions.Positive(pending, "calendar discovery journals the transcript for derived refresh")
+	requirements.NoError(st.DB().QueryRow(`SELECT count(*) FROM cache_related_change_journal WHERE dataset = 'meeting_links' AND seq > ? AND message_id = 0`, seq).Scan(&pending))
+	assertions.Equal(1, pending, "calendar discovery invalidates all meeting keys for derived refresh")
 }
