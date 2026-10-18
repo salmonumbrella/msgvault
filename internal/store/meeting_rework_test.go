@@ -44,7 +44,7 @@ func TestMeetingLinksUnsupportedMasterException(t *testing.T) {
 func TestMeetingLinksScheduledWithoutUID(t *testing.T) {
 	st := newRFC822IDBackfillBackendStore(t)
 	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "window@example.org"))
-	data, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"startsAt":"2027-03-14T10:00:00Z"}}`)
+	data, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{"startedAt":"2020-01-01T00:00:00Z","endedAt":"2020-01-01T00:30:00Z"},"calendar_event":{"startsAt":"2027-03-14T10:00:00Z"}}`)
 	data.Message.SentAt = sql.NullTime{Time: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC), Valid: true}
 	_, err := st.UpsertMessage(data.Message)
 	require.NoError(t, err)
