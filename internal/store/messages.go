@@ -2765,6 +2765,9 @@ func normalizedMessageRecipients(rs RecipientSet) []messageRecipientRow {
 }
 
 // MessageRecipientsMatchContext compares the snapshots replaced by the supplied roles.
+// An expected zero participant ID uses the recipient's normalized envelope
+// address and display name as its canonical identity; it does not require the
+// caller to resolve the participant ID before checking for a no-op.
 func (s *Store) MessageRecipientsMatchContext(ctx context.Context, messageID int64, sets []RecipientSet) (bool, error) {
 	want := make(map[string][]messageRecipientRow, len(sets))
 	for _, set := range sets {
@@ -2790,8 +2793,16 @@ func (s *Store) MessageRecipientsMatchContext(ctx context.Context, messageID int
 		return false, err
 	}
 	for role, expected := range want {
-		if !slices.Equal(got[role], expected) {
+		observed := got[role]
+		if len(observed) != len(expected) {
 			return false, nil
+		}
+		for i, wantRow := range expected {
+			gotRow := observed[i]
+			if gotRow.displayName != wantRow.displayName || gotRow.email != wantRow.email ||
+				(wantRow.participantID != 0 && gotRow.participantID != wantRow.participantID) {
+				return false, nil
+			}
 		}
 	}
 	return true, nil

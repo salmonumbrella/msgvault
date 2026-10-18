@@ -4710,6 +4710,8 @@ CREATE TABLE IF NOT EXISTS calendar_event_attendees (
     is_copy_self BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (message_id, ordinal)
 );
+CREATE INDEX IF NOT EXISTS idx_calendar_event_attendees_room_email
+    ON calendar_event_attendees(lower(trim(email))) WHERE role = 'room';
 
 CREATE TABLE IF NOT EXISTS meeting_link_key (
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,

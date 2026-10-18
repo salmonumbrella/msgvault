@@ -141,3 +141,112 @@ func TestCalsyncResourceFlagPreservesContactHistory(t *testing.T) {
 		})
 	}
 }
+
+func TestCalsyncResourceFlagChangeUsesUpdatedRoomEvidence(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	mock := gcal.NewMockAPI()
+	calendar := gcal.Calendar{ID: "primary", AccessRole: "owner", TimeZone: "UTC"}
+	mock.Calendars = []gcal.Calendar{calendar}
+	syncer, st := newSyncer(t, mock, Options{})
+
+	event := timedEvent("resource-change", "Resource change", gcal.Attendee{
+		Email: "person@example.org", DisplayName: "Example Person", Resource: true,
+	})
+	firstID, err := syncer.PersistEvent(t.Context(), calendar, event)
+	requirements.NoError(err)
+	var recipients int
+	requirements.NoError(st.DB().QueryRow(st.Rebind(`
+		SELECT count(*) FROM message_recipients r
+		JOIN participants p ON p.id = r.participant_id
+		WHERE r.message_id = ? AND r.recipient_type = 'to' AND p.email_address = ?
+	`), firstID, "person@example.org").Scan(&recipients))
+	assertions.Zero(recipients, "the initial resource flag excludes the attendee")
+
+	event.Attendees[0].Resource = false
+	secondID, err := syncer.PersistEvent(t.Context(), calendar, event)
+	requirements.NoError(err)
+	assertions.Equal(firstID, secondID, "the changed event updates its existing archive row")
+	requirements.NoError(st.DB().QueryRow(st.Rebind(`
+		SELECT count(*) FROM message_recipients r
+		JOIN participants p ON p.id = r.participant_id
+		WHERE r.message_id = ? AND r.recipient_type = 'to' AND p.email_address = ?
+	`), secondID, "person@example.org").Scan(&recipients))
+	assertions.Equal(1, recipients, "the stale room projection must not hide the updated human attendee")
+	var roomRows int
+	requirements.NoError(st.DB().QueryRow(st.Rebind(`
+		SELECT count(*) FROM calendar_event_attendees WHERE message_id = ? AND role = 'room'
+	`), secondID).Scan(&roomRows))
+	assertions.Zero(roomRows, "the updated projection removes the old room classification")
+}
+
+func TestMeetingReimportRepairsAttendeeProjectionAfterContactHistory(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	mock := gcal.NewMockAPI()
+	calendar := gcal.Calendar{ID: "primary", AccessRole: "owner", TimeZone: "UTC"}
+	mock.Calendars = []gcal.Calendar{calendar}
+	syncer, st := newSyncer(t, mock, Options{})
+	_, err := syncer.PersistEvent(t.Context(), calendar, timedEvent("room-evidence", "Room evidence", gcal.Attendee{
+		Email: "attendee@example.org", DisplayName: "Example Attendee", Resource: true,
+	}))
+	requirements.NoError(err)
+
+	noteSource, err := st.GetOrCreateSource("meeting_import", "notes@example.org")
+	requirements.NoError(err)
+	organizerID, err := st.EnsureParticipant("organizer@example.org", "Example Organizer", "example.org")
+	requirements.NoError(err)
+	attendee := meetingarchive.Person{Email: "attendee@example.org", Name: "Example Attendee"}
+	snapshot := meetingarchive.Snapshot{
+		SourceID: noteSource.ID, AccountEmail: "owner@example.net",
+		SourceMessageID: "meeting-note", SourceConversationID: "meeting-note",
+		RawFormat: "synthetic_meeting_json", Raw: []byte(`{"id":"meeting-note","attendees":["attendee@example.org"]}`),
+		Metadata:  []byte(`{"provider":"fixture"}`),
+		Organizer: &meetingarchive.Person{ParticipantID: organizerID, Email: "organizer@example.org", Name: "Example Organizer"},
+		Attendees: []meetingarchive.Person{attendee},
+	}
+	archiver := meetingarchive.New(st)
+	first, err := archiver.Upsert(t.Context(), snapshot, meetingarchive.UpsertOptions{})
+	requirements.NoError(err)
+	var recipientCount int
+	requirements.NoError(st.DB().QueryRow(st.Rebind(`
+		SELECT count(*) FROM message_recipients WHERE message_id = ? AND recipient_type = 'to'
+	`), first.MessageID).Scan(&recipientCount))
+	assertions.Equal(1, recipientCount, "another event's resource flag preserves the transcript attendee")
+
+	// Model an older import that omitted the attendee's normalized projection.
+	requirements.NoError(st.ReplaceMessageRecipients(first.MessageID, "to", nil, nil))
+	_, err = st.DB().Exec(st.Rebind(`
+		DELETE FROM conversation_participants
+		WHERE conversation_id = (SELECT conversation_id FROM messages WHERE id = ?)
+	`), first.MessageID)
+	requirements.NoError(err)
+
+	attendeeID, err := st.EnsureParticipant("attendee@example.org", "Example Attendee", "example.org")
+	requirements.NoError(err)
+	_, err = st.PersistMessage(&store.MessagePersistData{
+		Message: &store.Message{
+			SourceID: noteSource.ID, SourceMessageID: "ordinary-email", MessageType: "email",
+			SenderID: sql.NullInt64{Int64: attendeeID, Valid: true},
+		},
+		Conversation: &store.ConversationPersistData{SourceConversationID: "ordinary-email", ConversationType: "email"},
+	})
+	requirements.NoError(err)
+
+	second, err := archiver.Upsert(t.Context(), snapshot, meetingarchive.UpsertOptions{})
+	requirements.NoError(err)
+	assertions.Equal(first.MessageID, second.MessageID)
+	assertions.True(second.Changed, "the reimport repairs the missing attendee projection")
+	requirements.NoError(st.DB().QueryRow(st.Rebind(`
+		SELECT count(*) FROM message_recipients WHERE message_id = ? AND recipient_type = 'to' AND participant_id = ?
+	`), second.MessageID, attendeeID).Scan(&recipientCount))
+	assertions.Equal(1, recipientCount, "the reimport restores the attendee recipient")
+	var conversationCount int
+	requirements.NoError(st.DB().QueryRow(st.Rebind(`
+		SELECT count(*) FROM conversation_participants cp
+		JOIN messages m ON m.conversation_id = cp.conversation_id
+		WHERE m.id = ? AND cp.participant_id = ?
+	`), second.MessageID, attendeeID).Scan(&conversationCount))
+	assertions.Equal(1, conversationCount, "the reimport restores the attendee conversation edge")
+	unchanged, err := archiver.Unchanged(t.Context(), snapshot)
+	requirements.NoError(err)
+	assertions.True(unchanged, "canonical address matching preserves the no-op after the projection is repaired")
+}

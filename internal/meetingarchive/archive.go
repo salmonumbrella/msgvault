@@ -283,13 +283,9 @@ func (a *Archiver) storedMatches(ctx context.Context, snapshot Snapshot, existin
 			return false, nil
 		}
 	}
-	// Canonical address resolution is preserved when the source evidence matches.
-	if organizer.ParticipantID == 0 && !slices.ContainsFunc(attendees, func(person Person) bool { return person.ParticipantID > 0 }) && (organizer.PrimaryKey() != "" || len(attendees) > 0) {
-		return true, nil
-	}
-	if organizer.ParticipantID == 0 && organizer.PrimaryKey() != "" || slices.ContainsFunc(attendees, func(person Person) bool { return person.ParticipantID == 0 }) {
-		return false, nil
-	}
+	// A zero participant ID is resolved from its canonical address when the
+	// write is needed. Compare the normalized roster here so new room/contact
+	// evidence cannot leave stale recipient and conversation projections.
 	match, err := a.store.MessageRecipientsMatchContext(ctx, existing.ID, recipients(organizer, attendees))
 	if err != nil {
 		return false, fmt.Errorf("compare meeting recipients: %w", err)
