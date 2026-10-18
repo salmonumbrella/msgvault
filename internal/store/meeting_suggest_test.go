@@ -40,7 +40,7 @@ func TestSuggestRequiresOverlap(t *testing.T) {
 	assertions.Equal(15, suggestions[0].OverlapMinutes)
 }
 
-func TestSuggestionsReserveSkippedDSTCandidate(t *testing.T) {
+func TestSuggestionsChargeSkippedDSTCandidate(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
 	master, _ := calendarLinkFixture(t, st, "primary@example.com", dstGapLinkSeriesRaw)
@@ -55,6 +55,21 @@ func TestSuggestionsReserveSkippedDSTCandidate(t *testing.T) {
 	assertions.Equal(FormatOccurrenceRef(OccurrenceRef{MessageID: master, Key: "20270321T093000Z"}), suggestions[0].Ref)
 }
 
+func TestSuggestionsChargeSkippedCandidatesAcrossMultipleDSTGaps(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	master, _ := calendarLinkFixture(t, st, "primary@example.com", dstMultiGapLinkSeriesRaw)
+	note := suggestionNoteFixture(t, st)
+	at := time.Date(2032, time.April, 4, 9, 30, 0, 0, time.UTC)
+	_, err := st.db.Exec(`UPDATE messages SET sent_at = ? WHERE id = ?`, at, note)
+	requirements.NoError(err)
+
+	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), OwnerScope(), fmt.Sprintf("msg:%d", note), 10)
+	requirements.NoError(err)
+	requirements.Len(suggestions, 1)
+	assertions.Equal(FormatOccurrenceRef(OccurrenceRef{MessageID: master, Key: "20320404T093000Z"}), suggestions[0].Ref)
+}
+
 func TestSuggestionExceptionMasterIndexIsChargedToBudget(t *testing.T) {
 	requirements := require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
@@ -67,9 +82,15 @@ func TestSuggestionExceptionMasterIndexIsChargedToBudget(t *testing.T) {
 	ctx, release, err := st.BeginReadSnapshotContext(t.Context())
 	requirements.NoError(err)
 	defer release()
-	budget := 9 // The existing row expansion and recurrence reservation consume all nine units.
+	budget := 6 // Two row visits and three recurrence pulls leave no room for the master-index pass.
 	_, err = linkOccurrencesInWindow(ctx, st.snapshotReader(ctx), rows, time.Date(2027, 3, 7, 0, 0, 0, 0, time.UTC), time.Date(2027, 3, 15, 0, 0, 0, 0, time.UTC), &budget)
 	requirements.ErrorIs(err, ErrQueryTooBroad, "the additional linear master-index pass must be charged to the read budget")
+
+	budget = 7
+	occurrences, err := linkOccurrencesInWindow(ctx, st.snapshotReader(ctx), rows, time.Date(2027, 3, 7, 0, 0, 0, 0, time.UTC), time.Date(2027, 3, 15, 0, 0, 0, 0, time.UTC), &budget)
+	requirements.NoError(err, "a sufficient budget should complete the same indexed expansion")
+	requirements.Len(occurrences, 2)
+	requirements.Zero(budget)
 }
 
 func TestSuggestPlaud(t *testing.T) {

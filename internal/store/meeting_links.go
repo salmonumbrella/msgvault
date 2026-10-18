@@ -312,20 +312,9 @@ func readLinkOccurrence(ctx context.Context, r rowReader, scope SourceScope, ref
 	if err != nil {
 		return linkOccurrence{}, err
 	}
-	originalAt := id.Instant
-	if id.AllDay {
-		originalAt, _, err = calrecur.ResolveCivilDateBoundary(id.Date, set.Zone)
-		if err != nil {
-			return linkOccurrence{}, fmt.Errorf("parse occurrence civil date: %w", err)
-		}
-	}
-	allowance, err := reserveLinkRecurrence(ctx, set, originalAt, budget)
+	exists, err := containsLinkRecurrence(ctx, set, exc, id, budget)
 	if err != nil {
 		return linkOccurrence{}, err
-	}
-	exists, err := calrecur.Contains(ctx, set, exc, id, allowance)
-	if err != nil {
-		return linkOccurrence{}, linkRecurrenceError(err)
 	}
 	if !exists {
 		return linkOccurrence{}, sql.ErrNoRows
@@ -357,13 +346,9 @@ func readLinkOccurrence(ctx context.Context, r rowReader, scope SourceScope, ref
 		}
 	}
 
-	allowance, err = reserveLinkRecurrence(ctx, set, at.Add(24*time.Hour), budget)
+	occurrences, err := expandLinkRecurrence(ctx, set, duration, days, exc, at.Add(-24*time.Hour), at.Add(24*time.Hour), budget)
 	if err != nil {
 		return linkOccurrence{}, err
-	}
-	occurrences, err := calrecur.Expand(ctx, set, duration, days, exc, at.Add(-24*time.Hour), at.Add(24*time.Hour), allowance)
-	if err != nil {
-		return linkOccurrence{}, linkRecurrenceError(err)
 	}
 	for _, o := range occurrences {
 		if o.Original.Key() == id.Key() {
@@ -446,15 +431,11 @@ func autoLinkOccurrences(ctx context.Context, r rowReader, scope SourceScope, ke
 			if err != nil {
 				return nil, basis, err
 			}
-			allowance, err := reserveLinkRecurrence(ctx, set, key.ScheduledAt.Add(24*time.Hour), budget)
-			if err != nil {
-				return nil, basis, err
-			}
 			exceptions, err := linkReadExceptions(ctx, r, row, rows)
 			if err != nil {
 				return nil, basis, err
 			}
-			expanded, err := calrecur.Expand(ctx, set, duration, days, exceptions, key.ScheduledAt.Add(-24*time.Hour), key.ScheduledAt.Add(24*time.Hour), allowance)
+			expanded, err := expandLinkRecurrence(ctx, set, duration, days, exceptions, key.ScheduledAt.Add(-24*time.Hour), key.ScheduledAt.Add(24*time.Hour), budget)
 			if errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
 				continue
 			}

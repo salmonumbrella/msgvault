@@ -156,15 +156,11 @@ func linkOccurrencesInWindow(ctx context.Context, r rowReader, rows []CalendarEv
 			if err != nil {
 				return nil, err
 			}
-			allowance, err := reserveLinkRecurrence(ctx, set, to, budget)
-			if err != nil {
-				return nil, err
-			}
 			exceptions, err := linkReadExceptions(ctx, r, row, rows)
 			if err != nil {
 				return nil, err
 			}
-			expanded, err := calrecur.Expand(ctx, set, duration, days, exceptions, from, to, allowance)
+			expanded, err := expandLinkRecurrence(ctx, set, duration, days, exceptions, from, to, budget)
 			if errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
 				continue
 			}
