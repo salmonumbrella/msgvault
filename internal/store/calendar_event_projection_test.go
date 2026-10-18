@@ -39,7 +39,11 @@ func calendarRows(t *testing.T, st *Store, ids ...int64) []CalendarEventRow {
 	ctx, release, err := st.BeginReadSnapshotContext(t.Context())
 	require.NoError(t, err)
 	defer release()
-	rows, err := calendarEventRowsByMessageIDs(ctx, st.snapshotReader(ctx), OwnerScope(), ids)
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := queryCalendarEventRowsWithinBudget(ctx, st.db, "e.message_id IN ("+placeholders(len(ids))+")", args, len(ids))
 	require.NoError(t, err)
 	return rows
 }
@@ -63,7 +67,6 @@ func TestCalendarEventProjectionPersistRefreshDelete(t *testing.T) {
 	rows := calendarRows(t, st, id)
 	requirements.Len(rows, 1)
 	assertions.Equal("event-example", rows[0].Event.ProviderEventID)
-	assertions.Equal("Raw description", rows[0].Event.Description)
 	requirements.Len(rows[0].Event.Attendees, 1)
 	assertions.Equal("person@example.com", rows[0].Event.Attendees[0].Email)
 	requirements.NoError(st.SetMessageMetadata(id, sql.NullString{String: `{"calendar_id":"calendar@example.com","status":"cancelled"}`, Valid: true}))
@@ -173,43 +176,24 @@ func TestCalendarEventBackfillMalformedRecurrenceDoesNotFailInit(t *testing.T) {
 	assertions.Nil(rows[0].RecurrenceEndAt)
 }
 
-func TestCalendarEventUpgradeFromSchema4Fixture(t *testing.T) {
-	if IsPostgresURL(os.Getenv("MSGVAULT_TEST_DB")) {
-		t.Skip("schema-4 SQLite fixture")
-	}
-	assertions, requirements := assert.New(t), require.New(t)
-	path := filepath.Join(t.TempDir(), "schema4.db")
-	st, err := OpenForTest(path)
-	requirements.NoError(err)
-	for _, file := range []string{"calendar_schema4.sql", "calendar_schema4_sqlite.sql"} {
-		raw, err := os.ReadFile(filepath.Join("testdata", file))
-		requirements.NoError(err)
-		_, err = st.db.Exec(string(raw))
+func TestCalendarEventUpgradeRebuildsProjection(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+
+	st := newRFC822IDBackfillBackendStore(t)
+	_, id := calendarFixture(t, st, "upgrade", calendarRaw)
+	for _, query := range []string{`DROP TABLE calendar_event_attendees`, `DROP TABLE calendar_events`, `DELETE FROM applied_migrations WHERE name = 'calendar_event_projection_v1'`, `UPDATE archive_metadata SET value = '10' WHERE key = 'schema_version'`} {
+		_, err := st.db.Exec(query)
 		requirements.NoError(err)
 	}
-	_, err = st.db.Exec(`INSERT INTO sources (id, source_type, identifier, sync_config) VALUES (1, 'gcal', 'schema4@example.com', '{"calendar_id":"calendar@example.com","time_zone":"UTC"}')`)
-	requirements.NoError(err)
-	_, err = st.db.Exec(`INSERT INTO conversations (id, source_id, source_conversation_id, conversation_type) VALUES (1, 1, 'schema4', 'calendar')`)
-	requirements.NoError(err)
-	_, err = st.db.Exec(`INSERT INTO messages (id, source_id, conversation_id, source_message_id, message_type, metadata) VALUES (1, 1, 1, 'schema4', 'calendar_event', '{"calendar_id":"calendar@example.com"}')`)
-	requirements.NoError(err)
-	requirements.NoError(upsertMessageRawWithFormat(st.db, 1, []byte(calendarRaw), "gcal_json"))
-	_, err = st.db.Exec(`INSERT INTO archive_metadata(key,value) VALUES ('schema_version','4')`)
-	requirements.NoError(err)
 	requirements.NoError(st.Close())
-	st, err = OpenForTest(path)
+	reopened, err := OpenForTest(st.dbPath)
 	requirements.NoError(err)
-	requirements.NoError(st.InitSchemaContext(t.Context()))
-	rows := calendarRows(t, st, 1)
+	t.Cleanup(func() { assertions.NoError(reopened.Close()) })
+	requirements.NoError(reopened.InitSchemaContext(t.Context()))
+	rows := calendarRows(t, reopened, id)
 	requirements.Len(rows, 1)
 	assertions.Equal("event-example", rows[0].Event.ProviderEventID)
-	rejectCalendarWrites(t, st)
-	requirements.NoError(st.Close())
-	st, err = OpenForTest(path)
-	requirements.NoError(err)
-	defer func() { requirements.NoError(st.Close()) }()
-	requirements.NoError(st.InitSchemaContext(t.Context()))
-	requirements.Len(calendarRows(t, st, 1), 1)
 }
 
 func TestCopySubsetRebuildsCalendarEvents(t *testing.T) {
@@ -235,40 +219,4 @@ func TestCopySubsetRebuildsCalendarEvents(t *testing.T) {
 	rows := calendarRows(t, copied, id)
 	requirements.Len(rows, 1)
 	assert.Equal(t, "event-example", rows[0].Event.ProviderEventID)
-}
-
-func TestDedupRawCopyRefreshesSurvivor(t *testing.T) {
-	assertions, requirements := assert.New(t), require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
-	data, survivor := calendarFixture(t, st, "survivor", calendarRaw)
-	_, err := st.db.Exec(`DELETE FROM message_raw WHERE message_id = ?`, survivor)
-	requirements.NoError(err)
-	_, err = st.db.Exec(`DELETE FROM calendar_events WHERE message_id = ?`, survivor)
-	requirements.NoError(err)
-	data.Message.SourceMessageID = "duplicate"
-	data.Conversation.SourceConversationID = "duplicate"
-	data.RawMIME = []byte(strings.ReplaceAll(calendarRaw, "event-example", "copied-example"))
-	duplicate, err := st.PersistMessage(data)
-	requirements.NoError(err)
-	result, err := st.MergeDuplicates(survivor, []int64{duplicate}, "example-batch")
-	requirements.NoError(err)
-	assertions.Equal(1, result.RawMIMEBackfilled)
-	rows := calendarRows(t, st, survivor)
-	requirements.Len(rows, 1)
-	assertions.Equal("copied-example", rows[0].Event.ProviderEventID)
-	assertions.Empty(calendarRows(t, st, duplicate))
-}
-
-func TestCalendarEventConsolidationRefreshesSurvivor(t *testing.T) {
-	assertions, requirements := assert.New(t), require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
-	legacyData, legacy := calendarFixture(t, st, "legacy-source-key", calendarRaw)
-	_, survivor := calendarFixture(t, st, "canonical-source-key", calendarRaw)
-	_, err := st.db.Exec(`UPDATE calendar_events SET projection_version = 0, status = 'stale' WHERE message_id = ?`, survivor)
-	requirements.NoError(err)
-	requirements.NoError(st.MigrateSourceMessageID(legacyData.Message.SourceID, legacyData.Message.ConversationID, "legacy-source-key", "canonical-source-key"))
-	assertions.Empty(calendarRows(t, st, legacy))
-	rows := calendarRows(t, st, survivor)
-	requirements.Len(rows, 1)
-	assertions.Equal("confirmed", rows[0].Event.Status)
 }

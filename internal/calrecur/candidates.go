@@ -115,12 +115,8 @@ func (s Set) ruleIterator(line string, until time.Time, budget *candidateBudget)
 	if !s.AllDay {
 		opt.Dtstart = civilTime(opt.Dtstart.In(s.location()))
 		opt.Until = civilHorizon(opt.Until, s.location())
-		// COUNT applies to valid local instances, not normalized gap times.
-		rule, err = rrule.NewRRule(opt)
-		if err != nil {
-			return nil, unsupported(line, err)
-		}
 	}
+	// COUNT applies to existing civil dates and wall times.
 	opt.Count = 0
 	rule, err = rrule.NewRRule(opt)
 	if err != nil {

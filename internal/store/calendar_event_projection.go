@@ -63,14 +63,13 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 		return fmt.Errorf("read calendar projection source: %w", err)
 	}
 	var sc struct {
-		CalendarID       string `json:"calendar_id"`
 		CalendarTimeZone string `json:"time_zone"`
 	}
 	// Legacy invalid config falls back to the decoder's UTC/default namespace.
 	if err := json.Unmarshal([]byte(config.String), &sc); err != nil {
-		sc.CalendarID, sc.CalendarTimeZone = "", ""
+		sc.CalendarTimeZone = ""
 	}
-	event, ok, decodeErr := calevent.Decode(format.String, raw, []byte(metadata.String), calevent.SourceContext{CalendarID: sc.CalendarID, CalendarTimeZone: sc.CalendarTimeZone})
+	event, ok, decodeErr := calevent.Decode(format.String, raw, []byte(metadata.String), sc.CalendarTimeZone)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -103,8 +102,8 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 			originalAt = &event.Original.Instant
 		}
 	}
-	columns := []string{"message_id", "projection_version", "content_hash", "provider", "namespace", "provider_event_id", "series_provider_id", "kind", "original_start_at", "original_start_date", "ical_uid", "sequence", "status", "has_bounds", "all_day", "start_at", "end_at", "start_date", "end_date", "event_time_zone", "calendar_time_zone", "recurrence_json", "recurrence_end_at", "recurrence_error", "join_url", "join_key", "organizer_email", "calendar_id", "transparency", "visibility", "event_type", "location", "copy_self_rsvp", "description", "description_truncated"}
-	values := []any{messageID, calendarEventProjectionVersion, hash, event.Provider, event.Namespace, event.ProviderEventID, event.SeriesProviderID, event.Kind, originalAt, originalDate, event.ICalUID, event.Sequence, event.Status, event.HasBounds, event.AllDay, event.Start, event.End, event.StartDate, event.EndDate, event.EventTimeZone, event.CalendarTimeZone, string(recurrence), recurrenceEnd, recurrenceError, event.JoinURL, event.JoinKey, event.OrganizerEmail, event.CalendarID, event.Transparency, event.Visibility, event.EventType, event.Location, event.CopySelfRSVP, event.Description, event.DescriptionTruncated}
+	columns := []string{"message_id", "projection_version", "content_hash", "provider_event_id", "series_provider_id", "kind", "original_start_at", "original_start_date", "status", "all_day", "start_at", "end_at", "start_date", "end_date", "event_time_zone", "calendar_time_zone", "recurrence_json", "recurrence_end_at", "recurrence_error"}
+	values := []any{messageID, calendarEventProjectionVersion, hash, event.ProviderEventID, event.SeriesProviderID, event.Kind, originalAt, originalDate, event.Status, event.AllDay, event.Start, event.End, event.StartDate, event.EndDate, event.EventTimeZone, event.CalendarTimeZone, string(recurrence), recurrenceEnd, recurrenceError}
 	updates := make([]string, 0, len(columns)-1)
 	for _, column := range columns[1:] {
 		updates = append(updates, column+" = excluded."+column)
@@ -148,7 +147,7 @@ func calendarRecurrenceEnd(ctx context.Context, event calevent.Event) (*time.Tim
 	if err != nil {
 		return nil, err.Error()
 	}
-	if !event.HasBounds {
+	if event.Start == nil || event.End == nil {
 		return nil, "missing event bounds"
 	}
 	duration := event.End.Sub(*event.Start)
@@ -169,4 +168,58 @@ func calendarRecurrenceEnd(ctx context.Context, event calevent.Event) (*time.Tim
 		return nil, ""
 	}
 	return &end, ""
+}
+
+func (s *Store) refreshSourceCalendarEventsTx(ctx context.Context, tx *loggedTx, sourceID int64) error {
+	var after int64
+	haveCursor := false
+	for {
+		query := `SELECT id FROM messages WHERE source_id = ? AND message_type = 'calendar_event'`
+		args := []any{sourceID}
+		if haveCursor {
+			query += " AND id > ?"
+			args = append(args, after)
+		}
+		query += " ORDER BY id LIMIT 100"
+		rows, err := tx.QueryContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		err = rows.Err()
+		closeErr := rows.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		for _, id := range ids {
+			if err := s.refreshCalendarEventProjectionWith(ctx, tx, id); err != nil {
+				return err
+			}
+			after = id
+			haveCursor = true
+		}
+	}
+}
+func calendarConfigZone(config sql.NullString) string {
+	var value struct {
+		Zone string `json:"time_zone"`
+	}
+	if json.Unmarshal([]byte(config.String), &value) != nil {
+		return ""
+	}
+	return value.Zone
 }

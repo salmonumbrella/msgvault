@@ -77,8 +77,10 @@ CREATE TABLE IF NOT EXISTS communication_service_discoveries (
     PRIMARY KEY (service_id, provider, discovery_kind)
 );
 
--- =====================================================================-- SOURCES & IDENTITY
--- =====================================================================
+-- ============================================================================
+-- SOURCES & IDENTITY
+-- ============================================================================
+
 CREATE TABLE IF NOT EXISTS sources (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     source_type TEXT NOT NULL,
@@ -1310,8 +1312,10 @@ CREATE INDEX IF NOT EXISTS idx_person_uid_aliases_survivor
     ON person_uid_aliases(surviving_person_id)
     WHERE surviving_person_id IS NOT NULL;
 
--- =====================================================================-- CONVERSATIONS & MESSAGES
--- =====================================================================
+-- ============================================================================
+-- CONVERSATIONS & MESSAGES
+-- ============================================================================
+
 CREATE TABLE IF NOT EXISTS conversations (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
@@ -1445,8 +1449,10 @@ CREATE TABLE IF NOT EXISTS message_recipients (
     -- constraint dropped first.
 );
 
--- =====================================================================-- REACTIONS
--- =====================================================================
+-- ============================================================================
+-- REACTIONS
+-- ============================================================================
+
 CREATE TABLE IF NOT EXISTS reactions (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -1470,8 +1476,10 @@ CREATE TABLE IF NOT EXISTS reaction_source_events (
 CREATE INDEX IF NOT EXISTS idx_reaction_source_events_reaction
     ON reaction_source_events(reaction_id);
 
--- =====================================================================-- ATTACHMENTS
--- =====================================================================
+-- ============================================================================
+-- ATTACHMENTS
+-- ============================================================================
+
 CREATE TABLE IF NOT EXISTS attachments (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -1508,8 +1516,10 @@ CREATE TABLE IF NOT EXISTS attachments (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
--- =====================================================================-- LABELS
--- =====================================================================
+-- ============================================================================
+-- LABELS
+-- ============================================================================
+
 CREATE TABLE IF NOT EXISTS labels (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     source_id BIGINT REFERENCES sources(id) ON DELETE CASCADE,
@@ -1530,8 +1540,10 @@ CREATE TABLE IF NOT EXISTS message_labels (
     PRIMARY KEY (message_id, label_id)
 );
 
--- =====================================================================-- RAW DATA
--- =====================================================================
+-- ============================================================================
+-- RAW DATA
+-- ============================================================================
+
 CREATE TABLE IF NOT EXISTS message_bodies (
     message_id BIGINT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     body_text TEXT,
@@ -1733,8 +1745,10 @@ CREATE TABLE IF NOT EXISTS visual_work_claims (
     PRIMARY KEY (generation_id, message_id, blob_hash, media_input_key, proposed_revision)
 );
 
--- =====================================================================-- SYNC STATE
--- =====================================================================
+-- ============================================================================
+-- SYNC STATE
+-- ============================================================================
+
 CREATE TABLE IF NOT EXISTS sync_operations (
     id TEXT PRIMARY KEY,
     source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
@@ -1994,8 +2008,10 @@ CREATE TABLE IF NOT EXISTS source_import_items (
     UNIQUE(source_id, provider, provider_id)
 );
 
--- =====================================================================-- COLLECTIONS
--- =====================================================================
+-- ============================================================================
+-- COLLECTIONS
+-- ============================================================================
+
 CREATE TABLE IF NOT EXISTS collections (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -2012,8 +2028,10 @@ CREATE TABLE IF NOT EXISTS collection_sources (
 CREATE INDEX IF NOT EXISTS idx_collection_sources_source_id
     ON collection_sources(source_id);
 
--- =====================================================================-- ORGANIZATIONS & EMPLOYMENT
--- =====================================================================CREATE TABLE IF NOT EXISTS organizations (
+-- ============================================================================
+-- ORGANIZATIONS & EMPLOYMENT
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS organizations (
     id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name            TEXT NOT NULL,
     name_normalized TEXT NOT NULL,
@@ -2327,8 +2345,10 @@ CREATE TABLE IF NOT EXISTS participant_links (
 CREATE INDEX IF NOT EXISTS idx_participant_links_b
     ON participant_links(participant_b);
 
--- =====================================================================-- PERSON RELATIONSHIPS
--- =====================================================================
+-- ============================================================================
+-- PERSON RELATIONSHIPS
+-- ============================================================================
+
 -- Relationship type metadata. A type is presentation and interchange
 -- metadata, never a second copy of an edge: forward_label and reverse_label
 -- let ONE person_relationships row render correctly from both endpoints, so
@@ -2522,8 +2542,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_person_relationship_reviews_occurrence_uni
 CREATE INDEX IF NOT EXISTS idx_person_relationship_reviews_status
     ON person_relationship_reviews(status, person_id, id);
 
--- =====================================================================-- PORTABLE FIELD METADATA AND TYPED ATTRIBUTES
--- =====================================================================
+-- ============================================================================
+-- PORTABLE FIELD METADATA AND TYPED ATTRIBUTES
+-- ============================================================================
+
 -- Portable field-definition registry; vocabulary columns intentionally carry
 -- no CHECK so both backends reject growing vocabularies through the same Go
 -- validation. There is deliberately no is_unique column.
@@ -2818,8 +2840,10 @@ CREATE INDEX IF NOT EXISTS idx_organization_attribute_values_current_text
     WHERE value_text IS NOT NULL
       AND active_until IS NULL AND superseded_at IS NULL;
 
--- =====================================================================-- PEOPLE PROFILE PRIMITIVES
--- =====================================================================
+-- ============================================================================
+-- PEOPLE PROFILE PRIMITIVES
+-- ============================================================================
+
 -- Structured, ordered person-name forms with the shared provenance and
 -- two-axis history envelope.
 CREATE TABLE IF NOT EXISTS person_names (
@@ -3320,8 +3344,10 @@ CREATE TABLE IF NOT EXISTS attachment_pack_index (
     crc32c      BIGINT NOT NULL
 );
 
--- ===================================================================-- DOCUMENT ATTACHMENT EXTRACTION
--- ===================================================================
+-- ==========================================================================
+-- DOCUMENT ATTACHMENT EXTRACTION
+-- ==========================================================================
+
 CREATE TABLE IF NOT EXISTS document_extraction_profiles (
     id                    TEXT PRIMARY KEY,
     fingerprint           TEXT NOT NULL UNIQUE,
@@ -3667,10 +3693,14 @@ CREATE TABLE IF NOT EXISTS attachment_packs (
     created_at   TEXT NOT NULL
 );
 
--- =====================================================================-- INDEXES
--- =====================================================================
--- =====================================================================-- DATED ACTIVITY SPINE
--- =====================================================================
+-- ============================================================================
+-- INDEXES
+-- ============================================================================
+
+-- ============================================================================
+-- DATED ACTIVITY SPINE
+-- ============================================================================
+
 CREATE TABLE IF NOT EXISTS activity_events (
     message_id                         BIGINT PRIMARY KEY
                                                   REFERENCES messages(id) ON DELETE CASCADE,
@@ -3775,8 +3805,10 @@ CREATE INDEX IF NOT EXISTS idx_person_contact_state_dirty
 CREATE INDEX IF NOT EXISTS idx_person_contact_state_last_contact
     ON person_contact_state(last_contact_at DESC);
 
--- =====================================================================-- AUTHORED DAILY NOTES
--- =====================================================================
+-- ============================================================================
+-- AUTHORED DAILY NOTES
+-- ============================================================================
+
 CREATE TABLE IF NOT EXISTS daily_note_day_sequences (
     local_date TEXT PRIMARY KEY CHECK (
         LENGTH(local_date) = 10
@@ -4194,22 +4226,18 @@ CREATE INDEX IF NOT EXISTS idx_docbank_attachments_ready
  ON docbank_attachment_deliveries(destination_key, state);
 CREATE INDEX IF NOT EXISTS idx_docbank_attachment_receipts
  ON docbank_attachment_deliveries(content_hash, state);
+
 -- Typed calendar evidence rebuilt from raw provider snapshots.
 CREATE TABLE IF NOT EXISTS calendar_events (
     message_id BIGINT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     projection_version INTEGER NOT NULL,
     content_hash TEXT NOT NULL,
-    provider TEXT NOT NULL DEFAULT '',
-    namespace TEXT NOT NULL DEFAULT '',
     provider_event_id TEXT NOT NULL DEFAULT '',
     series_provider_id TEXT NOT NULL DEFAULT '',
     kind TEXT NOT NULL DEFAULT '',
     original_start_at TIMESTAMPTZ,
     original_start_date TEXT NOT NULL DEFAULT '',
-    ical_uid TEXT NOT NULL DEFAULT '',
-    sequence BIGINT NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT '',
-    has_bounds BOOLEAN NOT NULL DEFAULT FALSE,
     all_day BOOLEAN NOT NULL DEFAULT FALSE,
     start_at TIMESTAMPTZ,
     end_at TIMESTAMPTZ,
@@ -4219,24 +4247,9 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     calendar_time_zone TEXT NOT NULL DEFAULT '',
     recurrence_json TEXT NOT NULL DEFAULT '[]',
     recurrence_end_at TIMESTAMPTZ,
-    recurrence_error TEXT NOT NULL DEFAULT '',
-    join_url TEXT NOT NULL DEFAULT '',
-    join_key TEXT NOT NULL DEFAULT '',
-    organizer_email TEXT NOT NULL DEFAULT '',
-    calendar_id TEXT NOT NULL DEFAULT '',
-    transparency TEXT NOT NULL DEFAULT '',
-    visibility TEXT NOT NULL DEFAULT '',
-    event_type TEXT NOT NULL DEFAULT '',
-    location TEXT NOT NULL DEFAULT '',
-    copy_self_rsvp TEXT NOT NULL DEFAULT '',
-    description TEXT NOT NULL DEFAULT '',
-    description_truncated BOOLEAN NOT NULL DEFAULT FALSE
+    recurrence_error TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_at);
-CREATE INDEX IF NOT EXISTS idx_calendar_events_provider_id ON calendar_events(namespace, provider_event_id);
-CREATE INDEX IF NOT EXISTS idx_calendar_events_series_id ON calendar_events(namespace, series_provider_id);
-CREATE INDEX IF NOT EXISTS idx_calendar_events_ical_uid ON calendar_events(ical_uid);
-CREATE INDEX IF NOT EXISTS idx_calendar_events_join_key ON calendar_events(join_key);
 CREATE INDEX IF NOT EXISTS idx_calendar_events_recurrence_end ON calendar_events(recurrence_end_at);
 CREATE TABLE IF NOT EXISTS calendar_event_attendees (
     message_id BIGINT NOT NULL REFERENCES calendar_events(message_id) ON DELETE CASCADE,

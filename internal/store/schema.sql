@@ -77,8 +77,10 @@ CREATE TABLE IF NOT EXISTS communication_service_discoveries (
     PRIMARY KEY (service_id, provider, discovery_kind)
 );
 
--- =====================================================================-- SOURCES & IDENTITY
--- =====================================================================
+-- ============================================================================
+-- SOURCES & IDENTITY
+-- ============================================================================
+
 -- Message sources (accounts from different platforms)
 CREATE TABLE IF NOT EXISTS sources (
     id INTEGER PRIMARY KEY,
@@ -1354,8 +1356,10 @@ CREATE INDEX IF NOT EXISTS idx_person_uid_aliases_survivor
     ON person_uid_aliases(surviving_person_id)
     WHERE surviving_person_id IS NOT NULL;
 
--- =====================================================================-- CONVERSATIONS & MESSAGES
--- =====================================================================
+-- ============================================================================
+-- CONVERSATIONS & MESSAGES
+-- ============================================================================
+
 -- Conversations (threads for email, chats for messaging)
 CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY,
@@ -1546,8 +1550,10 @@ CREATE TABLE IF NOT EXISTS message_recipients (
     -- rebuilt away first.
 );
 
--- =====================================================================-- REACTIONS & INTERACTIONS
--- =====================================================================
+-- ============================================================================
+-- REACTIONS & INTERACTIONS
+-- ============================================================================
+
 -- Reactions (tapbacks, emoji reactions)
 CREATE TABLE IF NOT EXISTS reactions (
     id INTEGER PRIMARY KEY,
@@ -1577,8 +1583,10 @@ CREATE TABLE IF NOT EXISTS reaction_source_events (
 CREATE INDEX IF NOT EXISTS idx_reaction_source_events_reaction
     ON reaction_source_events(reaction_id);
 
--- =====================================================================-- ATTACHMENTS & MEDIA
--- =====================================================================
+-- ============================================================================
+-- ATTACHMENTS & MEDIA
+-- ============================================================================
+
 -- Attachments (content-addressed storage)
 CREATE TABLE IF NOT EXISTS attachments (
     id INTEGER PRIMARY KEY,
@@ -1624,8 +1632,10 @@ CREATE TABLE IF NOT EXISTS attachments (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- =====================================================================-- LABELS & ORGANIZATION
--- =====================================================================
+-- ============================================================================
+-- LABELS & ORGANIZATION
+-- ============================================================================
+
 -- Labels (Gmail labels, user tags)
 CREATE TABLE IF NOT EXISTS labels (
     id INTEGER PRIMARY KEY,
@@ -1719,8 +1729,10 @@ AFTER DELETE ON attachments FOR EACH ROW BEGIN
     VALUES ('attachments', OLD.message_id);
 END;
 
--- =====================================================================-- RAW DATA STORAGE
--- =====================================================================
+-- ============================================================================
+-- RAW DATA STORAGE
+-- ============================================================================
+
 -- Message bodies (separated from messages to keep messages B-tree small)
 CREATE TABLE IF NOT EXISTS message_bodies (
     message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
@@ -1728,8 +1740,10 @@ CREATE TABLE IF NOT EXISTS message_bodies (
     body_html TEXT
 );
 
--- =====================================================================-- LAST-MODIFIED TRIGGERS
--- =====================================================================-- messages.last_modified is bumped to CURRENT_TIMESTAMP on ANY change to a
+-- ============================================================================
+-- LAST-MODIFIED TRIGGERS
+-- ============================================================================
+-- messages.last_modified is bumped to CURRENT_TIMESTAMP on ANY change to a
 -- message row OR any insert/update of its body row. This is a TRUE row-level
 -- last-modified (blanket, not column-specific): the embed worker uses it as an
 -- optimistic-CAS token, so it must move whenever any embeddable content could
@@ -1978,8 +1992,10 @@ CREATE TABLE IF NOT EXISTS visual_work_claims (
     PRIMARY KEY (generation_id, message_id, blob_hash, media_input_key, proposed_revision)
 );
 
--- =====================================================================-- SYNC STATE
--- =====================================================================
+-- ============================================================================
+-- SYNC STATE
+-- ============================================================================
+
 -- Durable lifecycle for higher-level sync invocations. One operation can own
 -- multiple sync runs, such as full enumeration followed by history catch-up.
 CREATE TABLE IF NOT EXISTS sync_operations (
@@ -2263,8 +2279,10 @@ CREATE TABLE IF NOT EXISTS source_import_items (
     UNIQUE(source_id, provider, provider_id)
 );
 
--- =====================================================================-- INDEXES
--- =====================================================================
+-- ============================================================================
+-- INDEXES
+-- ============================================================================
+
 -- Sources
 CREATE INDEX IF NOT EXISTS idx_sources_type ON sources(source_type);
 
@@ -2454,8 +2472,10 @@ CREATE INDEX IF NOT EXISTS idx_sync_run_items_run_status
 CREATE INDEX IF NOT EXISTS idx_source_import_items_source_provider
     ON source_import_items(source_id, provider, status);
 
--- =====================================================================-- COLLECTIONS
--- =====================================================================
+-- ============================================================================
+-- COLLECTIONS
+-- ============================================================================
+
 -- Collections (named groupings of sources treated as a single logical archive)
 CREATE TABLE IF NOT EXISTS collections (
     id          INTEGER PRIMARY KEY,
@@ -2488,8 +2508,10 @@ CREATE TABLE IF NOT EXISTS saved_views (
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- =====================================================================-- ACCOUNT IDENTITIES
--- =====================================================================
+-- ============================================================================
+-- ACCOUNT IDENTITIES
+-- ============================================================================
+
 -- Confirmed per-account "me" identities used by sent-message detection
 -- in dedup. Identity is account-scoped: an address confirmed for one
 -- source does not imply it is "me" in any other source.
@@ -2534,8 +2556,10 @@ CREATE TABLE IF NOT EXISTS participant_links (
 CREATE INDEX IF NOT EXISTS idx_participant_links_b
     ON participant_links(participant_b);
 
--- =====================================================================-- PERSON RELATIONSHIPS
--- =====================================================================
+-- ============================================================================
+-- PERSON RELATIONSHIPS
+-- ============================================================================
+
 -- Relationship type metadata. A type is presentation and interchange
 -- metadata, never a second copy of an edge: forward_label and reverse_label
 -- let ONE person_relationships row render correctly from both endpoints, so
@@ -2729,8 +2753,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_person_relationship_reviews_occurrence_uni
 CREATE INDEX IF NOT EXISTS idx_person_relationship_reviews_status
     ON person_relationship_reviews(status, person_id, id);
 
--- =====================================================================-- PORTABLE FIELD METADATA AND TYPED ATTRIBUTES
--- =====================================================================
+-- ============================================================================
+-- PORTABLE FIELD METADATA AND TYPED ATTRIBUTES
+-- ============================================================================
+
 -- Definitions are metadata rows: adding one never issues DDL. universal_id is
 -- the stable external identity, slug is the immutable machine name, and label
 -- is mutable human-facing text. There is deliberately no is_unique column:
@@ -3035,8 +3061,10 @@ CREATE INDEX IF NOT EXISTS idx_organization_attribute_values_current_text
     WHERE value_text IS NOT NULL
       AND active_until IS NULL AND superseded_at IS NULL;
 
--- =====================================================================-- PEOPLE PROFILE PRIMITIVES
--- =====================================================================
+-- ============================================================================
+-- PEOPLE PROFILE PRIMITIVES
+-- ============================================================================
+
 -- Structured, ordered person-name forms with the shared provenance and
 -- two-axis history envelope.
 CREATE TABLE IF NOT EXISTS person_names (
@@ -3517,8 +3545,10 @@ CREATE TABLE IF NOT EXISTS identity_match_evidence_sources (
 CREATE INDEX IF NOT EXISTS idx_identity_match_evidence_sources_source
     ON identity_match_evidence_sources(source_id, evidence_id);
 
--- =====================================================================-- APPLIED MIGRATIONS
--- =====================================================================
+-- ============================================================================
+-- APPLIED MIGRATIONS
+-- ============================================================================
+
 -- Marks one-time data migrations that have already run. Schema DDL is
 -- idempotent via IF NOT EXISTS; this table is for *data* migrations
 -- (e.g. moving legacy config into per-account records) that must run
@@ -3546,8 +3576,10 @@ CREATE TABLE IF NOT EXISTS attachment_pack_index (
     crc32c      BIGINT NOT NULL
 );
 
--- ===================================================================-- DOCUMENT ATTACHMENT EXTRACTION
--- ===================================================================
+-- ==========================================================================
+-- DOCUMENT ATTACHMENT EXTRACTION
+-- ==========================================================================
+
 -- Immutable hosted-extraction policy. A policy change creates a new profile;
 -- mixed profiles may serve while an incremental rebuild is in progress.
 CREATE TABLE IF NOT EXISTS document_extraction_profiles (
@@ -3896,8 +3928,10 @@ CREATE TABLE IF NOT EXISTS attachment_packs (
     created_at   TEXT NOT NULL
 );
 
--- =====================================================================-- ORGANIZATIONS & EMPLOYMENT
--- =====================================================================-- Durable curated organizations. Name and domain are deliberately not unique:
+-- ============================================================================
+-- ORGANIZATIONS & EMPLOYMENT
+-- ============================================================================
+-- Durable curated organizations. Name and domain are deliberately not unique:
 -- distinct organizations can legitimately share either. Employment history
 -- later supplies the hard-delete guard.
 CREATE TABLE IF NOT EXISTS organizations (
@@ -4172,8 +4206,10 @@ CREATE INDEX IF NOT EXISTS idx_employments_organization_current_edge
     ON employments(organization_id, id) WHERE is_current = 1;
 CREATE INDEX IF NOT EXISTS idx_employments_address ON employments(address_id) WHERE address_id IS NOT NULL;
 
--- =====================================================================-- DATED ACTIVITY SPINE
--- =====================================================================
+-- ============================================================================
+-- DATED ACTIVITY SPINE
+-- ============================================================================
+
 -- One row per archived communication projected into the date-indexed spine.
 -- The native stable reference is derived as "<ref_kind>:<message_id>".
 CREATE TABLE IF NOT EXISTS activity_events (
@@ -4282,8 +4318,10 @@ CREATE INDEX IF NOT EXISTS idx_person_contact_state_dirty
 CREATE INDEX IF NOT EXISTS idx_person_contact_state_last_contact
     ON person_contact_state(last_contact_at DESC);
 
--- =====================================================================-- AUTHORED DAILY NOTES
--- =====================================================================
+-- ============================================================================
+-- AUTHORED DAILY NOTES
+-- ============================================================================
+
 CREATE TABLE IF NOT EXISTS daily_note_day_sequences (
     local_date TEXT NOT NULL PRIMARY KEY CHECK (
         LENGTH(local_date) = 10
@@ -4635,22 +4673,18 @@ CREATE INDEX IF NOT EXISTS idx_docbank_attachments_ready
  ON docbank_attachment_deliveries(destination_key, state);
 CREATE INDEX IF NOT EXISTS idx_docbank_attachment_receipts
  ON docbank_attachment_deliveries(content_hash, state);
+
 -- Typed calendar evidence rebuilt from raw provider snapshots.
 CREATE TABLE IF NOT EXISTS calendar_events (
     message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     projection_version INTEGER NOT NULL,
     content_hash TEXT NOT NULL,
-    provider TEXT NOT NULL DEFAULT '',
-    namespace TEXT NOT NULL DEFAULT '',
     provider_event_id TEXT NOT NULL DEFAULT '',
     series_provider_id TEXT NOT NULL DEFAULT '',
     kind TEXT NOT NULL DEFAULT '',
     original_start_at DATETIME,
     original_start_date TEXT NOT NULL DEFAULT '',
-    ical_uid TEXT NOT NULL DEFAULT '',
-    sequence INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT '',
-    has_bounds BOOLEAN NOT NULL DEFAULT FALSE,
     all_day BOOLEAN NOT NULL DEFAULT FALSE,
     start_at DATETIME,
     end_at DATETIME,
@@ -4660,24 +4694,9 @@ CREATE TABLE IF NOT EXISTS calendar_events (
     calendar_time_zone TEXT NOT NULL DEFAULT '',
     recurrence_json TEXT NOT NULL DEFAULT '[]',
     recurrence_end_at DATETIME,
-    recurrence_error TEXT NOT NULL DEFAULT '',
-    join_url TEXT NOT NULL DEFAULT '',
-    join_key TEXT NOT NULL DEFAULT '',
-    organizer_email TEXT NOT NULL DEFAULT '',
-    calendar_id TEXT NOT NULL DEFAULT '',
-    transparency TEXT NOT NULL DEFAULT '',
-    visibility TEXT NOT NULL DEFAULT '',
-    event_type TEXT NOT NULL DEFAULT '',
-    location TEXT NOT NULL DEFAULT '',
-    copy_self_rsvp TEXT NOT NULL DEFAULT '',
-    description TEXT NOT NULL DEFAULT '',
-    description_truncated BOOLEAN NOT NULL DEFAULT FALSE
+    recurrence_error TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_at);
-CREATE INDEX IF NOT EXISTS idx_calendar_events_provider_id ON calendar_events(namespace, provider_event_id);
-CREATE INDEX IF NOT EXISTS idx_calendar_events_series_id ON calendar_events(namespace, series_provider_id);
-CREATE INDEX IF NOT EXISTS idx_calendar_events_ical_uid ON calendar_events(ical_uid);
-CREATE INDEX IF NOT EXISTS idx_calendar_events_join_key ON calendar_events(join_key);
 CREATE INDEX IF NOT EXISTS idx_calendar_events_recurrence_end ON calendar_events(recurrence_end_at);
 CREATE TABLE IF NOT EXISTS calendar_event_attendees (
     message_id INTEGER NOT NULL REFERENCES calendar_events(message_id) ON DELETE CASCADE,

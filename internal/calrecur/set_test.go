@@ -148,7 +148,6 @@ func TestAllDayIdentityPreservesCivilDateAtMidnightDSTTransition(t *testing.T) {
 	}
 	assertions.Equal([]string{"2018-11-04", "2018-11-05"}, dates)
 	assertions.Equal(time.Date(2018, 11, 4, 1, 0, 0, 0, zone), instances[0].Start)
-
 }
 
 func TestAllDayDateValuesPreserveCivilDateAtMidnightDSTTransition(t *testing.T) {

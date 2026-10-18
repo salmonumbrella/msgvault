@@ -1218,7 +1218,7 @@ func (s *Store) MigrateSourceMessageID(sourceID, conversationID int64, legacySou
 			if err != nil {
 				return fmt.Errorf("delete legacy source_message_id: %w", err)
 			}
-			return s.refreshCalendarEventProjectionWith(context.Background(), tx, newID)
+			return nil
 		}
 
 		_, err = tx.Exec(
@@ -1230,15 +1230,7 @@ func (s *Store) MigrateSourceMessageID(sourceID, conversationID int64, legacySou
 		if err != nil {
 			return fmt.Errorf("migrate source_message_id: %w", err)
 		}
-		var survivor int64
-		err = tx.QueryRow(`SELECT id FROM messages WHERE source_id = ? AND conversation_id = ? AND source_message_id = ?`, sourceID, conversationID, newSourceMessageID).Scan(&survivor)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read migrated survivor: %w", err)
-		}
-		return s.refreshCalendarEventProjectionWith(context.Background(), tx, survivor)
+		return nil
 	})
 }
 

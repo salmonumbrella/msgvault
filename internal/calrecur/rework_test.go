@@ -33,15 +33,18 @@ func TestCountIncludesUnmatchedStart(t *testing.T) {
 	assert.Equal(t, instant(t, "2027-03-15T17:00:00Z"), got[2].Start)
 }
 func TestAllDaySkippedDateDoesNotConsumeCount(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+
 	zone, err := time.LoadLocation("Pacific/Apia")
-	require.NoError(t, err)
+	requirements.NoError(err)
 	s, err := ParseSet(time.Time{}, true, "2011-12-28", zone, []string{"RRULE:FREQ=DAILY;COUNT=4"})
-	require.NoError(t, err)
+	requirements.NoError(err)
 	got, _, err := Expand(t.Context(), s, 0, 1, nil, instant(t, "2011-12-27T00:00:00Z"), instant(t, "2012-01-03T00:00:00Z"), 100)
-	require.NoError(t, err)
+	requirements.NoError(err)
 	var dates []string
 	for _, o := range got {
 		dates = append(dates, o.StartDate)
 	}
-	assert.Equal(t, []string{"2011-12-28", "2011-12-29", "2011-12-31", "2012-01-01"}, dates)
+	assertions.Equal([]string{"2011-12-28", "2011-12-29", "2011-12-31", "2012-01-01"}, dates)
 }
