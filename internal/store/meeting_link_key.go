@@ -25,13 +25,18 @@ func deriveMeetingLinkKey(content meetingcontent.Content) meetingLinkKey {
 	return key
 }
 
-func replaceMeetingLinkKey(ctx context.Context, tx *loggedTx, messageID int64, key meetingLinkKey) error {
+func (s *Store) replaceMeetingLinkKey(ctx context.Context, tx *loggedTx, messageID int64, key meetingLinkKey) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM meeting_link_key WHERE message_id = ?`, messageID); err != nil {
 		return fmt.Errorf("clear meeting key: %w", err)
 	}
 	if key.Value != "" || key.ScheduledAt != nil {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO meeting_link_key(message_id,kind,value,calendar_id,scheduled_at) VALUES (?,?,?,?,?)`, messageID, key.Kind, key.Value, key.CalendarID, key.ScheduledAt); err != nil {
 			return fmt.Errorf("write meeting key: %w", err)
+		}
+	}
+	if !s.IsPostgreSQL() {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO cache_related_change_journal(dataset,message_id) VALUES('meeting_links', ?)`, messageID); err != nil {
+			return fmt.Errorf("journal meeting key: %w", err)
 		}
 	}
 	return nil

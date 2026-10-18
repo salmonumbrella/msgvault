@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json/v2"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,7 +20,8 @@ import (
 )
 
 type meetingLinksTestStore struct {
-	refreshes int
+	refreshes  int
+	refreshErr error
 	*mockStore
 
 	member   int64
@@ -31,7 +34,7 @@ type meetingLinksTestStore struct {
 
 func (s *meetingLinksTestStore) RefreshIdentityDatasets(context.Context) (int64, error) {
 	s.refreshes++
-	return 0, nil
+	return 0, s.refreshErr
 }
 
 func (s *meetingLinksTestStore) LinkMeetingContext(_ context.Context, id int64, ref store.OccurrenceRef) error {
@@ -121,7 +124,13 @@ func TestMeetingLinkRoutes(t *testing.T) {
 				assertions.Equal(int64(42), backend.member)
 				assertions.Equal(store.OccurrenceRef{MessageID: 81, Key: "20270314T100000Z"}, backend.event)
 				assertions.Equal(tc.name, backend.decision)
-				assertions.JSONEq(tc.body, w.Body.String())
+				var response map[string]any
+				requirements.NoError(json.Unmarshal(w.Body.Bytes(), &response))
+				assertions.Equal("ready", response["cache_state"])
+				delete(response, "cache_state")
+				body, err := json.Marshal(response)
+				requirements.NoError(err)
+				assertions.JSONEq(tc.body, string(body))
 			} else if tc.name == "links" {
 				assertions.Equal(int64(42), backend.member)
 				assertions.JSONEq(`{"links":[{"ref":"evt:81","subject":"Planning","start":"2027-03-14T10:00:00Z","end":"2027-03-14T11:00:00Z"}]}`, w.Body.String())
@@ -133,6 +142,24 @@ func TestMeetingLinkRoutes(t *testing.T) {
 				assertions.Equal(want, backend.ref)
 				assertions.JSONEq(`{"suggestions":[{"ref":"evt:81@20270314T100000Z","member_message_id":42,"overlap_minutes":30,"shared_attendees":1,"title_tokens":2,"reasons":["time_overlap","shared_attendees","title_tokens"]}]}`, w.Body.String())
 			}
+		})
+	}
+}
+
+func TestMeetingLinkDecisionReportsStaleCache(t *testing.T) {
+	backend := &meetingLinksTestStore{mockStore: &mockStore{stats: &StoreStats{}}, refreshErr: errors.New("refresh failed")}
+	srv := NewServer(&config.Config{}, backend, nil, testLogger())
+	for _, decision := range []string{"link", "unlink"} {
+		t.Run(decision, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/meetings/links/decisions", strings.NewReader(`{"message_id":42,"event":"evt:81","decision":"`+decision+`"}`))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			srv.Router().ServeHTTP(response, request)
+			require.Equal(t, http.StatusOK, response.Code)
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+			assert.Equal(t, "stale", body["cache_state"])
+			assert.Equal(t, decision, backend.decision)
 		})
 	}
 }

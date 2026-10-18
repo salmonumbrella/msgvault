@@ -26,6 +26,11 @@ func seedLegacyRoomEdges(t *testing.T, st *Store) {
 			Conversation: &ConversationPersistData{SourceConversationID: kind, ConversationType: "meeting"},
 		})
 		requirements.NoError(err)
+		var conversationID int64
+		requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_id FROM messages WHERE id = ?`), id).Scan(&conversationID))
+		for _, participant := range []int64{room, resource, human} {
+			requirements.NoError(st.EnsureConversationParticipant(conversationID, participant, "member"))
+		}
 		for _, role := range []string{"from", "to"} {
 			requirements.NoError(st.ReplaceMessageRecipients(id, role, []int64{room, resource, human}, []string{"Room", "Resource", "Human"}))
 		}
@@ -45,6 +50,10 @@ func assertRepairedRoomEdges(t *testing.T, st *Store) {
 	assertions.Equal(6, count, "email room edges remain")
 	requirements.NoError(st.DB().QueryRow(`SELECT count(*) FROM messages WHERE message_type IN ('calendar_event','meeting_transcript') AND sender_id IS NOT NULL`).Scan(&count))
 	assertions.Zero(count)
+	requirements.NoError(st.DB().QueryRow(`SELECT count(*) FROM conversation_participants cp WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = cp.conversation_id AND m.message_type IN ('calendar_event','meeting_transcript'))`).Scan(&count))
+	assertions.Equal(2, count, "human roster edges remain on both conversations")
+	requirements.NoError(st.DB().QueryRow(`SELECT count(*) FROM conversation_participants cp WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = cp.conversation_id AND m.message_type = 'email')`).Scan(&count))
+	assertions.Equal(3, count, "email roster remains")
 }
 
 func TestRoomRecipientsMigration(t *testing.T) {

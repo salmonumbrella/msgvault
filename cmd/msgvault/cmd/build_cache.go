@@ -195,9 +195,6 @@ func wrapError(err error, message string) error {
 	return fmt.Errorf("%s: %w", message, err)
 }
 
-// buildCacheBeforeSnapshotHook permits deterministic writes before snapshot pinning.
-var buildCacheBeforeSnapshotHook func()
-
 // buildCacheAfterSnapshotHook is a deterministic test seam for writes that
 // race with cache construction after its source watermark is captured.
 var buildCacheAfterSnapshotHook func()
@@ -846,7 +843,7 @@ func buildCacheScheduled(
 			return refreshDerivedDatasetsOnly(context.Background(), dbPath, analyticsDir,
 				acquirePublishLock, true, builderOverrides...)
 		}
-		return buildCacheLockedAttempt(context.Background(), dbPath, analyticsDir, staleness.FullRebuild, false,
+		return buildCacheLockedAttempt(dbPath, analyticsDir, staleness.FullRebuild, false,
 			acquirePublishLock, builderOverrides...)
 	}, dbPath, analyticsDir, acquirePublishLock, builderOverrides...)
 }
@@ -1011,7 +1008,7 @@ func buildCacheLocked(
 	builderOverrides ...duckdbutil.BuilderOverrides,
 ) (*buildResult, error) {
 	return withFullBuildFallback(func() (*buildResult, error) {
-		return buildCacheLockedAttempt(context.Background(), dbPath, analyticsDir, fullRebuild, recheckStaleness,
+		return buildCacheLockedAttempt(dbPath, analyticsDir, fullRebuild, recheckStaleness,
 			locking, builderOverrides...)
 	}, dbPath, analyticsDir, locking, builderOverrides...)
 }
@@ -1031,11 +1028,10 @@ func withFullBuildFallback(
 		return result, err
 	}
 	fmt.Printf("%v. Forcing full rebuild...\n", err)
-	return buildCacheLockedAttempt(context.Background(), dbPath, analyticsDir, true, false, locking, builderOverrides...)
+	return buildCacheLockedAttempt(dbPath, analyticsDir, true, false, locking, builderOverrides...)
 }
 
 func buildCacheLockedAttempt(
-	ctx context.Context,
 	dbPath, analyticsDir string,
 	fullRebuild, recheckStaleness bool,
 	locking cachePublishLocking,
@@ -1184,9 +1180,6 @@ func buildCacheLockedAttempt(
 	if err := registerCacheTextFunctions(context.Background(), db, textRepairs); err != nil {
 		return nil, err
 	}
-	if buildCacheBeforeSnapshotHook != nil {
-		buildCacheBeforeSnapshotHook()
-	}
 	sourceSnapshot, err := openCacheSourceSnapshot(db, dbPath)
 	if err != nil {
 		return nil, err
@@ -1312,11 +1305,6 @@ func buildCacheLockedAttempt(
 		return &buildResult{Skipped: true, OutputDir: analyticsDir}, nil
 	}
 
-	meetingKeys, err := identityStore.MeetingCountKeysFromSnapshotContext(ctx, sourceSnapshot)
-	if err != nil {
-		return nil, fmt.Errorf("read meeting count keys: %w", err)
-	}
-
 	replaceAll := fullRebuild || !hasPreviousState
 	if replaceAll {
 		lastMessageID = 0
@@ -1339,6 +1327,13 @@ func buildCacheLockedAttempt(
 	if buildCacheAfterSnapshotHook != nil {
 		buildCacheAfterSnapshotHook()
 	}
+	meetingKeys, keysSeq, err := identityStore.MeetingCountKeysContext(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("read meeting count keys: %w", err)
+	}
+
+	relatedChangeSeq = min(relatedChangeSeq, keysSeq)
+
 	var attachmentMIMEColumnCount int
 	if err := sourceSnapshot.QueryRow(`
 		SELECT COUNT(*) FROM pragma_table_info('attachments') WHERE name = 'mime_type'
@@ -1444,6 +1439,7 @@ func buildCacheLockedAttempt(
 	}
 
 	// 4. Export participants
+	ctx := context.Background()
 	copyDataset := func(table, selectSQL string) func() error {
 		return func() error {
 			return copyParquet(ctx, exportDB, filepath.Join(staging.root, table), table+".parquet", selectSQL)
@@ -1979,45 +1975,21 @@ func openCacheSourceSnapshot(duckDB *sql.DB, dbPath string) (*cacheSourceSnapsho
 	}, nil
 }
 
-// QueryContext reads archive rows from the same transaction as cache metadata.
-func (s *cacheSourceSnapshot) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	if s.sqliteTx != nil {
-		return s.sqliteTx.QueryContext(ctx, query, args...)
-	}
-	query, args = cacheSQLiteQuery(query, args)
-	return s.duckTx.QueryContext(ctx, query, args...)
-}
-
-func (s *cacheSourceSnapshot) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	if s.sqliteTx != nil {
-		return s.sqliteTx.QueryRowContext(ctx, query, args...)
-	}
-	query, args = cacheSQLiteQuery(query, args)
-	return s.duckTx.QueryRowContext(ctx, query, args...)
-}
-
-func cacheSQLiteQuery(query string, args []any) (string, []any) {
-	// sqlite_query accepts SQLite scalar values, so bind instants as the
-	// archive's UTC text rather than DuckDB's TIMESTAMP WITH TIME ZONE.
-	args = append([]any(nil), args...)
-	for i, arg := range args {
-		if instant, ok := arg.(time.Time); ok {
-			args[i] = instant.UTC().Format(store.SQLiteTimestampLayout)
-		}
-	}
-	count := len(args)
-	duckQuery := "SELECT * FROM sqlite_query('sqlite_db', '" + quoteCacheSQL(query) + "'"
-	if count > 0 {
-		duckQuery += ", params=row(" + strings.TrimSuffix(strings.Repeat("?,", count), ",") + ")"
-	}
-	return duckQuery + ")", args
-}
-
 // QueryRow executes source metadata SQL inside the same snapshot used by the
 // table exports. sqlite_query preserves native SQLite query planning and
 // indexes when sqlite_scanner is active.
 func (s *cacheSourceSnapshot) QueryRow(query string, args ...any) *sql.Row {
-	return s.QueryRowContext(context.Background(), query, args...)
+	if s.sqliteTx != nil {
+		return s.sqliteTx.QueryRow(query, args...)
+	}
+	escapedQuery := strings.ReplaceAll(query, "'", "''")
+	duckQuery := fmt.Sprintf("SELECT * FROM sqlite_query('sqlite_db', '%s'", escapedQuery)
+	if len(args) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(args)), ",")
+		duckQuery += ", params=row(" + placeholders + ")"
+	}
+	duckQuery += ")"
+	return s.duckTx.QueryRow(duckQuery, args...)
 }
 
 func (s *cacheSourceSnapshot) DuckDB() sqlRunner {

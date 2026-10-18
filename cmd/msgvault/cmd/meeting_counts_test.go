@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/api"
 	"go.kenn.io/msgvault/internal/config"
+	"go.kenn.io/msgvault/internal/identityindex"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
 )
@@ -29,16 +30,28 @@ func TestMeetingCountsLinkedCopies(t *testing.T) {
 	t.Cleanup(func() { requirements.NoError(st.Close()) })
 	human, err := st.EnsureParticipant("human@example.org", "Example Human", "example.org")
 	requirements.NoError(err)
+	owners := make(map[string]int64)
+	for _, identifier := range []string{"first", "second", "calendar"} {
+		kind := "meeting_transcript"
+		if identifier == "calendar" {
+			kind = "calendar_event"
+		}
+		source, err := st.GetOrCreateSource(kind, identifier+"@example.org")
+		requirements.NoError(err)
+		owners[identifier], err = st.EnsureParticipant(identifier+"@example.org", "Owner", "example.org")
+		requirements.NoError(err)
+		requirements.NoError(st.AddAccountIdentity(source.ID, identifier+"@example.org", "explicit"))
+	}
 	persist := func(kind, identifier, format, raw string) int64 {
 		source, err := st.GetOrCreateSource(kind, identifier+"@example.org")
 		requirements.NoError(err)
 		id, err := st.PersistMessage(&store.MessagePersistData{
-			Message:      &store.Message{SourceID: source.ID, SourceMessageID: identifier, MessageType: kind, SentAt: sql.NullTime{Time: time.Date(2027, 3, 14, 10, 0, 0, 0, time.UTC), Valid: true}},
+			Message:      &store.Message{SourceID: source.ID, SourceMessageID: identifier, MessageType: kind, SentAt: sql.NullTime{Time: time.Date(2026, 3, 14, 10, 0, 0, 0, time.UTC), Valid: true}},
 			Conversation: &store.ConversationPersistData{SourceConversationID: identifier, ConversationType: "meeting", Title: "Planning"},
 			RawMIME:      []byte(raw), RawFormat: format,
 		})
 		requirements.NoError(err)
-		requirements.NoError(st.ReplaceMessageRecipients(id, "to", []int64{human}, []string{"Example Human"}))
+		requirements.NoError(st.ReplaceMessageRecipients(id, "to", []int64{human, owners[identifier]}, []string{"Example Human", "Owner"}))
 		return id
 	}
 	persist("meeting_transcript", "first", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"planning@example.org"}}`)
@@ -48,7 +61,7 @@ func TestMeetingCountsLinkedCopies(t *testing.T) {
 		engine, err := query.NewDuckDBEngine(cache, "", nil)
 		requirements.NoError(err)
 		defer func() { requirements.NoError(engine.Close()) }()
-		people, err := engine.SearchPeople(t.Context(), query.PersonSearchRequest{})
+		people, err := engine.SearchPeople(t.Context(), query.PersonSearchRequest{Query: "human@example.org"})
 		requirements.NoError(err)
 		requirements.Len(people.Rows, 1)
 		assertions.Equal(want, people.Rows[0].MeetingCount)
@@ -56,17 +69,37 @@ func TestMeetingCountsLinkedCopies(t *testing.T) {
 		requirements.NoError(err)
 		requirements.NotNil(person)
 		assertions.Equal(want, person.MeetingCount)
+		db, err := sql.Open("duckdb", "")
+		requirements.NoError(err)
+		defer func() { requirements.NoError(db.Close()) }()
+		var scored int64
+		requirements.NoError(db.QueryRow(`SELECT sum(meeting_count) FROM read_parquet(?) WHERE canonical_id = ?`, filepath.Join(cache, identityindex.DatasetTemperatureContributions, "*.parquet"), human).Scan(&scored))
+		assertions.Equal(want, scored, "temperature days count the linked occurrence once")
 	}
 	_, err = buildCache(path, cache, true)
 	requirements.NoError(err)
 	readCount(2)
-	event := persist("calendar_event", "calendar", "gcal_json", `{"id":"event","iCalUID":"planning@example.org","start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"}}`)
+	event := persist("calendar_event", "calendar", "gcal_json", `{"id":"event","iCalUID":"planning@example.org","start":{"dateTime":"2026-03-14T10:00:00Z"},"end":{"dateTime":"2026-03-14T11:00:00Z"}}`)
 	requirements.NoError(st.SetMessageMetadata(event, sql.NullString{String: `{"ical_uid":"planning@example.org"}`, Valid: true}))
 	assertions.False(cacheNeedsBuild(path, cache).FullRebuild)
 	incremental, err := buildCache(path, cache, false)
 	requirements.NoError(err)
 	assertions.Equal(int64(1), incremental.StagedCount)
 	readCount(1)
+	// A re-import changes automatic evidence while keeping the message ID.
+	for _, tc := range []struct {
+		uid   string
+		count int64
+	}{
+		{"unmatched@example.org", 2}, {"planning@example.org", 1},
+	} {
+		requirements.NoError(st.UpsertMessageRawWithFormat(second, []byte(fmt.Sprintf(`{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":%q}}`, tc.uid)), "twenty_json"))
+		assertions.False(cacheNeedsBuild(path, cache).FullRebuild)
+		result, err := buildCache(path, cache, false)
+		requirements.NoError(err)
+		assertions.True(result.IdentityOnly)
+		readCount(tc.count)
+	}
 	previousRefresh := runDerivedCacheSubprocess
 	runDerivedCacheSubprocess = func(_ context.Context, dir string) error {
 		_, err := buildCacheDerivedOnly(path, dir)
@@ -159,7 +192,7 @@ func TestMeetingSyncsStayIncremental(t *testing.T) {
 	}
 }
 
-func TestMeetingKeysSharePublicationSnapshot(t *testing.T) {
+func TestMeetingKeysRespectPublicationBoundary(t *testing.T) {
 	for _, csv := range []bool{false, true} {
 		for _, derived := range []bool{false, true} {
 			t.Run(fmt.Sprintf("csv=%t/derived=%t", csv, derived), func(t *testing.T) {
@@ -201,11 +234,17 @@ func TestMeetingKeysSharePublicationSnapshot(t *testing.T) {
 				if derived {
 					derivedRefreshBeforeSnapshotHook = hook
 				} else {
-					buildCacheBeforeSnapshotHook = hook
+					buildCacheAfterSnapshotHook = hook
 				}
-				t.Cleanup(func() { derivedRefreshBeforeSnapshotHook = nil; buildCacheBeforeSnapshotHook = nil })
+				t.Cleanup(func() { derivedRefreshBeforeSnapshotHook = nil; buildCacheAfterSnapshotHook = nil })
 				_, err = buildCache(path, cache, !derived)
 				require.NoError(err)
+				buildCacheAfterSnapshotHook = nil
+				if !derived {
+					assert.True(t, cacheNeedsBuild(path, cache).NeedsBuild, "decision after snapshot remains pending")
+					_, err = buildCache(path, cache, false)
+					require.NoError(err)
+				}
 				engine, err := query.NewDuckDBEngine(cache, "", nil)
 				require.NoError(err)
 				defer func() { require.NoError(engine.Close()) }()
@@ -217,31 +256,4 @@ func TestMeetingKeysSharePublicationSnapshot(t *testing.T) {
 			})
 		}
 	}
-}
-
-func TestMeetingKeyResolutionSkipsAndUsesCallerContext(t *testing.T) {
-	require := require.New(t)
-	root := t.TempDir()
-	path, cache := filepath.Join(root, "archive.db"), filepath.Join(root, "analytics")
-	st, err := store.OpenForTest(path)
-	require.NoError(err)
-	defer func() { require.NoError(st.Close()) }()
-	require.NoError(st.InitSchema())
-	source, err := st.GetOrCreateSource("twenty", "owner@example.org")
-	require.NoError(err)
-	_, err = st.PersistMessage(&store.MessagePersistData{
-		Message:      &store.Message{SourceID: source.ID, SourceMessageID: "note", MessageType: "meeting_transcript", SentAt: sql.NullTime{Time: time.Now().UTC(), Valid: true}},
-		Conversation: &store.ConversationPersistData{SourceConversationID: "note", ConversationType: "meeting"},
-	})
-	require.NoError(err)
-	_, err = buildCache(path, cache, true)
-	require.NoError(err)
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	result, err := buildCacheLockedAttempt(ctx, path, cache, false, false, acquirePublishLock)
-	require.NoError(err)
-	assert.True(t, result.Skipped)
-	_, err = buildCacheLockedAttempt(ctx, path, cache, true, false, acquirePublishLock)
-	require.ErrorIs(err, context.Canceled)
-	require.ErrorContains(err, "read meeting count keys")
 }

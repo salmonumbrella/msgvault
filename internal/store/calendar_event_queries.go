@@ -84,7 +84,7 @@ func queryCalendarEventRows(ctx context.Context, r reboundReader, predicate stri
 	for result.Next() {
 		var row CalendarEventRow
 		e := &row.Event
-		var original, start, end nullableTimestamp
+		var original, start, end sql.NullTime
 		var originalDate, recurrence string
 		var uid sql.NullString
 		err := result.Scan(&row.MessageID, &row.SourceID, &row.Subject, &row.DeletedFromSource,

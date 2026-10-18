@@ -147,11 +147,6 @@ func refreshDerivedDatasetsOnly(
 		return nil, err
 	}
 	defer func() { _ = sourceSnapshot.Close() }()
-	meetingKeys, err := st.MeetingCountKeysFromSnapshotContext(ctx, sourceSnapshot)
-	if err != nil {
-		return nil, fmt.Errorf("read meeting count keys: %w", err)
-	}
-
 	datasets := []string{
 		tableMessages,
 		tableConversations,
@@ -246,6 +241,22 @@ func refreshDerivedDatasetsOnly(
 		// it active pagination cursors — for no analytical difference.
 		return &buildResult{OutputDir: analyticsDir, IdentityOnly: true, Skipped: true}, nil
 	}
+	meetingKeys, keysSeq, err := st.MeetingCountKeysContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read meeting count keys: %w", err)
+	}
+	relatedChangeSeq = min(relatedChangeSeq, keysSeq)
+
+	derivedCopy := func(table, selectSQL string) error {
+		return copyParquet(ctx, exportDB, filepath.Join(staging.root, table), table+".parquet", selectSQL)
+	}
+	if err := stageMeetingKeys(ctx, exportDB, meetingKeys); err != nil {
+		return nil, err
+	}
+	if err := derivedCopy(tableMeetingKeys, meetingKeysSelectSQL); err != nil {
+		return nil, err
+	}
+
 	if repairRelated && !relatedKinds.recipients && !relatedKinds.meetings &&
 		identityRevision == state.IdentityRevision &&
 		participantIdentifierRevision == state.ParticipantIdentifierRevision &&
@@ -268,6 +279,7 @@ func refreshDerivedDatasetsOnly(
 		}
 		state.DerivedDataRevision = derivedDataRevision
 		state.LastRelatedChangeSeq = relatedChangeSeq
+		relatedReplacements[tableMeetingKeys] = true
 		plan := cachePublishPlan{
 			Append:  map[string]bool{},
 			Replace: relatedReplacements,
@@ -280,18 +292,9 @@ func refreshDerivedDatasetsOnly(
 		return &buildResult{OutputDir: analyticsDir, IdentityOnly: true}, nil
 	}
 
-	derivedCopy := func(table, selectSQL string) error {
-		return copyParquet(ctx, exportDB, filepath.Join(staging.root, table), table+".parquet", selectSQL)
-	}
 	if err := derivedCopy(tableOwnerParticipants, ownerParticipantsSelectSQL(
 		sourceSnapshot.identityPresenceSQL("email_address", "primary_email_present"))); err != nil {
 		return nil, fmt.Errorf("export derived owner participants: %w", err)
-	}
-	if err := stageMeetingKeys(ctx, exportDB, meetingKeys); err != nil {
-		return nil, err
-	}
-	if err := derivedCopy(tableMeetingKeys, meetingKeysSelectSQL); err != nil {
-		return nil, err
 	}
 	if err := stageParticipantClusters(ctx, exportDB, clusters); err != nil {
 		return nil, err

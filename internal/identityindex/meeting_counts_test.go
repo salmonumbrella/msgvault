@@ -3,6 +3,7 @@ package identityindex
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -94,4 +95,36 @@ func TestValidateRejectsMeetingTotalBelowSourceCount(t *testing.T) {
 	) FROM read_parquet('`+quoteSQLString(relationshipParquetGlob(old, DatasetPeople))+`')`)
 	err = Validate(t.Context(), db, ValidationOptions{OutputRoot: root, RequiredOutputDatasets: RequiredDatasets})
 	require.ErrorContains(err, "source rollups do not decompose identity totals")
+}
+
+func TestMeetingKeyChangesControlTemperatureReuse(t *testing.T) {
+	require := require.New(t)
+	committed, db := writeRelationshipBaseFixture(t, true)
+	writeSyntheticRelationshipFanOut(t, db, committed, syntheticRelationshipFanOutOptions{
+		firstMessageID: 100, messageCount: 1, memberCount: 2, startDate: "2026-01-01",
+		messageType: "meeting_transcript", conversationType: "meeting",
+	})
+	replaceRelationshipParquet(t, db, committed, "meeting_keys", `SELECT 100::BIGINT AS message_id, 'ical:first@example.org|'::VARCHAR AS meeting_key`)
+	at := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, err := Build(t.Context(), db, BuildOptions{Mode: ModeFull, StagedBaseRoot: committed, OutputRoot: committed, EffectiveAt: at})
+	require.NoError(err)
+	staged := t.TempDir()
+	for _, tc := range []struct {
+		name, keys string
+		reuse      bool
+	}{
+		{"unchanged", `(100::BIGINT, 'ical:first@example.org|'::VARCHAR)`, true},
+		{"late link", `(100::BIGINT, 'ical:second@example.org|'::VARCHAR)`, false},
+		{"split", `(101::BIGINT, 'ical:second@example.org|'::VARCHAR)`, false},
+		{"new unrelated meeting", `(100::BIGINT, 'ical:first@example.org|'::VARCHAR),(101::BIGINT, 'ical:second@example.org|'::VARCHAR)`, true},
+		{"new copy of cached meeting", `(100::BIGINT, 'ical:first@example.org|'::VARCHAR),(101::BIGINT, 'ical:first@example.org|'::VARCHAR)`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			replaceRelationshipParquet(t, db, staged, "meeting_keys", `SELECT * FROM (VALUES `+tc.keys+`) t(message_id,meeting_key)`)
+			b := builder{db: db, opts: BuildOptions{Mode: ModeIncremental, CommittedRoot: committed, StagedBaseRoot: staged}}
+			reuse, err := b.canReuseTemperatureContributions(t.Context(), at)
+			require.NoError(err)
+			assert.Equal(t, tc.reuse, reuse)
+		})
+	}
 }

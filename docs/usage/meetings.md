@@ -268,8 +268,9 @@ update (hourly, or `msgvault activity build`) adds the meeting to the person's
 timeline, relationships, and last-contact information.
 
 Transcript copies linked to the same calendar occurrence count as one meeting,
-including when you select several sources. Calendar and meeting imports exclude
-meeting rooms from people.
+including when you select several sources. A recurring series master stays one
+calendar item; its transcripts count their individual occurrences. Calendar and
+meeting imports exclude meeting rooms from people.
 
 Some sources also know that several emails and phone numbers are the same
 human. msgvault links those identities through the source's stable identifier,

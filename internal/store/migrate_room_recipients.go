@@ -3,17 +3,17 @@ package store
 import (
 	"context"
 	"errors"
+
+	"go.kenn.io/msgvault/internal/calevent"
 )
 
 const migrationRoomRecipientsV1 = "room_recipients_v1"
 
 func (s *Store) repairRoomRecipientsContext(ctx context.Context) error {
 	return s.withTxContext(ctx, func(tx *loggedTx) error {
-		isRoom, err := roomClassifierContext(ctx, tx.Tx)
-		if err != nil {
-			return err
-		}
-		rows, err := tx.QueryContext(ctx, `SELECT id, coalesce(email_address, '') FROM participants`)
+		rows, err := tx.QueryContext(ctx, `SELECT p.id, coalesce(p.email_address, ''),
+         EXISTS (SELECT 1 FROM calendar_event_attendees a WHERE a.role = 'room' AND lower(trim(a.email)) = lower(trim(p.email_address)))
+         FROM participants p`)
 		if err != nil {
 			return err
 		}
@@ -21,11 +21,12 @@ func (s *Store) repairRoomRecipientsContext(ctx context.Context) error {
 		for rows.Next() {
 			var id int64
 			var email string
-			if err := rows.Scan(&id, &email); err != nil {
+			var resource bool
+			if err := rows.Scan(&id, &email, &resource); err != nil {
 				_ = rows.Close()
 				return err
 			}
-			if isRoom(email, false) {
+			if calevent.IsRoomAttendee(email, resource) {
 				rooms = append(rooms, id)
 			}
 		}
@@ -36,6 +37,11 @@ func (s *Store) repairRoomRecipientsContext(ctx context.Context) error {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM message_recipients
    WHERE participant_id = ? AND message_id IN
    (SELECT id FROM messages WHERE message_type IN ('calendar_event','meeting_transcript'))`, id); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_participants
+   WHERE participant_id = ? AND conversation_id IN
+   (SELECT conversation_id FROM messages WHERE message_type IN ('calendar_event','meeting_transcript'))`, id); err != nil {
 				return err
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE messages SET sender_id = NULL

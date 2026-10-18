@@ -8,27 +8,21 @@ import (
 	"go.kenn.io/msgvault/internal/calrecur"
 )
 
-// MeetingCountKeysContext resolves transcripts with one calendar occurrence identity.
-// Transcripts without an unambiguous link retain their individual message counts.
-func (s *Store) MeetingCountKeysContext(ctx context.Context) (map[int64]string, error) {
-	var keys map[int64]string
-	err := s.withReadSnapshotContext(ctx, func(tx *loggedTx) error {
-		var err error
-		keys, err = s.MeetingCountKeysFromSnapshotContext(ctx, tx.Tx)
-		return err
-	})
-	return keys, err
-}
-
-// MeetingCountKeysFromSnapshotContext uses the caller's pinned archive snapshot.
-// Calendar rows receive keys only when a transcript links to that occurrence.
-func (s *Store) MeetingCountKeysFromSnapshotContext(ctx context.Context, reader SQLReader) (map[int64]string, error) {
-	keys := make(map[int64]string)
-	eventKeys := make(map[int64]string)
-	conflictingEvents := make(map[int64]bool)
-	err := func() error {
-		r := reboundReader{reader: reader, rebind: s.dialect.Rebind}
-		rows, err := r.QueryContext(ctx, `SELECT id FROM messages WHERE message_type = 'meeting_transcript' AND deleted_at IS NULL`)
+// MeetingCountKeysContext resolves linked transcripts in one read snapshot.
+// journalSeq bounds the related changes represented by these keys.
+func (s *Store) MeetingCountKeysContext(ctx context.Context) (keys map[int64]string, journalSeq int64, err error) {
+	keys = make(map[int64]string)
+	err = s.withReadSnapshotContext(ctx, func(tx *loggedTx) error {
+		if !s.IsPostgreSQL() {
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'cache_related_change_journal'), 0)`).Scan(&journalSeq); err != nil {
+				return fmt.Errorf("read meeting key boundary: %w", err)
+			}
+		}
+		r := reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind}
+		rows, err := r.QueryContext(ctx, `SELECT id FROM messages m
+   WHERE message_type = 'meeting_transcript' AND deleted_at IS NULL
+   AND (EXISTS (SELECT 1 FROM meeting_link_key k WHERE k.message_id = m.id)
+        OR EXISTS (SELECT 1 FROM meeting_link_decisions d WHERE d.member_message_id = m.id))`)
 		if err != nil {
 			return err
 		}
@@ -72,20 +66,14 @@ func (s *Store) MeetingCountKeysFromSnapshotContext(ctx context.Context, reader 
 					keys[id] = fmt.Sprintf("event:%d|%s", identity.EventMessageID, identity.OccurrenceKey)
 				}
 				for _, occurrence := range occurrences {
-					eventID := occurrence.Ref.MessageID
-					if prior, exists := eventKeys[eventID]; exists && prior != keys[id] {
-						conflictingEvents[eventID] = true
+					if occurrence.Row.Event.Kind != meetingSeriesKind {
+						keys[occurrence.Row.MessageID] = keys[id]
 					}
-					eventKeys[eventID] = keys[id]
 				}
 			}
 		}
+
 		return nil
-	}()
-	for id, key := range eventKeys {
-		if !conflictingEvents[id] {
-			keys[id] = key
-		}
-	}
-	return keys, err
+	})
+	return keys, journalSeq, err
 }

@@ -19,6 +19,7 @@ func TestMeetingCountKeysContext(t *testing.T) {
 		{"ambiguous decisions", "ambiguous", ""},
 		{"split", "split", ""},
 		{"event without UID", "event", "event"},
+		{"series master", "series", "ical:shared@example.org|20270314T100000Z"},
 		{"unsupported recurrence", "unsupported", ""},
 		{"over budget", "budget", ""},
 	} {
@@ -28,6 +29,9 @@ func TestMeetingCountKeysContext(t *testing.T) {
 			_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org"}}`)
 			var event int64
 			switch tc.mode {
+			case "series":
+				_, event = calendarFixture(t, st, "event", `{"id":"event","iCalUID":"shared@example.org","start":{"dateTime":"2027-03-07T10:00:00Z"},"end":{"dateTime":"2027-03-07T11:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY"]}`)
+				_, note = projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org","startsAt":"2027-03-14T10:00:00Z"}}`)
 			case "unsupported":
 				calendarFixture(t, st, "event", `{"id":"event","iCalUID":"shared@example.org","start":{"dateTime":"2027-03-07T10:00:00Z"},"end":{"dateTime":"2027-03-07T11:00:00Z"},"recurrence":["RRULE:FREQ=HOURLY"]}`)
 				_, note = projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org","startsAt":"2027-03-14T10:00:00Z"}}`)
@@ -43,7 +47,9 @@ func TestMeetingCountKeysContext(t *testing.T) {
 					uid = ""
 				}
 				_, event = calendarFixture(t, st, "event", singleLinkRaw("event", uid))
-				requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+				if tc.mode != "shared" {
+					requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+				}
 				if tc.mode == "shared" {
 					calendarFixture(t, st, "copy", singleLinkRaw("copy", uid), "copy@example.org")
 				}
@@ -55,13 +61,44 @@ func TestMeetingCountKeysContext(t *testing.T) {
 					requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
 				}
 			}
-			keys, err := st.MeetingCountKeysContext(t.Context())
+			keys, _, err := st.MeetingCountKeysContext(t.Context())
 			requirements.NoError(err)
 			want := tc.want
 			if want == "event" {
 				want = fmt.Sprintf("event:%d|", event)
 			}
 			assert.Equal(t, want, keys[note])
+			if tc.mode == "series" {
+				assert.NotContains(t, keys, event, "series master stays a separate calendar item")
+			}
+			if tc.mode == "shared" || tc.mode == "event" {
+				assert.Equal(t, want, keys[event])
+			}
 		})
+	}
+}
+
+func TestMeetingCountKeysJournalSnapshot(t *testing.T) {
+	require := require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org"}}`)
+	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "shared@example.org"))
+	require.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+	ctx, release, err := st.BeginReadSnapshotContext(t.Context())
+	require.NoError(err)
+	defer release()
+	before, seq, err := st.MeetingCountKeysContext(ctx)
+	require.NoError(err)
+	require.Equal("ical:shared@example.org|", before[note])
+	require.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+	pinned, pinnedSeq, err := st.MeetingCountKeysContext(ctx)
+	require.NoError(err)
+	assert.Equal(t, before, pinned)
+	assert.Equal(t, seq, pinnedSeq)
+	current, currentSeq, err := st.MeetingCountKeysContext(t.Context())
+	require.NoError(err)
+	assert.NotContains(t, current, note)
+	if !st.IsPostgreSQL() {
+		assert.Greater(t, currentSeq, pinnedSeq)
 	}
 }

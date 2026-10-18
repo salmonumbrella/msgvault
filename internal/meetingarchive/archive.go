@@ -115,10 +115,7 @@ func (a *Archiver) Upsert(
 	existingMessage, existed := existing[snapshot.SourceMessageID]
 	existingMessageID := existingMessage.ID
 
-	organizer, attendees, err := a.normalizedPeople(ctx, snapshot)
-	if err != nil {
-		return Result{}, err
-	}
+	organizer, attendees := normalizedPeople(snapshot)
 	organizerAddress := organizer.Email
 	if organizerAddress == "" {
 		organizerAddress = organizer.Phone
@@ -257,10 +254,7 @@ func (a *Archiver) Unchanged(ctx context.Context, snapshot Snapshot) (bool, erro
 	if !existed {
 		return false, nil
 	}
-	organizer, attendees, err := a.normalizedPeople(ctx, snapshot)
-	if err != nil {
-		return false, err
-	}
+	organizer, attendees := normalizedPeople(snapshot)
 	expectedIsFromMe, err := a.expectedIsFromMe(snapshot, organizer)
 	if err != nil {
 		return false, err

@@ -59,17 +59,30 @@ func (b builder) materializeContributions(ctx context.Context, activity string, 
 // new activity shard. In that rare case the daily score reduction must read
 // the committed activity once instead of adding only the new contribution.
 func (b builder) canReuseTemperatureContributions(ctx context.Context, effectiveAt time.Time) (bool, error) {
-	// Daily sums have discarded occurrence keys. Recompute them when linked
-	// meetings exist so a new copy or changed decision can re-key old rows.
-	var hasLinkedMeetings bool
-	if err := b.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM read_parquet(['`+quoteSQLString(b.base("meeting_keys"))+`','`+quoteSQLString(b.committed("meeting_keys"))+`']))`).Scan(&hasLinkedMeetings); err != nil {
-		return false, fmt.Errorf("inspect linked meeting contributions: %w", err)
+	// Daily sums discard occurrence keys. A late link or split can change
+	// contributions on days that the cache has already reduced.
+	var changedKeys bool
+	query := `WITH cached_messages AS (
+		SELECT id FROM read_parquet('` + quoteSQLString(b.committed("messages")) + `', hive_partitioning=true, union_by_name=true)
+	), prior_keys AS (
+		SELECT * FROM read_parquet('` + quoteSQLString(b.committed("meeting_keys")) + `')
+	), current_keys AS (
+		SELECT * FROM read_parquet('` + quoteSQLString(b.base("meeting_keys")) + `')
+		WHERE message_id IN (SELECT id FROM cached_messages)
+		   OR meeting_key IN (SELECT meeting_key FROM prior_keys)
+	) SELECT EXISTS (
+		(SELECT * FROM current_keys EXCEPT SELECT * FROM prior_keys)
+		UNION ALL
+		(SELECT * FROM prior_keys EXCEPT SELECT * FROM current_keys)
+	)`
+	if err := b.db.QueryRowContext(ctx, query).Scan(&changedKeys); err != nil {
+		return false, fmt.Errorf("inspect changed meeting contributions: %w", err)
 	}
-	if hasLinkedMeetings {
+	if changedKeys {
 		return false, nil
 	}
 	var priorCutoff sql.NullTime
-	query := `SELECT max(temperature_effective_at) FROM read_parquet('` +
+	query = `SELECT max(temperature_effective_at) FROM read_parquet('` +
 		quoteSQLString(b.committed(DatasetPeople)) + `')`
 	if err := b.db.QueryRowContext(ctx, query).Scan(&priorCutoff); err != nil {
 		return false, fmt.Errorf("inspect prior relationship score window: %w", err)
