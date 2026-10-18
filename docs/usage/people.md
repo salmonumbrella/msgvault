@@ -147,6 +147,9 @@ Archive observation alone does not promote people. Sources that assert a stable
 identity link addresses automatically: Beeper user IDs, Notion user IDs, Apple
 Contacts cards for Muesli attendees, and person `id` values in meeting imports.
 See [how meetings connect to people](/docs/usage/meetings/#how-meetings-connect-to-people).
+
+Transcript copies linked to the same calendar occurrence count as one meeting, including when you select several sources. Calendar and meeting imports exclude meeting rooms from people.
+
 Linking another cluster into a promoted one expands that
 profile's participant bindings. Linking two clusters that already belong to
 different profiles reports a conflict instead of silently merging curated

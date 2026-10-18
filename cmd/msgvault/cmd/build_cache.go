@@ -1152,6 +1152,11 @@ func buildCacheLockedAttempt(
 		_ = identityStore.Close()
 		return nil, fmt.Errorf("read participant clusters: %w", err)
 	}
+	meetingKeys, err := identityStore.MeetingCountKeysContext(context.Background())
+	if err != nil {
+		_ = identityStore.Close()
+		return nil, fmt.Errorf("read meeting count keys: %w", err)
+	}
 	if err := identityStore.Close(); err != nil {
 		return nil, fmt.Errorf("close store after identity export: %w", err)
 	}
@@ -1284,7 +1289,7 @@ func buildCacheLockedAttempt(
 		// Export their complete population alongside the new message shards.
 		relatedKinds.recipients = true
 	}
-	repairRelated := relatedKinds.recipients || relatedKinds.labels || relatedKinds.attachments
+	repairRelated := relatedKinds.recipients || relatedKinds.labels || relatedKinds.attachments || relatedKinds.meetings
 	if hasPreviousState && !fullRebuild && hasSyncRunsTable > 0 &&
 		syncCounters.additions != previousState.LastCacheAdditionCount &&
 		maxID <= previousState.LastMessageID && !repairRelated {
@@ -1458,6 +1463,13 @@ func buildCacheLockedAttempt(
 	primaryEmailPresence := sourceSnapshot.identityPresenceSQL("email_address", "primary_email_present")
 	if err := runExport(tableOwnerParticipants, copyDataset(tableOwnerParticipants, ownerParticipantsSelectSQL(primaryEmailPresence))); err != nil {
 		return nil, fmt.Errorf("export owner participants: %w", err)
+	}
+
+	if err := stageMeetingKeys(ctx, exportDB, meetingKeys); err != nil {
+		return nil, err
+	}
+	if err := runExport(tableMeetingKeys, copyDataset(tableMeetingKeys, meetingKeysSelectSQL)); err != nil {
+		return nil, err
 	}
 
 	// Participant clusters: participant_id -> canonical (smallest member)

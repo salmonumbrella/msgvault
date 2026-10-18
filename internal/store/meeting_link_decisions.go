@@ -67,6 +67,12 @@ func (s *Store) writeMeetingLinkDecision(ctx context.Context, memberID int64, oc
 			}
 		}
 		_, err = tx.ExecContext(ctx, meetingDecisionUpsert, memberID, target.Identity.ICalUID, sql.NullInt64{Int64: target.Identity.EventMessageID, Valid: target.Identity.ICalUID == ""}, target.Identity.OccurrenceKey, decision, createdAt)
+		if err != nil {
+			return err
+		}
+		if !s.IsPostgreSQL() {
+			_, err = tx.ExecContext(ctx, `INSERT INTO cache_related_change_journal(dataset,message_id) VALUES('meeting_links', ?)`, memberID)
+		}
 		return err
 	})
 }

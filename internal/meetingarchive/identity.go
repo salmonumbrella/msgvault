@@ -5,6 +5,7 @@ import (
 	"strings"
 	"unicode"
 
+	"go.kenn.io/msgvault/internal/calevent"
 	"go.kenn.io/msgvault/internal/meetingidentity"
 	"go.kenn.io/msgvault/internal/store"
 )
@@ -13,11 +14,17 @@ func normalizedPeople(snapshot Snapshot) (Person, []Person) {
 	var organizer Person
 	if snapshot.Organizer != nil {
 		organizer = snapshot.Organizer.Normalized()
+		if calevent.IsRoomAttendee(organizer.Email, false) {
+			organizer = Person{}
+		}
 	}
 	attendees := make([]Person, 0, len(snapshot.Attendees))
 	seen := make(map[string]bool, len(snapshot.Attendees))
 	for _, raw := range snapshot.Attendees {
 		attendee := raw.Normalized()
+		if calevent.IsRoomAttendee(attendee.Email, false) {
+			continue
+		}
 		key := archiveParticipantKey(attendee)
 		if key != "" && !seen[key] {
 			seen[key] = true
@@ -60,7 +67,7 @@ func (p Person) Normalized() Person {
 	}
 	seenEmails := map[string]bool{out.Email: true}
 	for _, email := range p.OtherEmails {
-		if email = normalizePersonEmail(email); email != "" && !seenEmails[email] {
+		if email = normalizePersonEmail(email); email != "" && !seenEmails[email] && !calevent.IsRoomAttendee(email, false) {
 			seenEmails[email] = true
 			out.OtherEmails = append(out.OtherEmails, email)
 		}

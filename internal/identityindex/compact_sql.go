@@ -12,17 +12,18 @@ const (
 	directoryBuildRelation = "relationship_build_directory"
 )
 
-func buildRelationshipPeopleSQL(effectiveAt time.Time) string {
+func buildRelationshipPeopleSQL(effectiveAt time.Time, keys string) string {
 	return `
 WITH logical_people AS (
-	SELECT entry_key, source_id, source_type, occurred_at, message_type, attachment_count,
-	       canonical_id
-	FROM ` + logicalBuildRelation + `
+	SELECT l.entry_key, l.source_id, l.source_type, l.occurred_at, l.message_type, l.attachment_count,
+	       l.canonical_id, ` + MeetingKeySQL("mk", "l.message_type", "l.anchor_message_id") + ` AS meeting_key
+	FROM ` + logicalBuildRelation + ` l
+	LEFT JOIN read_parquet('` + quoteSQLString(keys) + `') mk ON mk.message_id = l.anchor_message_id
 	WHERE relation_kind = 1
 ), people_totals AS (
 	SELECT canonical_id,
 	       count(*)::BIGINT AS activity_count,
-	       count(*) FILTER (WHERE message_type = 'meeting_transcript')::BIGINT AS meeting_count,
+	       count(DISTINCT meeting_key)::BIGINT AS meeting_count,
 	       coalesce(sum(attachment_count), 0)::BIGINT AS file_count,
 	       min(occurred_at)::TIMESTAMP AS first_at,
 	       max(occurred_at)::TIMESTAMP AS last_at
@@ -31,7 +32,7 @@ WITH logical_people AS (
 ), source_rows AS (
 	SELECT canonical_id, source_id, source_type,
 	       count(*)::BIGINT AS activity_count,
-	       count(*) FILTER (WHERE message_type = 'meeting_transcript')::BIGINT AS meeting_count,
+	       count(DISTINCT meeting_key)::BIGINT AS meeting_count,
 	       coalesce(sum(attachment_count), 0)::BIGINT AS file_count,
 	       min(occurred_at)::TIMESTAMP AS first_at,
 	       max(occurred_at)::TIMESTAMP AS last_at
@@ -370,4 +371,9 @@ ORDER BY m.canonical_id`,
 		quoteSQLString(path("participant_identifiers")),
 		quoteSQLString(path("owner_participants")),
 	)
+}
+
+// MeetingKeySQL counts linked transcript copies once and unlinked messages individually.
+func MeetingKeySQL(keys, messageType, messageID string) string {
+	return "CASE WHEN " + messageType + " = 'meeting_transcript' THEN coalesce(" + keys + ".meeting_key, 'msg:' || CAST(" + messageID + " AS VARCHAR)) END"
 }

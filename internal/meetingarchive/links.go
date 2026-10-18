@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"go.kenn.io/msgvault/internal/calevent"
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -65,6 +66,9 @@ func (a *Archiver) LinkIdentities(ctx context.Context, sourceID int64, people []
 			return result, err
 		}
 		person := raw.Normalized()
+		if calevent.IsRoomAttendee(person.Email, false) {
+			continue
+		}
 		identities := person.identities()
 		if person.Anchor == "" || len(identities) == 0 {
 			continue

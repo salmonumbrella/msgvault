@@ -851,6 +851,7 @@ func writeRelationshipBaseFixture(t *testing.T, empty bool) (string, *sql.DB) {
 			(1::BIGINT, 1::BIGINT)
 		) AS t(source_id, participant_id)`+where)
 	writeRelationshipParquet(t, db, root, "person_display_names", `SELECT 0::BIGINT AS participant_id, 0::BIGINT AS person_id, NULL::VARCHAR AS display_name WHERE false`)
+	writeRelationshipParquet(t, db, root, "meeting_keys", `SELECT 0::BIGINT AS message_id, NULL::VARCHAR AS meeting_key WHERE false`)
 	writeRelationshipParquet(t, db, root, "participant_clusters", `
 		SELECT * FROM (VALUES
 			(2::BIGINT, 2::BIGINT),

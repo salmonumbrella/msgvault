@@ -123,6 +123,11 @@ func refreshDerivedDatasetsOnly(
 		_ = st.Close()
 		return nil, fmt.Errorf("read participant clusters: %w", err)
 	}
+	meetingKeys, err := st.MeetingCountKeysContext(ctx)
+	if err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("read meeting count keys: %w", err)
+	}
 	if err := st.Close(); err != nil {
 		return nil, fmt.Errorf("close identity store: %w", err)
 	}
@@ -243,7 +248,7 @@ func refreshDerivedDatasetsOnly(
 		// it active pagination cursors — for no analytical difference.
 		return &buildResult{OutputDir: analyticsDir, IdentityOnly: true, Skipped: true}, nil
 	}
-	if repairRelated && !relatedKinds.recipients &&
+	if repairRelated && !relatedKinds.recipients && !relatedKinds.meetings &&
 		identityRevision == state.IdentityRevision &&
 		participantIdentifierRevision == state.ParticipantIdentifierRevision &&
 		participantDisplayNameRevision == state.ParticipantDisplayNameRevision &&
@@ -283,6 +288,12 @@ func refreshDerivedDatasetsOnly(
 	if err := derivedCopy(tableOwnerParticipants, ownerParticipantsSelectSQL(
 		sourceSnapshot.identityPresenceSQL("email_address", "primary_email_present"))); err != nil {
 		return nil, fmt.Errorf("export derived owner participants: %w", err)
+	}
+	if err := stageMeetingKeys(ctx, exportDB, meetingKeys); err != nil {
+		return nil, err
+	}
+	if err := derivedCopy(tableMeetingKeys, meetingKeysSelectSQL); err != nil {
+		return nil, err
 	}
 	if err := stageParticipantClusters(ctx, exportDB, clusters); err != nil {
 		return nil, err
@@ -522,6 +533,7 @@ func derivedCachePublishPlan(
 	for _, dataset := range []string{
 		tableOwnerParticipants,
 		tableParticipantClusters,
+		tableMeetingKeys,
 		identityindex.DatasetActivity,
 		identityindex.DatasetPeople,
 		identityindex.DatasetDomains,
@@ -598,3 +610,22 @@ func verifyRelatedOnlyAdditions(snapshot *cacheSourceSnapshot, state syncState) 
 	}
 	return nil
 }
+
+func stageMeetingKeys(ctx context.Context, db sqlRunner, keys map[int64]string) error {
+	if _, err := db.ExecContext(ctx, `CREATE TEMP TABLE tmp_meeting_keys (message_id BIGINT, meeting_key VARCHAR)`); err != nil {
+		return fmt.Errorf("create meeting keys temp table: %w", err)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(keys))
+	for id, key := range keys {
+		values = append(values, fmt.Sprintf("(%d,'%s')", id, quoteCacheSQL(key)))
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO tmp_meeting_keys VALUES `+strings.Join(values, ",")); err != nil {
+		return fmt.Errorf("populate meeting keys temp table: %w", err)
+	}
+	return nil
+}
+
+const meetingKeysSelectSQL = `SELECT message_id, meeting_key FROM tmp_meeting_keys`
