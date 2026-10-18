@@ -11,13 +11,13 @@ import (
 // Exception overrides a generated instance at Original, preserving its identity.
 // Any date bound makes the effective event all-day; otherwise any instant bound
 // makes it timed. With no bounds, the master's type and bounds are inherited.
-// All-day endpoints use their date, instant's local date, or nominal local date,
-// in that order. Missing timed endpoints inherit their nominal instants.
+// Missing all-day dates are derived from effective bounds in Zone, or the series
+// zone when Zone is nil. Missing timed endpoints inherit their nominal instants.
 type Exception struct {
 	Original           Identity
 	Start, End         *time.Time
 	StartDate, EndDate string
-	Zone               *time.Location
+	Zone               *time.Location // Date-bound zone; nil inherits the recurrence set zone.
 	Cancelled          bool
 	Ref                int64
 }
@@ -114,7 +114,7 @@ func effective(s Set, e Exception, duration time.Duration, durationDays int) (Oc
 				}
 			}
 			if e.End == nil {
-				o.End, _, err = localDateBoundary(o.EndDate, zone)
+				o.End, _, err = localDateBoundary(o.EndDate, s.location())
 				if err != nil {
 					return Occurrence{}, unsupported("exception nominal end date", err)
 				}
