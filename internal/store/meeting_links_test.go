@@ -48,18 +48,25 @@ func TestMeetingLinksUnlinkSavedIdentityWhenRecurrenceCannotBeResolved(t *testin
 			wantErr: ErrQueryTooBroad,
 		},
 	} {
-		for _, uid := range []string{"weekly@example.org", ""} {
-			t.Run(uid+"/"+tc.name, func(t *testing.T) {
+		for _, uidCase := range []struct{ name, uid string }{
+			{"with UID", "weekly@example.org"},
+			{"without UID", ""},
+			{"later UID", ""},
+		} {
+			t.Run(uidCase.name+"/"+tc.name, func(t *testing.T) {
 				assertions, requirements := assert.New(t), require.New(t)
 				st := newRFC822IDBackfillBackendStore(t)
 				_, automatic := calendarFixture(t, st, "automatic", singleLinkRaw("automatic", "automatic@example.org"))
 				_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"automatic@example.org"}}`)
-				raw := strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", uid)
+				raw := strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", uidCase.uid)
 				_, master := calendarFixture(t, st, "master", raw)
 				ref := OccurrenceRef{MessageID: master, Key: "20270314T100000Z"}
 				requirements.NoError(st.LinkMeetingContext(t.Context(), note, ref))
 				requirements.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", master), linkedMeetingRefs(t, st, note)[note])
-				requirements.NoError(st.UpsertMessageRawWithFormat(master, []byte(strings.ReplaceAll(tc.updatedRaw, "weekly@example.org", uid)), "gcal_json"))
+				if uidCase.name == "later UID" {
+					requirements.NoError(st.SetMessageMetadata(master, sql.NullString{String: `{"calendar_id":"calendar@example.com","ical_uid":"weekly@example.org"}`, Valid: true}))
+				}
+				requirements.NoError(st.UpsertMessageRawWithFormat(master, []byte(strings.ReplaceAll(tc.updatedRaw, "weekly@example.org", uidCase.uid)), "gcal_json"))
 				links, err := st.MeetingLinksContext(t.Context(), note)
 				if errors.Is(tc.wantErr, ErrQueryTooBroad) {
 					requirements.ErrorIs(err, ErrQueryTooBroad)

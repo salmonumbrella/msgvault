@@ -56,7 +56,7 @@ func (s *Store) writeMeetingLinkDecision(ctx context.Context, memberID int64, oc
 		if err := tx.QueryRowContext(ctx, `SELECT id FROM messages WHERE id = ? AND message_type = 'meeting_transcript' AND deleted_at IS NULL`, memberID).Scan(&found); err != nil {
 			return err
 		}
-		target, err := resolveMeetingDecisionTarget(ctx, reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind, dialect: s.dialect}, memberID, occurrence, decision)
+		target, err := s.resolveMeetingDecisionTarget(ctx, reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind, dialect: s.dialect}, memberID, occurrence, decision)
 		if err != nil {
 			return fmt.Errorf("resolve meeting decision target: %w", err)
 		}
@@ -65,7 +65,7 @@ func (s *Store) writeMeetingLinkDecision(ctx context.Context, memberID int64, oc
 	})
 }
 
-func resolveMeetingDecisionTarget(ctx context.Context, r reboundReader, memberID int64, ref OccurrenceRef, decision string) (linkOccurrence, error) {
+func (s *Store) resolveMeetingDecisionTarget(ctx context.Context, r reboundReader, memberID int64, ref OccurrenceRef, decision string) (linkOccurrence, error) {
 	budget := calrecur.RequestReadBudget
 	target, err := resolveMeetingOccurrence(ctx, r, ref, &budget)
 	if decision != "split" || !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, calrecur.ErrUnsupportedRecurrence) && !errors.Is(err, ErrQueryTooBroad) {
@@ -81,9 +81,22 @@ func resolveMeetingDecisionTarget(ctx context.Context, r reboundReader, memberID
 		return linkOccurrence{}, sql.ErrNoRows
 	}
 	target = occurrenceFromRow(rows[0], ref.Key)
-	var found int
-	err = r.QueryRowContext(ctx, `SELECT 1 FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND COALESCE(target_message_id,0) = ? AND occurrence_key = ?`, memberID, target.Identity.ICalUID, target.Identity.EventMessageID, target.Identity.OccurrenceKey).Scan(&found)
-	return target, err
+	identities, err := s.meetingSplitIdentities(ctx, r, meetingIdentity{EventMessageID: ref.MessageID, OccurrenceKey: ref.Key}, &budget)
+	if err != nil {
+		return linkOccurrence{}, err
+	}
+	for _, identity := range identities {
+		var found int
+		err := r.QueryRowContext(ctx, `SELECT 1 FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND COALESCE(target_message_id,0) = ? AND occurrence_key = ?`, memberID, identity.ICalUID, identity.EventMessageID, identity.OccurrenceKey).Scan(&found)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return linkOccurrence{}, err
+		}
+		if err == nil {
+			target.Identity = identity
+			return target, nil
+		}
+	}
+	return linkOccurrence{}, sql.ErrNoRows
 }
 
 // Retain the original decisions for undo; purge removes only that hidden copy.
