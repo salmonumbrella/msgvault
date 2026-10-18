@@ -91,18 +91,21 @@ type Syncer struct {
 	// Set only on the per-run copy, before message fetches or worker startup.
 	nativeSourcePermission     *store.NativeSourcePermission
 	nativeGmailSourceReference string
-	nativeGmailSourceID        int64
-	nativeGmailNativeIdentity  string
-	nativeGmailScopePins       map[string]store.NativeMessageScopeIdentity
-	nativeIMAPSourceReference  string
-	nativeIMAPAuthority        *nativeIMAPAuthorityState
-	client                     gmail.API
-	store                      *store.Store
-	logger                     *slog.Logger
-	progress                   gmail.SyncProgress
-	opts                       *Options
-	successfulHookName         string
-	successfulHook             SuccessfulSyncHook
+	nativeGmailPermissionReference string
+	nativeGmailInitiallyReadGrant  bool
+	nativeGmailPermissionReduced   bool
+	nativeGmailSourceID            int64
+	nativeGmailNativeIdentity      string
+	nativeGmailScopePins           map[string]store.NativeMessageScopeIdentity
+	nativeIMAPSourceReference      string
+	nativeIMAPAuthority            *nativeIMAPAuthorityState
+	client                         gmail.API
+	store                          *store.Store
+	logger                         *slog.Logger
+	progress                       gmail.SyncProgress
+	opts                           *Options
+	successfulHookName             string
+	successfulHook                 SuccessfulSyncHook
 
 	// failedRelocationGuards holds run-scoped protection for forced
 	// relocation targets that failed this run. It is set only on the scoped
@@ -1587,14 +1590,25 @@ func (s *Syncer) listCompleteMessageSnapshot(ctx context.Context) (map[string]st
 }
 
 // syncLabels syncs all labels and returns a map of Gmail label ID to internal ID.
-func (s *Syncer) syncLabels(ctx context.Context, sourceID int64) (map[string]int64, error) {
+func (s *Syncer) syncLabels(ctx context.Context, sourceID int64) (labelMap map[string]int64, err error) {
 	inventory, err := s.pinNativeGmailLabelInventory(ctx, sourceID)
 	if err != nil {
 		return nil, err
 	}
 	labels, err := s.client.ListLabels(ctx)
 	if err != nil {
-		return nil, s.nativeGmailLabelInventoryError(ctx, inventory, s.nativeMailPermissionFailure(ctx, err))
+		return nil, s.nativeMailPermissionFailure(ctx, err)
+	}
+	if s.nativeGmailPermissionNarrowedAfterRefresh() {
+		// The successful labels call may refresh the token. Delay the source-level
+		// revocation until the response's native label inventory has been applied;
+		// that write still uses the lifetime pinned before the request.
+		defer func() {
+			if reduceErr := s.persistNativeGmailPermissionReduction(ctx); reduceErr != nil {
+				err = errors.Join(err, fmt.Errorf("observe Gmail message-read permission after label refresh: %w", reduceErr))
+				labelMap = nil
+			}
+		}()
 	}
 
 	labelInfos := make(map[string]store.LabelInfo)
@@ -1638,7 +1652,8 @@ func (s *Syncer) syncLabels(ctx context.Context, sourceID int64) (map[string]int
 	if err := s.observeNativeIMAPMailboxInventory(ctx, sourceID); err != nil {
 		return nil, err
 	}
-	return s.store.EnsureLabelsBatch(sourceID, labelInfos)
+	labelMap, err = s.store.EnsureLabelsBatch(sourceID, labelInfos)
+	return labelMap, err
 }
 
 // messageData holds all parsed data for a message before persistence.
