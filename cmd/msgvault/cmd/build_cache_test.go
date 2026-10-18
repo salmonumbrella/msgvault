@@ -2975,6 +2975,8 @@ func TestBuildCache_EmptyDatabase(t *testing.T) {
 	db, _ := sql.Open("sqlite3", dbPath)
 	_, _ = db.Exec(`
 		CREATE TABLE source_merge_archive_only_messages (message_id INTEGER PRIMARY KEY);
+		CREATE TABLE meeting_link_decisions (member_message_id INTEGER, target_message_id INTEGER, occurrence_key TEXT, decision TEXT, created_at DATETIME);
+		CREATE TABLE meeting_link_key (message_id INTEGER PRIMARY KEY, kind TEXT, value TEXT, calendar_id TEXT, scheduled_at DATETIME);
 		CREATE TABLE sources (id INTEGER PRIMARY KEY, source_type TEXT NOT NULL DEFAULT 'gmail', identifier TEXT);
 		CREATE TABLE messages (id INTEGER PRIMARY KEY, source_id INTEGER, source_message_id TEXT, rfc822_message_id TEXT, sent_at TIMESTAMP, size_estimate INTEGER, has_attachments BOOLEAN, subject TEXT, snippet TEXT, conversation_id INTEGER, deleted_from_source_at TIMESTAMP, attachment_count INTEGER DEFAULT 0, list_id TEXT, sender_id INTEGER, message_type TEXT NOT NULL DEFAULT 'email', is_from_me BOOLEAN DEFAULT FALSE, deleted_at DATETIME);
 		CREATE TABLE participants (id INTEGER PRIMARY KEY, email_address TEXT, domain TEXT, display_name TEXT, phone_number TEXT);
@@ -3244,6 +3246,8 @@ func setupTestSQLiteEmpty(t *testing.T) string {
 
 	schema := `
 		CREATE TABLE source_merge_archive_only_messages (message_id INTEGER PRIMARY KEY);
+		CREATE TABLE meeting_link_decisions (member_message_id INTEGER, target_message_id INTEGER, occurrence_key TEXT, decision TEXT, created_at DATETIME);
+		CREATE TABLE meeting_link_key (message_id INTEGER PRIMARY KEY, kind TEXT, value TEXT, calendar_id TEXT, scheduled_at DATETIME);
 		CREATE TABLE sources (
 			id INTEGER PRIMARY KEY,
 			source_type TEXT NOT NULL DEFAULT 'gmail',

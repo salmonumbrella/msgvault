@@ -80,6 +80,7 @@ func TestMeetingCountKeysContext(t *testing.T) {
 
 func TestMeetingCountKeysJournalSnapshot(t *testing.T) {
 	require := require.New(t)
+	assert := assert.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
 	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org"}}`)
 	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "shared@example.org"))
@@ -93,12 +94,12 @@ func TestMeetingCountKeysJournalSnapshot(t *testing.T) {
 	require.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
 	pinned, pinnedSeq, err := st.MeetingCountKeysContext(ctx)
 	require.NoError(err)
-	assert.Equal(t, before, pinned)
-	assert.Equal(t, seq, pinnedSeq)
+	assert.Equal(before, pinned)
+	assert.Equal(seq, pinnedSeq)
 	current, currentSeq, err := st.MeetingCountKeysContext(t.Context())
 	require.NoError(err)
-	assert.NotContains(t, current, note)
+	assert.NotContains(current, note)
 	if !st.IsPostgreSQL() {
-		assert.Greater(t, currentSeq, pinnedSeq)
+		assert.Greater(currentSeq, pinnedSeq)
 	}
 }

@@ -20,10 +20,10 @@ import (
 )
 
 type meetingLinksTestStore struct {
-	refreshes  int
-	refreshErr error
 	*mockStore
 
+	refreshes  int
+	refreshErr error
 	member   int64
 	event    store.OccurrenceRef
 	decision string
@@ -151,15 +151,17 @@ func TestMeetingLinkDecisionReportsStaleCache(t *testing.T) {
 	srv := NewServer(&config.Config{}, backend, nil, testLogger())
 	for _, decision := range []string{"link", "unlink"} {
 		t.Run(decision, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
 			request := httptest.NewRequest(http.MethodPost, "/api/v1/meetings/links/decisions", strings.NewReader(`{"message_id":42,"event":"evt:81","decision":"`+decision+`"}`))
 			request.Header.Set("Content-Type", "application/json")
 			response := httptest.NewRecorder()
 			srv.Router().ServeHTTP(response, request)
-			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(http.StatusOK, response.Code)
 			var body map[string]any
-			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
-			assert.Equal(t, "stale", body["cache_state"])
-			assert.Equal(t, decision, backend.decision)
+			require.NoError(json.Unmarshal(response.Body.Bytes(), &body))
+			assert.Equal("stale", body["cache_state"])
+			assert.Equal(decision, backend.decision)
 		})
 	}
 }
