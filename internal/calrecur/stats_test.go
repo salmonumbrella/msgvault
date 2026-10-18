@@ -34,14 +34,14 @@ func TestRecurrenceStatsCountUnderlyingCandidates(t *testing.T) {
 			s, err := ParseSet(start, false, "", zone, tc.lines)
 			requirements.NoError(err)
 			var got []string
-			stats, err := IterWithStats(t.Context(), s, until, 100, func(i Instance) bool {
+			stats, err := testIterWithStats(t.Context(), s, until, 100, func(i instance) bool {
 				got = append(got, i.Identity.Key())
 				return true
 			})
 			requirements.NoError(err)
 			assertions.Equal(tc.wantKeys, got)
 			assertions.Equal(tc.candidates, stats.Candidates)
-			occurrences, stats, err := ExpandWithStats(t.Context(), s, time.Hour, 0, nil, start, until, 100)
+			occurrences, stats, err := testExpandWithStats(t.Context(), s, time.Hour, 0, nil, start, until, 100)
 			requirements.NoError(err)
 			assertions.Equal(tc.candidates, stats.Candidates)
 			var occurrenceKeys []string
@@ -49,7 +49,7 @@ func TestRecurrenceStatsCountUnderlyingCandidates(t *testing.T) {
 				occurrenceKeys = append(occurrenceKeys, o.Original.Key())
 			}
 			assertions.Equal(tc.wantKeys, occurrenceKeys)
-			end, bounded, stats := ConservativeEndWithStats(t.Context(), s, time.Hour, 0, 100)
+			end, bounded, stats := testConservativeEndWithStats(t.Context(), s, time.Hour, 0, 100)
 			requirements.True(bounded)
 			assertions.Equal(tc.candidates, stats.Candidates)
 			assertions.Equal(instant(t, tc.wantEnd), end.UTC())
@@ -63,20 +63,20 @@ func TestExpansionStatsIncludeExceptionSuppressionAndOverflow(t *testing.T) {
 	s := parsed(t, "RRULE:FREQ=DAILY;COUNT=2", "RRULE:FREQ=DAILY;COUNT=2", "RDATE:20270303T170000Z", "EXDATE:20270302T170000Z")
 	until := instant(t, "2027-03-05T00:00:00Z")
 	exc := []Exception{{Original: timed(t, "2027-03-03T17:00:00Z"), Cancelled: true, Ref: 42}}
-	got, stats, err := ExpandWithStats(t.Context(), s, time.Hour, 0, exc, s.DTStart, until, 6)
+	got, stats, err := testExpandWithStats(t.Context(), s, time.Hour, 0, exc, s.DTStart, until, 6)
 	requirements.NoError(err)
 	requirements.Len(got, 1)
 	assertions.True(got[0].Cancelled)
 	assertions.Equal(int64(42), got[0].ExceptionRef)
 	assertions.Equal(6, stats.Candidates)
-	got, stats, err = ExpandWithStats(t.Context(), s, time.Hour, 0, exc, s.DTStart, until, 5)
+	got, stats, err = testExpandWithStats(t.Context(), s, time.Hour, 0, exc, s.DTStart, until, 5)
 	requirements.ErrorIs(err, ErrBudgetExceeded)
 	assertions.Empty(got)
 	assertions.Equal(6, stats.Candidates)
-	stats, err = IterWithStats(t.Context(), s, until, 5, func(Instance) bool { return true })
+	stats, err = testIterWithStats(t.Context(), s, until, 5, func(instance) bool { return true })
 	requirements.ErrorIs(err, ErrBudgetExceeded)
 	assertions.Equal(6, stats.Candidates)
-	end, bounded, stats := ConservativeEndWithStats(t.Context(), s, time.Hour, 0, 5)
+	end, bounded, stats := testConservativeEndWithStats(t.Context(), s, time.Hour, 0, 5)
 	assertions.False(bounded)
 	assertions.True(end.IsZero())
 	assertions.Equal(6, stats.Candidates)
@@ -87,17 +87,17 @@ func TestIterationStatsRetainLookaheadOnEarlyStopAndCancellation(t *testing.T) {
 	assertions := assert.New(t)
 	s := parsed(t, "RRULE:FREQ=DAILY;COUNT=2", "RRULE:FREQ=DAILY;COUNT=2")
 	until := instant(t, "2027-03-05T00:00:00Z")
-	stats, err := IterWithStats(t.Context(), s, until, 100, func(Instance) bool { return false })
+	stats, err := testIterWithStats(t.Context(), s, until, 100, func(instance) bool { return false })
 	requirements.NoError(err)
 	assertions.Equal(3, stats.Candidates)
 	ctx, cancel := context.WithCancel(t.Context())
-	stats, err = IterWithStats(ctx, s, until, 100, func(Instance) bool { cancel(); return true })
+	stats, err = testIterWithStats(ctx, s, until, 100, func(instance) bool { cancel(); return true })
 	requirements.ErrorIs(err, context.Canceled)
 	assertions.Equal(3, stats.Candidates)
-	stats, err = IterWithStats(ctx, s, until, 100, func(Instance) bool { return true })
+	stats, err = testIterWithStats(ctx, s, until, 100, func(instance) bool { return true })
 	requirements.ErrorIs(err, context.Canceled)
 	assertions.Zero(stats.Candidates)
-	_, bounded, stats := ConservativeEndWithStats(ctx, s, time.Hour, 0, 100)
+	_, bounded, stats := testConservativeEndWithStats(ctx, s, time.Hour, 0, 100)
 	assertions.False(bounded)
 	assertions.Zero(stats.Candidates)
 }
@@ -110,7 +110,7 @@ func TestIterationStatsCountCandidateBeyondAbsoluteFoldHorizon(t *testing.T) {
 	s, err := ParseSet(instant(t, "2027-11-07T09:30:00Z"), false, "", zone, []string{"RRULE:FREQ=DAILY;COUNT=2"})
 	requirements.NoError(err)
 	emitted := 0
-	stats, err := IterWithStats(t.Context(), s, instant(t, "2027-11-07T09:15:00Z"), 100, func(Instance) bool { emitted++; return true })
+	stats, err := testIterWithStats(t.Context(), s, instant(t, "2027-11-07T09:15:00Z"), 100, func(instance) bool { emitted++; return true })
 	requirements.NoError(err)
 	assertions.Zero(emitted)
 	// The rule pulled the civil 01:30 candidate, then rejected the supplied
@@ -160,9 +160,28 @@ func FuzzIterationStatsIncludeExcludedDuplicateCandidates(f *testing.F) {
 			s.ExDates = append(s.ExDates, id)
 		}
 		emitted := 0
-		stats, err := IterWithStats(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 100, func(Instance) bool { emitted++; return true })
+		stats, err := testIterWithStats(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 100, func(instance) bool { emitted++; return true })
 		requirements.NoError(err)
 		assertions.Zero(emitted)
 		assertions.Equal(1+3*count, stats.Candidates) // DTSTART, RDATEs, and both rules.
 	})
+}
+
+func testIter(ctx context.Context, s Set, until time.Time, budget int, yield func(instance) bool) error {
+	_, err := testIterWithStats(ctx, s, until, budget, yield)
+	return err
+}
+func testIterWithStats(ctx context.Context, s Set, until time.Time, budget int, yield func(instance) bool) (struct{ Candidates int }, error) {
+	counter := &candidateBudget{ctx: ctx, limit: budget}
+	err := iter(ctx, s, until, counter, yield)
+	return struct{ Candidates int }{counter.used}, err
+}
+func testExpandWithStats(ctx context.Context, s Set, d time.Duration, days int, exc []Exception, from, to time.Time, budget int) ([]Occurrence, struct{ Candidates int }, error) {
+	out, count, err := Expand(ctx, s, d, days, exc, from, to, budget)
+	return out, struct{ Candidates int }{count}, err
+}
+func testConservativeEndWithStats(ctx context.Context, s Set, d time.Duration, days, budget int) (time.Time, bool, struct{ Candidates int }) {
+	counter := &candidateBudget{ctx: ctx, limit: budget}
+	end, ok := conservativeEnd(ctx, s, d, days, counter)
+	return end, ok, struct{ Candidates int }{counter.used}
 }

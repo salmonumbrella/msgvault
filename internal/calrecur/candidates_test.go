@@ -23,7 +23,7 @@ func TestTimedRecurrenceFoldBounds(t *testing.T) {
 			s, err := ParseSet(instant(t, tc.start), false, "", zone, []string{"RRULE:FREQ=DAILY;COUNT=2"})
 			requirements.NoError(err)
 			var got []string
-			err = Iter(t.Context(), s, instant(t, tc.until), 100, func(i Instance) bool {
+			err = testIter(t.Context(), s, instant(t, tc.until), 100, func(i instance) bool {
 				got = append(got, i.Identity.Key())
 				return true
 			})
@@ -46,7 +46,7 @@ func TestTimedRecurrenceFoldUsesFirstOccurrence(t *testing.T) {
 	})
 	requirements.NoError(err)
 	var got []string
-	err = Iter(t.Context(), s, instant(t, "2027-11-02T00:00:00Z"), 100, func(i Instance) bool {
+	err = testIter(t.Context(), s, instant(t, "2027-11-02T00:00:00Z"), 100, func(i instance) bool {
 		got = append(got, i.Identity.Key())
 		return true
 	})
@@ -56,7 +56,7 @@ func TestTimedRecurrenceFoldUsesFirstOccurrence(t *testing.T) {
 	s, err = ParseSet(start, false, "", zone, []string{"RRULE:FREQ=DAILY;COUNT=3"})
 	requirements.NoError(err)
 	got = nil
-	err = Iter(t.Context(), s, instant(t, "2027-10-31T01:00:00Z"), 100, func(i Instance) bool {
+	err = testIter(t.Context(), s, instant(t, "2027-10-31T01:00:00Z"), 100, func(i instance) bool {
 		got = append(got, i.Identity.Key())
 		return true
 	})
@@ -79,7 +79,7 @@ func TestTimedRecurrenceGapHonorsUntilAndBudget(t *testing.T) {
 	s, err := ParseSet(start, false, "", zone, []string{"RRULE:FREQ=WEEKLY;COUNT=2;UNTIL=20270314T110000Z"})
 	requirements.NoError(err)
 	var got []string
-	err = Iter(t.Context(), s, instant(t, "2027-03-22T00:00:00Z"), 100, func(i Instance) bool {
+	err = testIter(t.Context(), s, instant(t, "2027-03-22T00:00:00Z"), 100, func(i instance) bool {
 		got = append(got, i.Identity.Key())
 		return true
 	})
@@ -90,7 +90,7 @@ func TestTimedRecurrenceGapHonorsUntilAndBudget(t *testing.T) {
 	assertions.Equal(instant(t, "2027-03-07T11:30:00Z"), end.UTC())
 	s, err = ParseSet(start, false, "", zone, []string{"RRULE:FREQ=WEEKLY;COUNT=2"})
 	requirements.NoError(err)
-	err = Iter(t.Context(), s, instant(t, "2027-03-22T00:00:00Z"), 3, func(Instance) bool { return true })
+	err = testIter(t.Context(), s, instant(t, "2027-03-22T00:00:00Z"), 3, func(instance) bool { return true })
 	requirements.ErrorIs(err, ErrBudgetExceeded)
 	_, bounded = ConservativeEnd(t.Context(), s, time.Hour, 0, 3)
 	assertions.False(bounded)

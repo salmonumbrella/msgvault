@@ -1,0 +1,47 @@
+package calrecur
+
+import (
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"testing"
+	"time"
+)
+
+func TestExplicitGapAndFold(t *testing.T) {
+	for _, tc := range []struct{ property, value, want string }{
+		{"RDATE", "TZID=America/New_York:20070311T023000", "2007-03-11T07:30:00Z"},
+		{"EXDATE", "TZID=America/New_York:20070311T023000", "2007-03-11T07:30:00Z"},
+		{"RDATE", "TZID=Europe/Berlin:20271031T023000", "2027-10-31T00:30:00Z"},
+	} {
+		t.Run(tc.property+tc.value, func(t *testing.T) {
+			s, err := ParseSet(instant(t, "2007-03-01T00:00:00Z"), false, "", time.UTC, []string{tc.property + ";" + tc.value})
+			require.NoError(t, err)
+			ids := s.RDates
+			if tc.property == "EXDATE" {
+				ids = s.ExDates
+			}
+			require.Len(t, ids, 1)
+			assert.Equal(t, instant(t, tc.want), ids[0].Instant)
+		})
+	}
+}
+func TestCountIncludesUnmatchedStart(t *testing.T) {
+	s := parsed(t, "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3")
+	got, _, err := Expand(t.Context(), s, time.Hour, 0, nil, s.DTStart, instant(t, "2027-04-01T00:00:00Z"), 100)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	assert.Equal(t, instant(t, "2027-03-15T17:00:00Z"), got[2].Start)
+}
+func TestAllDaySkippedDateDoesNotConsumeCount(t *testing.T) {
+	zone, err := time.LoadLocation("Pacific/Apia")
+	require.NoError(t, err)
+	s, err := ParseSet(time.Time{}, true, "2011-12-28", zone, []string{"RRULE:FREQ=DAILY;COUNT=4"})
+	require.NoError(t, err)
+	got, _, err := Expand(t.Context(), s, 0, 1, nil, instant(t, "2011-12-27T00:00:00Z"), instant(t, "2012-01-03T00:00:00Z"), 100)
+	require.NoError(t, err)
+	var dates []string
+	for _, o := range got {
+		dates = append(dates, o.StartDate)
+	}
+	assert.Equal(t, []string{"2011-12-28", "2011-12-29", "2011-12-31", "2012-01-01"}, dates)
+}

@@ -39,7 +39,7 @@ func TestParseSetRejectsMixedWeekdayOrdinals(t *testing.T) {
 func keys(t *testing.T, s Set) []string {
 	t.Helper()
 	var got []string
-	require.NoError(t, Iter(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 100, func(i Instance) bool {
+	require.NoError(t, testIter(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 100, func(i instance) bool {
 		got = append(got, i.Identity.Key())
 		return true
 	}))
@@ -90,7 +90,7 @@ func TestTimedDateTimeRDateAndExDateUseFirstFoldOccurrence(t *testing.T) {
 func TestIterBudgetCountsUnderlyingCandidates(t *testing.T) {
 	s, err := ParseSet(instant(t, "1997-03-02T17:00:00Z"), false, "", time.UTC, []string{"RRULE:FREQ=DAILY"})
 	require.NoError(t, err)
-	got, err := Expand(t.Context(), s, time.Hour, 0, nil, instant(t, "2027-03-02T00:00:00Z"), instant(t, "2027-03-03T00:00:00Z"), 1000)
+	got, _, err := Expand(t.Context(), s, time.Hour, 0, nil, instant(t, "2027-03-02T00:00:00Z"), instant(t, "2027-03-03T00:00:00Z"), 1000)
 	require.ErrorIs(t, err, ErrBudgetExceeded)
 	assert.Empty(t, got)
 }
@@ -99,10 +99,10 @@ func TestIterHonorsContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	s := parsed(t, "RRULE:FREQ=DAILY")
 	count := 0
-	err := Iter(ctx, s, instant(t, "2028-01-01T00:00:00Z"), 100, func(i Instance) bool { count++; cancel(); return true })
+	err := testIter(ctx, s, instant(t, "2028-01-01T00:00:00Z"), 100, func(i instance) bool { count++; cancel(); return true })
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, 1, count)
-	require.ErrorIs(t, Iter(ctx, s, instant(t, "2028-01-01T00:00:00Z"), 100, func(i Instance) bool { return true }), context.Canceled)
+	require.ErrorIs(t, testIter(ctx, s, instant(t, "2028-01-01T00:00:00Z"), 100, func(i instance) bool { return true }), context.Canceled)
 }
 
 func TestAllDayIdentityCivilDate(t *testing.T) {
@@ -115,7 +115,7 @@ func TestAllDayIdentityCivilDate(t *testing.T) {
 			s, err := ParseSet(instant(t, "2027-03-07T00:00:00Z"), true, "2027-03-07", zone, []string{"RRULE:FREQ=WEEKLY;COUNT=3"})
 			requirements.NoError(err)
 			var dates []string
-			requirements.NoError(Iter(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 100, func(i Instance) bool {
+			requirements.NoError(testIter(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 100, func(i instance) bool {
 				assertions.True(i.Identity.AllDay)
 				assertions.Equal(0, i.Start.Hour())
 				assertions.Equal(zone, i.Start.Location())
@@ -135,8 +135,8 @@ func TestAllDayIdentityPreservesCivilDateAtMidnightDSTTransition(t *testing.T) {
 	requirements.NoError(err)
 	s, err := ParseSet(time.Time{}, true, "2018-11-04", zone, []string{"RRULE:FREQ=DAILY;COUNT=2"})
 	requirements.NoError(err)
-	var instances []Instance
-	err = Iter(t.Context(), s, time.Date(2019, 1, 1, 0, 0, 0, 0, zone), 100, func(i Instance) bool {
+	var instances []instance
+	err = testIter(t.Context(), s, time.Date(2019, 1, 1, 0, 0, 0, 0, zone), 100, func(i instance) bool {
 		instances = append(instances, i)
 		return true
 	})
@@ -149,9 +149,6 @@ func TestAllDayIdentityPreservesCivilDateAtMidnightDSTTransition(t *testing.T) {
 	assertions.Equal([]string{"2018-11-04", "2018-11-05"}, dates)
 	assertions.Equal(time.Date(2018, 11, 4, 1, 0, 0, 0, zone), instances[0].Start)
 
-	found, err := Contains(t.Context(), s, nil, Identity{Date: "2018-11-04", AllDay: true}, 100)
-	requirements.NoError(err)
-	assertions.True(found)
 }
 
 func TestAllDayDateValuesPreserveCivilDateAtMidnightDSTTransition(t *testing.T) {
@@ -173,7 +170,7 @@ func TestAllDayRDateAtMidnightDSTTransitionIsNotDeduplicated(t *testing.T) {
 	s, err := ParseSet(time.Time{}, true, "2018-11-03", zone, []string{"RDATE;VALUE=DATE:20181104"})
 	requirements.NoError(err)
 	var dates []string
-	err = Iter(t.Context(), s, time.Date(2018, 11, 6, 12, 0, 0, 0, zone), 100, func(i Instance) bool {
+	err = testIter(t.Context(), s, time.Date(2018, 11, 6, 12, 0, 0, 0, zone), 100, func(i instance) bool {
 		dates = append(dates, i.Identity.Date)
 		return true
 	})
@@ -189,7 +186,7 @@ func TestAllDayExDateAtMidnightDSTTransitionExcludesCivilDate(t *testing.T) {
 		[]string{"RRULE:FREQ=DAILY;COUNT=3", "EXDATE;VALUE=DATE:20181104"})
 	requirements.NoError(err)
 	var dates []string
-	err = Iter(t.Context(), s, time.Date(2018, 11, 6, 12, 0, 0, 0, zone), 100, func(i Instance) bool {
+	err = testIter(t.Context(), s, time.Date(2018, 11, 6, 12, 0, 0, 0, zone), 100, func(i instance) bool {
 		dates = append(dates, i.Identity.Date)
 		return true
 	})
@@ -219,36 +216,12 @@ func TestIterSkipsExcludedSkippedCivilDate(t *testing.T) {
 		[]string{"RRULE:FREQ=DAILY;COUNT=3", "EXDATE;VALUE=DATE:20111230"})
 	requirements.NoError(err)
 	var dates []string
-	err = Iter(t.Context(), s, time.Date(2012, 1, 2, 12, 0, 0, 0, zone), 100, func(i Instance) bool {
+	err = testIter(t.Context(), s, time.Date(2012, 1, 2, 12, 0, 0, 0, zone), 100, func(i instance) bool {
 		dates = append(dates, i.Identity.Date)
 		return true
 	})
 	requirements.NoError(err)
-	assert.Equal(t, []string{"2011-12-29", "2011-12-31"}, dates)
-}
-
-func TestContainsAfterExcludedSkippedCivilDate(t *testing.T) {
-	requirements := require.New(t)
-	zone, err := time.LoadLocation("Pacific/Apia")
-	requirements.NoError(err)
-	s, err := ParseSet(time.Time{}, true, "2011-12-29", zone,
-		[]string{"RRULE:FREQ=DAILY;COUNT=3", "EXDATE;VALUE=DATE:20111230"})
-	requirements.NoError(err)
-	found, err := Contains(t.Context(), s, nil, Identity{Date: "2011-12-31", AllDay: true}, 100)
-	requirements.NoError(err)
-	assert.True(t, found)
-}
-
-func TestContainsExcludedSkippedCivilDate(t *testing.T) {
-	requirements := require.New(t)
-	zone, err := time.LoadLocation("Pacific/Apia")
-	requirements.NoError(err)
-	s, err := ParseSet(time.Time{}, true, "2011-12-29", zone,
-		[]string{"RRULE:FREQ=DAILY;COUNT=3", "EXDATE;VALUE=DATE:20111230"})
-	requirements.NoError(err)
-	found, err := Contains(t.Context(), s, nil, Identity{Date: "2011-12-30", AllDay: true}, 100)
-	requirements.NoError(err)
-	assert.False(t, found)
+	assert.Equal(t, []string{"2011-12-29", "2011-12-31", "2012-01-01"}, dates)
 }
 
 func TestParseSetUnsupportedLine(t *testing.T) {
@@ -258,20 +231,6 @@ func TestParseSetUnsupportedLine(t *testing.T) {
 			require.ErrorIs(t, err, ErrUnsupportedRecurrence)
 			assert.Contains(t, err.Error(), line)
 		})
-	}
-}
-
-func TestInstanceIDRoundTrip(t *testing.T) {
-	requirements := require.New(t)
-	assertions := assert.New(t)
-	for _, value := range []string{"abc_20270302T170000Z", "abc_20270302", "base_with_underscores_20270302"} {
-		base, id, ok := ParseInstanceID(value)
-		requirements.True(ok)
-		assertions.Equal(value, FormatInstanceID(base, id))
-	}
-	for _, value := range []string{"abc", "abc_x", "abc_2027", "_20270302", "abc_20270230", "abc_20270302T170000"} {
-		_, _, ok := ParseInstanceID(value)
-		assertions.False(ok, value)
 	}
 }
 
@@ -288,13 +247,6 @@ func TestParseSetRejectsSubsecondRecurrenceDates(t *testing.T) {
 			require.ErrorIs(t, err, ErrUnsupportedRecurrence)
 		})
 	}
-}
-
-func TestContainsRejectsSubsecondOriginalIdentity(t *testing.T) {
-	original := Identity{Instant: time.Date(2027, 3, 2, 17, 0, 0, 500_000_000, time.UTC)}
-	found, err := Contains(t.Context(), parsed(t, "RRULE:FREQ=DAILY;COUNT=1"), nil, original, 100)
-	require.ErrorIs(t, err, ErrUnsupportedRecurrence)
-	assert.False(t, found)
 }
 
 func TestConservativeEndCountUntilRdate(t *testing.T) {
@@ -318,12 +270,12 @@ func TestIterBudgetAndEarlyStop(t *testing.T) {
 	assertions := assert.New(t)
 	s := parsed(t, "RRULE:FREQ=DAILY;COUNT=2", "EXDATE:20270302T170000Z", "RDATE:20270303T170000Z")
 	count := 0
-	err := Iter(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 1, func(i Instance) bool { count++; return true })
+	err := testIter(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 1, func(i instance) bool { count++; return true })
 	requirements.ErrorIs(err, ErrBudgetExceeded)
 	assertions.Zero(count)
-	requirements.NoError(Iter(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 4, func(i Instance) bool { count++; return true }))
+	requirements.NoError(testIter(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 4, func(i instance) bool { count++; return true }))
 	assertions.Equal(1, count)
-	requirements.NoError(Iter(t.Context(), parsed(t, "RRULE:FREQ=DAILY"), instant(t, "2028-01-01T00:00:00Z"), 2, func(i Instance) bool { return false }))
+	requirements.NoError(testIter(t.Context(), parsed(t, "RRULE:FREQ=DAILY"), instant(t, "2028-01-01T00:00:00Z"), 2, func(i instance) bool { return false }))
 }
 
 func TestParseSetRejectsInvalidRuleParameters(t *testing.T) {
@@ -390,9 +342,9 @@ func TestIterRepeatedRuleSelectors(t *testing.T) {
 }
 
 func TestParseSetAllowsFeb29Yearly(t *testing.T) {
-	s := parsed(t, "RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29;COUNT=1")
+	s := parsed(t, "RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29;COUNT=2")
 	var got []string
-	err := Iter(t.Context(), s, instant(t, "2028-03-01T00:00:00Z"), 10, func(i Instance) bool {
+	err := testIter(t.Context(), s, instant(t, "2028-03-01T00:00:00Z"), 10, func(i instance) bool {
 		got = append(got, i.Identity.Key())
 		return true
 	})
@@ -558,11 +510,11 @@ func TestIterBudgetCountsDuplicateStreams(t *testing.T) {
 	assertions := assert.New(t)
 	s := parsed(t, "RRULE:FREQ=DAILY;COUNT=2", "RRULE:FREQ=DAILY;COUNT=2")
 	count := 0
-	err := Iter(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 3, func(i Instance) bool { count++; return true })
+	err := testIter(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 3, func(i instance) bool { count++; return true })
 	requirements.ErrorIs(err, ErrBudgetExceeded)
 	assertions.Equal(1, count)
 	count = 0
-	requirements.NoError(Iter(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 5, func(i Instance) bool { count++; return true }))
+	requirements.NoError(testIter(t.Context(), s, instant(t, "2028-01-01T00:00:00Z"), 5, func(i instance) bool { count++; return true }))
 	assertions.Equal(2, count)
 }
 
@@ -584,7 +536,7 @@ func TestIterUntilBoundsIteration(t *testing.T) {
 	assertions := assert.New(t)
 	s := parsed(t, "RRULE:FREQ=DAILY", "RRULE:FREQ=WEEKLY", "RDATE:20270305T170000Z")
 	var got []string
-	err := Iter(t.Context(), s, instant(t, "2027-03-04T17:00:00Z"), 5, func(i Instance) bool {
+	err := testIter(t.Context(), s, instant(t, "2027-03-04T17:00:00Z"), 5, func(i instance) bool {
 		got = append(got, i.Identity.Key())
 		return true
 	})
@@ -592,7 +544,7 @@ func TestIterUntilBoundsIteration(t *testing.T) {
 	assertions.Equal([]string{"20270302T170000Z", "20270303T170000Z", "20270304T170000Z"}, got)
 	s = parsed(t, "RRULE:FREQ=DAILY;UNTIL=20270302T170000Z")
 	got = nil
-	requirements.NoError(Iter(t.Context(), s, instant(t, "2027-03-04T17:00:00Z"), 100, func(i Instance) bool {
+	requirements.NoError(testIter(t.Context(), s, instant(t, "2027-03-04T17:00:00Z"), 100, func(i instance) bool {
 		got = append(got, i.Identity.Key())
 		return true
 	}))

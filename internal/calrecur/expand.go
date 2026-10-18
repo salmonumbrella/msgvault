@@ -17,33 +17,17 @@ type Exception struct {
 	Original           Identity
 	Start, End         *time.Time
 	StartDate, EndDate string
+	Zone               *time.Location
 	Cancelled          bool
 	Ref                int64
 }
 
 type Occurrence struct {
-	Original                       Identity
-	Start, End                     time.Time
-	StartDate, EndDate             string
-	AllDay, Cancelled, BoundsKnown bool
-	ExceptionRef                   int64
-}
-
-// ExpandWithStats behaves like Expand and reports its generation scan's raw
-// candidate work before exclusion, deduplication and exception suppression.
-// Detached exception rows are separate caller-owned work.
-func ExpandWithStats(ctx context.Context, s Set, duration time.Duration, durationDays int, exc []Exception, from, to time.Time, budget int) ([]Occurrence, IterStats, error) {
-	var stats IterStats
-	out, err := expand(ctx, s, duration, durationDays, exc, from, to, budget, &stats)
-	return out, stats, err
-}
-
-// ConservativeEndWithStats behaves like ConservativeEnd and reports its raw
-// scan work, including excluded candidates and work before an unknown bound.
-func ConservativeEndWithStats(ctx context.Context, s Set, duration time.Duration, durationDays int, budget int) (time.Time, bool, IterStats) {
-	counter := &candidateBudget{ctx: ctx, limit: budget}
-	end, bounded := conservativeEnd(ctx, s, duration, durationDays, counter)
-	return end, bounded, IterStats{Candidates: counter.used}
+	Original           Identity
+	Start, End         time.Time
+	StartDate, EndDate string
+	AllDay, Cancelled  bool
+	ExceptionRef       int64
 }
 
 func nominal(s Set, id Identity, duration time.Duration, durationDays int) (Occurrence, error) {
@@ -51,7 +35,7 @@ func nominal(s Set, id Identity, duration time.Duration, durationDays int) (Occu
 	if err != nil {
 		return Occurrence{}, unsupported("original identity", err)
 	}
-	o := Occurrence{Original: id, Start: start, End: start.Add(duration), AllDay: s.AllDay, BoundsKnown: true}
+	o := Occurrence{Original: id, Start: start, End: start.Add(duration), AllDay: s.AllDay}
 	if s.AllDay {
 		o.Start, err = s.instanceStart(start)
 		if err != nil {
@@ -75,7 +59,11 @@ func effective(s Set, e Exception, duration time.Duration, durationDays int) (Oc
 	if err != nil {
 		return Occurrence{}, unsupported("original identity", err)
 	}
-	o := Occurrence{Original: e.Original, AllDay: s.AllDay, BoundsKnown: true}
+	zone := e.Zone
+	if zone == nil {
+		zone = s.location()
+	}
+	o := Occurrence{Original: e.Original, AllDay: s.AllDay}
 	if e.StartDate != "" || e.EndDate != "" {
 		o.AllDay = true
 	} else if e.Start != nil || e.End != nil {
@@ -86,17 +74,17 @@ func effective(s Set, e Exception, duration time.Duration, durationDays int) (Oc
 			o.StartDate = e.Original.Date
 			o.EndDate, err = addCivilDays(e.Original.Date, durationDays)
 		} else {
-			o.StartDate = start.In(s.location()).Format(dateLayout)
-			o.EndDate = start.Add(duration).In(s.location()).Format(dateLayout)
+			o.StartDate = start.In(zone).Format(dateLayout)
+			o.EndDate = start.Add(duration).In(zone).Format(dateLayout)
 		}
 		if err != nil {
 			return Occurrence{}, unsupported("exception nominal dates", err)
 		}
 		if e.Start != nil {
-			o.StartDate = e.Start.In(s.location()).Format(dateLayout)
+			o.StartDate = e.Start.In(zone).Format(dateLayout)
 		}
 		if e.End != nil {
-			o.EndDate = e.End.In(s.location()).Format(dateLayout)
+			o.EndDate = e.End.In(zone).Format(dateLayout)
 		}
 		if e.StartDate != "" {
 			o.StartDate = e.StartDate
@@ -104,11 +92,11 @@ func effective(s Set, e Exception, duration time.Duration, durationDays int) (Oc
 		if e.EndDate != "" {
 			o.EndDate = e.EndDate
 		}
-		o.Start, err = localDateStart(o.StartDate, s.location())
+		o.Start, err = localDateStart(o.StartDate, zone)
 		if err != nil {
 			return Occurrence{}, unsupported("exception start date", err)
 		}
-		o.End, _, err = localDateBoundary(o.EndDate, s.location())
+		o.End, _, err = localDateBoundary(o.EndDate, zone)
 		if err != nil {
 			return Occurrence{}, unsupported("exception end date", err)
 		}
@@ -126,7 +114,7 @@ func effective(s Set, e Exception, duration time.Duration, durationDays int) (Oc
 				}
 			}
 			if e.End == nil {
-				o.End, _, err = localDateBoundary(o.EndDate, s.location())
+				o.End, _, err = localDateBoundary(o.EndDate, zone)
 				if err != nil {
 					return Occurrence{}, unsupported("exception nominal end date", err)
 				}
@@ -158,12 +146,13 @@ func effective(s Set, e Exception, duration time.Duration, durationDays int) (Oc
 // window, sorted by effective start and original identity. Exceptions are
 // considered independently so a move can enter a window beyond the series end.
 // A generation error returns no partial result.
-func Expand(ctx context.Context, s Set, duration time.Duration, durationDays int, exc []Exception, from, to time.Time, budget int) ([]Occurrence, error) {
-	out, _, err := ExpandWithStats(ctx, s, duration, durationDays, exc, from, to, budget)
-	return out, err
+func Expand(ctx context.Context, s Set, duration time.Duration, durationDays int, exc []Exception, from, to time.Time, budget int) ([]Occurrence, int, error) {
+	counter := &candidateBudget{ctx: ctx, limit: budget}
+	out, err := expand(ctx, s, duration, durationDays, exc, from, to, counter)
+	return out, counter.used, err
 }
 
-func expand(ctx context.Context, s Set, duration time.Duration, durationDays int, exc []Exception, from, to time.Time, budget int, stats *IterStats) ([]Occurrence, error) {
+func expand(ctx context.Context, s Set, duration time.Duration, durationDays int, exc []Exception, from, to time.Time, counter *candidateBudget) ([]Occurrence, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -205,13 +194,7 @@ func expand(ctx context.Context, s Set, duration time.Duration, durationDays int
 	}
 	var boundsErr error
 	// Iter's horizon is inclusive; step back one nanosecond to preserve Expand's half-open window.
-	work, err := IterWithStats(ctx, iterationSet, to.Add(-time.Nanosecond), budget, func(i Instance) bool {
-		if !i.Start.Before(to) {
-			return false
-		}
-		if _, ok := overrides[i.Identity.Key()]; ok {
-			return true
-		}
+	err := iter(ctx, iterationSet, to.Add(-time.Nanosecond), counter, func(i instance) bool {
 		o, err := nominal(s, i.Identity, duration, durationDays)
 		if err != nil {
 			boundsErr = err
@@ -220,7 +203,6 @@ func expand(ctx context.Context, s Set, duration time.Duration, durationDays int
 		add(o)
 		return true
 	})
-	*stats = work
 	if err != nil {
 		return nil, err
 	}
@@ -236,53 +218,13 @@ func expand(ctx context.Context, s Set, duration time.Duration, durationDays int
 	return out, nil
 }
 
-// Contains checks original identity, rather than effective start. A detached
-// exception establishes existence even when cancelled or excluded by EXDATE.
-func Contains(ctx context.Context, s Set, exc []Exception, original Identity, budget int) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	target, err := s.identityStart(original)
-	if err != nil {
-		return false, unsupported("original identity", err)
-	}
-	for _, e := range exc {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		if e.Original.AllDay == original.AllDay && e.Original.Key() == original.Key() {
-			return true, nil
-		}
-	}
-	if original.AllDay {
-		target, _, err = localDateBoundary(original.Date, s.location())
-		if err != nil {
-			return false, unsupported("original identity", err)
-		}
-	}
-	iterationSet := s
-	if len(exc) > 0 {
-		iterationSet.ExDates = slices.Clone(s.ExDates)
-		for _, e := range exc {
-			iterationSet.ExDates = append(iterationSet.ExDates, e.Original)
-		}
-	}
-	found := false
-	err = Iter(ctx, iterationSet, target, budget, func(i Instance) bool {
-		found = i.Identity.Key() == original.Key()
-		return !found && i.Start.Before(target)
-	})
-	return found, err
-}
-
 // ConservativeEnd includes DTSTART and RDATEs even when excluded. It bounds
 // only the generated recurrence set; callers bounding effective occurrences
 // must also account for moved exceptions' effective bounds. Unbounded rules,
 // malformed input, context cancellation or exhausted budget make the bound
 // unknown. All-day ends use civil days and a 14-hour conservative margin.
 func ConservativeEnd(ctx context.Context, s Set, duration time.Duration, durationDays int, budget int) (end time.Time, bounded bool) {
-	end, bounded, _ = ConservativeEndWithStats(ctx, s, duration, durationDays, budget)
-	return end, bounded
+	return conservativeEnd(ctx, s, duration, durationDays, &candidateBudget{ctx: ctx, limit: budget})
 }
 
 func conservativeEnd(ctx context.Context, s Set, duration time.Duration, durationDays int, budgetCounter *candidateBudget) (end time.Time, bounded bool) {

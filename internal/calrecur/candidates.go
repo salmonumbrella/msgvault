@@ -102,6 +102,7 @@ type ruleIterator struct {
 	start, until time.Time
 	count        int
 	generated    int
+	first        bool
 }
 
 func (s Set) ruleIterator(line string, until time.Time, budget *candidateBudget) (*ruleIterator, error) {
@@ -110,16 +111,20 @@ func (s Set) ruleIterator(line string, until time.Time, budget *candidateBudget)
 		return nil, err
 	}
 	opt := rule.OrigOptions
-	iterator := &ruleIterator{budget: budget, set: s, start: opt.Dtstart, until: opt.Until, count: opt.Count}
+	iterator := &ruleIterator{budget: budget, set: s, start: opt.Dtstart, until: opt.Until, count: opt.Count, first: true}
 	if !s.AllDay {
 		opt.Dtstart = civilTime(opt.Dtstart.In(s.location()))
 		opt.Until = civilHorizon(opt.Until, s.location())
 		// COUNT applies to valid local instances, not normalized gap times.
-		opt.Count = 0
 		rule, err = rrule.NewRRule(opt)
 		if err != nil {
 			return nil, unsupported(line, err)
 		}
+	}
+	opt.Count = 0
+	rule, err = rrule.NewRRule(opt)
+	if err != nil {
+		return nil, unsupported(line, err)
 	}
 	iterator.nextRaw = rule.Iterator()
 	return iterator, nil
@@ -150,6 +155,24 @@ func (i *ruleIterator) next() (time.Time, bool, error) {
 			if value.After(i.until) {
 				return time.Time{}, false, nil
 			}
+		}
+		if i.set.AllDay {
+			_, exists, err := localDateBoundary(value.Format(dateLayout), i.set.location())
+			if err != nil {
+				return time.Time{}, false, err
+			}
+			if !exists {
+				continue
+			}
+		}
+		if i.first {
+			i.first = false
+			if !value.Equal(i.start) {
+				i.generated++
+			}
+		}
+		if i.count > 0 && i.generated >= i.count {
+			return time.Time{}, false, nil
 		}
 		i.generated++
 		return value, true, nil

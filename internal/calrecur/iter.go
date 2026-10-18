@@ -7,29 +7,11 @@ import (
 	"time"
 )
 
-type Instance struct {
+type instance struct {
 	Identity Identity
 	// Start is the first valid instant of the identity's local civil date for
 	// all-day instances, or the recurrence instant for timed instances.
 	Start time.Time
-}
-
-// IterStats reports work performed by one recurrence scan, including work
-// retained when the scan stops early or returns an error.
-type IterStats struct {
-	// Candidates counts successful raw DTSTART/RDATE and RRULE pulls, including
-	// duplicates, exclusions, nonexistent local times and prefetched lookahead.
-	// It includes the candidate that exceeds budget; exhausted pulls and
-	// detached exception rows are not counted.
-	Candidates int
-}
-
-// IterWithStats behaves like Iter and reports actual candidate work before
-// deduplication and exclusion filtering, even on cancellation or budget errors.
-func IterWithStats(ctx context.Context, s Set, until time.Time, budget int, yield func(Instance) bool) (IterStats, error) {
-	counter := &candidateBudget{ctx: ctx, limit: budget}
-	err := iter(ctx, s, until, counter, yield)
-	return IterStats{Candidates: counter.used}, err
 }
 
 type stream struct {
@@ -38,16 +20,7 @@ type stream struct {
 	active bool
 }
 
-// Iter emits the ascending, deduplicated recurrence union minus exclusions.
-// Returning false from yield stops successfully. The inclusive until horizon
-// limits every rule. Each candidate counts toward budget, including duplicates, exclusions
-// and those before the caller's window.
-func Iter(ctx context.Context, s Set, until time.Time, budget int, yield func(Instance) bool) error {
-	_, err := IterWithStats(ctx, s, until, budget, yield)
-	return err
-}
-
-func iter(ctx context.Context, s Set, until time.Time, budgetCounter *candidateBudget, yield func(Instance) bool) error {
+func iter(ctx context.Context, s Set, until time.Time, budgetCounter *candidateBudget, yield func(instance) bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -152,7 +125,7 @@ func iter(ctx context.Context, s Set, until time.Time, budgetCounter *candidateB
 			if instanceStart.After(until) {
 				return nil
 			}
-			if !yield(Instance{Identity: id, Start: instanceStart}) {
+			if !yield(instance{Identity: id, Start: instanceStart}) {
 				return ctx.Err()
 			}
 		}

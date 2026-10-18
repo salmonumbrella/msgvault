@@ -240,15 +240,6 @@ func (s Set) rule(line string, until time.Time) (*rrule.RRule, error) {
 	if err := supportedRule(opt, seen, start); err != nil {
 		return nil, unsupported(line, err)
 	}
-	opt.Bysetpos = unique(opt.Bysetpos)
-	opt.Bymonth = unique(opt.Bymonth)
-	opt.Bymonthday = unique(opt.Bymonthday)
-	opt.Byyearday = unique(opt.Byyearday)
-	opt.Byweekno = unique(opt.Byweekno)
-	opt.Byweekday = unique(opt.Byweekday)
-	opt.Byhour = unique(opt.Byhour)
-	opt.Byminute = unique(opt.Byminute)
-	opt.Bysecond = unique(opt.Bysecond)
 	if !until.IsZero() && (opt.Until.IsZero() || until.Before(opt.Until)) {
 		opt.Until = until
 	}
@@ -308,9 +299,6 @@ func supportedRule(opt *rrule.ROption, seen map[string]bool, start time.Time) er
 	}
 	if hasPlain && hasOrdinal {
 		return errors.New("mixed plain and ordinal BYDAY selectors are not supported")
-	}
-	if len(opt.Bymonth) > 0 && len(opt.Bymonthday) > 0 && !possibleMonthDay(opt.Bymonth, opt.Bymonthday) {
-		return errors.New("no selected month can contain a selected month day")
 	}
 	if !hasReachableDate(opt, start) {
 		return errors.New("selectors and interval do not reach a recurrence date")
@@ -472,22 +460,6 @@ func greatestCommonDivisor(a, b int) int {
 	return a
 }
 
-func possibleMonthDay(months, days []int) bool {
-	// Use a leap year: February 29 and its negative equivalent are possible.
-	for _, month := range months {
-		if month < 1 || month > 12 {
-			continue
-		}
-		length := time.Date(2000, time.Month(month)+1, 0, 0, 0, 0, 0, time.UTC).Day()
-		for _, day := range days {
-			if day != 0 && day >= -length && day <= length {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func ParseSet(dtstart time.Time, allDay bool, startDate string, zone *time.Location, lines []string) (Set, error) {
 	s := Set{DTStart: dtstart, AllDay: allDay, StartDate: startDate, Zone: zone}
 	if _, err := s.start(); err != nil {
@@ -602,22 +574,20 @@ func parseLocalDateTime(layout, value string, loc *time.Location) (time.Time, er
 	if instant, exists := firstLocalWallTime(anchor, loc); exists {
 		return instant, nil
 	}
-	instant, err := time.ParseInLocation(layout, value, loc)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("resolve local recurrence time: %w", err)
-	}
-	return instant, nil
-}
-
-// Repeated BY selectors describe a set, not extra instances counted by COUNT.
-func unique[T comparable](values []T) []T {
-	seen := make(map[T]bool, len(values))
-	out := values[:0]
-	for _, v := range values {
-		if !seen[v] {
-			seen[v] = true
-			out = append(out, v)
+	// Explicit gap values use the offset before the forward transition.
+	for cursor := anchor.Add(-72 * time.Hour).In(loc); cursor.Before(anchor.Add(72 * time.Hour)); {
+		_, end := cursor.ZoneBounds()
+		if end.IsZero() {
+			break
 		}
+		_, before := end.Add(-time.Second).In(loc).Zone()
+		_, after := end.In(loc).Zone()
+		gapStart := end.UTC().Add(time.Duration(before) * time.Second)
+		gapEnd := end.UTC().Add(time.Duration(after) * time.Second)
+		if after > before && !anchor.Before(gapStart) && anchor.Before(gapEnd) {
+			return anchor.Add(-time.Duration(before) * time.Second).In(loc), nil
+		}
+		cursor = end.In(loc)
 	}
-	return out
+	return time.Time{}, errors.New("cannot resolve local recurrence time")
 }

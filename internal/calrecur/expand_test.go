@@ -22,7 +22,7 @@ func TestExpandWeekly6WeeksExdateCancelledMoved(t *testing.T) {
 		{Original: timed(t, "2027-03-16T17:00:00Z"), Cancelled: true, Ref: 11},
 		{Original: timed(t, "2027-03-23T17:00:00Z"), Start: &movedStart, End: &movedEnd, Ref: 12},
 	}
-	got, err := Expand(t.Context(), s, time.Hour, 0, exc, instant(t, "2027-03-01T00:00:00Z"), instant(t, "2027-04-13T00:00:00Z"), 100)
+	got, _, err := Expand(t.Context(), s, time.Hour, 0, exc, instant(t, "2027-03-01T00:00:00Z"), instant(t, "2027-04-13T00:00:00Z"), 100)
 	requirements.NoError(err)
 	requirements.Len(got, 5)
 	assertions.True(got[1].Cancelled)
@@ -42,7 +42,7 @@ func TestExpandSparseTombstoneInheritsBounds(t *testing.T) {
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	s := parsed(t, "RRULE:FREQ=DAILY;COUNT=2")
-	got, err := Expand(t.Context(), s, time.Hour, 0, []Exception{{Original: timed(t, "2027-03-03T17:00:00Z"), Cancelled: true, Ref: 42}},
+	got, _, err := Expand(t.Context(), s, time.Hour, 0, []Exception{{Original: timed(t, "2027-03-03T17:00:00Z"), Cancelled: true, Ref: 42}},
 		instant(t, "2027-03-03T00:00:00Z"), instant(t, "2027-03-04T00:00:00Z"), 100)
 	requirements.NoError(err)
 	requirements.Len(got, 1)
@@ -56,7 +56,7 @@ func TestExpandMovedIntoWindow(t *testing.T) {
 	assertions := assert.New(t)
 	s := parsed(t, "RRULE:FREQ=DAILY;COUNT=2", "EXDATE:20270303T170000Z")
 	start, end := instant(t, "2027-06-01T17:00:00Z"), instant(t, "2027-06-01T18:00:00Z")
-	got, err := Expand(t.Context(), s, time.Hour, 0, []Exception{{Original: timed(t, "2027-03-03T17:00:00Z"), Start: &start, End: &end, Ref: 7}},
+	got, _, err := Expand(t.Context(), s, time.Hour, 0, []Exception{{Original: timed(t, "2027-03-03T17:00:00Z"), Start: &start, End: &end, Ref: 7}},
 		instant(t, "2027-06-01T00:00:00Z"), instant(t, "2027-06-02T00:00:00Z"), 100)
 	requirements.NoError(err)
 	requirements.Len(got, 1)
@@ -67,7 +67,7 @@ func TestExpandMovedIntoWindow(t *testing.T) {
 
 func TestExpandMovedOutOfWindow(t *testing.T) {
 	start, end := instant(t, "2027-06-01T17:00:00Z"), instant(t, "2027-06-01T18:00:00Z")
-	got, err := Expand(t.Context(), parsed(t, "RRULE:FREQ=DAILY;COUNT=2"), time.Hour, 0,
+	got, _, err := Expand(t.Context(), parsed(t, "RRULE:FREQ=DAILY;COUNT=2"), time.Hour, 0,
 		[]Exception{{Original: timed(t, "2027-03-03T17:00:00Z"), Start: &start, End: &end}},
 		instant(t, "2027-03-03T00:00:00Z"), instant(t, "2027-03-04T00:00:00Z"), 100)
 	require.NoError(t, err)
@@ -77,7 +77,7 @@ func TestExpandMovedOutOfWindow(t *testing.T) {
 func TestExpandRejectsStartOnlyExceptionWithReversedBounds(t *testing.T) {
 	original := timed(t, "2027-03-02T17:00:00Z")
 	movedStart := instant(t, "2027-03-02T19:00:00Z")
-	got, err := Expand(t.Context(), parsed(t, "RRULE:FREQ=DAILY;COUNT=1"), time.Hour, 0,
+	got, _, err := Expand(t.Context(), parsed(t, "RRULE:FREQ=DAILY;COUNT=1"), time.Hour, 0,
 		[]Exception{{Original: original, Start: &movedStart}},
 		instant(t, "2027-03-02T17:00:00Z"), instant(t, "2027-03-02T20:00:00Z"), 100)
 	require.ErrorIs(t, err, ErrUnsupportedRecurrence)
@@ -99,7 +99,7 @@ func TestExpandRejectsNegativeDurations(t *testing.T) {
 		{"all-day duration", allDay, 0, -1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := Expand(t.Context(), tc.set, tc.duration, tc.durationDays, nil,
+			got, _, err := Expand(t.Context(), tc.set, tc.duration, tc.durationDays, nil,
 				instant(t, "2027-02-28T00:00:00Z"), instant(t, "2027-03-04T00:00:00Z"), 100)
 			require.ErrorIs(t, err, ErrUnsupportedRecurrence)
 			assert.Empty(t, got)
@@ -119,24 +119,11 @@ func TestExpandRejectsNegativeDurationForEmptyOrReversedWindow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			requirements := require.New(t)
 			assertions := assert.New(t)
-			got, err := Expand(t.Context(), parsed(t, "RRULE:FREQ=DAILY;COUNT=1"), -time.Hour, 0, nil, from, tc.to, 100)
+			got, _, err := Expand(t.Context(), parsed(t, "RRULE:FREQ=DAILY;COUNT=1"), -time.Hour, 0, nil, from, tc.to, 100)
 			requirements.ErrorIs(err, ErrUnsupportedRecurrence)
 			assertions.Empty(got)
 		})
 	}
-}
-
-func TestContainsExceptionBeatsExdate(t *testing.T) {
-	requirements := require.New(t)
-	assertions := assert.New(t)
-	s := parsed(t, "RRULE:FREQ=DAILY;COUNT=2", "EXDATE:20270303T170000Z")
-	id := timed(t, "2027-03-03T17:00:00Z")
-	found, err := Contains(t.Context(), s, nil, id, 100)
-	requirements.NoError(err)
-	assertions.False(found)
-	found, err = Contains(t.Context(), s, []Exception{{Original: id, Cancelled: true}}, id, 100)
-	requirements.NoError(err)
-	assertions.True(found)
 }
 
 func TestExpandAllDayCalendarDurationAcrossDST(t *testing.T) {
@@ -146,7 +133,7 @@ func TestExpandAllDayCalendarDurationAcrossDST(t *testing.T) {
 	requirements.NoError(err)
 	s, err := ParseSet(time.Time{}, true, "2027-03-13", zone, []string{"RRULE:FREQ=DAILY;COUNT=2"})
 	requirements.NoError(err)
-	got, err := Expand(t.Context(), s, 48*time.Hour, 2, nil, instant(t, "2027-03-13T00:00:00Z"), instant(t, "2027-03-16T00:00:00Z"), 100)
+	got, _, err := Expand(t.Context(), s, 48*time.Hour, 2, nil, instant(t, "2027-03-13T00:00:00Z"), instant(t, "2027-03-16T00:00:00Z"), 100)
 	requirements.NoError(err)
 	requirements.Len(got, 2)
 	assertions.Equal("2027-03-15", got[0].EndDate)
@@ -162,7 +149,7 @@ func TestExpandAllDayDurationUsesCivilEndDateWhenMidnightIsSkipped(t *testing.T)
 	s, err := ParseSet(time.Time{}, true, "2018-11-03", zone, []string{"RRULE:FREQ=DAILY;COUNT=1"})
 	requirements.NoError(err)
 
-	got, err := Expand(t.Context(), s, 0, 1, nil, instant(t, "2018-11-02T00:00:00Z"), instant(t, "2018-11-06T00:00:00Z"), 100)
+	got, _, err := Expand(t.Context(), s, 0, 1, nil, instant(t, "2018-11-02T00:00:00Z"), instant(t, "2018-11-06T00:00:00Z"), 100)
 	requirements.NoError(err)
 	requirements.Len(got, 1)
 	assertions.Equal("2018-11-03", got[0].StartDate)
@@ -183,7 +170,7 @@ func TestExpandAllDayExceptionPreservesCivilBoundsWhenMidnightIsSkipped(t *testi
 		EndDate:   "2018-11-05",
 	}
 
-	got, err := Expand(t.Context(), s, 0, 0, []Exception{exception}, instant(t, "2018-11-02T00:00:00Z"), instant(t, "2018-11-06T00:00:00Z"), 100)
+	got, _, err := Expand(t.Context(), s, 0, 0, []Exception{exception}, instant(t, "2018-11-02T00:00:00Z"), instant(t, "2018-11-06T00:00:00Z"), 100)
 	requirements.NoError(err)
 	requirements.Len(got, 1)
 	assertions.Equal("2018-11-04", got[0].StartDate)
@@ -199,7 +186,7 @@ func TestExpandAllDayUsesNextLocalBoundaryWhenExclusiveDateIsSkipped(t *testing.
 	s, err := ParseSet(time.Time{}, true, "2011-12-29", zone, nil)
 	requirements.NoError(err)
 
-	got, err := Expand(t.Context(), s, 0, 1, nil, instant(t, "2011-12-29T00:00:00Z"), instant(t, "2012-01-01T00:00:00Z"), 100)
+	got, _, err := Expand(t.Context(), s, 0, 1, nil, instant(t, "2011-12-29T00:00:00Z"), instant(t, "2012-01-01T00:00:00Z"), 100)
 	requirements.NoError(err)
 	requirements.Len(got, 1)
 	assert.Equal(t, "2011-12-30", got[0].EndDate)
@@ -220,7 +207,7 @@ func TestExpandAllDayWindowIncludesFirstMidnightBeforeRollback(t *testing.T) {
 	assertions.True(exists)
 	assertions.Equal(from, boundary.UTC())
 
-	got, err := Expand(t.Context(), s, 0, 1, nil, from, from.Add(time.Minute), 100)
+	got, _, err := Expand(t.Context(), s, 0, 1, nil, from, from.Add(time.Minute), 100)
 	requirements.NoError(err)
 	requirements.Len(got, 1)
 	assertions.Equal("2009-11-01", got[0].StartDate)
@@ -237,7 +224,7 @@ func TestExpandAllDayWindowEndingAfterRollbackIncludesEarlierOccurrence(t *testi
 
 	from := instant(t, "2009-11-01T02:30:00Z")
 	to := instant(t, "2009-11-01T02:32:00Z")
-	got, err := Expand(t.Context(), s, 0, 1, nil, from, to, 100)
+	got, _, err := Expand(t.Context(), s, 0, 1, nil, from, to, 100)
 	requirements.NoError(err)
 	requirements.Len(got, 1)
 	assertions.Equal("2009-11-01", got[0].StartDate)
@@ -246,7 +233,7 @@ func TestExpandAllDayWindowEndingAfterRollbackIncludesEarlierOccurrence(t *testi
 
 func TestExpandDoesNotChargeBudgetForExclusiveEndCandidate(t *testing.T) {
 	s := parsed(t, "RDATE:20270303T170000Z")
-	got, err := Expand(t.Context(), s, time.Hour, 0, nil,
+	got, _, err := Expand(t.Context(), s, time.Hour, 0, nil,
 		instant(t, "2027-03-02T16:00:00Z"), instant(t, "2027-03-03T17:00:00Z"), 1)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
@@ -257,7 +244,7 @@ func TestExpandAllDayDoesNotChargeBudgetForExclusiveEndCandidate(t *testing.T) {
 	requirements := require.New(t)
 	s, err := ParseSet(time.Time{}, true, "2027-03-02", time.UTC, []string{"RRULE:FREQ=DAILY;COUNT=2"})
 	requirements.NoError(err)
-	got, err := Expand(t.Context(), s, 0, 1, nil,
+	got, _, err := Expand(t.Context(), s, 0, 1, nil,
 		instant(t, "2027-03-02T00:00:00Z"), instant(t, "2027-03-03T00:00:00Z"), 2)
 	requirements.NoError(err)
 	requirements.Len(got, 1)
@@ -279,41 +266,12 @@ func TestExpandDetachedExceptionOverridesSkippedRDate(t *testing.T) {
 		End:      &end,
 	}
 
-	got, err := Expand(t.Context(), s, 0, 1, []Exception{exception}, start.Add(-time.Hour), end.Add(time.Hour), 100)
+	got, _, err := Expand(t.Context(), s, 0, 1, []Exception{exception}, start.Add(-time.Hour), end.Add(time.Hour), 100)
 	requirements.NoError(err)
 	requirements.Len(got, 1)
 	assertions.Equal(exception.Original, got[0].Original)
 	assertions.Equal(start, got[0].Start)
 	assertions.Equal(end, got[0].End)
-}
-
-func TestContainsDetachedExceptionOnSkippedCivilDate(t *testing.T) {
-	requirements := require.New(t)
-	zone, err := time.LoadLocation("Pacific/Apia")
-	requirements.NoError(err)
-	s, err := ParseSet(time.Time{}, true, "2011-12-29", zone, []string{"RDATE;VALUE=DATE:20111230"})
-	requirements.NoError(err)
-	original := Identity{Date: "2011-12-30", AllDay: true}
-	found, err := Contains(t.Context(), s, []Exception{{Original: original, Cancelled: true}}, original, 100)
-	requirements.NoError(err)
-	assert.True(t, found)
-}
-
-func TestContainsAfterDetachedExceptionOnSkippedCivilDate(t *testing.T) {
-	requirements := require.New(t)
-	zone, err := time.LoadLocation("Pacific/Apia")
-	requirements.NoError(err)
-	s, err := ParseSet(time.Time{}, true, "2011-12-29", zone,
-		[]string{"RDATE;VALUE=DATE:20111230", "RDATE;VALUE=DATE:20111231"})
-	requirements.NoError(err)
-	exception := Exception{
-		Original:  Identity{Date: "2011-12-30", AllDay: true},
-		Cancelled: true,
-	}
-
-	found, err := Contains(t.Context(), s, []Exception{exception}, Identity{Date: "2011-12-31", AllDay: true}, 100)
-	requirements.NoError(err)
-	requirements.True(found)
 }
 
 func TestExpandRejectsReversedAllDayDatesAcrossSkippedCivilDate(t *testing.T) {
@@ -329,7 +287,7 @@ func TestExpandRejectsReversedAllDayDatesAcrossSkippedCivilDate(t *testing.T) {
 	}
 	boundary := time.Date(2011, 12, 31, 0, 0, 0, 0, zone)
 
-	got, err := Expand(t.Context(), s, 0, 1, []Exception{exception}, boundary.Add(-time.Hour), boundary.Add(time.Hour), 100)
+	got, _, err := Expand(t.Context(), s, 0, 1, []Exception{exception}, boundary.Add(-time.Hour), boundary.Add(time.Hour), 100)
 	requirements.ErrorIs(err, ErrUnsupportedRecurrence)
 	assert.Empty(t, got)
 }
@@ -347,7 +305,7 @@ func TestExpandHalfOpenWindow(t *testing.T) {
 		{"reversed", start.Add(45 * time.Minute), start.Add(15 * time.Minute)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := Expand(t.Context(), s, time.Hour, 0, nil, tc.from, tc.to, 100)
+			got, _, err := Expand(t.Context(), s, time.Hour, 0, nil, tc.from, tc.to, 100)
 			require.NoError(t, err)
 			assert.Empty(t, got)
 		})
@@ -399,7 +357,7 @@ func TestExpandExceptionEffectiveType(t *testing.T) {
 			e := tc.exception
 			e.Original, e.Ref = original, 42
 			start, end := instant(t, tc.wantStart), instant(t, tc.wantEnd)
-			got, err := Expand(t.Context(), s, time.Hour, 2, []Exception{e}, start, end, 100)
+			got, _, err := Expand(t.Context(), s, time.Hour, 2, []Exception{e}, start, end, 100)
 			requirements.NoError(err)
 			requirements.Len(got, 1)
 			assertions.Equal(original, got[0].Original)
@@ -408,11 +366,10 @@ func TestExpandExceptionEffectiveType(t *testing.T) {
 			assertions.Equal(end, got[0].End.UTC())
 			assertions.Equal(tc.wantStartDate, got[0].StartDate)
 			assertions.Equal(tc.wantEndDate, got[0].EndDate)
-			assertions.True(got[0].BoundsKnown)
 			assertions.Equal(e.Cancelled, got[0].Cancelled)
 			assertions.Equal(int64(42), got[0].ExceptionRef)
 			if tc.name == "all-day to timed" {
-				got, err = Expand(t.Context(), s, time.Hour, 2, []Exception{e},
+				got, _, err = Expand(t.Context(), s, time.Hour, 2, []Exception{e},
 					instant(t, "2027-03-13T08:00:00Z"), instant(t, "2027-03-13T09:00:00Z"), 100)
 				requirements.NoError(err)
 				assertions.Empty(got)
@@ -428,7 +385,7 @@ func TestExpandExceptionInvalidDates(t *testing.T) {
 	} {
 		t.Run(e.StartDate+"/"+e.EndDate, func(t *testing.T) {
 			e.Original = timed(t, "2027-03-02T17:00:00Z")
-			got, err := Expand(t.Context(), parsed(t, "RRULE:FREQ=DAILY;COUNT=1"), time.Hour, 0, []Exception{e},
+			got, _, err := Expand(t.Context(), parsed(t, "RRULE:FREQ=DAILY;COUNT=1"), time.Hour, 0, []Exception{e},
 				instant(t, "2027-03-01T00:00:00Z"), instant(t, "2027-03-16T00:00:00Z"), 100)
 			require.ErrorIs(t, err, ErrUnsupportedRecurrence)
 			assert.Empty(t, got)
@@ -446,7 +403,7 @@ func FuzzExpandTimedException(f *testing.F) {
 		start := time.Date(2027, 6, 1, int(hour%24), int(minute%60), 0, 0, time.UTC)
 		end := start.Add(time.Duration(int(durationMinutes)+1) * time.Minute)
 		original := Identity{Date: "2027-03-13", AllDay: true}
-		got, err := Expand(t.Context(), s, time.Hour, 1, []Exception{{Original: original, Start: &start, End: &end}}, start, end, 100)
+		got, _, err := Expand(t.Context(), s, time.Hour, 1, []Exception{{Original: original, Start: &start, End: &end}}, start, end, 100)
 		requirements.NoError(err)
 		requirements.Len(got, 1)
 		assertions.Equal(original, got[0].Original)
