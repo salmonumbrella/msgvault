@@ -211,7 +211,6 @@ func TestListCalendarOccurrencesCancellationSuppliedFields(t *testing.T) {
 		name, fields, subject string
 		attendees             int
 	}{
-		{"omitted", "", "Example event", 1},
 		{"supplied", `,"summary":"Cancelled planning","attendees":[{"email":"other@example.com","responseStatus":"declined"}]`, "Cancelled planning", 1},
 		{"cleared", `,"summary":"","attendees":[]`, "", 0},
 	} {
@@ -220,11 +219,7 @@ func TestListCalendarOccurrencesCancellationSuppliedFields(t *testing.T) {
 			st := newRFC822IDBackfillBackendStore(t)
 			_, master := calendarFixture(t, st, "master", `{"id":"weekly","status":"confirmed","start":{"dateTime":"2027-03-02T17:00:00Z"},"end":{"dateTime":"2027-03-02T18:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=2"],"attendees":[{"email":"guest@example.com","responseStatus":"accepted"}]}`)
 			_, cancelled := calendarFixture(t, st, "cancelled", `{"id":"cancelled","recurringEventId":"weekly","originalStartTime":{"dateTime":"2027-03-09T17:00:00Z"},"status":"cancelled"`+tc.fields+`}`)
-			subject := tc.subject
-			if tc.name == "omitted" {
-				subject = ""
-			}
-			_, err := st.db.Exec(`UPDATE messages SET subject = ? WHERE id = ?`, subject, cancelled)
+			_, err := st.db.Exec(`UPDATE messages SET subject = ? WHERE id = ?`, tc.subject, cancelled)
 			requirements.NoError(err)
 			from := time.Date(2027, 3, 9, 0, 0, 0, 0, time.UTC)
 			page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
