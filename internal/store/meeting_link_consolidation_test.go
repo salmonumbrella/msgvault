@@ -17,14 +17,22 @@ func TestMeetingLinksDedupUndoAndPurge(t *testing.T) {
 			requirements := require.New(t)
 
 			st := newRFC822IDBackfillBackendStore(t)
-			_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "dedup@example.org"))
+			uid := "dedup@example.org"
+			if targetSide {
+				uid = ""
+			}
+			_, event := calendarFixture(t, st, "event", singleLinkRaw("event", uid))
 			_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
 			survivor := note
 			var duplicate int64
 			if targetSide {
-				_, duplicate = calendarFixture(t, st, "duplicate", singleLinkRaw("duplicate", "dedup@example.org"))
+				_, duplicate = calendarFixture(t, st, "duplicate", singleLinkRaw("duplicate", uid))
 				survivor = event
 				requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: duplicate}))
+				var target int64
+				requirements.NoError(st.db.QueryRow(`SELECT target_message_id FROM meeting_link_decisions WHERE member_message_id = ?`, note).Scan(&target))
+				requirements.Equal(duplicate, target)
+				requirements.Equal(fmt.Sprintf("evt:%d", duplicate), linkedMeetingRefs(t, st, note)[note])
 			} else {
 				_, duplicate = projectionFixture(t, st, "duplicate", "plaud_json", `{}`)
 				requirements.NoError(st.LinkMeetingContext(t.Context(), duplicate, OccurrenceRef{MessageID: event}))
@@ -36,7 +44,7 @@ func TestMeetingLinksDedupUndoAndPurge(t *testing.T) {
 			requirements.NoError(err)
 			assertions.Equal(int64(1), count)
 			if targetSide {
-				assertions.Equal(fmt.Sprintf("evt:%d", event), linkedMeetingRefs(t, st, note)[note])
+				assertions.Equal(fmt.Sprintf("evt:%d,evt:%d", event, duplicate), linkedMeetingRefs(t, st, note)[note])
 			} else {
 				keys := linkedMeetingRefs(t, st, note, duplicate)
 				assertions.Equal(fmt.Sprintf("evt:%d", event), keys[note])
@@ -102,13 +110,21 @@ func TestMeetingLinksSourceMessageIDMigration(t *testing.T) {
 			requirements := require.New(t)
 
 			st := newRFC822IDBackfillBackendStore(t)
-			eventData, event := calendarFixture(t, st, "event", singleLinkRaw("event", "migration@example.org"))
+			uid := "migration@example.org"
+			if targetSide {
+				uid = ""
+			}
+			eventData, event := calendarFixture(t, st, "event", singleLinkRaw("event", uid))
 			noteData, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
 			var source, conversation int64
 			oldKey, newKey := "legacy-note", "note"
 			if targetSide {
-				oldData, old := calendarFixture(t, st, "legacy-event", singleLinkRaw("legacy-event", "migration@example.org"))
+				oldData, old := calendarFixture(t, st, "legacy-event", singleLinkRaw("legacy-event", uid))
 				requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: old}))
+				var target int64
+				requirements.NoError(st.db.QueryRow(`SELECT target_message_id FROM meeting_link_decisions WHERE member_message_id = ?`, note).Scan(&target))
+				requirements.Equal(old, target)
+				requirements.Equal(fmt.Sprintf("evt:%d", old), linkedMeetingRefs(t, st, note)[note])
 				source, conversation = eventData.Message.SourceID, oldData.Message.ConversationID
 				oldKey, newKey = "legacy-event", "event"
 			} else {
