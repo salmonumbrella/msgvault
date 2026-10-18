@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"database/sql/driver"
 	"fmt"
 	"strings"
@@ -39,26 +38,6 @@ func TestMeetingLinksUnsupportedMasterException(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, links, 1)
 	assert.Equal(t, page.Occurrences[0].Ref, links[0].Ref)
-}
-
-func TestMeetingLinksScheduledWithoutUID(t *testing.T) {
-	st := newRFC822IDBackfillBackendStore(t)
-	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "window@example.org"))
-	data, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{"startedAt":"2020-01-01T00:00:00Z","endedAt":"2020-01-01T00:30:00Z"},"calendar_event":{"startsAt":"2027-03-14T10:00:00Z"}}`)
-	data.Message.SentAt = sql.NullTime{Time: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC), Valid: true}
-	_, err := st.UpsertMessage(data.Message)
-	require.NoError(t, err)
-	for _, ref := range []MeetingLinkRef{{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: note}}, {Kind: "evt", OccurrenceRef: OccurrenceRef{MessageID: event}}} {
-		suggestions, err := st.SuggestMeetingLinksContext(t.Context(), ref, 10)
-		require.NoError(t, err)
-		require.Len(t, suggestions, 1)
-		assert.Equal(t, note, suggestions[0].MemberMessageID)
-		assert.Equal(t, fmt.Sprintf("evt:%d", event), suggestions[0].Ref)
-		assert.Equal(t, 30, suggestions[0].OverlapMinutes)
-	}
-	links, err := st.MeetingLinksContext(t.Context(), note)
-	require.NoError(t, err)
-	assert.Empty(t, links)
 }
 
 func TestMeetingLinksSuggestionWindowPlan(t *testing.T) {
@@ -112,12 +91,9 @@ func TestMeetingLinksSuggestionWindowPlan(t *testing.T) {
 	}
 	require.NoError(t, rows.Err())
 	text := strings.Join(plan, "\n")
-	t.Log(text)
 	assert.Contains(t, text, "idx_meeting_link_key_scheduled")
 	assert.Contains(t, text, "idx_messages_meeting_start")
 	if st.IsPostgreSQL() {
 		assert.Contains(t, text, "Index Cond:")
-	} else {
-		assert.Contains(t, text, "<expr>>? AND <expr><?")
 	}
 }

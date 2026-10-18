@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMeetingLinksSuggestionsBatchParticipants(t *testing.T) {
+func TestMeetingLinksSuggestionsRankingAndReadOnly(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 
@@ -71,11 +71,13 @@ func TestMeetingLinksSuggestionsTimeWindow(t *testing.T) {
 	st := newRFC822IDBackfillBackendStore(t)
 	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "window@example.org"))
 	var want []int64
+	var uidless int64
 	for _, tc := range []struct {
 		name, sent, received, internal, raw string
 		include                             bool
 	}{
 		{name: "scheduled", sent: "2020-01-01T00:00:00Z", raw: `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"window@example.org","startsAt":"2027-03-14T10:00:00Z"}}`, include: true},
+		{name: "scheduled without UID", sent: "2020-01-01T00:00:00Z", raw: `{"schema_version":1,"recording":{"startedAt":"2020-01-01T00:00:00Z","endedAt":"2020-01-01T00:30:00Z"},"calendar_event":{"startsAt":"2027-03-14T10:00:00Z"}}`, include: true},
 		{name: "long recording", sent: "2027-03-12T10:00:00Z", raw: `{"started_at":"2027-03-12T10:00:00Z","ended_at":"2027-03-14T10:30:00Z"}`, include: true},
 		{name: "offset", sent: "2027-03-14T06:30:00-04:00", raw: `{}`, include: true},
 		{name: "received", received: "2027-03-14T10:00:00Z", raw: `{}`, include: true},
@@ -100,6 +102,9 @@ func TestMeetingLinksSuggestionsTimeWindow(t *testing.T) {
 		}
 		_, err := st.UpsertMessage(data.Message)
 		requirements.NoError(err)
+		if tc.name == "scheduled without UID" {
+			uidless = id
+		}
 		if tc.include {
 			want = append(want, id)
 		}
@@ -109,22 +114,17 @@ func TestMeetingLinksSuggestionsTimeWindow(t *testing.T) {
 	var got []int64
 	for _, suggestion := range suggestions {
 		got = append(got, suggestion.MemberMessageID)
+		if suggestion.MemberMessageID == uidless {
+			assert.Equal(t, fmt.Sprintf("evt:%d", event), suggestion.Ref)
+			assert.Equal(t, 30, suggestion.OverlapMinutes)
+		}
 	}
 	assert.ElementsMatch(t, want, got)
-}
-
-func TestMeetingLinksSuggestionsOffset(t *testing.T) {
-	st := newRFC822IDBackfillBackendStore(t)
-	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "offset@example.org"))
-	data, note := projectionFixture(t, st, "note", "meeting_json", `{}`)
-	at, err := time.Parse(time.RFC3339, "2027-03-14T06:30:00-04:00")
-	require.NoError(t, err)
-	data.Message.SentAt = sql.NullTime{Time: at, Valid: true}
-	_, err = st.UpsertMessage(data.Message)
-	require.NoError(t, err)
-	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "evt", OccurrenceRef: OccurrenceRef{MessageID: event}}, 10)
-	require.NoError(t, err)
-	require.Len(t, suggestions, 1)
-	assert.Equal(t, note, suggestions[0].MemberMessageID)
+	suggestions, err = st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: uidless}}, 10)
+	requirements.NoError(err)
+	requirements.Len(suggestions, 1)
+	assert.Equal(t, uidless, suggestions[0].MemberMessageID)
+	assert.Equal(t, fmt.Sprintf("evt:%d", event), suggestions[0].Ref)
 	assert.Equal(t, 30, suggestions[0].OverlapMinutes)
+	assert.Empty(t, linkedMeetingRefs(t, st, uidless)[uidless])
 }

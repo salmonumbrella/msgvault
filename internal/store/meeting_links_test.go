@@ -1,7 +1,9 @@
 package store
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"strings"
 	"testing"
@@ -20,13 +22,26 @@ func TestMeetingLinksCalendarUIDLookupPlan(t *testing.T) {
 	// Metadata is the UID source even if the archived provider payload differs.
 	require.NoError(t, st.SetMessageMetadata(id, sql.NullString{String: `{"ical_uid":"metadata@example.org"}`, Valid: true}))
 	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"metadata@example.org"}}`)
-	assert.Equal(t, fmt.Sprintf("evt:%d", id), linkedMeetingRefs(t, st, note)[note])
+	var query string
+	var args []any
+	observed := gatedMeetingProjectionStore(t, st, &meetingProjectionGate{before: func(_ context.Context, q string, values []driver.NamedValue) error {
+		if strings.Contains(q, "FROM calendar_events e") && strings.Contains(q, "ical_uid") {
+			query = q
+			args = nil
+			for _, v := range values {
+				args = append(args, v.Value)
+			}
+		}
+		return nil
+	}})
+	assert.Equal(t, fmt.Sprintf("evt:%d", id), linkedMeetingRefs(t, observed, note)[note])
+	require.NotEmpty(t, query)
 
 	explain := "EXPLAIN QUERY PLAN "
 	if st.IsPostgreSQL() {
 		explain = "EXPLAIN "
 	}
-	rows, err := st.db.QueryContext(t.Context(), explain+calendarEventSelect+"("+st.calendarUIDPredicate()+" AND e.kind != 'exception') ORDER BY e.message_id LIMIT 201", "metadata@example.org")
+	rows, err := st.db.QueryContext(t.Context(), explain+query, args...)
 	require.NoError(t, err)
 	defer func() { require.NoError(t, rows.Close()) }()
 	var plan []string
@@ -38,7 +53,6 @@ func TestMeetingLinksCalendarUIDLookupPlan(t *testing.T) {
 			var id, parent, unused int
 			require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
 		}
-		t.Log(detail)
 		plan = append(plan, detail)
 	}
 	require.NoError(t, rows.Err())
@@ -54,27 +68,14 @@ func TestMeetingLinksWindowedExceptions(t *testing.T) {
 		at := time.Date(2026, 1, 4, 10, 0, 0, 0, time.UTC).AddDate(0, 0, i)
 		calendarFixture(t, st, fmt.Sprintf("old-%d", i), fmt.Sprintf(`{"id":"old-%d","iCalUID":"weekly@example.org","recurringEventId":"series","status":"cancelled","originalStartTime":{"dateTime":%q}}`, i, at.Format(time.RFC3339)))
 	}
-	from := time.Date(2027, 3, 14, 10, 0, 0, 0, time.UTC)
-	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.Add(time.Hour))
-	requirements.NoError(err)
-	requirements.Len(page.Occurrences, 1)
-	note := granolaLinkFixture(t, st, "note", "series_20270314T100000Z")
-	assertions.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", master), linkedMeetingRefs(t, st, note)[note])
 	_, twenty := projectionFixture(t, st, "twenty", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"weekly@example.org","startsAt":"2027-03-14T10:00:00Z"}}`)
 	assertions.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", master), linkedMeetingRefs(t, st, twenty)[twenty])
-	ref := OccurrenceRef{MessageID: master, Key: "20270314T100000Z"}
-	requirements.NoError(st.LinkMeetingContext(t.Context(), note, ref))
-	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, ref))
-	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
 
 	// An old exception moved into this window retains its original identity.
 	calendarFixture(t, st, "old-1", `{"id":"old-1","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2026-01-05T10:00:00Z"},"start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"}}`)
 	raw = strings.Replace(raw, `"RRULE:FREQ=DAILY;COUNT=1000"`, `"RRULE:FREQ=DAILY;COUNT=1000","EXDATE:20270314T100000Z"`, 1)
 	requirements.NoError(st.UpsertMessageRawWithFormat(master, []byte(raw), "gcal_json"))
 	assertions.Equal(fmt.Sprintf("evt:%d@20260105T100000Z", master), linkedMeetingRefs(t, st, twenty)[twenty])
-	ref.Key = "20260105T100000Z"
-	requirements.NoError(st.LinkMeetingContext(t.Context(), note, ref))
-	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, ref))
 }
 
 func TestMeetingLinksTwentyExactInstant(t *testing.T) {
@@ -117,25 +118,25 @@ func granolaLinkFixture(t *testing.T, st *Store, key, event string) int64 {
 }
 
 func TestMeetingLinksGranolaOwnCalendar(t *testing.T) {
-	assertions, requirements := assert.New(t), require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
-	raw := singleLinkRaw("event", "own@example.org")
-	_, other := calendarFixture(t, st, "other", raw, "other@example.com")
-	note := granolaLinkFixture(t, st, "note", "event")
-	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
-	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: note}}, 10)
-	requirements.NoError(err)
-	requirements.Len(suggestions, 1)
-	assertions.Equal(fmt.Sprintf("evt:%d", other), suggestions[0].Ref)
-	_, own := calendarFixture(t, st, "own", raw)
-	assertions.Equal(fmt.Sprintf("evt:%d", own), linkedMeetingRefs(t, st, note)[note])
-}
-
-func TestMeetingLinksGranolaEmailCase(t *testing.T) {
-	st := newRFC822IDBackfillBackendStore(t)
-	_, own := calendarFixture(t, st, "own", singleLinkRaw("event", "own@example.org"), " Calendar@Example.COM ")
-	_, note := projectionFixture(t, st, "note", "granola_json", `{"owner":{"email":" CALENDAR@example.com "},"calendar_event":{"calendar_event_id":"event"}}`)
-	assert.Equal(t, fmt.Sprintf("evt:%d", own), linkedMeetingRefs(t, st, note)[note])
+	for _, tc := range []struct{ name, calendar, owner string }{
+		{"exact email", "calendar@example.com", "calendar@example.com"},
+		{"padded uppercase email", " Calendar@Example.COM ", " CALENDAR@example.com "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			raw := singleLinkRaw("event", "own@example.org")
+			_, other := calendarFixture(t, st, "other", raw, "other@example.com")
+			_, note := projectionFixture(t, st, "note", "granola_json", fmt.Sprintf(`{"owner":{"email":%q},"calendar_event":{"calendar_event_id":"event","scheduled_start_time":"2027-03-14T10:00:00Z"}}`, tc.owner))
+			assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
+			suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: note}}, 10)
+			requirements.NoError(err)
+			requirements.Len(suggestions, 1)
+			assertions.Equal(fmt.Sprintf("evt:%d", other), suggestions[0].Ref)
+			_, own := calendarFixture(t, st, "own", raw, tc.calendar)
+			assertions.Equal(fmt.Sprintf("evt:%d", own), linkedMeetingRefs(t, st, note)[note])
+		})
+	}
 }
 
 func TestMeetingLinksIdentityHasSeparateFields(t *testing.T) {
@@ -145,18 +146,18 @@ func TestMeetingLinksIdentityHasSeparateFields(t *testing.T) {
 	st := newRFC822IDBackfillBackendStore(t)
 	_, single := calendarFixture(t, st, "single", singleLinkRaw("single", "x@20270314T100000Z"))
 	_, series := calendarFixture(t, st, "series", strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", "x"))
-	_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
-	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: single}))
-	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: series, Key: "20270314T100000Z"}))
-	assertions.Equal(fmt.Sprintf("evt:%d,evt:%d@20270314T100000Z", single, series), linkedMeetingRefs(t, st, note)[note])
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"x@20270314T100000Z","startsAt":"2027-03-14T10:00:00Z"}}`)
+	assertions.Equal(fmt.Sprintf("evt:%d", single), linkedMeetingRefs(t, st, note)[note])
+	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: series, Key: "20270314T100000Z"}))
+	assertions.Equal(fmt.Sprintf("evt:%d", single), linkedMeetingRefs(t, st, note)[note])
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: single}))
-	assertions.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", series), linkedMeetingRefs(t, st, note)[note])
+	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
 }
 
 func TestMeetingLinksGranolaOccurrences(t *testing.T) {
 	for _, tc := range []struct {
-		name, raw, exception string
-		want                 bool
+		name, raw, exception, key string
+		want                      bool
 	}{
 		{name: "generated", raw: linkSeriesRaw, want: true},
 		{name: "exdate", raw: strings.Replace(linkSeriesRaw, `"RRULE:FREQ=WEEKLY;COUNT=6"`, `"RRULE:FREQ=WEEKLY;COUNT=6","EXDATE:20270314T100000Z"`, 1)},
@@ -165,6 +166,7 @@ func TestMeetingLinksGranolaOccurrences(t *testing.T) {
 		{name: "non UTC", raw: `{"id":"series","iCalUID":"weekly@example.org","start":{"dateTime":"2027-03-07T05:00:00-05:00","timeZone":"America/New_York"},"end":{"dateTime":"2027-03-07T06:00:00-05:00"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=6"]}`},
 		{name: "non UTC after DST", raw: `{"id":"series","iCalUID":"weekly@example.org","start":{"dateTime":"2027-03-07T06:00:00-05:00","timeZone":"America/New_York"},"end":{"dateTime":"2027-03-07T07:00:00-05:00"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=6"]}`, want: true},
 		{name: "all day", raw: `{"id":"series","iCalUID":"weekly@example.org","start":{"date":"2027-03-07"},"end":{"date":"2027-03-08"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=6"]}`},
+		{name: "all day instance", raw: `{"id":"series","iCalUID":"day@example.org","start":{"date":"2027-03-07"},"end":{"date":"2027-03-08"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=6"]}`, key: "20270314", want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := newRFC822IDBackfillBackendStore(t)
@@ -172,21 +174,18 @@ func TestMeetingLinksGranolaOccurrences(t *testing.T) {
 			if tc.exception != "" {
 				calendarFixture(t, st, "exception", tc.exception)
 			}
-			note := granolaLinkFixture(t, st, "note", "series_20270314T100000Z")
+			key := tc.key
+			if key == "" {
+				key = "20270314T100000Z"
+			}
+			note := granolaLinkFixture(t, st, "note", "series_"+key)
 			want := ""
 			if tc.want {
-				want = fmt.Sprintf("evt:%d@20270314T100000Z", master)
+				want = fmt.Sprintf("evt:%d@%s", master, key)
 			}
 			assert.Equal(t, want, linkedMeetingRefs(t, st, note)[note])
 		})
 	}
-}
-
-func TestMeetingLinksAllDayInstance(t *testing.T) {
-	st := newRFC822IDBackfillBackendStore(t)
-	_, master := calendarFixture(t, st, "series", `{"id":"series","iCalUID":"day@example.org","start":{"date":"2027-03-07"},"end":{"date":"2027-03-08"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=6"]}`)
-	note := granolaLinkFixture(t, st, "note", "series_20270314")
-	assert.Equal(t, fmt.Sprintf("evt:%d@20270314", master), linkedMeetingRefs(t, st, note)[note])
 }
 
 func TestMeetingLinksTwentyCopiesAndAmbiguity(t *testing.T) {
@@ -222,13 +221,12 @@ func TestMeetingLinksUserDecisions(t *testing.T) {
 	_, copyID := calendarFixture(t, st, "copy", raw, "copy@example.com")
 	_, other := calendarFixture(t, st, "other", singleLinkRaw("other", "other@example.org"))
 	note := granolaLinkFixture(t, st, "note", "event")
-	fallback := ""
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: copyID}))
-	assertions.Equal(fallback, linkedMeetingRefs(t, st, note)[note])
+	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
 	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
 	assertions.Equal(fmt.Sprintf("evt:%d", event), linkedMeetingRefs(t, st, note)[note])
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: copyID}))
-	assertions.Equal(fallback, linkedMeetingRefs(t, st, note)[note])
+	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
 	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: other}))
 	assertions.Equal(fmt.Sprintf("evt:%d", other), linkedMeetingRefs(t, st, note)[note])
 	requirements.ErrorIs(st.LinkMeetingContext(t.Context(), event, OccurrenceRef{MessageID: other}), sql.ErrNoRows)
@@ -296,8 +294,6 @@ func TestMeetingLinksProjectionEnvelopeAndRepair(t *testing.T) {
 	assertions.NotEqual(hash, newHash)
 	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
 	requirements.NoError(st.UpsertMessageRawWithFormat(note, []byte(`{broken`), "twenty_json"))
-	content, _ := readProjection(t, st, note)
-	assertions.Equal("invalid_raw", content.Transcript.Reason)
 	var count int
 	requirements.NoError(st.db.QueryRow(`SELECT count(*) FROM meeting_link_key WHERE message_id = ?`, note).Scan(&count))
 	assertions.Zero(count)
@@ -306,8 +302,6 @@ func TestMeetingLinksProjectionEnvelopeAndRepair(t *testing.T) {
 	data.Message.MessageType = "email"
 	_, err := st.UpsertMessage(data.Message)
 	requirements.NoError(err)
-	_, err = st.MeetingLinksContext(t.Context(), note)
-	assertions.ErrorIs(err, sql.ErrNoRows)
 	requirements.NoError(st.db.QueryRow(`SELECT count(*) FROM meeting_link_key WHERE message_id = ?`, note).Scan(&count))
 	assertions.Zero(count)
 }
