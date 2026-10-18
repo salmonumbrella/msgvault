@@ -156,3 +156,15 @@ func TestCalendarTimezoneMeetingJournalRollsBackWithProjection(t *testing.T) {
 	assertions.Equal(seq, after)
 	assertions.Equal("ical:shared@example.org|", keys[note])
 }
+
+func TestMeetingCountKeysGranolaCalendarCopies(t *testing.T) {
+	st := newRFC822IDBackfillBackendStore(t)
+	_, own := calendarFixture(t, st, "own", singleLinkRaw("event", "shared@example.org"))
+	_, copyID := calendarFixture(t, st, "copy", singleLinkRaw("event", "shared@example.org"), "copy@example.org")
+	_, note := projectionFixture(t, st, "note", "granola_json", `{"owner":{"email":"calendar@example.com"},"calendar_event":{"calendar_event_id":"event","scheduled_start_time":"2027-03-14T10:00:00Z"}}`)
+	keys, _, err := st.MeetingCountKeysContext(t.Context())
+	require.NoError(t, err)
+	for _, id := range []int64{note, own, copyID} {
+		assert.Equal(t, "ical:shared@example.org|", keys[id], "message %d", id)
+	}
+}

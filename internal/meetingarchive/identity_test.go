@@ -1,7 +1,10 @@
 package meetingarchive
 
 import (
+	"bytes"
+	"context"
 	"encoding/json/v2"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -150,4 +153,24 @@ func TestMeetingContextIncludesPhoneAttendee(t *testing.T) {
 	require.Len(phones, 1, "archive and raw evidence merge into one phone attendee")
 	assert.Equal("Phone Example", phones[0].Name)
 	assert.NotNil(phones[0].ParticipantID)
+}
+
+func TestNormalizePeopleAvoidsCalendarScan(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := testutil.NewTestStore(t)
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	people := []Person{{Email: "human@example.org"}, {Email: "room@resource.calendar.google.com"}}
+	got, err := New(st).normalizePeople(t.Context(), people)
+	requirements.NoError(err)
+	assertions.Equal([]Person{{Email: "human@example.org"}, {}}, got)
+	assertions.NotContains(logs.String(), "calendar_event_attendees", "person normalization must not scan archived calendar attendees")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = New(st).normalizePeople(ctx, people)
+	requirements.ErrorIs(err, context.Canceled)
+	_, err = (*Archiver)(nil).normalizePeople(t.Context(), people)
+	requirements.ErrorIs(err, ErrUnavailable)
 }

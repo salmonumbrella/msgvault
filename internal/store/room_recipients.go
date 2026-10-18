@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"errors"
 	"strings"
 
 	"go.kenn.io/msgvault/internal/calevent"
@@ -30,28 +29,6 @@ func isRoomAddressWith(q querier, email string, resource bool) (bool, error) {
  EXISTS (SELECT 1 FROM conversation_participants cp JOIN messages m ON m.conversation_id = cp.conversation_id WHERE cp.participant_id = p.id AND coalesce(m.message_type, '') NOT IN ('calendar_event','meeting_transcript'))
  ))`, email).Scan(&history)
 	return !history, err
-}
-
-// RoomAddressesContext returns provider-verified resource addresses. An
-// event's resource flag describes only that event and cannot exclude the same
-// address from other archived meetings.
-func (s *Store) RoomAddressesContext(ctx context.Context) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT email FROM calendar_event_attendees WHERE role = 'room'`)
-	if err != nil {
-		return nil, err
-	}
-	rooms := make(map[string]bool)
-	for rows.Next() {
-		var email string
-		if err := rows.Scan(&email); err != nil {
-			return nil, errors.Join(err, rows.Close())
-		}
-		email = strings.ToLower(strings.TrimSpace(email))
-		if calevent.IsRoomAttendee(email, false) {
-			rooms[email] = true
-		}
-	}
-	return rooms, errors.Join(rows.Err(), rows.Close())
 }
 
 func removeRoomParticipantEdges(q querier, id int64) error {

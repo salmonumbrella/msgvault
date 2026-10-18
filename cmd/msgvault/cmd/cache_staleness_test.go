@@ -407,44 +407,40 @@ func TestCacheNeedsBuild_MeetingMutation(t *testing.T) {
 }
 
 func TestCalendarZoneChangeRepairsMeetingCountCache(t *testing.T) {
+	testCalendarEditRepairsMeetingCountCache(t, func(st *store.Store, source, event int64) error {
+		return st.UpdateSourceSyncConfig(source, `{"calendar_id":"calendar@example.org","time_zone":"Asia/Tokyo"}`)
+	})
+}
+
+func TestCalendarRawEditRepairsMeetingCountCache(t *testing.T) {
+	for _, tc := range []struct{ name, raw, format string }{
+		{"excluded occurrence", `{"id":"zone-event","iCalUID":"zone-change@example.org","start":{"date":"2027-03-14"},"end":{"date":"2027-03-15"},"recurrence":["RRULE:FREQ=DAILY;COUNT=2","EXDATE;VALUE=DATE:20270314"]}`, "gcal_json"},
+		{"removed projection", `{}`, "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testCalendarEditRepairsMeetingCountCache(t, func(st *store.Store, source, event int64) error {
+				return st.UpsertMessageRawWithFormat(event, []byte(tc.raw), tc.format)
+			})
+		})
+	}
+}
+
+func TestCalendarUIDEditRepairsMeetingCountCache(t *testing.T) {
+	testCalendarEditRepairsMeetingCountCache(t, func(st *store.Store, source, event int64) error {
+		return st.SetMessageMetadata(event, sql.NullString{String: `{"calendar_id":"calendar@example.org","ical_uid":"changed@example.org"}`, Valid: true})
+	})
+}
+
+func testCalendarEditRepairsMeetingCountCache(t *testing.T, edit func(*store.Store, int64, int64) error) {
+	t.Helper()
 	require := require.New(t)
 	assert := assert.New(t)
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "msgvault.db")
 	analyticsDir := filepath.Join(tmp, "analytics")
-	st, err := store.Open(dbPath)
-	require.NoError(err)
-	require.NoError(st.InitSchema())
-	calendarSource, err := st.GetOrCreateSource("gcal", "calendar@example.org")
-	require.NoError(err)
-	require.NoError(st.UpdateSourceSyncConfig(calendarSource.ID,
-		`{"calendar_id":"calendar@example.org","time_zone":"UTC"}`))
-	noteSource, err := st.GetOrCreateSource("twenty", "recordings@example.org")
-	require.NoError(err)
-	eventID, err := st.PersistMessage(&store.MessagePersistData{
-		Message: &store.Message{
-			SourceID: calendarSource.ID, SourceMessageID: "zone-event", MessageType: "calendar_event",
-			SentAt: sql.NullTime{Time: time.Date(2027, 3, 14, 0, 0, 0, 0, time.UTC), Valid: true},
-		},
-		Conversation: &store.ConversationPersistData{SourceConversationID: "zone-event", ConversationType: "calendar"},
-		RawFormat:    "gcal_json",
-		RawMIME:      []byte(`{"id":"zone-event","iCalUID":"zone-change@example.org","start":{"date":"2027-03-14"},"end":{"date":"2027-03-15"},"recurrence":["RRULE:FREQ=DAILY;COUNT=2"]}`),
-		Metadata:     &sql.NullString{String: `{"calendar_id":"calendar@example.org","ical_uid":"zone-change@example.org"}`, Valid: true},
-	})
-	require.NoError(err)
-	noteID, err := st.PersistMessage(&store.MessagePersistData{
-		Message: &store.Message{
-			SourceID: noteSource.ID, SourceMessageID: "zone-note", MessageType: "meeting_transcript",
-			SentAt: sql.NullTime{Time: time.Date(2027, 3, 14, 0, 0, 0, 0, time.UTC), Valid: true},
-		},
-		Conversation: &store.ConversationPersistData{SourceConversationID: "zone-note", ConversationType: "meeting"},
-		RawFormat:    "twenty_json",
-		RawMIME:      []byte(`{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"zone-change@example.org","startsAt":"2027-03-14T00:00:00Z"}}`),
-	})
-	require.NoError(err)
-	require.NoError(st.Close())
+	sourceID, eventID, noteID := persistCalendarCacheFixture(t, dbPath)
 
-	_, err = buildCache(dbPath, analyticsDir, true)
+	_, err := buildCache(dbPath, analyticsDir, true)
 	require.NoError(err)
 	duckDB, err := sql.Open("duckdb", "")
 	require.NoError(err)
@@ -454,10 +450,9 @@ func TestCalendarZoneChangeRepairsMeetingCountCache(t *testing.T) {
 	require.NoError(duckDB.QueryRow(`SELECT count(*) FROM read_parquet(?) WHERE message_id IN (?, ?)`, keysPath, eventID, noteID).Scan(&linkedCount))
 	assert.Equal(1, linkedCount, "the transcript has an occurrence key; the series master stays separate")
 
-	st, err = store.Open(dbPath)
+	st, err := store.Open(dbPath)
 	require.NoError(err)
-	require.NoError(st.UpdateSourceSyncConfig(calendarSource.ID,
-		`{"calendar_id":"calendar@example.org","time_zone":"Asia/Tokyo"}`))
+	require.NoError(edit(st, sourceID, eventID))
 	require.NoError(st.Close())
 	stale := cacheNeedsBuild(dbPath, analyticsDir)
 	assert.True(stale.NeedsBuild)
@@ -469,7 +464,7 @@ func TestCalendarZoneChangeRepairsMeetingCountCache(t *testing.T) {
 	assert.False(cacheNeedsBuild(dbPath, analyticsDir).NeedsBuild)
 	var remainingCount int
 	require.NoError(duckDB.QueryRow(`SELECT count(*) FROM read_parquet(?) WHERE message_id IN (?, ?)`, keysPath, eventID, noteID).Scan(&remainingCount))
-	assert.Zero(remainingCount, "a zone change must refresh keys for linked event and transcript rows")
+	assert.Zero(remainingCount, "a calendar edit must refresh linked transcript keys")
 }
 
 func TestCacheNeedsBuildMixedNewMessagesAndRelationshipDrift(t *testing.T) {
@@ -703,4 +698,41 @@ func TestLabelsOnNewMessageKeepCacheBuildIncremental(t *testing.T) {
 	assert.EqualValues(2, result.Rows[0][0])
 	assert.EqualValues(1, result.Rows[0][1])
 	assert.False(cacheNeedsBuild(c.DatabaseDSN(), c.AnalyticsDir()).NeedsBuild)
+}
+
+func persistCalendarCacheFixture(t *testing.T, dbPath string) (int64, int64, int64) {
+	t.Helper()
+	require := require.New(t)
+	st, err := store.Open(dbPath)
+	require.NoError(err)
+	require.NoError(st.InitSchema())
+	calendarSource, err := st.GetOrCreateSource("gcal", "calendar@example.org")
+	require.NoError(err)
+	require.NoError(st.UpdateSourceSyncConfig(calendarSource.ID,
+		`{"calendar_id":"calendar@example.org","time_zone":"UTC"}`))
+	noteSource, err := st.GetOrCreateSource("twenty", "recordings@example.org")
+	require.NoError(err)
+	eventID, err := st.PersistMessage(&store.MessagePersistData{
+		Message: &store.Message{
+			SourceID: calendarSource.ID, SourceMessageID: "zone-event", MessageType: "calendar_event",
+			SentAt: sql.NullTime{Time: time.Date(2027, 3, 14, 0, 0, 0, 0, time.UTC), Valid: true},
+		},
+		Conversation: &store.ConversationPersistData{SourceConversationID: "zone-event", ConversationType: "calendar"},
+		RawFormat:    "gcal_json",
+		RawMIME:      []byte(`{"id":"zone-event","iCalUID":"zone-change@example.org","start":{"date":"2027-03-14"},"end":{"date":"2027-03-15"},"recurrence":["RRULE:FREQ=DAILY;COUNT=2"]}`),
+		Metadata:     &sql.NullString{String: `{"calendar_id":"calendar@example.org","ical_uid":"zone-change@example.org"}`, Valid: true},
+	})
+	require.NoError(err)
+	noteID, err := st.PersistMessage(&store.MessagePersistData{
+		Message: &store.Message{
+			SourceID: noteSource.ID, SourceMessageID: "zone-note", MessageType: "meeting_transcript",
+			SentAt: sql.NullTime{Time: time.Date(2027, 3, 14, 0, 0, 0, 0, time.UTC), Valid: true},
+		},
+		Conversation: &store.ConversationPersistData{SourceConversationID: "zone-note", ConversationType: "meeting"},
+		RawFormat:    "twenty_json",
+		RawMIME:      []byte(`{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"zone-change@example.org","startsAt":"2027-03-14T00:00:00Z"}}`),
+	})
+	require.NoError(err)
+	require.NoError(st.Close())
+	return calendarSource.ID, eventID, noteID
 }

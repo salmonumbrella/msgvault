@@ -60,12 +60,19 @@ func (s *Store) MeetingCountKeysContext(ctx context.Context) (keys map[int64]str
 				}
 			}
 			if shared {
+				copies, err := s.resolveMeetingIdentity(ctx, r, identity, &budget)
+				if errors.Is(err, ErrQueryTooBroad) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
+					continue
+				}
+				if err != nil {
+					return fmt.Errorf("resolve calendar copies for transcript %d: %w", id, err)
+				}
 				if identity.ICalUID != "" {
 					keys[id] = "ical:" + identity.ICalUID + "|" + identity.OccurrenceKey
 				} else {
 					keys[id] = fmt.Sprintf("event:%d|%s", identity.EventMessageID, identity.OccurrenceKey)
 				}
-				for _, occurrence := range occurrences {
+				for _, occurrence := range copies {
 					if occurrence.Row.Event.Kind != meetingSeriesKind {
 						keys[occurrence.Row.MessageID] = keys[id]
 					}

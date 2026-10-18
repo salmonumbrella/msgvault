@@ -48,7 +48,7 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 		if err != nil {
 			return fmt.Errorf("clear calendar projection: %w", err)
 		}
-		return nil
+		return s.journalCalendarMeetingLinks(ctx, tx)
 	}
 	if messageType.String != "calendar_event" {
 		return clearProjection()
@@ -73,7 +73,10 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 	if !ok {
 		return clearProjection()
 	}
-	canonical, err := json.Marshal(event)
+	canonical, err := json.Marshal(struct {
+		Event    calevent.Event
+		Metadata string
+	}{event, metadata.String})
 	if err != nil {
 		return fmt.Errorf("hash calendar projection: %w", err)
 	}
@@ -109,7 +112,10 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 	if _, err := q.Exec(query, values...); err != nil {
 		return fmt.Errorf("write calendar projection: %w", err)
 	}
-	return replaceCalendarAttendees(ctx, tx, messageID, event.Attendees)
+	if err := replaceCalendarAttendees(ctx, tx, messageID, event.Attendees); err != nil {
+		return err
+	}
+	return s.journalCalendarMeetingLinks(ctx, tx)
 }
 
 func replaceCalendarAttendees(ctx context.Context, tx *loggedTx, messageID int64, attendees []calevent.Attendee) error {
@@ -186,7 +192,7 @@ func (s *Store) refreshSourceCalendarEventsTx(ctx context.Context, tx *loggedTx,
 			return closeErr
 		}
 		if len(ids) == 0 {
-			return s.journalCalendarMeetingLinks(ctx, tx)
+			return nil
 		}
 		for _, id := range ids {
 			if err := s.lockMeetingEvidenceWith(ctx, tx, id); err != nil {

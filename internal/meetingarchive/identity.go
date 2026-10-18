@@ -52,12 +52,10 @@ func persistData(person Person) store.ParticipantPersistData {
 // Normalized returns the person with trimmed, lowercased emails, E.164-only
 // phones, invalid values dropped, and extra identities de-duplicated against
 // the primary ones. A room email excludes the whole person.
-func (p Person) Normalized() Person { return p.normalized(nil) }
-
-func (p Person) normalized(rooms map[string]bool) Person {
+func (p Person) Normalized() Person {
 	for _, email := range append([]string{p.Email}, p.OtherEmails...) {
 		email = normalizePersonEmail(email)
-		if email != "" && calevent.IsRoomAttendee(email, rooms[email]) {
+		if email != "" && calevent.IsRoomAttendee(email, false) {
 			return Person{}
 		}
 	}
@@ -162,13 +160,12 @@ func (a *Archiver) normalizePeople(ctx context.Context, people []Person) ([]Pers
 	if a == nil || a.store == nil {
 		return nil, ErrUnavailable
 	}
-	rooms, err := a.store.RoomAddressesContext(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("read calendar rooms: %w", err)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	out := make([]Person, len(people))
 	for i, person := range people {
-		out[i] = person.normalized(rooms)
+		out[i] = person.Normalized()
 	}
 	return out, nil
 }

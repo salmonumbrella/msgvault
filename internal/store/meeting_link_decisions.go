@@ -233,7 +233,7 @@ func (s *Store) journalMeetingLinks(ctx context.Context, tx *loggedTx, memberID 
 }
 
 // journalCalendarMeetingLinks invalidates cached count keys after calendar
-// projection changes. A source zone change can alter automatic links for any
+// projection changes. Calendar evidence can alter automatic links for any
 // transcript key and can make a previously stored decision stop resolving.
 func (s *Store) journalCalendarMeetingLinks(ctx context.Context, tx *loggedTx) error {
 	if s.IsPostgreSQL() {
