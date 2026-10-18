@@ -13,6 +13,7 @@ import (
 
 	"go.kenn.io/msgvault/internal/calevent"
 	"go.kenn.io/msgvault/internal/calrecur"
+	"go.kenn.io/msgvault/internal/gcal/gcalmodel"
 )
 
 const calendarEventProjectionVersion = 1
@@ -54,19 +55,18 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("read calendar projection raw: %w", err)
 	}
-	raw, _, decodeErr := decodeMessageRawBounded(stored, compression, maxMeetingRawBytes, errMeetingRawTooLarge)
-	if decodeErr != nil {
+	if format.String != gcalmodel.RawFormat {
 		return clearProjection()
 	}
 	var config sql.NullString
 	if err := q.QueryRow(`SELECT sync_config FROM sources WHERE id = ?`, sourceID).Scan(&config); err != nil {
 		return fmt.Errorf("read calendar projection source: %w", err)
 	}
-	event, ok, decodeErr := calevent.Decode(format.String, raw, []byte(metadata.String), calendarConfigZone(config))
+	event, ok := decodeCalendarProjection(stored, compression, []byte(metadata.String), calendarConfigZone(config))
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if decodeErr != nil || !ok {
+	if !ok {
 		return clearProjection()
 	}
 	canonical, err := json.Marshal(event)
@@ -114,6 +114,20 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 		}
 	}
 	return nil
+}
+
+func decodeCalendarProjection(stored []byte, compression sql.NullString, metadata []byte, zone string) (calevent.Event, bool) {
+	raw, _, err := decodeMessageRawBounded(stored, compression, maxMeetingRawBytes, errMeetingRawTooLarge)
+	var event calevent.Event
+	var ok bool
+	if err == nil {
+		event, ok, err = calevent.Decode(gcalmodel.RawFormat, raw, metadata, zone)
+	}
+	if err != nil {
+		// Unknown bounds keep this message visible in the reader's unexpandable list.
+		return calevent.Event{Kind: "single"}, true
+	}
+	return event, ok
 }
 
 func calendarRecurrenceEnd(ctx context.Context, event calevent.Event) (*time.Time, string) {

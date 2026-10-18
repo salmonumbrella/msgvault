@@ -6,6 +6,9 @@ import (
 	"time"
 )
 
+// RawFormat identifies preserved Google Calendar event JSON.
+const RawFormat = "gcal_json"
+
 // Person is an organizer/creator reference on an event.
 type Person struct {
 	Email       string `json:"email,omitempty"`

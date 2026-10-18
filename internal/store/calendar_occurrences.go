@@ -66,7 +66,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 	}
 	remaining := calrecur.RequestReadBudget - len(rows)
 	if remaining < 0 {
-		return page, fmt.Errorf("%w; narrow the window", ErrQueryTooBroad)
+		return page, calendarRecurrenceBudgetError()
 	}
 	add := func(row CalendarEventRow, seriesID int64, o calrecur.Occurrence) {
 		e := row.Event
@@ -128,7 +128,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 				}
 				if errors.Is(err, calrecur.ErrBudgetExceeded) {
 					if remaining < 0 {
-						return page, fmt.Errorf("%w; narrow the window", ErrQueryTooBroad)
+						return page, calendarRecurrenceBudgetError()
 					}
 					page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: err.Error()})
 					continue
@@ -161,6 +161,10 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 		return cmp.Compare(a.MessageID, b.MessageID)
 	})
 	return page, nil
+}
+
+func calendarRecurrenceBudgetError() error {
+	return fmt.Errorf("%w; long-running series count steps from their start; a narrower window may not reduce the work", ErrQueryTooBroad)
 }
 
 func calendarRecurrenceExceptions(rows []CalendarEventRow) ([]calrecur.Exception, error) {

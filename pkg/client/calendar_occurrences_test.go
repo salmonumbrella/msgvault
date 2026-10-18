@@ -19,7 +19,7 @@ func TestCalendarOccurrenceGeneratedEmptyStrings(t *testing.T) {
 		StartDate: "2026-10-18", EndDate: "2026-10-19", Status: "confirmed",
 		Attendees: []generated.Attendee{{Email: "guest@example.com", DisplayName: "Guest", Role: "required", Rsvp: "accepted"}},
 	}
-	for _, name := range []string{"timed event", "untitled event", "unnamed attendee", "all empty"} {
+	for _, name := range []string{"timed event", "untitled event", "unnamed attendee", "attendee without email", "all empty"} {
 		t.Run(name, func(t *testing.T) {
 			assert := assert.New(t)
 			require := require.New(t)
@@ -33,6 +33,9 @@ func TestCalendarOccurrenceGeneratedEmptyStrings(t *testing.T) {
 			}
 			if name == "unnamed attendee" || name == "all empty" {
 				occurrence.Attendees[0].DisplayName = ""
+			}
+			if name == "attendee without email" || name == "all empty" {
+				occurrence.Attendees[0].Email = ""
 			}
 			require.NoError(occurrence.Validate())
 			raw, err := json.Marshal(occurrence)
@@ -52,6 +55,10 @@ func TestCalendarOccurrenceGeneratedEmptyStrings(t *testing.T) {
 			var displayName string
 			require.NoError(jsonv1.Unmarshal(attendees[0]["display_name"], &displayName))
 			assert.Equal(occurrence.Attendees[0].DisplayName, displayName)
+			require.Contains(attendees[0], "email")
+			var email string
+			require.NoError(jsonv1.Unmarshal(attendees[0]["email"], &email))
+			assert.Equal(occurrence.Attendees[0].Email, email)
 		})
 	}
 	for _, field := range []string{"Status", "Start", "End"} {

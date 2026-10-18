@@ -128,6 +128,7 @@ func RewriteGeneratedValidators(source []byte) ([]byte, error) {
 	}
 	// Required strings a response may send empty keep presence but lose their non-empty check.
 	for _, target := range [][3]string{
+		{"Attendee", "Email", "a"},
 		{"Attendee", "DisplayName", "a"},
 		{"CalendarOccurrence", "StartDate", "c"},
 		{"CalendarOccurrence", "EndDate", "c"},

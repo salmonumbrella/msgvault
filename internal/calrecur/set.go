@@ -241,9 +241,6 @@ func (s Set) parseRule(line string) (*rrule.ROption, error) {
 		return nil, unsupported(line, err)
 	}
 	opt.Dtstart = start
-	if _, err := rrule.NewRRule(*opt); err != nil {
-		return nil, unsupported(line, err)
-	}
 	return opt, nil
 }
 
@@ -278,9 +275,9 @@ func supportedRule(opt *rrule.ROption, seen map[string]bool, start time.Time) er
 	if opt.Freq == rrule.MONTHLY && (seen["BYMONTHDAY"] && (seen["BYDAY"] || seen["BYSETPOS"]) || seen["BYSETPOS"] && !seen["BYDAY"]) {
 		return errors.New("monthly recurrence requires BYMONTHDAY or BYDAY with optional BYSETPOS")
 	}
-	if opt.Freq == rrule.YEARLY && (seen["BYMONTH"] || seen["BYMONTHDAY"] || seen["BYDAY"]) &&
-		(!seen["BYMONTH"] || seen["BYMONTHDAY"] == seen["BYDAY"]) {
-		return errors.New("yearly selectors require BYMONTH with either BYMONTHDAY or BYDAY")
+	if opt.Freq == rrule.YEARLY && (seen["BYMONTHDAY"] || seen["BYDAY"]) &&
+		(!seen["BYMONTH"] || seen["BYMONTHDAY"] && seen["BYDAY"]) {
+		return errors.New("yearly day selectors require BYMONTH with either BYMONTHDAY or BYDAY")
 	}
 	hasPlain, hasOrdinal := false, false
 	for _, day := range opt.Byweekday {
@@ -384,7 +381,7 @@ func monthHasRuleDate(opt *rrule.ROption, start time.Time, year int, month time.
 		}
 		if len(opt.Bymonthday) == 0 && len(opt.Byweekday) == 0 {
 			if opt.Freq == rrule.MONTHLY && day != start.Day() ||
-				opt.Freq == rrule.YEARLY && (month != start.Month() || day != start.Day()) {
+				opt.Freq == rrule.YEARLY && (len(opt.Bymonth) == 0 && month != start.Month() || day != start.Day()) {
 				continue
 			}
 		}

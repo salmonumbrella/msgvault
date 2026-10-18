@@ -57,6 +57,32 @@ func TestListCalendarOccurrencesUnexpandable(t *testing.T) {
 	assertions.Equal(id, page.Unexpandable[0].MessageID)
 }
 
+func TestListCalendarOccurrencesYearlyByMonth(t *testing.T) {
+	assert, require := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, id := calendarFixture(t, st, "yearly", `{"id":"yearly","start":{"dateTime":"2027-03-02T17:00:00Z"},"end":{"dateTime":"2027-03-02T18:00:00Z"},"recurrence":["RRULE:FREQ=YEARLY;BYMONTH=3"]}`)
+	from := time.Date(2028, time.March, 1, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 1, 0))
+	require.NoError(err)
+	assert.Empty(page.Unexpandable)
+	require.Len(page.Occurrences, 1)
+	assert.Equal(id, page.Occurrences[0].MessageID)
+	assert.Equal("2028-03-02T17:00:00Z", page.Occurrences[0].Start.Format(time.RFC3339))
+}
+
+func TestListCalendarOccurrencesUndecodableEvent(t *testing.T) {
+	assert, require := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, id := calendarFixture(t, st, "unknown-zone", `{"id":"unknown-zone","start":{"date":"2027-03-02","timeZone":"Unknown/Zone"},"end":{"date":"2027-03-03","timeZone":"Unknown/Zone"}}`)
+	from := time.Date(2027, time.March, 1, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 1, 0))
+	require.NoError(err)
+	assert.Empty(page.Occurrences)
+	require.Len(page.Unexpandable, 1)
+	assert.Equal(id, page.Unexpandable[0].MessageID)
+	assert.Equal("missing event bounds", page.Unexpandable[0].Reason)
+}
+
 func TestListCalendarOccurrencesSharesRequestBudget(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
@@ -72,7 +98,8 @@ func TestListCalendarOccurrencesSharesRequestBudget(t *testing.T) {
 		}
 	}
 	_, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 1, 0))
-	assertions.ErrorIs(err, ErrQueryTooBroad)
+	requirements.ErrorIs(err, ErrQueryTooBroad)
+	requirements.ErrorContains(err, "long-running series count steps from their start; a narrower window may not reduce the work")
 }
 
 func TestListCalendarOccurrencesOrphanExceptions(t *testing.T) {

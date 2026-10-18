@@ -377,7 +377,6 @@ func TestParseSetRejectsUnsupportedSelectors(t *testing.T) {
 		"FREQ=MONTHLY;BYMONTHDAY=2;BYSETPOS=1",
 		"FREQ=MONTHLY;BYSETPOS=1",
 		"FREQ=MONTHLY;WKST=MO",
-		"FREQ=YEARLY;BYMONTH=3",
 		"FREQ=YEARLY;BYMONTHDAY=2",
 		"FREQ=YEARLY;BYDAY=TU",
 		"FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=2;BYDAY=TU",
@@ -389,6 +388,28 @@ func TestParseSetRejectsUnsupportedSelectors(t *testing.T) {
 			require.ErrorIs(t, err, ErrUnsupportedRecurrence)
 		})
 	}
+}
+
+func TestYearlyByMonthInheritsStartDay(t *testing.T) {
+	for _, tc := range []struct {
+		name, start, rule, want string
+	}{
+		{"same month", "2027-03-02T17:00:00Z", "RRULE:FREQ=YEARLY;BYMONTH=3", "2028-03-02T17:00:00Z"},
+		{"different month", "2027-01-02T17:00:00Z", "RRULE:FREQ=YEARLY;BYMONTH=3", "2028-03-02T17:00:00Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require := require.New(t)
+			set, err := ParseSet(instant(t, tc.start), false, "", time.UTC, []string{tc.rule})
+			require.NoError(err)
+			got, _, err := Expand(t.Context(), set, time.Hour, 0, nil, instant(t, "2028-03-01T00:00:00Z"), instant(t, "2028-04-01T00:00:00Z"), 100)
+			require.NoError(err)
+			require.Len(got, 1)
+			assert.Equal(t, instant(t, tc.want), got[0].Start)
+		})
+	}
+	_, err := ParseSet(instant(t, "2027-01-30T17:00:00Z"), false, "", time.UTC, []string{"RRULE:FREQ=YEARLY;BYMONTH=2"})
+	require.ErrorIs(t, err, ErrUnsupportedRecurrence)
+	assert.Contains(t, err.Error(), "do not reach a recurrence date")
 }
 
 func TestParseSetRejectsImpossibleMonthDays(t *testing.T) {

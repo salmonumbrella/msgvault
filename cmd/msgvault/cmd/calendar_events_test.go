@@ -43,7 +43,7 @@ func TestCalendarEventsCommand(t *testing.T) {
 		{name: "json", args: []string{"--json"}, page: store.CalendarOccurrencePage{Occurrences: []store.CalendarOccurrence{{MessageID: 378, SeriesMessageID: 377, Subject: "Standup", Start: start, End: start.Add(time.Hour)}}, Unexpandable: []store.CalendarUnexpandable{}}, want: `"message_id":378`},
 		{name: "deleted", page: store.CalendarOccurrencePage{Occurrences: []store.CalendarOccurrence{{MessageID: 378, Subject: "Removed event", Status: "confirmed", DeletedFromSource: true, Start: start, End: start.Add(time.Hour)}}}, want: "deleted"},
 		{name: "terminal controls", page: store.CalendarOccurrencePage{Occurrences: []store.CalendarOccurrence{{MessageID: 378, Subject: "Planning\x1b[31m red\x1b[0m\nmeeting", Status: "confirmed", Start: start, End: start.Add(time.Hour)}}}, want: "Planning red meeting"},
-		{name: "too broad", err: &daemonclient.APIError{Status: 400, Code: "query_too_broad", Message: "calendar query is too broad; narrow the window"}, wantErr: "calendar query is too broad; narrow the window"},
+		{name: "too broad", err: &daemonclient.APIError{Status: 400, Code: "query_too_broad", Message: "calendar query is too broad; long-running series count steps from their start; a narrower window may not reduce the work"}, wantErr: "calendar query is too broad; long-running series count steps from their start; a narrower window may not reduce the work"},
 		{name: "series cap", err: &daemonclient.APIError{Status: 400, Code: "query_too_broad", Message: "calendar query is too broad: more than 2000 recurring series overlap the window; a narrower window will not reduce open-ended series"}, wantErr: "calendar query is too broad: more than 2000 recurring series overlap the window; a narrower window will not reduce open-ended series"},
 		{name: "old daemon", version: "3.23.0", wantErr: "calendar events require daemon API schema 3.24.0 or newer"},
 		{name: "account", args: []string{"--account", "calendar@example.com"}, wantErr: "--account is only valid"},
@@ -89,6 +89,7 @@ func TestCalendarEventsCommand(t *testing.T) {
 			}
 			assertions.Equal(time.Date(2027, 3, 1, 0, 0, 0, 0, time.Local), fake.from)
 			if tc.name == "table" {
+				assertions.Contains(out.String(), "END (EXCL)")
 				assertions.Contains(out.String(), "2027-03-03")
 				assertions.Contains(out.String(), "2027-03-04")
 				assertions.Contains(out.String(), "ID")

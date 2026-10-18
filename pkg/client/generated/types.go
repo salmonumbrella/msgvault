@@ -543,7 +543,7 @@ func (a AttachmentSearchResult) Validate() error {
 
 type Attendee struct {
 	DisplayName string `json:"display_name" validate:"omitempty"`
-	Email       string `json:"email" validate:"required"`
+	Email       string `json:"email" validate:"omitempty"`
 	IsSelf      bool   `json:"is_self"`
 	Role        string `json:"role" validate:"required"`
 	Rsvp        string `json:"rsvp" validate:"required"`

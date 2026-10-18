@@ -148,6 +148,7 @@ func TestRewriteGeneratedValidatorsRejectsAmbiguousDailyNotePersonIDValidators(t
 
 func generatedValidatorFixture() string {
 	return `type Attendee struct {
+	Email string
 	DisplayName string
 }
 func (a Attendee) Validate() error {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"go.kenn.io/msgvault/internal/calrecur"
+	"go.kenn.io/msgvault/internal/gcal/gcalmodel"
 )
 
 // IsRoomAttendee identifies provider resource addresses and explicit resources.
@@ -40,7 +41,7 @@ type Event struct {
 // Decode reads a provider snapshot with the source calendar's time zone.
 func Decode(rawFormat string, raw, metadata []byte, calendarZone string) (Event, bool, error) {
 	switch rawFormat {
-	case "gcal_json":
+	case gcalmodel.RawFormat:
 		return decodeGoogleEvent(raw, metadata, calendarZone)
 	default:
 		return Event{}, false, nil

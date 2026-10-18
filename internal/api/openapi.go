@@ -988,6 +988,7 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 	schemas := doc.Components.Schemas.Map()
 	// These response properties stay required in JSON, but allow empty strings.
 	for _, field := range []struct{ schema, property string }{
+		{"Attendee", "email"},
 		{"Attendee", "display_name"},
 		{"CalendarOccurrence", "start_date"},
 		{"CalendarOccurrence", "end_date"},

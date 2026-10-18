@@ -21,7 +21,7 @@ const (
 	// ConversationType is the conversations.conversation_type value.
 	ConversationType = "calendar"
 	// RawFormat is the message_raw.raw_format tag for the stored event JSON.
-	RawFormat = "gcal_json"
+	RawFormat = gcalmodel.RawFormat
 )
 
 // Event status values returned by the API.
