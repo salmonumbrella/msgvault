@@ -61,21 +61,23 @@ func bulkCalendarCandidates(t *testing.T, st *Store, sourceID, conversationID in
 
 func TestCalendarEventRowsManyExceptionsBounded(t *testing.T) {
 	assertions := assert.New(t)
+	requirements := require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
 	data, _ := calendarFixture(t, st, "cap-master", `{"id":"cap-series","start":{"date":"1970-01-01"},"end":{"date":"1970-01-02"},"recurrence":["RRULE:FREQ=DAILY"]}`)
 	bulkCalendarCandidates(t, st, data.Message.SourceID, data.Message.ConversationID, "exception", 20001)
 	rows, err := calendarWindow(t, st, "2027-03-14T00:00:00Z", "2027-03-15T00:00:00Z")
-	require.NoError(t, err)
+	requirements.NoError(err)
 	assertions.Len(rows, 1)
 	from := time.Date(2027, 3, 14, 0, 0, 0, 0, time.UTC)
 	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
-	require.NoError(t, err)
+	requirements.NoError(err)
 	assertions.Len(page.Occurrences, 1)
 	// The same budget still rejects exceptions that actually affect the window.
 	_, err = st.db.Exec(`UPDATE calendar_events SET original_start_date = '2027-03-14' WHERE kind = 'exception'`)
-	require.NoError(t, err)
+	requirements.NoError(err)
 	_, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
-	assertions.ErrorIs(err, ErrQueryTooBroad)
+	requirements.ErrorIs(err, ErrQueryTooBroad)
+	assertions.Contains(err.Error(), "narrow the window")
 }
 
 func TestCalendarEventRowsHardSeriesCap(t *testing.T) {
@@ -83,9 +85,16 @@ func TestCalendarEventRowsHardSeriesCap(t *testing.T) {
 	st := newRFC822IDBackfillBackendStore(t)
 	data, _ := calendarFixture(t, st, "cap-master", calendarRaw)
 	bulkCalendarCandidates(t, st, data.Message.SourceID, data.Message.ConversationID, "series", 2001)
-	rows, err := calendarWindow(t, st, "2027-03-14T00:00:00Z", "2027-03-15T00:00:00Z")
-	require.ErrorIs(t, err, ErrQueryTooBroad)
-	assertions.Empty(rows)
+	_, err := st.db.Exec(`UPDATE calendar_events SET start_at = '2027-03-01 00:00:00+00:00', end_at = '2027-03-02 00:00:00+00:00', start_date = '2027-03-01', end_date = '2027-03-02', recurrence_json = '["RRULE:FREQ=DAILY"]' WHERE kind = 'series'`)
+	require.NoError(t, err)
+	from := time.Date(2027, 3, 14, 0, 0, 0, 0, time.UTC)
+	for _, width := range []time.Duration{24 * time.Hour, time.Hour} {
+		_, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.Add(width))
+		require.ErrorIs(t, err, ErrQueryTooBroad)
+		assertions.Contains(err.Error(), "more than 2000 recurring series overlap the window")
+		assertions.Contains(err.Error(), "a narrower window will not reduce open-ended series")
+		assertions.NotContains(err.Error(), "narrow the window")
+	}
 }
 
 func TestCalendarEventRowsBudgetRejectsBeforeDecoding(t *testing.T) {

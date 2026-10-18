@@ -181,3 +181,38 @@ func TestListCalendarOccurrencesAllDayPartialWindow(t *testing.T) {
 		})
 	}
 }
+
+func TestListCalendarOccurrencesMultiDayExceptions(t *testing.T) {
+	for _, allDay := range []bool{false, true} {
+		for _, moved := range []bool{false, true} {
+			t.Run(fmt.Sprintf("allDay=%t/moved=%t", allDay, moved), func(t *testing.T) {
+				assertions, requirements := assert.New(t), require.New(t)
+				st := newRFC822IDBackfillBackendStore(t)
+				start, end := `{"dateTime":"2027-03-01T09:00:00Z"}`, `{"dateTime":"2027-03-08T09:00:00Z"}`
+				newStart, newEnd := `{"dateTime":"2027-04-01T09:00:00Z"}`, `{"dateTime":"2027-04-08T09:00:00Z"}`
+				if allDay {
+					start, end = `{"date":"2027-03-01"}`, `{"date":"2027-03-08"}`
+					newStart, newEnd = `{"date":"2027-04-01"}`, `{"date":"2027-04-08"}`
+				}
+				_, master := calendarFixture(t, st, "master", fmt.Sprintf(`{"id":"weekly","status":"confirmed","start":%s,"end":%s,"recurrence":["RRULE:FREQ=WEEKLY;COUNT=2"]}`, start, end))
+				fields := `"status":"cancelled"`
+				if moved {
+					fields = fmt.Sprintf(`"status":"confirmed","start":%s,"end":%s`, newStart, newEnd)
+				}
+				_, exception := calendarFixture(t, st, "exception", fmt.Sprintf(`{"id":"exception","recurringEventId":"weekly","originalStartTime":%s,%s}`, start, fields))
+				from := time.Date(2027, 3, 5, 0, 0, 0, 0, time.UTC)
+				page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+				requirements.NoError(err)
+				assertions.Empty(page.Unexpandable)
+				if moved {
+					assertions.Empty(page.Occurrences, "the week-long occurrence moved to April")
+					return
+				}
+				requirements.Len(page.Occurrences, 1)
+				assertions.Equal(exception, page.Occurrences[0].MessageID)
+				assertions.Equal(master, page.Occurrences[0].SeriesMessageID)
+				assertions.Equal("cancelled", page.Occurrences[0].Status)
+			})
+		}
+	}
+}

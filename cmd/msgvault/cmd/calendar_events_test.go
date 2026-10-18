@@ -41,7 +41,9 @@ func TestCalendarEventsCommand(t *testing.T) {
 		{name: "table", page: store.CalendarOccurrencePage{Occurrences: []store.CalendarOccurrence{{MessageID: 378, SeriesMessageID: 377, Subject: "Standup", Status: "confirmed", Start: start, End: start.Add(time.Hour)}, {MessageID: 412, Subject: "Offsite", Status: "confirmed", AllDay: true, StartDate: "2027-03-03", EndDate: "2027-03-04"}}, Unexpandable: []store.CalendarUnexpandable{{MessageID: 500, Reason: "unsupported recurrence"}}}, want: "Standup", wantWarning: "1 event could not be expanded: message 500 (unsupported recurrence)"},
 		{name: "empty", want: "No archived calendar events from 2027-03-01 to 2027-04-01."},
 		{name: "json", args: []string{"--json"}, page: store.CalendarOccurrencePage{Occurrences: []store.CalendarOccurrence{{MessageID: 378, SeriesMessageID: 377, Subject: "Standup", Start: start, End: start.Add(time.Hour)}}, Unexpandable: []store.CalendarUnexpandable{}}, want: `"message_id":378`},
-		{name: "too broad", err: &daemonclient.APIError{Status: 400, Code: "query_too_broad", Message: "window too broad"}, wantErr: "calendar query is too broad; narrow the window"},
+		{name: "deleted", page: store.CalendarOccurrencePage{Occurrences: []store.CalendarOccurrence{{MessageID: 378, Subject: "Removed event", Status: "confirmed", DeletedFromSource: true, Start: start, End: start.Add(time.Hour)}}}, want: "deleted"},
+		{name: "too broad", err: &daemonclient.APIError{Status: 400, Code: "query_too_broad", Message: "calendar query is too broad; narrow the window"}, wantErr: "calendar query is too broad; narrow the window"},
+		{name: "series cap", err: &daemonclient.APIError{Status: 400, Code: "query_too_broad", Message: "calendar query is too broad: more than 2000 recurring series overlap the window; a narrower window will not reduce open-ended series"}, wantErr: "calendar query is too broad: more than 2000 recurring series overlap the window; a narrower window will not reduce open-ended series"},
 		{name: "old daemon", version: "3.23.0", wantErr: "calendar events require daemon API schema 3.24.0 or newer"},
 		{name: "account", args: []string{"--account", "calendar@example.com"}, wantErr: "--account is only valid"},
 		{name: "dry run", args: []string{"--dry-run"}, wantErr: "--dry-run is only valid"},
@@ -71,8 +73,9 @@ func TestCalendarEventsCommand(t *testing.T) {
 			err := root.Execute()
 			if tc.wantErr != "" {
 				requirements.ErrorContains(err, tc.wantErr)
-				if tc.name == "too broad" {
+				if tc.name == "too broad" || tc.name == "series cap" {
 					requirements.EqualError(err, tc.wantErr)
+					requirements.ErrorIs(err, store.ErrQueryTooBroad)
 				}
 				return
 			}

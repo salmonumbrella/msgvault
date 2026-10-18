@@ -14,7 +14,7 @@ import (
 	"go.kenn.io/msgvault/internal/calrecur"
 )
 
-var ErrQueryTooBroad = errors.New("calendar query is too broad; narrow the window")
+var ErrQueryTooBroad = errors.New("calendar query is too broad")
 
 type CalendarEventRow struct {
 	MessageID, SourceID int64
@@ -52,7 +52,7 @@ func queryCalendarEventRowsWithinBudget(ctx context.Context, r *loggedDB, predic
 		return nil, fmt.Errorf("probe calendar event breadth: %w", err)
 	}
 	if count > budget {
-		return nil, ErrQueryTooBroad
+		return nil, fmt.Errorf("%w; narrow the window", ErrQueryTooBroad)
 	}
 	return queryCalendarEventRows(ctx, r, predicate, args, budget+1)
 }
@@ -156,7 +156,7 @@ func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, from, to time.T
 	lower, upper := from.UTC().Add(-calendarCandidateMargin), to.UTC().Add(calendarCandidateMargin)
 	// RDATE can precede DTSTART by any amount. Retain those masters for exact
 	// expansion rather than treating their stored start as the earliest instance.
-	masters, err := queryCalendarEventRowsWithinBudget(ctx, r, `e.kind = 'series' AND (e.start_at IS NULL OR e.start_at < ? OR e.recurrence_json LIKE '%RDATE%') AND (e.recurrence_end_at IS NULL OR e.recurrence_end_at >= ?)`, []any{upper, lower}, maxCalendarSeries)
+	masters, err := queryCalendarSeriesWithinBudget(ctx, r, `e.kind = 'series' AND (e.start_at IS NULL OR e.start_at < ? OR e.recurrence_json LIKE '%RDATE%') AND (e.recurrence_end_at IS NULL OR e.recurrence_end_at >= ?)`, []any{upper, lower})
 	if err != nil {
 		return nil, err
 	}
@@ -167,12 +167,7 @@ func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, from, to time.T
 	if err != nil {
 		return nil, err
 	}
-	// Exceptions can remove an original occurrence from the window or move into it.
-	predicate := `e.kind = 'exception' AND ((e.start_at < ? AND e.end_at >= ?) OR
-  (e.original_start_at >= ? AND e.original_start_at < ?) OR
-   (e.original_start_date >= ? AND e.original_start_date < ?) OR
-   (e.original_start_at IS NULL AND e.original_start_date = ''))`
-	exceptions, err := queryCalendarEventRowsWithinBudget(ctx, r, predicate, []any{upper, lower, lower, upper, lower.Format(time.DateOnly), upper.AddDate(0, 0, 1).Format(time.DateOnly)}, maxCalendarExceptions)
+	exceptions, err := queryCalendarExceptionsInWindow(ctx, r, masters, lower, upper)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +189,7 @@ func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, from, to time.T
 		predicate := `e.kind = 'series' AND EXISTS (SELECT 1 FROM calendar_events x JOIN messages mx ON mx.id = x.message_id
    WHERE x.message_id IN (` + placeholders(len(args)) + `)
    AND x.series_provider_id = e.provider_event_id AND mx.source_id = m.source_id)`
-		parents, err := queryCalendarEventRowsWithinBudget(ctx, r, predicate, args, maxCalendarSeries)
+		parents, err := queryCalendarSeriesWithinBudget(ctx, r, predicate, args)
 		if err != nil {
 			return nil, err
 		}
@@ -204,7 +199,7 @@ func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, from, to time.T
 				masters = append(masters, row)
 				seriesCount++
 				if seriesCount > maxCalendarSeries {
-					return nil, ErrQueryTooBroad
+					return nil, calendarSeriesLimitError()
 				}
 			}
 		}
@@ -215,6 +210,46 @@ func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, from, to time.T
 	}
 	slices.SortFunc(out, func(a, b CalendarEventRow) int { return cmp.Compare(a.MessageID, b.MessageID) })
 	return out, nil
+}
+
+func calendarSeriesLimitError() error {
+	return fmt.Errorf("%w: more than %d recurring series overlap the window; a narrower window will not reduce open-ended series", ErrQueryTooBroad, maxCalendarSeries)
+}
+
+func queryCalendarSeriesWithinBudget(ctx context.Context, r *loggedDB, predicate string, args []any) ([]CalendarEventRow, error) {
+	rows, err := queryCalendarEventRowsWithinBudget(ctx, r, predicate, args, maxCalendarSeries)
+	if errors.Is(err, ErrQueryTooBroad) {
+		return nil, calendarSeriesLimitError()
+	}
+	return rows, err
+}
+
+func queryCalendarExceptionsInWindow(ctx context.Context, r *loggedDB, masters []CalendarEventRow, lower, upper time.Time) ([]CalendarEventRow, error) {
+	// Include the full nominal interval of an occurrence cancelled or moved away.
+	originalLower := lower.Add(-calendarMasterDuration(masters))
+	predicate := `e.kind = 'exception' AND ((e.start_at < ? AND e.end_at >= ?) OR
+  (e.original_start_at >= ? AND e.original_start_at < ?) OR
+   (e.original_start_date >= ? AND e.original_start_date < ?) OR
+   (e.original_start_at IS NULL AND e.original_start_date = ''))`
+	return queryCalendarEventRowsWithinBudget(ctx, r, predicate, []any{upper, lower, originalLower, upper, originalLower.Format(time.DateOnly), upper.AddDate(0, 0, 1).Format(time.DateOnly)}, maxCalendarExceptions)
+}
+
+func calendarMasterDuration(masters []CalendarEventRow) time.Duration {
+	var longest time.Duration
+	for _, row := range masters {
+		e := row.Event
+		if e.Start != nil && e.End != nil {
+			longest = max(longest, e.End.Sub(*e.Start))
+		}
+		if e.AllDay {
+			start, startErr := time.Parse(time.DateOnly, e.StartDate)
+			end, endErr := time.Parse(time.DateOnly, e.EndDate)
+			if startErr == nil && endErr == nil {
+				longest = max(longest, end.Sub(start))
+			}
+		}
+	}
+	return longest
 }
 
 // Sparse cancellations retain details omitted by the provider. Raw field presence

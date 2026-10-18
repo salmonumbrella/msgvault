@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,6 +47,7 @@ func TestCalendarEventsRoute(t *testing.T) {
 		{"missing", "/api/v1/calendar/events", "", nil, 400, "invalid_argument"},
 		{"reversed", strings.Replace(path, "2027-04-01", "2027-02-01", 1), "", nil, 400, "invalid_argument"},
 		{"broad", path, "", store.ErrQueryTooBroad, 400, "query_too_broad"},
+		{"series cap", path, "", fmt.Errorf("%w: more than 2000 recurring series overlap the window; a narrower window will not reduce open-ended series", store.ErrQueryTooBroad), 400, "more than 2000 recurring series overlap the window; a narrower window will not reduce open-ended series"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backend.err = tc.err

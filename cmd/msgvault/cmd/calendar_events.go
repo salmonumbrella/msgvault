@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 )
 
 const calendarEventsMinAPISchemaVersion = "3.24.0"
+const calendarEventDeletedStatus = "deleted"
 
 type calendarEventsClient interface {
 	ListCalendarOccurrencesContext(ctx context.Context, from, to time.Time) (store.CalendarOccurrencePage, error)
@@ -74,7 +76,7 @@ func newCalendarEventsCommand(open calendarEventsOpen) *cobra.Command {
 		if err != nil {
 			var apiError *daemonclient.APIError
 			if errors.As(err, &apiError) && apiError.Code == "query_too_broad" {
-				return store.ErrQueryTooBroad
+				return fmt.Errorf("%w%s", store.ErrQueryTooBroad, strings.TrimPrefix(apiError.Message, store.ErrQueryTooBroad.Error()))
 			}
 			return err
 		}
@@ -103,7 +105,7 @@ func newCalendarEventsCommand(open calendarEventsOpen) *cobra.Command {
 				if o.AllDay {
 					start, end = o.StartDate, o.EndDate
 				}
-				if _, err := fmt.Fprintf(writer, "%s\t%s\t%s\t%d\t%s\n", start, end, o.Status, o.MessageID, o.Subject); err != nil {
+				if _, err := fmt.Fprintf(writer, "%s\t%s\t%s\t%d\t%s\n", start, end, calendarOccurrenceStatus(o), o.MessageID, o.Subject); err != nil {
 					return fmt.Errorf("write calendar events: %w", err)
 				}
 			}
@@ -136,4 +138,11 @@ func newCalendarEventsCommand(open calendarEventsOpen) *cobra.Command {
 		return nil
 	}
 	return command
+}
+
+func calendarOccurrenceStatus(o store.CalendarOccurrence) string {
+	if o.DeletedFromSource {
+		return calendarEventDeletedStatus
+	}
+	return o.Status
 }

@@ -62,14 +62,7 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 	if err := q.QueryRow(`SELECT sync_config FROM sources WHERE id = ?`, sourceID).Scan(&config); err != nil {
 		return fmt.Errorf("read calendar projection source: %w", err)
 	}
-	var sc struct {
-		CalendarTimeZone string `json:"time_zone"`
-	}
-	// Legacy invalid config falls back to the decoder's UTC/default namespace.
-	if err := json.Unmarshal([]byte(config.String), &sc); err != nil {
-		sc.CalendarTimeZone = ""
-	}
-	event, ok, decodeErr := calevent.Decode(format.String, raw, []byte(metadata.String), sc.CalendarTimeZone)
+	event, ok, decodeErr := calevent.Decode(format.String, raw, []byte(metadata.String), calendarConfigZone(config))
 	if err := ctx.Err(); err != nil {
 		return err
 	}

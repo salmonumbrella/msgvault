@@ -38,9 +38,6 @@ type CalendarOccurrencePage struct {
 // ListCalendarOccurrencesContext expands archived series in a half-open window.
 func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to time.Time) (CalendarOccurrencePage, error) {
 	page := CalendarOccurrencePage{Occurrences: []CalendarOccurrence{}, Unexpandable: []CalendarUnexpandable{}}
-	if !to.After(from) {
-		return page, errors.New("to must be after from")
-	}
 	ctx, release, err := s.BeginReadSnapshotContext(ctx)
 	if err != nil {
 		return page, err
@@ -69,7 +66,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 	}
 	remaining := calrecur.RequestReadBudget - len(rows)
 	if remaining < 0 {
-		return page, ErrQueryTooBroad
+		return page, fmt.Errorf("%w; narrow the window", ErrQueryTooBroad)
 	}
 	add := func(row CalendarEventRow, seriesID int64, o calrecur.Occurrence) {
 		e := row.Event
@@ -144,7 +141,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 				}
 				if errors.Is(err, calrecur.ErrBudgetExceeded) {
 					if remaining < 0 {
-						return page, ErrQueryTooBroad
+						return page, fmt.Errorf("%w; narrow the window", ErrQueryTooBroad)
 					}
 					page.Unexpandable = append(page.Unexpandable, CalendarUnexpandable{MessageID: row.MessageID, Reason: err.Error()})
 					continue
