@@ -1882,10 +1882,13 @@ func (s *Store) UpdateSourceSyncConfig(sourceID int64, configJSON string) error 
 				return err
 			}
 		}
-		if calendarMailbox(current) == calendarMailbox(newConfig) {
-			return nil
+		if calendarMailbox(current) != calendarMailbox(newConfig) {
+			if err := s.journalCalendarMeetingLinks(ctx, tx); err != nil {
+				return fmt.Errorf("journal calendar mailbox change: %w", err)
+			}
+			return s.refreshCalendarAccountAttributionTx(ctx, tx, sourceID)
 		}
-		return s.refreshCalendarAccountAttributionTx(ctx, tx, sourceID)
+		return nil
 	})
 }
 

@@ -107,6 +107,32 @@ func TestCalendarSourceZoneChangeJournalsMeetingLinks(t *testing.T) {
 	}
 }
 
+func TestCalendarMailboxChangeJournalsMeetingLinks(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	data, event := calendarFixture(t, st, "mailbox-event", singleLinkRaw("event", "mailbox@example.org"), "old-calendar@example.org")
+	note := granolaLinkFixture(t, st, "event")
+	keys, seq, err := st.MeetingCountKeysContext(t.Context())
+	requirements.NoError(err)
+	assertions.NotContains(keys, note, "the Granola owner does not match the current calendar mailbox")
+
+	// No confirmed account identity exists, so this changes the mailbox-based
+	// Granola match without changing account attribution or the calendar zone.
+	requirements.NoError(st.UpdateSourceSyncConfig(data.Message.SourceID,
+		`{"calendar_id":"calendar@example.com","time_zone":"UTC"}`))
+	keys, _, err = st.MeetingCountKeysContext(t.Context())
+	requirements.NoError(err)
+	assertions.Equal(fmt.Sprintf("evt:%d", event), linkedMeetingRefs(t, st, note)[note])
+	assertions.NotEmpty(keys[note])
+	assertions.Equal(keys[event], keys[note], "the new automatic link shares the event's meeting count")
+	if !st.IsPostgreSQL() {
+		var journaled int
+		requirements.NoError(st.db.QueryRow(`SELECT count(*) FROM cache_related_change_journal
+			WHERE dataset = 'meeting_links' AND message_id = 0 AND seq > ?`, seq).Scan(&journaled))
+		assertions.Equal(1, journaled, "a mailbox mapping change invalidates all meeting keys")
+	}
+}
+
 func TestCalendarMutationsJournalLinearMeetingLinks(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
