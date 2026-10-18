@@ -39,41 +39,55 @@ func (s *Store) MeetingCountKeysContext(ctx context.Context) (keys map[int64]str
 			return err
 		}
 		for _, id := range ids {
-			budget := calrecur.SeriesReadBudget
-			occurrences, err := s.meetingMemberOccurrences(ctx, r, id, &budget)
-			if errors.Is(err, ErrQueryTooBroad) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
-				continue
-			}
-			if err != nil {
-				return fmt.Errorf("resolve transcript %d: %w", id, err)
-			}
-			if len(occurrences) == 0 {
-				continue
-			}
-			identity := occurrences[0].Identity
-			shared := true
-			for _, occurrence := range occurrences[1:] {
-				// Calendar copies without a shared UID keep separate archive identities.
-				if occurrence.Identity != identity {
-					shared = false
-					break
-				}
-			}
-			if shared {
-				if identity.ICalUID != "" {
-					keys[id] = "ical:" + identity.ICalUID + "|" + identity.OccurrenceKey
-				} else {
-					keys[id] = fmt.Sprintf("event:%d|%s", identity.EventMessageID, identity.OccurrenceKey)
-				}
-				for _, occurrence := range occurrences {
-					if occurrence.Row.Event.Kind != meetingSeriesKind {
-						keys[occurrence.Row.MessageID] = keys[id]
-					}
-				}
+			if err := s.addMeetingCountKeys(ctx, r, id, keys); err != nil {
+				return err
 			}
 		}
 
 		return nil
 	})
 	return keys, journalSeq, err
+}
+
+func (s *Store) addMeetingCountKeys(ctx context.Context, r reboundReader, id int64, keys map[int64]string) error {
+	budget := calrecur.SeriesReadBudget
+	occurrences, err := s.meetingMemberOccurrences(ctx, r, id, &budget)
+	if errors.Is(err, ErrQueryTooBroad) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("resolve transcript %d: %w", id, err)
+	}
+	if len(occurrences) == 0 {
+		return nil
+	}
+	identity := occurrences[0].Identity
+	shared := true
+	for _, occurrence := range occurrences[1:] {
+		// Calendar copies without a shared UID keep separate archive identities.
+		if occurrence.Identity != identity {
+			shared = false
+			break
+		}
+	}
+	if shared {
+		copies, err := s.resolveMeetingIdentityCopies(ctx, r, identity, &budget)
+		if errors.Is(err, ErrQueryTooBroad) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("resolve calendar copies for transcript %d: %w", id, err)
+		}
+		if identity.ICalUID != "" {
+			keys[id] = "ical:" + identity.ICalUID + "|" + identity.OccurrenceKey
+		} else {
+			keys[id] = fmt.Sprintf("event:%d|%s", identity.EventMessageID, identity.OccurrenceKey)
+		}
+		for _, occurrence := range copies {
+			if occurrence.Row.Event.Kind != meetingSeriesKind {
+				keys[occurrence.Row.MessageID] = keys[id]
+			}
+		}
+	}
+	return nil
 }

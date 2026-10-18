@@ -503,6 +503,11 @@ func (s *Store) meetingSplitIdentities(ctx context.Context, r reboundReader, ide
 }
 
 func (s *Store) resolveMeetingIdentity(ctx context.Context, r reboundReader, identity meetingIdentity, budget *int) ([]linkOccurrence, error) {
+	copies, err := s.resolveMeetingIdentityCopies(ctx, r, identity, budget)
+	return uniqueMeetingOccurrences(copies), err
+}
+
+func (s *Store) resolveMeetingIdentityCopies(ctx context.Context, r reboundReader, identity meetingIdentity, budget *int) ([]linkOccurrence, error) {
 	rows, err := s.meetingIdentityRows(ctx, r, identity, budget)
 	if err != nil {
 		return nil, err
@@ -525,5 +530,5 @@ func (s *Store) resolveMeetingIdentity(ctx context.Context, r reboundReader, ide
 		}
 		out = append(out, o)
 	}
-	return uniqueMeetingOccurrences(out), nil
+	return out, nil
 }

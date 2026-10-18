@@ -1,6 +1,7 @@
 package calsync
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json/v2"
 	"fmt"
@@ -8,7 +9,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"go.kenn.io/msgvault/internal/calevent"
 	"go.kenn.io/msgvault/internal/gcal"
 	"go.kenn.io/msgvault/internal/gcal/gcalmodel"
 	"go.kenn.io/msgvault/internal/store"
@@ -75,7 +75,11 @@ func (s *Syncer) ingestEvent(sourceID int64, cal gcal.Calendar, ev gcal.Event) (
 			organizerResource = true
 		}
 	}
-	if ev.Organizer.Email != "" && !calevent.IsRoomAttendee(ev.Organizer.Email, organizerResource) {
+	organizerRoom, err := s.store.IsRoomAddressContext(context.Background(), ev.Organizer.Email, organizerResource)
+	if err != nil {
+		return 0, fmt.Errorf("classify organizer: %w", err)
+	}
+	if ev.Organizer.Email != "" && !organizerRoom {
 		id, err := s.store.EnsureParticipant(ev.Organizer.Email, ev.Organizer.DisplayName, emailDomain(ev.Organizer.Email))
 		if err != nil {
 			return 0, fmt.Errorf("organizer participant: %w", err)
@@ -92,7 +96,11 @@ func (s *Syncer) ingestEvent(sourceID int64, cal gcal.Calendar, ev gcal.Event) (
 			continue
 		}
 		attendeeEmails = append(attendeeEmails, a.Email)
-		if calevent.IsRoomAttendee(a.Email, a.Resource) {
+		room, err := s.store.IsRoomAddressContext(context.Background(), a.Email, a.Resource)
+		if err != nil {
+			return 0, fmt.Errorf("classify attendee: %w", err)
+		}
+		if room {
 			continue
 		}
 		pid, err := s.store.EnsureParticipant(a.Email, a.DisplayName, emailDomain(a.Email))

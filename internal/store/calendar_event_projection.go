@@ -191,7 +191,7 @@ func (s *Store) refreshSourceCalendarEventsTx(ctx context.Context, tx *loggedTx,
 			return closeErr
 		}
 		if len(ids) == 0 {
-			return nil
+			return s.journalSourceCalendarMeetingLinks(ctx, tx, sourceID)
 		}
 		for _, id := range ids {
 			if err := s.lockMeetingEvidenceWith(ctx, tx, id); err != nil {

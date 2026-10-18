@@ -99,3 +99,31 @@ func TestRelationshipMeetingCountsCollapseLinkedOccurrence(t *testing.T) {
 		})
 	}
 }
+
+func TestRelationshipCalendarLinkedMeetingAcrossYears(t *testing.T) {
+	b := NewTestDataBuilder(t)
+	source := b.AddSourceWithType("owner@example.org", "gcal")
+	owner := b.AddParticipant("owner@example.org", "example.org", "Owner")
+	person := b.AddParticipant("person@example.org", "example.org", "Person")
+	b.AddOwnerParticipant(source, owner)
+	for i, kind := range []string{"calendar_event", "meeting_transcript"} {
+		at := time.Date(2024, 12, 31, 23, 59, 0, 0, time.UTC).Add(time.Duration(i) * 2 * time.Minute)
+		id := b.AddMessage(MessageOpt{SourceID: source, ConversationID: int64(100 + i), MessageType: kind, SentAt: at})
+		b.AddTo(id, owner, "Owner")
+		b.AddTo(id, person, "Person")
+		b.meetingKeys = append(b.meetingKeys, fmt.Sprintf("(%d, 'ical:shared@example.org|')", id))
+	}
+	engine := b.BuildEngine()
+	for _, tc := range []struct {
+		year int
+		want int64
+	}{{2024, 1}, {2025, 0}} {
+		calendar, err := engine.RelationshipCalendar(t.Context(), RelationshipCalendarRequest{CanonicalID: person, Year: tc.year, Timezone: "UTC"})
+		require.NoError(t, err)
+		var meetings int64
+		for _, day := range calendar.Days {
+			meetings += day.Meetings
+		}
+		assert.Equal(t, tc.want, meetings, "year %d", tc.year)
+	}
+}

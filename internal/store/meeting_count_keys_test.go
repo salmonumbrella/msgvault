@@ -103,3 +103,39 @@ func TestMeetingCountKeysJournalSnapshot(t *testing.T) {
 		assert.Greater(currentSeq, pinnedSeq)
 	}
 }
+
+func TestMeetingCountKeysAllCalendarCopies(t *testing.T) {
+	st := newRFC822IDBackfillBackendStore(t)
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org"}}`)
+	_, first := calendarFixture(t, st, "first", singleLinkRaw("first", "shared@example.org"), "first@example.org")
+	_, second := calendarFixture(t, st, "second", singleLinkRaw("second", "shared@example.org"), "second@example.org")
+	keys, _, err := st.MeetingCountKeysContext(t.Context())
+	require.NoError(t, err)
+	for _, id := range []int64{note, first, second} {
+		assert.Equal(t, "ical:shared@example.org|", keys[id])
+	}
+}
+
+func TestCalendarTimezoneMeetingJournalRollsBackWithProjection(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	if st.IsPostgreSQL() {
+		t.Skip("SQLite cache journal")
+	}
+	data, event := calendarFixture(t, st, "event", singleLinkRaw("event", "shared@example.org"))
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org"}}`)
+	_, seq, err := st.MeetingCountKeysContext(t.Context())
+	requirements.NoError(err)
+	_, err = st.DB().Exec(`CREATE TRIGGER reject_meeting_journal BEFORE INSERT ON cache_related_change_journal WHEN NEW.dataset = 'meeting_links' BEGIN SELECT RAISE(ABORT, 'journal blocked'); END`)
+	requirements.NoError(err)
+	err = st.UpdateSourceSyncConfig(data.Message.SourceID, `{"calendar_id":"calendar@example.com","time_zone":"America/New_York"}`)
+	requirements.ErrorContains(err, "journal blocked")
+	source, err := st.GetSourceByID(data.Message.SourceID)
+	requirements.NoError(err)
+	assertions.Equal("UTC", calendarConfigZone(source.SyncConfig))
+	assertions.Equal("UTC", calendarRows(t, st, event)[0].Event.CalendarTimeZone)
+	keys, after, err := st.MeetingCountKeysContext(t.Context())
+	requirements.NoError(err)
+	assertions.Equal(seq, after)
+	assertions.Equal("ical:shared@example.org|", keys[note])
+}

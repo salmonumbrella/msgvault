@@ -39,7 +39,7 @@ func TestCalsyncSkipsRoomAttendeesAndOrganizer(t *testing.T) {
 	}
 }
 
-func TestCalsyncLateRoomEvidenceRemovesMeetingEdges(t *testing.T) {
+func TestCalsyncLateRoomEvidencePreservesContactEdges(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
 	mock := gcal.NewMockAPI()
 	mock.Calendars = []gcal.Calendar{{ID: "primary", AccessRole: "owner", TimeZone: "UTC"}}
@@ -55,7 +55,7 @@ func TestCalsyncLateRoomEvidenceRemovesMeetingEdges(t *testing.T) {
 	requirements.NoError(err)
 	var roomID int64
 	requirements.NoError(st.DB().QueryRow(`SELECT id FROM participants WHERE email_address = 'room@example.org'`).Scan(&roomID))
-	// An ordinary email to the same address must survive the calendar evidence.
+	// Ordinary email history establishes this address as a person.
 	_, err = st.PersistMessage(&store.MessagePersistData{
 		Message:      &store.Message{SourceID: source.ID, SourceMessageID: "email", MessageType: "email", SenderID: sql.NullInt64{Int64: roomID, Valid: true}},
 		Conversation: &store.ConversationPersistData{SourceConversationID: "email", ConversationType: "email", Participants: []store.ConversationParticipantRef{{ParticipantID: roomID, Role: "member"}}},
@@ -64,16 +64,80 @@ func TestCalsyncLateRoomEvidenceRemovesMeetingEdges(t *testing.T) {
 	requirements.NoError(err)
 	_, err = syncer.Full(t.Context())
 	requirements.NoError(err)
-	for _, query := range []string{
-		`SELECT count(*) FROM message_recipients WHERE participant_id = ?`,
-		`SELECT count(*) FROM conversation_participants WHERE participant_id = ?`,
-		`SELECT count(*) FROM messages WHERE sender_id = ?`,
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{`SELECT count(*) FROM message_recipients WHERE participant_id = ?`, 4},
+		{`SELECT count(*) FROM conversation_participants WHERE participant_id = ?`, 2},
+		{`SELECT count(*) FROM messages WHERE sender_id = ?`, 2},
 	} {
 		var count int
-		requirements.NoError(st.DB().QueryRow(st.Rebind(query), roomID).Scan(&count))
-		assertions.Equal(1, count, "only the email edge remains: %s", query)
+		requirements.NoError(st.DB().QueryRow(st.Rebind(tc.query), roomID).Scan(&count))
+		assertions.Equal(tc.want, count, "contact edges remain: %s", tc.query)
 	}
 	var humanCount int
 	requirements.NoError(st.DB().QueryRow(`SELECT count(*) FROM message_recipients r JOIN participants p ON p.id = r.participant_id WHERE p.email_address = 'human@example.org'`).Scan(&humanCount))
 	assertions.Equal(1, humanCount)
+}
+
+func TestCalsyncResourceFlagPreservesContactHistory(t *testing.T) {
+	for _, edge := range []string{"sender", "recipient", "conversation", "chat"} {
+		t.Run(edge, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			mock := gcal.NewMockAPI()
+			mock.Calendars = []gcal.Calendar{{ID: "primary", AccessRole: "owner", TimeZone: "UTC"}}
+			event := timedEvent("planning", "Planning", gcal.Attendee{Email: "person@example.org", Resource: true, Organizer: true}, gcal.Attendee{Email: "unseen@example.org", Resource: true})
+			event.Organizer = gcal.Person{Email: "person@example.org"}
+			mock.FullEvents["primary"] = [][]gcal.Event{{event}}
+			syncer, st := newSyncer(t, mock, Options{})
+			source, err := st.GetOrCreateSource("meeting_import", "notes@example.org")
+			requirements.NoError(err)
+			personID, err := st.EnsureParticipant("person@example.org", "Person", "example.org")
+			requirements.NoError(err)
+			data := &store.MessagePersistData{
+				Message:      &store.Message{SourceID: source.ID, SourceMessageID: "history", MessageType: "email"},
+				Conversation: &store.ConversationPersistData{SourceConversationID: "history", ConversationType: "email"},
+			}
+			switch edge {
+			case "sender":
+				data.Message.SenderID = sql.NullInt64{Int64: personID, Valid: true}
+			case "recipient":
+				data.Recipients = []store.RecipientSet{{Type: "to", ParticipantIDs: []int64{personID}}}
+			case "conversation", "chat":
+				data.Conversation.Participants = []store.ConversationParticipantRef{{ParticipantID: personID, Role: "member"}}
+				if edge == "chat" {
+					data.Message.MessageType = "chat"
+					data.Conversation.ConversationType = "direct_chat"
+				}
+			}
+			_, err = st.PersistMessage(data)
+			requirements.NoError(err)
+			person := meetingarchive.Person{Email: "person@example.org"}
+			archive := meetingarchive.New(st)
+			snapshot := meetingarchive.Snapshot{SourceID: source.ID, SourceMessageID: "before", Organizer: &person, Attendees: []meetingarchive.Person{person}}
+			before, err := archive.Upsert(t.Context(), snapshot, meetingarchive.UpsertOptions{})
+			requirements.NoError(err)
+			_, err = syncer.Full(t.Context())
+			requirements.NoError(err)
+			snapshot.SourceMessageID = "after"
+			snapshot.Attendees = append(snapshot.Attendees, meetingarchive.Person{Email: "unseen@example.org"})
+			after, err := archive.Upsert(t.Context(), snapshot, meetingarchive.UpsertOptions{})
+			requirements.NoError(err)
+			for _, id := range []int64{before.MessageID, after.MessageID} {
+				var sender sql.NullInt64
+				requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT sender_id FROM messages WHERE id = ?`), id).Scan(&sender))
+				assertions.Equal(sql.NullInt64{Int64: personID, Valid: true}, sender)
+				var recipients int
+				requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT count(*) FROM message_recipients WHERE message_id = ? AND participant_id = ?`), id, personID).Scan(&recipients))
+				assertions.Equal(2, recipients)
+			}
+			var sender sql.NullInt64
+			requirements.NoError(st.DB().QueryRow(`SELECT sender_id FROM messages WHERE message_type = 'calendar_event'`).Scan(&sender))
+			assertions.Equal(sql.NullInt64{Int64: personID, Valid: true}, sender)
+			var unseen int
+			requirements.NoError(st.DB().QueryRow(`SELECT count(*) FROM participants WHERE email_address = 'unseen@example.org'`).Scan(&unseen))
+			assertions.Zero(unseen)
+		})
+	}
 }

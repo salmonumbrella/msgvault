@@ -231,3 +231,41 @@ func (s *Store) journalMeetingLinks(ctx context.Context, tx *loggedTx, memberID 
 	_, err := tx.ExecContext(ctx, `INSERT INTO cache_related_change_journal(dataset,message_id) VALUES('meeting_links', ?)`, memberID)
 	return err
 }
+
+// Source time-zone changes can move occurrences into or out of transcript matches.
+func (s *Store) journalSourceCalendarMeetingLinks(ctx context.Context, tx *loggedTx, sourceID int64) error {
+	if s.IsPostgreSQL() {
+		return nil
+	}
+	var config sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT sync_config FROM sources WHERE id = ?`, sourceID).Scan(&config); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `WITH source_events AS (
+ SELECT id, `+calendarUIDExpression(s.dialect, "metadata")+` AS uid FROM messages WHERE source_id = ? AND message_type = 'calendar_event'
+ ) SELECT m.id FROM messages m WHERE m.message_type = 'meeting_transcript' AND m.deleted_at IS NULL AND EXISTS (SELECT 1 FROM source_events) AND (
+ EXISTS (SELECT 1 FROM meeting_link_key k WHERE k.message_id = m.id AND (
+   (k.kind = 'ical_uid' AND k.value IN (SELECT uid FROM source_events)) OR (k.kind = 'google_event_id' AND k.calendar_id = ?))) OR
+ EXISTS (SELECT 1 FROM meeting_link_decisions d WHERE d.member_message_id = m.id AND (
+   d.target_message_id IN (SELECT id FROM source_events) OR d.target_ical_uid IN (SELECT uid FROM source_events))))`, sourceID, calendarMailbox(config))
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return errors.Join(err, rows.Close())
+		}
+		ids = append(ids, id)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := s.journalMeetingLinks(ctx, tx, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
