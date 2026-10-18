@@ -10,6 +10,8 @@ import (
 	"go.kenn.io/msgvault/internal/calrecur"
 )
 
+const recurrenceCandidateMargin = 3
+
 func spendLinkBudget(ctx context.Context, budget *int, cost int) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -42,7 +44,7 @@ func reserveLinkRecurrence(ctx context.Context, set calrecur.Set, until time.Tim
 			return 0, fmt.Errorf("parse all-day recurrence start: %w", err)
 		}
 	}
-	days := max(0, int(until.Sub(start)/(24*time.Hour))) + 3
+	days := max(0, int(until.Sub(start)/(24*time.Hour))) + recurrenceCandidateMargin
 	allowance := min(calrecur.SeriesReadBudget, 1+len(set.RDates))
 	for _, rule := range set.RRules {
 		ruleLimit := days
@@ -50,7 +52,11 @@ func reserveLinkRecurrence(ctx context.Context, set calrecur.Set, until time.Tim
 			key, value, ok := strings.Cut(part, "=")
 			if ok && key == "COUNT" {
 				if count, err := strconv.Atoi(value); err == nil && count > 0 {
-					ruleLimit = min(ruleLimit, count)
+					// COUNT bounds emitted instances. A nonexistent local wall time
+					// still consumes a recurrence candidate before COUNT is reached.
+					if count < ruleLimit {
+						ruleLimit = min(ruleLimit, count+recurrenceCandidateMargin)
+					}
 				}
 			}
 		}

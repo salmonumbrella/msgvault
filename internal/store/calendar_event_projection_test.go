@@ -126,13 +126,55 @@ func TestCalendarEventProjectionUpgradeBackfillsSkippedMidnightBoundsWithoutNewL
 	assertions.Equal("2018-11-05T02:00:00Z", rows[0].Event.End.UTC().Format(time.RFC3339))
 	var version int
 	requirements.NoError(st.db.QueryRow(`SELECT projection_version FROM calendar_events WHERE message_id = ?`, id).Scan(&version))
-	assertions.Equal(2, version)
+	assertions.Equal(3, version)
 	var ledgerVersion int
 	requirements.NoError(st.db.QueryRow(`SELECT version FROM applied_migrations WHERE name = ?`, migrationCalendarEventProjectionV1).Scan(&ledgerVersion))
 	assertions.Equal(1, ledgerVersion)
 	archiveVersion, err := st.SchemaVersionContext(t.Context())
 	requirements.NoError(err)
 	assertions.Equal(SchemaVersion, archiveVersion)
+}
+
+func TestCalendarEventProjectionSchemaV7UpgradeRebuildsDSTRecurrenceEnd(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	raw := `{"id":"dst-gap-series","start":{"dateTime":"2027-03-07T02:30:00-08:00","timeZone":"America/Los_Angeles"},"end":{"dateTime":"2027-03-07T03:30:00-08:00"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=2"]}`
+	data, id := calendarFixture(t, st, "dst-gap-series", raw)
+	oldEnd := time.Date(2027, time.March, 14, 11, 30, 0, 0, time.UTC)
+	_, err := st.db.Exec(`UPDATE calendar_events SET projection_version = 2, recurrence_end_at = ? WHERE message_id = ?`, oldEnd, id)
+	requirements.NoError(err)
+	_, err = st.db.Exec(`UPDATE applied_migrations SET version = 1 WHERE name = ?`, migrationCalendarEventProjectionV1)
+	requirements.NoError(err)
+	_, err = st.db.Exec(st.Rebind(`UPDATE archive_metadata SET value = ? WHERE key = 'schema_version'`), strconv.Itoa(SchemaVersion-1))
+	requirements.NoError(err)
+
+	rows, err := calendarWindow(t, st, OwnerScope(), "2027-03-21T00:00:00Z", "2027-03-22T00:00:00Z")
+	requirements.NoError(err)
+	assertions.Empty(rows, "the version-2 bound excludes the valid post-gap occurrence")
+	requirements.NoError(st.InitSchemaContext(t.Context()))
+	rows, err = calendarWindow(t, st, OwnerScope(), "2027-03-21T00:00:00Z", "2027-03-22T00:00:00Z")
+	requirements.NoError(err)
+	requirements.Len(rows, 1)
+	requirements.NotNil(rows[0].RecurrenceEndAt)
+	assertions.Equal("2027-03-21T10:30:00Z", rows[0].RecurrenceEndAt.UTC().Format(time.RFC3339))
+	var projectionVersion, ledgerVersion int
+	requirements.NoError(st.db.QueryRow(`SELECT projection_version FROM calendar_events WHERE message_id = ?`, id).Scan(&projectionVersion))
+	requirements.NoError(st.db.QueryRow(`SELECT version FROM applied_migrations WHERE name = ?`, migrationCalendarEventProjectionV1).Scan(&ledgerVersion))
+	assertions.Equal(3, projectionVersion)
+	assertions.Equal(1, ledgerVersion)
+	archiveVersion, err := st.SchemaVersionContext(t.Context())
+	requirements.NoError(err)
+	assertions.Equal(SchemaVersion, archiveVersion)
+
+	// An unchanged reimport must also refresh a row from the older revision.
+	_, err = st.db.Exec(`UPDATE calendar_events SET projection_version = 2, recurrence_end_at = ? WHERE message_id = ?`, oldEnd, id)
+	requirements.NoError(err)
+	_, err = st.PersistMessage(data)
+	requirements.NoError(err)
+	rows = calendarRows(t, st, id)
+	requirements.Len(rows, 1)
+	assertions.NotNil(rows[0].RecurrenceEndAt)
+	assertions.Equal("2027-03-21T10:30:00Z", rows[0].RecurrenceEndAt.UTC().Format(time.RFC3339))
 }
 
 func TestCalendarEventProjectionStorageFailureRollsBack(t *testing.T) {
@@ -193,6 +235,58 @@ func TestCalendarEventBackfillResumesAfterCancel(t *testing.T) {
 	assertions.Equal(103, count)
 	rejectCalendarWrites(t, base)
 	requirements.NoError(st.InitSchemaContext(t.Context()))
+}
+
+func TestCalendarEventProjectionRevisionUpgradeResumesAfterCancel(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	base := newRFC822IDBackfillBackendStore(t)
+	for i := range 5 {
+		raw := strings.ReplaceAll(calendarRaw, "event-example", fmt.Sprintf("event-%d", i))
+		calendarFixture(t, base, fmt.Sprintf("revision-%d", i), raw)
+	}
+	_, err := base.db.Exec(`UPDATE calendar_events SET projection_version = 2`)
+	requirements.NoError(err)
+	_, err = base.db.Exec(base.Rebind(`UPDATE archive_metadata SET value = ? WHERE key = 'schema_version'`), strconv.Itoa(SchemaVersion-1))
+	requirements.NoError(err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var pending atomic.Bool
+	committed := 0
+	gate := &meetingProjectionGate{
+		before: func(_ context.Context, query string, _ []driver.NamedValue) error {
+			if strings.HasPrefix(query, "INSERT INTO calendar_events") {
+				pending.Store(true)
+			}
+			return nil
+		},
+		committed: func(_ bool) {
+			if pending.Swap(false) {
+				committed++
+				if committed == 3 {
+					cancel()
+				}
+			}
+		},
+	}
+	st := gatedMeetingProjectionStore(t, base, gate)
+	requirements.ErrorIs(st.InitSchemaContext(ctx), context.Canceled)
+	var current, old int
+	requirements.NoError(base.db.QueryRow(`SELECT COUNT(*) FROM calendar_events WHERE projection_version = 3`).Scan(&current))
+	requirements.NoError(base.db.QueryRow(`SELECT COUNT(*) FROM calendar_events WHERE projection_version = 2`).Scan(&old))
+	assertions.Equal(3, current)
+	assertions.Equal(2, old)
+	archiveVersion, err := base.SchemaVersionContext(t.Context())
+	requirements.NoError(err)
+	assertions.Equal(SchemaVersion-1, archiveVersion, "an interrupted backfill must not certify the new schema")
+
+	gate.committed = nil
+	requirements.NoError(st.InitSchemaContext(t.Context()))
+	requirements.NoError(base.db.QueryRow(`SELECT COUNT(*) FROM calendar_events WHERE projection_version = 3`).Scan(&current))
+	assertions.Equal(5, current)
+	archiveVersion, err = base.SchemaVersionContext(t.Context())
+	requirements.NoError(err)
+	assertions.Equal(SchemaVersion, archiveVersion)
 }
 
 func TestCalendarEventBackfillMalformedRecurrenceDoesNotFailInit(t *testing.T) {

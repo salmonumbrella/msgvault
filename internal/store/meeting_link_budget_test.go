@@ -61,7 +61,7 @@ func TestLinkBudgetAllowsMovedExceptionOfFinishedMaster(t *testing.T) {
 	budget := 50
 	allowance, err := reserveLinkRecurrence(context.Background(), set, end.Add(24*time.Hour), &budget)
 	requirements.NoError(err)
-	assertions.Equal(7, allowance)
+	assertions.Equal(10, allowance)
 	occurrences, err := calrecur.Expand(context.Background(), set, time.Hour, 0, []calrecur.Exception{{Original: calrecur.Identity{Instant: start}, Start: &moved, End: &end}}, moved.Add(-time.Hour), end.Add(time.Hour), allowance)
 	requirements.NoError(err)
 	requirements.Len(occurrences, 1)

@@ -16,9 +16,10 @@ import (
 	"go.kenn.io/msgvault/internal/gcal/gcalmodel"
 )
 
-// v2 recomputes all-day bounds when local midnight is skipped by a zone.
+// v3 rebuilds recurrence ends when nonexistent timed wall times no longer
+// consume COUNT.
 const (
-	calendarEventProjectionVersion       = 2
+	calendarEventProjectionVersion       = 3
 	calendarEventProjectionLedgerVersion = 1
 )
 

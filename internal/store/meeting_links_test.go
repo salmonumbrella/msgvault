@@ -15,6 +15,7 @@ import (
 )
 
 const linkSeriesRaw = `{"id":"series","iCalUID":"weekly@example.org","start":{"dateTime":"2027-03-07T10:00:00Z","timeZone":"UTC"},"end":{"dateTime":"2027-03-07T11:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=6"]}`
+const dstGapLinkSeriesRaw = `{"id":"dst-gap-series","iCalUID":"dst-gap@example.org","start":{"dateTime":"2027-03-07T02:30:00-08:00","timeZone":"America/Los_Angeles"},"end":{"dateTime":"2027-03-07T03:30:00-08:00"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=2"]}`
 
 func calendarLinkFixture(t *testing.T, st *Store, calendar, raw string) (int64, int64) {
 	t.Helper()
@@ -68,6 +69,18 @@ func TestLinkGranolaInstanceIDToOccurrence(t *testing.T) {
 	assert.ElementsMatch(t, []OccurrenceRef{OccurrenceRef{MessageID: master, Key: "20270314T100000Z"}}, linkTargets(links))
 	require.Len(t, links, 1)
 	assert.Equal(t, "instance_id", links[0].Basis)
+}
+
+func TestLinkResolutionReservesSkippedDSTCandidate(t *testing.T) {
+	requirements := require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	master, _ := calendarLinkFixture(t, st, "primary@example.com", dstGapLinkSeriesRaw)
+	_, note := projectionFixture(t, st, "manual-dst-gap-link", "plaud_json", `{}`)
+	target := OccurrenceRef{MessageID: master, Key: "20270321T093000Z"}
+	requirements.NoError(st.LinkMeetingContext(t.Context(), FormatOccurrenceRef(target), note))
+	links := memberLinks(t, st, OwnerScope(), note)
+	requirements.Len(links, 1)
+	assert.Equal(t, target, links[0].Target)
 }
 
 func TestNoLinkExdatedWithoutException(t *testing.T) {

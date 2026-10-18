@@ -2291,7 +2291,7 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 	}
 	// Projection revisions track decoder semantics, while the migration ledger
 	// entry remains at v1 because its value is part of SchemaVersion's archive
-	// contract. Archives that already applied that migration need revision-2
+	// contract. Archives that already applied that migration need revision-3
 	// rows rebuilt as part of this schema upgrade. The schema marker is written
 	// only after this step, so a cancelled or failed backfill resumes on reopen.
 	if calendarProjectionMigrationAlreadyApplied {
