@@ -72,7 +72,7 @@ func TestCalendarEventsCommand(t *testing.T) {
 			if tc.wantErr != "" {
 				requirements.ErrorContains(err, tc.wantErr)
 				if tc.name == "too broad" {
-					assertions.EqualError(err, tc.wantErr)
+					requirements.EqualError(err, tc.wantErr)
 				}
 				return
 			}
