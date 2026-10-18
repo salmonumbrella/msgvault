@@ -24,12 +24,12 @@ type meetingLinksTestStore struct {
 
 	refreshes  int
 	refreshErr error
-	member   int64
-	event    store.OccurrenceRef
-	decision string
-	ref      store.MeetingLinkRef
-	err      error
-	calls    int
+	member     int64
+	event      store.OccurrenceRef
+	decision   string
+	ref        store.MeetingLinkRef
+	err        error
+	calls      int
 }
 
 func (s *meetingLinksTestStore) RefreshIdentityDatasets(context.Context) (int64, error) {
