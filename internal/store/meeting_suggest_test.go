@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"fmt"
 	"strings"
@@ -63,4 +64,50 @@ func TestMeetingLinksSuggestionsBatchParticipants(t *testing.T) {
 	var count int
 	requirements.NoError(st.db.QueryRow(`SELECT count(*) FROM meeting_link_decisions`).Scan(&count))
 	assertions.Zero(count)
+}
+
+func TestMeetingLinksSuggestionsTimeWindow(t *testing.T) {
+	requirements := require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "window@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+	var want []int64
+	for _, tc := range []struct {
+		name, sent, received, internal, raw string
+		include                             bool
+	}{
+		{name: "scheduled", sent: "2020-01-01T00:00:00Z", raw: `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"window@example.org","startsAt":"2027-03-14T10:00:00Z"}}`, include: true},
+		{name: "long recording", sent: "2027-03-12T10:00:00Z", raw: `{"started_at":"2027-03-12T10:00:00Z","ended_at":"2027-03-14T10:30:00Z"}`, include: true},
+		{name: "received", received: "2027-03-14T10:00:00Z", raw: `{}`, include: true},
+		{name: "internal", internal: "2027-03-14T10:00:00Z", raw: `{}`, include: true},
+		{name: "past", sent: "2020-01-01T00:00:00Z", raw: `{}`},
+		{name: "future", sent: "2030-01-01T00:00:00Z", raw: `{}`},
+		{name: "scheduled overrides sent", sent: "2027-03-14T10:00:00Z", raw: `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"window@example.org","startsAt":"2030-01-01T00:00:00Z"}}`},
+		{name: "ends at start", sent: "2027-03-14T09:30:00Z", raw: `{}`},
+		{name: "starts at end", sent: "2027-03-14T11:00:00Z", raw: `{}`},
+	} {
+		format := "meeting_json"
+		if strings.Contains(tc.raw, "schema_version") {
+			format = "twenty_json"
+		}
+		data, id := projectionFixture(t, st, tc.name, format, tc.raw)
+		for field, value := range map[*sql.NullTime]string{&data.Message.SentAt: tc.sent, &data.Message.ReceivedAt: tc.received, &data.Message.InternalDate: tc.internal} {
+			if value != "" {
+				at, err := time.Parse(time.RFC3339, value)
+				requirements.NoError(err)
+				*field = sql.NullTime{Time: at, Valid: true}
+			}
+		}
+		_, err := st.UpsertMessage(data.Message)
+		requirements.NoError(err)
+		if tc.include {
+			want = append(want, id)
+		}
+	}
+	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), fmt.Sprintf("evt:%d", event), 100)
+	requirements.NoError(err)
+	var got []int64
+	for _, suggestion := range suggestions {
+		got = append(got, suggestion.MemberMessageID)
+	}
+	assert.ElementsMatch(t, want, got)
 }

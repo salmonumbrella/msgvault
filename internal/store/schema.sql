@@ -4713,16 +4713,15 @@ CREATE TABLE IF NOT EXISTS calendar_event_attendees (
 
 CREATE TABLE IF NOT EXISTS meeting_link_keys (
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL,
     kind TEXT NOT NULL,
     value TEXT NOT NULL,
     calendar_id TEXT NOT NULL DEFAULT '',
-    base TEXT NOT NULL DEFAULT '',
-    instance_key TEXT NOT NULL DEFAULT '',
     scheduled_at DATETIME,
-    PRIMARY KEY (message_id, ordinal)
+    PRIMARY KEY (message_id)
 );
-CREATE INDEX IF NOT EXISTS idx_meeting_link_keys_value ON meeting_link_keys(kind, value);
+CREATE INDEX IF NOT EXISTS idx_meeting_link_keys_scheduled ON meeting_link_keys(scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_meeting_details_duration ON meeting_details(duration_seconds);
+CREATE INDEX IF NOT EXISTS idx_messages_meeting_start ON messages(COALESCE(sent_at,received_at,internal_date)) WHERE message_type = 'meeting_transcript' AND deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS meeting_link_decisions (
     member_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     target_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,

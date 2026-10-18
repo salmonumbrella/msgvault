@@ -21,11 +21,11 @@ func decodeTwenty(fields map[string]jsontext.Value) Content {
 		return unavailableContent("invalid_recording")
 	}
 	c := baseRecognizedContent()
-	var linkCalendar map[string]jsontext.Value
-	if json.Unmarshal(fields["calendar_event"], &linkCalendar) == nil {
-		uid, _ := optionalString(linkCalendar["iCalUid"])
+	var calendar map[string]jsontext.Value
+	if json.Unmarshal(fields["calendar_event"], &calendar) == nil {
+		uid, _ := optionalString(calendar["iCalUid"])
 		c.LinkEvidence.ICalUID = strings.TrimSpace(uid)
-		if at, ok := rawTime(linkCalendar["startsAt"], false); ok {
+		if at, ok := rawTime(calendar["startsAt"], false); ok {
 			c.LinkEvidence.ScheduledAt = &at
 		}
 	}
@@ -69,11 +69,10 @@ func decodeTwenty(fields map[string]jsontext.Value) Content {
 		setDuration(&c, end.Sub(start).Seconds(), DurationProvider)
 		return c
 	}
-	var calendar map[string]jsontext.Value
-	if json.Unmarshal(fields["calendar_event"], &calendar) == nil {
-		start, startOK = rawTime(calendar["startsAt"], false)
+	if c.LinkEvidence.ScheduledAt != nil {
+		start = *c.LinkEvidence.ScheduledAt
 		end, endOK = rawTime(calendar["endsAt"], false)
-		if startOK && endOK && end.After(start) {
+		if endOK && end.After(start) {
 			setDuration(&c, end.Sub(start).Seconds(), DurationScheduled)
 			return c
 		}

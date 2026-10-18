@@ -2271,6 +2271,7 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 	if err := s.ensureArchiveUIDContext(ctx); err != nil {
 		return err
 	}
+	// LegacyColumnMigrations adds ical_uid after the schema files execute.
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_calendar_events_ical_uid ON calendar_events(ical_uid)`); err != nil {
 		return fmt.Errorf("index calendar UID: %w", err)
 	}

@@ -91,7 +91,7 @@ func suggestionMembers(ctx context.Context, r SQLReader, ids []int64) (out []sug
 		args[i] = id
 	}
 	rows, err := r.QueryContext(ctx, `SELECT m.id,COALESCE(m.subject,''),m.sent_at,m.received_at,m.internal_date,d.duration_seconds,k.scheduled_at
- FROM messages m LEFT JOIN meeting_details d ON d.message_id = m.id LEFT JOIN meeting_link_keys k ON k.message_id = m.id AND k.ordinal = 0
+ FROM messages m LEFT JOIN meeting_details d ON d.message_id = m.id LEFT JOIN meeting_link_keys k ON k.message_id = m.id
  WHERE m.message_type = 'meeting_transcript' AND m.deleted_at IS NULL AND m.id IN (`+placeholders(len(ids))+`) ORDER BY m.id`, args...)
 	if err != nil {
 		return nil, err
@@ -206,16 +206,31 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref string, limi
 		if target.Row.Event.Status == "cancelled" {
 			return []MeetingSuggestion{}, nil
 		}
+		r := s.meetingReader(ctx)
+		// Use the longest archived duration to bound the start window without
+		// excluding a long recording that still overlaps the event.
+		var longest float64
+		if err := r.QueryRowContext(ctx, `SELECT COALESCE(MAX(duration_seconds),1800) FROM meeting_details`).Scan(&longest); err != nil {
+			return nil, err
+		}
+		lower := target.Start.Add(-time.Duration(max(1800, longest) * float64(time.Second)))
 		filter := `effective_start < ? AND effective_start + duration_seconds * INTERVAL '1 second' > ?`
 		if !s.IsPostgreSQL() {
 			filter = `julianday(effective_start) < julianday(?) AND julianday(effective_start) + duration_seconds / 86400.0 > julianday(?)`
 		}
-		rows, err := s.db.QueryContext(ctx, `WITH candidates AS (
+		rows, err := r.QueryContext(ctx, `WITH window_ids AS (
+ SELECT message_id AS id FROM meeting_link_keys WHERE scheduled_at >= ? AND scheduled_at < ?
+ UNION ALL
+ SELECT id FROM messages m WHERE message_type = 'meeting_transcript' AND deleted_at IS NULL
+ AND COALESCE(sent_at,received_at,internal_date) >= ? AND COALESCE(sent_at,received_at,internal_date) < ?
+ AND NOT EXISTS (SELECT 1 FROM meeting_link_keys k WHERE k.message_id = m.id AND k.scheduled_at IS NOT NULL)
+), candidates AS (
  SELECT m.id, COALESCE(k.scheduled_at,m.sent_at,m.received_at,m.internal_date) AS effective_start,
  CASE WHEN d.duration_seconds > 0 THEN d.duration_seconds ELSE 1800 END AS duration_seconds
- FROM messages m LEFT JOIN meeting_details d ON d.message_id = m.id LEFT JOIN meeting_link_keys k ON k.message_id = m.id AND k.ordinal = 0
+ FROM window_ids w JOIN messages m ON m.id = w.id
+ LEFT JOIN meeting_details d ON d.message_id = m.id LEFT JOIN meeting_link_keys k ON k.message_id = m.id
  WHERE m.message_type = 'meeting_transcript' AND m.deleted_at IS NULL)
- SELECT id FROM candidates WHERE `+filter+` ORDER BY id LIMIT 2001`, target.End, target.Start)
+ SELECT id FROM candidates WHERE `+filter+` ORDER BY id LIMIT 2001`, lower, target.End, lower, target.End, target.End, target.Start)
 		if err != nil {
 			return nil, err
 		}

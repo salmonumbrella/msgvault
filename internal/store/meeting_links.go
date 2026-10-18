@@ -88,52 +88,23 @@ func occurrenceFromRow(row CalendarEventRow, key string) linkOccurrence {
 }
 
 func expandMeetingSeries(ctx context.Context, r SQLReader, master CalendarEventRow, from, to time.Time, budget *int) ([]linkOccurrence, error) {
-	set, duration, days, err := prepareCalendarRecurrence(master.Event)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", calrecur.ErrUnsupportedRecurrence, err)
-	}
-	related, err := meetingEventRows(ctx, r, `e.kind = 'exception' AND m.source_id = ? AND e.series_provider_id = ?`, []any{master.SourceID, master.Event.ProviderEventID}, budget)
+	predicate, args := calendarExceptionWindow([]CalendarEventRow{master}, from, to)
+	predicate += ` AND m.source_id = ? AND e.series_provider_id = ?`
+	args = append(args, master.SourceID, master.Event.ProviderEventID)
+	related, err := meetingEventRows(ctx, r, predicate, args, budget)
 	if err != nil {
 		return nil, err
 	}
-	var exceptions []calrecur.Exception
-	byID := make(map[int64]CalendarEventRow, len(related))
-	for _, row := range related {
-		e := row.Event
-		if e.Original == nil {
-			continue
-		}
-		zone, err := calendarEventZone(e)
-		if err != nil {
-			return nil, err
-		}
-		exceptions = append(exceptions, calrecur.Exception{Original: *e.Original, Start: e.Start, End: e.End, StartDate: e.StartDate, EndDate: e.EndDate, Zone: zone, Cancelled: e.Status == "cancelled", Ref: row.MessageID})
-		byID[row.MessageID] = row
-	}
-	expanded, count, err := calrecur.Expand(ctx, set, duration, days, exceptions, from, to, min(*budget, calrecur.SeriesReadBudget))
-	if budgetErr := spendMeetingBudget(ctx, budget, count); budgetErr != nil {
-		return nil, budgetErr
-	}
-	if errors.Is(err, calrecur.ErrBudgetExceeded) {
-		return nil, fmt.Errorf("%w: %w", ErrQueryTooBroad, err)
-	}
+	expanded, err := expandCalendarSeries(ctx, r, master, related, from, to, budget)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]linkOccurrence, 0, len(expanded))
 	for _, instance := range expanded {
-		o := occurrenceFromRow(master, instance.Original.Key())
-		o.Start, o.End = instance.Start, instance.End
-		if instance.ExceptionRef != 0 {
-			o.Row = byID[instance.ExceptionRef]
-			if o.Row.Event.Status == "cancelled" {
-				o.Row, err = inheritCalendarCancellation(ctx, r, o.Row, master)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
-		if instance.Cancelled || master.Event.Status == "cancelled" {
+		o := occurrenceFromRow(master, instance.Occurrence.Original.Key())
+		o.Row = instance.Row
+		o.Start, o.End = instance.Occurrence.Start, instance.Occurrence.End
+		if instance.Occurrence.Cancelled {
 			o.Row.Event.Status = "cancelled"
 		}
 		out = append(out, o)
@@ -214,7 +185,7 @@ func resolveMeetingOccurrence(ctx context.Context, r SQLReader, ref OccurrenceRe
 }
 
 func memberLinkKeys(ctx context.Context, r SQLReader, id int64) (keys []meetingLinkKey, err error) {
-	rows, err := r.QueryContext(ctx, `SELECT kind,value,calendar_id,base,instance_key,scheduled_at FROM meeting_link_keys WHERE message_id = ? ORDER BY ordinal`, id)
+	rows, err := r.QueryContext(ctx, `SELECT kind,value,calendar_id,scheduled_at FROM meeting_link_keys WHERE message_id = ?`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +193,7 @@ func memberLinkKeys(ctx context.Context, r SQLReader, id int64) (keys []meetingL
 	for rows.Next() {
 		var key meetingLinkKey
 		var at sql.NullTime
-		if err := rows.Scan(&key.Kind, &key.Value, &key.CalendarID, &key.Base, &key.InstanceKey, &at); err != nil {
+		if err := rows.Scan(&key.Kind, &key.Value, &key.CalendarID, &at); err != nil {
 			return nil, err
 		}
 		if at.Valid {
@@ -233,18 +204,9 @@ func memberLinkKeys(ctx context.Context, r SQLReader, id int64) (keys []meetingL
 	return keys, rows.Err()
 }
 
-func calendarConfigID(config sql.NullString) string {
-	var fields struct {
-		CalendarID string `json:"calendar_id"`
-	}
-	if json.Unmarshal([]byte(config.String), &fields) != nil {
-		return ""
-	}
-	return fields.CalendarID
-}
-
 func automaticMeetingOccurrences(ctx context.Context, r SQLReader, key meetingLinkKey, budget *int) ([]linkOccurrence, error) {
 	predicate, args := `e.ical_uid = ?`, []any{key.Value}
+	base, instance, _ := calrecur.ParseInstanceID(key.Value)
 	if key.Kind == "google_event_id" {
 		// Parse the same source configuration used by calendar persistence.
 		sources, err := r.QueryContext(ctx, `SELECT id,sync_config FROM sources WHERE source_type = 'gcal'`)
@@ -259,7 +221,7 @@ func automaticMeetingOccurrences(ctx context.Context, r SQLReader, key meetingLi
 				_ = sources.Close()
 				return nil, err
 			}
-			if calendarConfigID(config) == key.CalendarID {
+			if decodeCalendarSourceConfig(config).CalendarID == key.CalendarID {
 				sourceIDs = append(sourceIDs, id)
 			}
 		}
@@ -271,7 +233,14 @@ func automaticMeetingOccurrences(ctx context.Context, r SQLReader, key meetingLi
 			return nil, nil
 		}
 		predicate = `m.source_id IN (` + placeholders(len(sourceIDs)) + `) AND (e.provider_event_id = ? OR (e.kind = 'series' AND e.provider_event_id = ?))`
-		args = append(sourceIDs, key.Value, key.Base)
+		args = sourceIDs
+		args = append(args, key.Value, base)
+	} else if key.ScheduledAt != nil {
+		window, windowArgs := calendarExceptionWindow(nil, key.ScheduledAt.Add(-calendarCandidateMargin), key.ScheduledAt.Add(calendarCandidateMargin))
+		predicate += ` AND (e.kind != 'exception' OR (` + window + `))`
+		args = append(args, windowArgs...)
+	} else {
+		predicate += ` AND e.kind != 'exception'`
 	}
 	rows, err := meetingEventRows(ctx, r, predicate, args, budget)
 	if err != nil {
@@ -291,10 +260,10 @@ candidatesLoop:
 		if key.Kind == "google_event_id" {
 			ref := OccurrenceRef{MessageID: row.MessageID}
 			if row.Event.Kind == "series" {
-				if key.Base == "" {
+				if base == "" {
 					continue
 				}
-				ref.Key = key.InstanceKey
+				ref.Key = instance.Key()
 			}
 			o, err := resolveMeetingOccurrence(ctx, r, ref, budget)
 			if errors.Is(err, sql.ErrNoRows) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
@@ -308,7 +277,8 @@ candidatesLoop:
 			if key.ScheduledAt == nil {
 				continue
 			}
-			candidates, err = expandMeetingSeries(ctx, r, row, key.ScheduledAt.Add(-time.Minute), key.ScheduledAt.Add(time.Minute+time.Nanosecond), budget)
+			// PostgreSQL rounds a nanosecond window to zero; compare exact starts below.
+			candidates, err = expandMeetingSeries(ctx, r, row, *key.ScheduledAt, key.ScheduledAt.Add(time.Second), budget)
 			if errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
 				continue
 			}
@@ -324,7 +294,7 @@ candidatesLoop:
 		}
 		for _, o := range candidates {
 			if key.Kind == "ical_uid" && row.Event.Kind != "single" {
-				if key.ScheduledAt == nil || o.Start.Sub(*key.ScheduledAt) < -time.Minute || o.Start.Sub(*key.ScheduledAt) > time.Minute {
+				if key.ScheduledAt == nil || !o.Start.Equal(*key.ScheduledAt) {
 					continue
 				}
 			}
@@ -352,6 +322,7 @@ func meetingMemberOccurrences(ctx context.Context, r SQLReader, memberID int64, 
 	}
 	type resolvedDecision struct {
 		meetingLinkDecision
+
 		target linkOccurrence
 	}
 	var resolved []resolvedDecision
@@ -399,6 +370,8 @@ func meetingMemberOccurrences(ctx context.Context, r SQLReader, memberID int64, 
 // ExportLogicalMeetingKeysContext resolves owner-only transcript identities.
 // The caller keeps a pinned reader from this archive alive for the whole call.
 // Each of at most 100 members gets its own recurrence budget.
+// A failed member keeps its msg:<id> key. Breadth limits are expected fallbacks;
+// other member errors accompany the completed map.
 func (s *Store) ExportLogicalMeetingKeysContext(ctx context.Context, reader SQLReader, ids []int64) (map[int64]string, error) {
 	if len(ids) > 100 {
 		return nil, errors.New("export meeting keys: batch exceeds 100 messages")
@@ -428,13 +401,21 @@ func (s *Store) ExportLogicalMeetingKeysContext(ctx context.Context, reader SQLR
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return nil, err
 	}
+	var memberErrors error
 	for _, id := range members {
 		budget := calrecur.RequestReadBudget
 		occurrences, err := meetingMemberOccurrences(ctx, r, id, &budget)
-		if err != nil {
-			return nil, fmt.Errorf("resolve meeting key for message %d: %w", id, err)
-		}
 		key := fmt.Sprintf("msg:%d", id)
+		if err != nil {
+			out[id] = key
+			if ctx.Err() != nil {
+				return out, errors.Join(memberErrors, ctx.Err())
+			}
+			if !errors.Is(err, ErrQueryTooBroad) {
+				memberErrors = errors.Join(memberErrors, fmt.Errorf("resolve meeting key for message %d: %w", id, err))
+			}
+			continue
+		}
 		if len(occurrences) > 0 {
 			identity := occurrences[0].Identity
 			same := true
@@ -449,7 +430,7 @@ func (s *Store) ExportLogicalMeetingKeysContext(ctx context.Context, reader SQLR
 		}
 		out[id] = key
 	}
-	return out, ctx.Err()
+	return out, errors.Join(memberErrors, ctx.Err())
 }
 
 func (s *Store) meetingReader(ctx context.Context) SQLReader {
