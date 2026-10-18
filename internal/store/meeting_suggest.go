@@ -162,7 +162,8 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref MeetingLinkR
 			return nil, sql.ErrNoRows
 		}
 		member := members[0]
-		page, err := s.ListCalendarOccurrencesContext(ctx, member.Start, member.End)
+		// Include adjacent civil dates; ranking checks the actual instant overlap.
+		page, err := s.ListCalendarOccurrencesContext(ctx, member.Start.Add(-24*time.Hour), member.End.Add(24*time.Hour))
 		if err != nil {
 			return nil, err
 		}

@@ -130,3 +130,28 @@ func TestMeetingLinksSuggestionsTimeWindow(t *testing.T) {
 	assertions.Equal(30, suggestions[0].OverlapMinutes)
 	assertions.Empty(linkedMeetingRefs(t, st, uidless)[uidless])
 }
+
+func TestMeetingLinksSuggestionsAllDayAcrossUTCDates(t *testing.T) {
+	for _, tc := range []struct{ zone, noteStart string }{
+		{"Asia/Tokyo", "2027-03-01T18:00:00Z"},
+		{"America/Los_Angeles", "2027-03-03T06:00:00Z"},
+	} {
+		t.Run(tc.zone, func(t *testing.T) {
+			st := newRFC822IDBackfillBackendStore(t)
+			_, event := calendarFixture(t, st, "event", fmt.Sprintf(`{"id":"event","start":{"date":"2027-03-02","timeZone":%q},"end":{"date":"2027-03-03","timeZone":%q}}`, tc.zone, tc.zone))
+			_, note := projectionFixture(t, st, "note", "twenty_json", fmt.Sprintf(`{"schema_version":1,"recording":{},"calendar_event":{"startsAt":%q}}`, tc.noteStart))
+			for _, ref := range []MeetingLinkRef{{Kind: "evt", MessageID: event}, {Kind: "msg", MessageID: note}} {
+				t.Run(ref.Kind, func(t *testing.T) {
+					assert, require := assert.New(t), require.New(t)
+					suggestions, err := st.SuggestMeetingLinksContext(t.Context(), ref, 10)
+					require.NoError(err)
+					if assert.Len(suggestions, 1) {
+						assert.Equal(fmt.Sprintf("evt:%d", event), suggestions[0].Ref)
+						assert.Equal(note, suggestions[0].MemberMessageID)
+						assert.Equal(30, suggestions[0].OverlapMinutes)
+					}
+				})
+			}
+		})
+	}
+}
