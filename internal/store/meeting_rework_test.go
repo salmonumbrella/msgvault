@@ -66,6 +66,54 @@ func TestMeetingLinksUnsupportedMasterException(t *testing.T) {
 	assertions.Equal(page.Occurrences[0].Ref, links[0].Ref)
 }
 
+func TestMeetingSuggestionsKeepBoundedExceptionForUnsupportedMaster(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	unsupported := strings.ReplaceAll(linkSeriesRaw, "FREQ=WEEKLY;COUNT=6", "FREQ=HOURLY;COUNT=6")
+	_, master := calendarFixture(t, st, "master", unsupported)
+	calendarFixture(t, st, "exception", `{"id":"edited","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-07T10:00:00Z"},"start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"}}`)
+	_, note := projectionFixture(t, st, "twenty", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"weekly@example.org","startsAt":"2027-03-14T10:00:00Z"}}`)
+
+	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: note}}, 10)
+	requirements.NoError(err)
+	requirements.Len(suggestions, 1)
+	wantRef := fmt.Sprintf("evt:%d@20270307T100000Z", master)
+	assertions.Equal(wantRef, suggestions[0].Ref)
+
+	links, err := st.MeetingLinksContext(t.Context(), note)
+	requirements.NoError(err)
+	requirements.Len(links, 1)
+	assertions.Equal(wantRef, links[0].Ref)
+}
+
+func TestMeetingLinksRejectOrphanExceptionsWithoutCompleteBounds(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "cancellation tombstone",
+			raw:  `{"id":"orphan-cancelled","recurringEventId":"missing-series","status":"cancelled","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"}}`,
+		},
+		{
+			name: "partial bounds",
+			raw:  `{"id":"orphan-partial","recurringEventId":"missing-series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T10:00:00Z"}}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			_, orphan := calendarFixture(t, st, "orphan", tc.raw)
+			_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
+
+			err := st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: orphan})
+			requirements.ErrorIs(err, sql.ErrNoRows)
+			assertions.Empty(linkedMeetingRefs(t, st, note)[note])
+		})
+	}
+}
+
 func TestMeetingLinksSuggestionWindowPlan(t *testing.T) {
 	requirements := require.New(t)
 	assertions := assert.New(t)

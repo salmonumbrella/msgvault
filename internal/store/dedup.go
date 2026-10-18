@@ -572,6 +572,9 @@ func (s *Store) MergeDuplicates(
 			}
 		}
 		if result.RawMIMEBackfilled > 0 {
+			if err := s.lockMeetingEvidenceWith(ctx, tx, survivorID); err != nil {
+				return err
+			}
 			if err := s.refreshMeetingProjectionWith(ctx, tx, survivorID); err != nil {
 				return err
 			}

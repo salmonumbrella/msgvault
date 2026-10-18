@@ -104,6 +104,28 @@ func TestCalendarEventProjectionPersistRefreshDelete(t *testing.T) {
 	assertions.Empty(calendarRows(t, st, id))
 }
 
+func TestMergeDuplicatesBackfillsCalendarProjectionAndRetargetsLinks(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	raw := `{"id":"shared-event","iCalUID":"shared@example.test","start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"}}`
+	_, survivor := calendarFixture(t, st, "survivor", raw)
+	_, duplicate := calendarFixture(t, st, "duplicate", raw)
+	_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
+	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: duplicate}))
+
+	_, err := st.db.Exec(`DELETE FROM calendar_events WHERE message_id = ?`, survivor)
+	requirements.NoError(err)
+	_, err = st.db.Exec(`DELETE FROM message_raw WHERE message_id = ?`, survivor)
+	requirements.NoError(err)
+	assertions.Empty(calendarRows(t, st, survivor))
+
+	result, err := st.MergeDuplicates(survivor, []int64{duplicate}, "calendar-raw-backfill")
+	requirements.NoError(err)
+	assertions.Equal(1, result.RawMIMEBackfilled)
+	requirements.Len(calendarRows(t, st, survivor), 1)
+	assertions.Equal(fmt.Sprintf("evt:%d", survivor), linkedMeetingRefs(t, st, note)[note])
+}
+
 func TestCalendarEventProjectionSkipsUnchanged(t *testing.T) {
 	requirements := require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
