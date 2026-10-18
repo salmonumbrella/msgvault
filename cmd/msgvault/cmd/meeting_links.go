@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"go.kenn.io/msgvault/internal/daemonclient"
@@ -16,6 +17,7 @@ import (
 const meetingLinksMinAPISchemaVersion = "3.25.0"
 
 type meetingLinkClient interface {
+	MeetingLinks(ctx context.Context, messageID int64) ([]store.MeetingLink, error)
 	DecideMeetingLink(ctx context.Context, messageID int64, event, decision string) error
 	SuggestMeetingLinks(ctx context.Context, ref string) ([]store.MeetingSuggestion, error)
 	APISchemaVersion(ctx context.Context) (string, error)
@@ -94,6 +96,45 @@ func newMeetingSuggestCommand(open meetingLinkOpen) *cobra.Command {
 		for _, suggestion := range suggestions {
 			if _, err := fmt.Fprintf(writer, "%s\t%d\t%d\t%d\t%d\n", suggestion.Ref, suggestion.MemberMessageID, suggestion.OverlapMinutes, suggestion.SharedAttendees, suggestion.TitleTokens); err != nil {
 				return fmt.Errorf("write meeting suggestions: %w", err)
+			}
+		}
+		return writer.Flush()
+	}
+	return command
+}
+
+func newMeetingLinksCommand(open meetingLinkOpen) *cobra.Command {
+	var jsonOutput bool
+	command := &cobra.Command{Use: "links <note-id>", Short: "Show a note's linked calendar occurrences", Args: cobra.ExactArgs(1)}
+	command.Flags().BoolVar(&jsonOutput, "json", false, "print linked events as JSON")
+	command.RunE = func(cmd *cobra.Command, args []string) error {
+		id, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil || id <= 0 || id > 9007199254740991 {
+			return usageErr(cmd, errors.New("note-id must be a positive message ID"))
+		}
+		client, cleanup, err := openMeetingLinkClient(cmd.Context(), open)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		links, err := client.MeetingLinks(cmd.Context(), id)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return json.MarshalWrite(cmd.OutOrStdout(), links)
+		}
+		if len(links) == 0 {
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), "No linked calendar events")
+			return err
+		}
+		writer := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+		if _, err := fmt.Fprintln(writer, "EVENT\tSTART\tEND\tTITLE"); err != nil {
+			return err
+		}
+		for _, link := range links {
+			if _, err := fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", link.Ref, link.Start.Format(time.RFC3339), link.End.Format(time.RFC3339), normalizeSearchTableText(link.Subject)); err != nil {
+				return err
 			}
 		}
 		return writer.Flush()

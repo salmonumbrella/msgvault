@@ -1763,6 +1763,20 @@ type GetMeetingContextErrorResponseJSON500 = ErrorResponse
 
 type GetMeetingContextErrorResponseJSON503 = ErrorResponse
 
+type GetMeetingLinksResponse = MeetingLinksResponse
+
+type GetMeetingLinksErrorResponse = ErrorResponse
+
+type GetMeetingLinksErrorResponseJSON = ErrorResponse
+
+type GetMeetingLinksErrorResponseJSON403 = ErrorResponse
+
+type GetMeetingLinksErrorResponseJSON404 = ErrorResponse
+
+type GetMeetingLinksErrorResponseJSON500 = ErrorResponse
+
+type GetMeetingLinksErrorResponseJSON503 = ErrorResponse
+
 type DecideMeetingLinkResponse = MeetingLinkDecisionResponse
 
 type DecideMeetingLinkErrorResponse = ErrorResponse
@@ -5244,6 +5258,19 @@ type GetMeetingContextResp struct {
 	JSON415      *GetMeetingContextErrorResponseJSON415
 	JSON500      *GetMeetingContextErrorResponseJSON500
 	JSON503      *GetMeetingContextErrorResponseJSON503
+}
+
+type GetMeetingLinksResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *GetMeetingLinksResponse
+	JSON400      *GetMeetingLinksErrorResponse
+	JSON401      *GetMeetingLinksErrorResponseJSON
+	JSON403      *GetMeetingLinksErrorResponseJSON403
+	JSON404      *GetMeetingLinksErrorResponseJSON404
+	JSON500      *GetMeetingLinksErrorResponseJSON500
+	JSON503      *GetMeetingLinksErrorResponseJSON503
 }
 
 type DecideMeetingLinkResp struct {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,6 +31,12 @@ func (f *meetingLinkFakeClient) SuggestMeetingLinks(_ context.Context, ref strin
 	return []store.MeetingSuggestion{{Ref: "evt:81@20270314T100000Z", MemberMessageID: 42, OverlapMinutes: 30}}, nil
 }
 
+func (f *meetingLinkFakeClient) MeetingLinks(_ context.Context, id int64) ([]store.MeetingLink, error) {
+	f.calls++
+	f.id = id
+	return []store.MeetingLink{{Ref: "evt:81", Subject: "Planning", Start: time.Date(2027, 3, 14, 10, 0, 0, 0, time.UTC), End: time.Date(2027, 3, 14, 11, 0, 0, 0, time.UTC)}}, nil
+}
+
 func TestMeetingLinkCommands(t *testing.T) {
 	requirements := require.New(t)
 	assertions := assert.New(t)
@@ -39,6 +46,10 @@ func TestMeetingLinkCommands(t *testing.T) {
 		args                   []string
 		version, wantErr, want string
 	}{
+		{"links", []string{"links", "42"}, "", "", "Planning"},
+		{"links json", []string{"links", "42", "--json"}, "", "", `"ref":"evt:81"`},
+		{"old daemon links", []string{"links", "42"}, "3.24.0", "upgrade the daemon", ""},
+		{"invalid links ID", []string{"links", "0"}, "", "positive message ID", ""},
 		{"link", []string{"link", "42", "--event", "evt:81@20270314T100000Z"}, "", "", ""},
 		{"unlink", []string{"unlink", "42", "--event", "evt:81@20270314T100000Z"}, "", "", ""},
 		{"suggest note", []string{"suggest", "msg:42"}, "", "", "evt:81@20270314T100000Z"},
@@ -59,11 +70,11 @@ func TestMeetingLinkCommands(t *testing.T) {
 			open := func(context.Context) (meetingLinkClient, func(), error) { return fake, func() { cleaned = true }, nil }
 			root := newMeetingsCommand(meetingCommandDeps{})
 			for _, child := range root.Commands() {
-				if child.Name() == "link" || child.Name() == "unlink" || child.Name() == "suggest" {
+				if child.Name() == "link" || child.Name() == "unlink" || child.Name() == "suggest" || child.Name() == "links" {
 					root.RemoveCommand(child)
 				}
 			}
-			root.AddCommand(newMeetingLinkDecisionCommand("link", open), newMeetingLinkDecisionCommand("unlink", open), newMeetingSuggestCommand(open))
+			root.AddCommand(newMeetingLinkDecisionCommand("link", open), newMeetingLinkDecisionCommand("unlink", open), newMeetingSuggestCommand(open), newMeetingLinksCommand(open))
 			var out bytes.Buffer
 			root.SetOut(&out)
 			root.SetErr(&out)
@@ -83,6 +94,11 @@ func TestMeetingLinkCommands(t *testing.T) {
 			if tc.args[0] == "suggest" {
 				assertions.Equal(tc.args[1], fake.ref)
 				assertions.Contains(out.String(), tc.want)
+			} else if tc.args[0] == "links" {
+				assertions.Equal(int64(42), fake.id)
+				assertions.Contains(out.String(), tc.want)
+				assertions.Contains(out.String(), "evt:81")
+				assertions.Contains(out.String(), "2027-03-14T10:00:00Z")
 			} else {
 				assertions.Equal(int64(42), fake.id)
 				assertions.Equal("evt:81@20270314T100000Z", fake.event)
@@ -90,9 +106,9 @@ func TestMeetingLinkCommands(t *testing.T) {
 			}
 		})
 	}
-	// The production parent includes all three commands.
+	// The production parent includes all four commands.
 	root := newMeetingsCommand(meetingCommandDeps{})
-	for _, name := range []string{"link", "unlink", "suggest"} {
+	for _, name := range []string{"link", "unlink", "suggest", "links"} {
 		command, _, err := root.Find([]string{name})
 		requirements.NoError(err)
 		assertions.Equal(name, command.Name())

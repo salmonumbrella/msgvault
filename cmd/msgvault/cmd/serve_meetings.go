@@ -41,3 +41,7 @@ func (a *storeAPIAdapter) SuggestMeetingLinksContext(ctx context.Context, ref st
 }
 
 var _ api.MeetingLinkStore = (*storeAPIAdapter)(nil)
+
+func (a *storeAPIAdapter) MeetingLinksContext(ctx context.Context, messageID int64) ([]store.MeetingLink, error) {
+	return a.store.MeetingLinksContext(ctx, messageID)
+}

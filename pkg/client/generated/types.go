@@ -7321,6 +7321,17 @@ func (m MeetingImportResponse) Validate() error {
 	return errors
 }
 
+type MeetingLink struct {
+	End     time.Time `json:"end" validate:"required"`
+	Ref     string    `json:"ref" validate:"required"`
+	Start   time.Time `json:"start" validate:"required"`
+	Subject *string   `json:"subject,omitzero"`
+}
+
+func (m MeetingLink) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(m))
+}
+
 type MeetingLinkDecisionRequest struct {
 	Decision  MeetingLinkDecisionRequestDecision `json:"decision" validate:"required"`
 	Event     string                             `json:"event" validate:"required"`
@@ -7354,6 +7365,25 @@ type MeetingLinkDecisionResponse struct {
 
 func (m MeetingLinkDecisionResponse) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(m))
+}
+
+type MeetingLinksResponse struct {
+	Links []MeetingLink `json:"links" validate:"required"`
+}
+
+func (m MeetingLinksResponse) Validate() error {
+	var errors runtime.ValidationErrors
+	for i, item := range m.Links {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("Links[%d]", i), err)
+			}
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
 }
 
 type MeetingMetricsRequest struct {

@@ -412,3 +412,33 @@ func TestMeetingLinksBreadthBeforeDecode(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, fmt.Sprintf("msg:%d", note), keys[note])
 }
+
+func TestMeetingLinksReadDecisions(t *testing.T) {
+	st := newRFC822IDBackfillBackendStore(t)
+	note := granolaLinkFixture(t, st, "note", "event")
+	links, err := st.MeetingLinksContext(t.Context(), note)
+	require.NoError(t, err)
+	assert.Empty(t, links)
+	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "linked@example.org"))
+	for step := range 3 {
+		if step == 1 {
+			require.NoError(t, st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+		}
+		if step == 2 {
+			require.NoError(t, st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+		}
+		links, err = st.MeetingLinksContext(t.Context(), note)
+		require.NoError(t, err)
+		if step == 2 {
+			assert.Empty(t, links)
+			continue
+		}
+		require.Len(t, links, 1)
+		assert.Equal(t, fmt.Sprintf("evt:%d", event), links[0].Ref)
+		assert.Equal(t, "Example event", links[0].Subject)
+		assert.Equal(t, "2027-03-14T10:00:00Z", links[0].Start.Format(time.RFC3339))
+		assert.Equal(t, "2027-03-14T11:00:00Z", links[0].End.Format(time.RFC3339))
+	}
+	_, err = st.MeetingLinksContext(t.Context(), event)
+	assert.ErrorIs(t, err, sql.ErrNoRows)
+}

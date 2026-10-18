@@ -3,10 +3,12 @@
  */
 import type {
   ActionsPage,
+  GetMeetingLinksParams,
   MeetingActionsRequest,
   MeetingContextRequest,
   MeetingLinkDecisionRequest,
   MeetingLinkDecisionResponse,
+  MeetingLinksResponse,
   MeetingMetricsRequest,
   MeetingSuggestionsResponse,
   Metrics,
@@ -49,6 +51,18 @@ export const getMeetingContext = (
       headers: { "Content-Type": "application/json" },
       data: meetingContextRequest,
     },
+    options,
+  );
+};
+/**
+ * @summary List a note's linked calendar occurrences
+ */
+export const getMeetingLinks = (
+  params: GetMeetingLinksParams,
+  options?: SecondParameter<typeof orvalFetch<MeetingLinksResponse>>,
+) => {
+  return orvalFetch<MeetingLinksResponse>(
+    { url: `/api/v1/meetings/links`, method: "GET", params },
     options,
   );
 };

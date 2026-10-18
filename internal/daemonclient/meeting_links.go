@@ -40,3 +40,22 @@ func (c *Client) SuggestMeetingLinks(ctx context.Context, ref string) ([]store.M
 	}
 	return decoded.Suggestions, nil
 }
+
+func (c *Client) MeetingLinks(ctx context.Context, messageID int64) ([]store.MeetingLink, error) {
+	response, err := APIResponse(c, func(client *apiclient.Client) (*generated.GetMeetingLinksResp, error) {
+		return client.GetMeetingLinksWithResponse(ctx, &generated.GetMeetingLinksRequestOptions{Query: &generated.GetMeetingLinksQuery{MessageID: messageID}})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if response.JSON200 == nil {
+		return nil, errors.New("meeting links: empty response")
+	}
+	decoded, err := decodeMeetingResponse[struct {
+		Links []store.MeetingLink `json:"links"`
+	}]("meeting links", response.Body)
+	if err != nil {
+		return nil, err
+	}
+	return decoded.Links, nil
+}

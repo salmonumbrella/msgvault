@@ -14,6 +14,7 @@ import (
 )
 
 type MeetingLinkStore interface {
+	MeetingLinksContext(ctx context.Context, messageID int64) ([]store.MeetingLink, error)
 	LinkMeetingContext(ctx context.Context, memberID int64, ref store.OccurrenceRef) error
 	UnlinkMeetingContext(ctx context.Context, memberID int64, ref store.OccurrenceRef) error
 	SuggestMeetingLinksContext(ctx context.Context, ref store.MeetingLinkRef, limit int) ([]store.MeetingSuggestion, error)
@@ -35,7 +36,19 @@ type MeetingSuggestionsResponse struct {
 	Suggestions []store.MeetingSuggestion `json:"suggestions"`
 }
 
+type MeetingLinksResponse struct {
+	Links []store.MeetingLink `json:"links"`
+}
+
 func (s *Server) registerMeetingLinkRoutes(api huma.API) {
+	links := rawAPIV1Operation("getMeetingLinks", http.MethodGet, "/meetings/links", "List a note's linked calendar occurrences")
+	links.Tags = []string{"Meetings"}
+	links.Parameters = []*huma.Param{{Name: "message_id", In: "query", Required: true, Schema: &huma.Schema{Type: "integer", Format: "int64", Minimum: new(float64(1)), Maximum: new(float64(9007199254740991))}}}
+	links.Responses = jsonResponsesFor[MeetingLinksResponse](api)
+	links.Errors = []int{400, 401, 403, 404, 500, 503}
+	addErrorResponses(api, links.Responses, links.Errors...)
+	registerRawHumaRoute(api, links, s.handleMeetingLinks)
+
 	registerMeetingRoute[MeetingLinkDecisionRequest, MeetingLinkDecisionResponse](api, "decideMeetingLink", "/meetings/links/decisions", "Link or unlink an archived meeting", s.handleMeetingLinkDecision)
 	op := rawAPIV1Operation("suggestMeetingLinks", http.MethodGet, "/meetings/suggestions", "Suggest archived meeting links")
 	op.Tags = []string{"Meetings"}
@@ -126,4 +139,26 @@ func (s *Server) writeMeetingLinkError(w http.ResponseWriter, err error) {
 			writeError(w, 500, "meeting_links_failed", err.Error())
 		}
 	}
+}
+
+func (s *Server) handleMeetingLinks(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.URL.Query().Get("message_id"), 10, 64)
+	if err != nil || id <= 0 || id > 9007199254740991 {
+		writeError(w, 400, "invalid_argument", "message_id must be a positive message ID")
+		return
+	}
+	backend, ok := s.store.(MeetingLinkStore)
+	if !ok {
+		writeError(w, 503, "meetings_unavailable", "Meeting links are unavailable")
+		return
+	}
+	links, err := backend.MeetingLinksContext(r.Context(), id)
+	if err != nil {
+		s.writeMeetingLinkError(w, err)
+		return
+	}
+	if links == nil {
+		links = []store.MeetingLink{}
+	}
+	writeJSON(w, 200, MeetingLinksResponse{Links: links})
 }

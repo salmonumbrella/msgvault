@@ -43,6 +43,12 @@ func (s *meetingLinksTestStore) SuggestMeetingLinksContext(_ context.Context, re
 	s.ref = ref
 	return []store.MeetingSuggestion{{Ref: "evt:81@20270314T100000Z", MemberMessageID: 42, OverlapMinutes: 30, SharedAttendees: 1, TitleTokens: 2, Reasons: []string{"time_overlap", "shared_attendees", "title_tokens"}}}, s.err
 }
+func (s *meetingLinksTestStore) MeetingLinksContext(_ context.Context, id int64) ([]store.MeetingLink, error) {
+	s.calls++
+	s.member = id
+	return []store.MeetingLink{{Ref: "evt:81", Subject: "Planning", Start: time.Date(2027, 3, 14, 10, 0, 0, 0, time.UTC), End: time.Date(2027, 3, 14, 11, 0, 0, 0, time.UTC)}}, s.err
+}
+
 func TestMeetingLinkRoutes(t *testing.T) {
 	requirements := require.New(t)
 
@@ -58,6 +64,12 @@ func TestMeetingLinkRoutes(t *testing.T) {
 	}{
 		{"link", "POST", "/meetings/links/decisions", `{"message_id":42,"event":"evt:81@20270314T100000Z","decision":"link"}`, "", 200, nil},
 		{"unlink", "POST", "/meetings/links/decisions", `{"message_id":42,"event":"evt:81@20270314T100000Z","decision":"unlink"}`, "", 200, nil},
+		{"links", "GET", "/meetings/links?message_id=42", "", "", 200, nil},
+		{"invalid links ID", "GET", "/meetings/links?message_id=0", "", "", 400, nil},
+		{"missing links ID", "GET", "/meetings/links", "", "", 400, nil},
+		{"missing links", "GET", "/meetings/links?message_id=42", "", "", 404, sql.ErrNoRows},
+		{"delegated links", "GET", "/meetings/links?message_id=42", "", secret, 401, nil},
+		{"remote links", "GET", "/meetings/links?message_id=42", "", "synthetic-reader-key", 403, nil},
 		{"note suggestions", "GET", "/meetings/suggestions?ref=msg:42", "", "", 200, nil},
 		{"event suggestions", "GET", "/meetings/suggestions?ref=evt:81@20270314T100000Z", "", "", 200, nil},
 		{"invalid ref", "GET", "/meetings/suggestions?ref=msg:42@20270314", "", "", 400, nil},
@@ -98,6 +110,9 @@ func TestMeetingLinkRoutes(t *testing.T) {
 				assertions.Equal(store.OccurrenceRef{MessageID: 81, Key: "20270314T100000Z"}, backend.event)
 				assertions.Equal(tc.name, backend.decision)
 				assertions.JSONEq(tc.body, w.Body.String())
+			} else if tc.name == "links" {
+				assertions.Equal(int64(42), backend.member)
+				assertions.JSONEq(`{"links":[{"ref":"evt:81","subject":"Planning","start":"2027-03-14T10:00:00Z","end":"2027-03-14T11:00:00Z"}]}`, w.Body.String())
 			} else {
 				want := store.MeetingLinkRef{Kind: "msg", OccurrenceRef: store.OccurrenceRef{MessageID: 42}}
 				if strings.Contains(tc.path, "ref=evt:") {

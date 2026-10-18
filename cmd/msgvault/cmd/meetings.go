@@ -57,6 +57,7 @@ Muesli, Notion, Twenty, Twilio). Meeting IDs are message IDs; find them with
 		newMeetingLinkDecisionCommand("link", openMeetingLinks),
 		newMeetingLinkDecisionCommand("unlink", openMeetingLinks),
 		newMeetingSuggestCommand(openMeetingLinks),
+		newMeetingLinksCommand(openMeetingLinks),
 	)
 	return command
 }

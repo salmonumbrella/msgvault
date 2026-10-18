@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,4 +67,33 @@ func TestMeetingLinksClient(t *testing.T) {
 	var apiError *daemonclient.APIError
 	requirements.ErrorAs(err, &apiError)
 	assertions.Equal(404, apiError.Status)
+}
+
+func TestReadMeetingLinksClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/api/v1/meetings/links", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("message_id") == "43" {
+			_, err := w.Write([]byte(`{"links":[]}`))
+			assert.NoError(t, err)
+			return
+		}
+		assert.Equal(t, "42", r.URL.Query().Get("message_id"))
+		_, err := w.Write([]byte(`{"links":[{"ref":"evt:81","subject":"Planning","start":"2027-03-14T10:00:00Z","end":"2027-03-14T11:00:00Z"}]}`))
+		assert.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+	client, err := daemonclient.New(daemonclient.Config{URL: server.URL, AllowInsecure: true, HTTPClient: server.Client()})
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, client.Close()) })
+	links, err := client.MeetingLinks(t.Context(), 42)
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+	assert.Equal(t, "evt:81", links[0].Ref)
+	assert.Equal(t, "Planning", links[0].Subject)
+	assert.Equal(t, "2027-03-14T10:00:00Z", links[0].Start.Format(time.RFC3339))
+	links, err = client.MeetingLinks(t.Context(), 43)
+	require.NoError(t, err)
+	assert.Empty(t, links)
 }

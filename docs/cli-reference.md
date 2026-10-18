@@ -40,20 +40,23 @@ msgvault meetings actions --status pending --assignee alex@example.com --json
 msgvault meetings metrics --domain example.com --after 2026-01-01 --json
 ```
 
-### meetings link, unlink, and suggest
+### meetings link, unlink, links, and suggest
 
-Link an archived meeting note to a calendar occurrence, or split copies that share an identity. These commands are unreleased and require owner access and daemon API schema 3.25.0 or newer.
+See which calendar events belong to a meeting note, and correct missing or wrong links. These commands are unreleased and require owner access and daemon API schema 3.25.0 or newer.
 
 ```bash
 msgvault meetings suggest msg:42
 msgvault meetings suggest evt:81@20270314T100000Z --json
 msgvault meetings link 42 --event evt:81@20270314T100000Z
+msgvault meetings links 42
 msgvault meetings unlink 42 --event evt:81@20270314T100000Z
 ```
 
 `link` and `unlink` take one meeting note's message ID and a required `--event` reference. Copy the event reference from `meetings suggest` or the `ref` field in `calendar events --json`. A series occurrence uses the series master's ID and its original occurrence key, even when an edited copy moved to another time.
 
-`suggest` accepts `msg:<id>` for a note or `evt:<id>[@occurrence key]` for an event. It returns up to ten overlapping candidates, ranked by overlap minutes, shared attendees, and shared title words. `--json` prints the same evidence. Suggestions leave links unchanged. An explicit link replaces automatic matches; unlinking excludes copies with the same meeting identity.
+`suggest` accepts `msg:<id>` for a note or `evt:<id>[@occurrence key]` for an event. It returns up to ten overlapping candidates, ranked by overlap minutes, shared attendees, and shared title words. `--json` prints the same evidence. Suggestions leave links unchanged.
+
+`links <note-id>` shows each linked event's reference, title, start, and end. `--json` returns the same fields. Exact shared IDs can link a note automatically. After `link`, this list shows the chosen event instead of automatic matches. After `unlink`, it excludes that event and calendar copies of the same occurrence.
 
 ### meetings context
 
