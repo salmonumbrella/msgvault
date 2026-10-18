@@ -116,6 +116,7 @@ func TestClientRecordingPageReadsCalendarsInBulk(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
 	requests := 0
+	var calendarQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		var request struct {
@@ -127,9 +128,10 @@ func TestClientRecordingPageReadsCalendarsInBulk(t *testing.T) {
 		}
 		switch {
 		case strings.Contains(request.Query, "callRecordings("):
+			calendarQuery = request.Query
 			recordings := []any{}
 			for i, event := range []string{"event-1", "event-2", "event-1"} {
-				recordings = append(recordings, map[string]any{"node": map[string]any{"id": fmt.Sprintf("recording-%d", i), "calendarEventId": event, "calendarEvent": map[string]any{"id": event, "startsAt": "2026-09-01T10:00:00Z"}}})
+				recordings = append(recordings, map[string]any{"node": map[string]any{"id": fmt.Sprintf("recording-%d", i), "calendarEventId": event, "calendarEvent": map[string]any{"id": event, "iCalUid": "shared@example.org", "startsAt": "2026-09-01T10:00:00Z"}}})
 			}
 			assert.NoError(json.MarshalWrite(w, map[string]any{"data": map[string]any{"callRecordings": map[string]any{"edges": recordings, "pageInfo": map[string]any{"hasNextPage": false}}}}))
 		case request.Variables["after"] == nil:
@@ -151,8 +153,10 @@ func TestClientRecordingPageReadsCalendarsInBulk(t *testing.T) {
 	page, err := client.ListRecordings(t.Context(), epoch, "", 100)
 	require.NoError(err)
 	require.Len(page.Records, 3)
+	assert.Contains(calendarQuery, "iCalUid")
 	assert.Equal(3, requests)
 	require.NotNil(page.Records[0].Calendar)
+	assert.Contains(string(page.Records[0].Calendar.Raw), `"iCalUid":"shared@example.org"`)
 	assert.Len(page.Records[0].Calendar.Participants, 100)
 	assert.Same(page.Records[0].Calendar, page.Records[2].Calendar)
 	require.Len(page.Records[1].Calendar.Participants, 1)
