@@ -148,7 +148,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 func expandCalendarSeries(ctx context.Context, row CalendarEventRow, exceptionRows []CalendarEventRow, from, to time.Time, remaining int) ([]calrecur.Occurrence, int, string, error) {
 	set, duration, days, prepareErr := prepareCalendarRecurrence(row.Event)
 	var prepared *calrecur.Set
-	if prepareErr == nil && row.RecurrenceError == "" {
+	if prepareErr == nil {
 		prepared = &set
 	}
 	resolved, bounded, err := resolveCalendarExceptions(ctx, prepared, exceptionRows, duration, days)
@@ -162,7 +162,7 @@ func expandCalendarSeries(ctx context.Context, row CalendarEventRow, exceptionRo
 	if remaining <= 0 {
 		return resolved, 0, requestLimit, nil
 	}
-	occurrences, count, err := calrecur.Expand(ctx, set, duration, days, nil, from.Add(-calendarCandidateMargin), to.Add(calendarCandidateMargin), min(remaining, calrecur.SeriesReadBudget))
+	occurrences, count, err := calrecur.Expand(ctx, set, duration, days, from.Add(-calendarCandidateMargin), to.Add(calendarCandidateMargin), min(remaining, calrecur.SeriesReadBudget))
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, count, "", ctx.Err()
@@ -182,8 +182,8 @@ func expandCalendarSeries(ctx context.Context, row CalendarEventRow, exceptionRo
 func resolveCalendarExceptions(ctx context.Context, set *calrecur.Set, rows []CalendarEventRow, duration time.Duration, days int) (resolved, bounded []calrecur.Occurrence, err error) {
 	for _, row := range rows {
 		e := row.Event
-		if e.Status != "cancelled" && e.Start != nil && e.End != nil {
-			bounded = append(bounded, calrecur.Occurrence{Start: *e.Start, End: *e.End, AllDay: e.AllDay, StartDate: e.StartDate, EndDate: e.EndDate, ExceptionRef: row.MessageID, HasException: true})
+		if e.Start != nil && e.End != nil {
+			bounded = append(bounded, calrecur.Occurrence{Start: *e.Start, End: *e.End, AllDay: e.AllDay, StartDate: e.StartDate, EndDate: e.EndDate, Cancelled: e.Status == "cancelled", ExceptionRef: row.MessageID, HasException: true})
 		}
 	}
 	if set == nil {

@@ -41,7 +41,7 @@ func TestRecurrenceStatsCountUnderlyingCandidates(t *testing.T) {
 			requirements.NoError(err)
 			assertions.Equal(tc.wantKeys, got)
 			assertions.Equal(tc.candidates, stats.Candidates)
-			occurrences, count, err := Expand(t.Context(), s, time.Hour, 0, nil, start, until, 100)
+			occurrences, count, err := Expand(t.Context(), s, time.Hour, 0, start, until, 100)
 			requirements.NoError(err)
 			assertions.Equal(tc.candidates, count)
 			var occurrenceKeys []string
@@ -55,31 +55,6 @@ func TestRecurrenceStatsCountUnderlyingCandidates(t *testing.T) {
 			assertions.Equal(instant(t, tc.wantEnd), end.UTC())
 		})
 	}
-}
-
-func TestExpansionStatsIncludeExceptionSuppressionAndOverflow(t *testing.T) {
-	requirements := require.New(t)
-	assertions := assert.New(t)
-	s := parsed(t, "RRULE:FREQ=DAILY;COUNT=2", "RRULE:FREQ=DAILY;COUNT=2", "RDATE:20270303T170000Z", "EXDATE:20270302T170000Z")
-	until := instant(t, "2027-03-05T00:00:00Z")
-	exc := []Exception{{Original: timed(t, "2027-03-03T17:00:00Z"), Cancelled: true, Ref: 42}}
-	got, count, err := Expand(t.Context(), s, time.Hour, 0, exc, s.DTStart, until, 6)
-	requirements.NoError(err)
-	requirements.Len(got, 1)
-	assertions.True(got[0].Cancelled)
-	assertions.Equal(int64(42), got[0].ExceptionRef)
-	assertions.Equal(6, count)
-	got, count, err = Expand(t.Context(), s, time.Hour, 0, exc, s.DTStart, until, 5)
-	requirements.ErrorIs(err, ErrBudgetExceeded)
-	assertions.Empty(got)
-	assertions.Equal(6, count)
-	stats, err := testIterWithStats(t.Context(), s, until, 5, func(instance) bool { return true })
-	requirements.ErrorIs(err, ErrBudgetExceeded)
-	assertions.Equal(6, stats.Candidates)
-	end, bounded, stats := testConservativeEndWithStats(t.Context(), s, time.Hour, 0, 5)
-	assertions.False(bounded)
-	assertions.True(end.IsZero())
-	assertions.Equal(6, stats.Candidates)
 }
 
 func TestIterationStatsRetainLookaheadOnEarlyStopAndCancellation(t *testing.T) {

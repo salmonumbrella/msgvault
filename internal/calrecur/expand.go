@@ -146,16 +146,15 @@ func EffectiveException(s Set, e Exception, duration time.Duration, durationDays
 }
 
 // Expand returns effective occurrences overlapping the half-open [from,to)
-// window, sorted by effective start and original identity. Exceptions are
-// considered independently so a move can enter a window beyond the series end.
+// window, sorted by effective start and original identity.
 // A generation error returns no partial result.
-func Expand(ctx context.Context, s Set, duration time.Duration, durationDays int, exc []Exception, from, to time.Time, budget int) ([]Occurrence, int, error) {
+func Expand(ctx context.Context, s Set, duration time.Duration, durationDays int, from, to time.Time, budget int) ([]Occurrence, int, error) {
 	counter := &candidateBudget{ctx: ctx, limit: budget}
-	out, err := expand(ctx, s, duration, durationDays, exc, from, to, counter)
+	out, err := expand(ctx, s, duration, durationDays, from, to, counter)
 	return out, counter.used, err
 }
 
-func expand(ctx context.Context, s Set, duration time.Duration, durationDays int, exc []Exception, from, to time.Time, counter *candidateBudget) ([]Occurrence, error) {
+func expand(ctx context.Context, s Set, duration time.Duration, durationDays int, from, to time.Time, counter *candidateBudget) ([]Occurrence, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -165,39 +164,15 @@ func expand(ctx context.Context, s Set, duration time.Duration, durationDays int
 	if !to.After(from) {
 		return nil, nil
 	}
-	overrides := map[string]Exception{}
-	for _, e := range exc {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		overrides[e.Original.Key()] = e
-	}
 	var out []Occurrence
 	add := func(o Occurrence) {
 		if o.Start.Before(to) && o.End.After(from) {
 			out = append(out, o)
 		}
 	}
-	for _, e := range overrides {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		o, err := EffectiveException(s, e, duration, durationDays)
-		if err != nil {
-			return nil, err
-		}
-		add(o)
-	}
-	iterationSet := s
-	if len(overrides) > 0 {
-		iterationSet.ExDates = slices.Clone(s.ExDates)
-		for _, e := range overrides {
-			iterationSet.ExDates = append(iterationSet.ExDates, e.Original)
-		}
-	}
 	var boundsErr error
 	// Iter's horizon is inclusive; step back one nanosecond to preserve Expand's half-open window.
-	err := iter(ctx, iterationSet, to.Add(-time.Nanosecond), counter, func(i instance) bool {
+	err := iter(ctx, s, to.Add(-time.Nanosecond), counter, func(i instance) bool {
 		o, err := nominal(s, i.Identity, duration, durationDays)
 		if err != nil {
 			boundsErr = err

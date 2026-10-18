@@ -28,7 +28,7 @@ func TestExplicitGapAndFold(t *testing.T) {
 }
 func TestCountIncludesUnmatchedStart(t *testing.T) {
 	s := parsed(t, "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3")
-	got, _, err := Expand(t.Context(), s, time.Hour, 0, nil, s.DTStart, instant(t, "2027-04-01T00:00:00Z"), 100)
+	got, _, err := Expand(t.Context(), s, time.Hour, 0, s.DTStart, instant(t, "2027-04-01T00:00:00Z"), 100)
 	require.NoError(t, err)
 	require.Len(t, got, 3)
 	assert.Equal(t, instant(t, "2027-03-15T17:00:00Z"), got[2].Start)
@@ -41,7 +41,7 @@ func TestAllDaySkippedDateDoesNotConsumeCount(t *testing.T) {
 	requirements.NoError(err)
 	s, err := ParseSet(time.Time{}, true, "2011-12-28", zone, []string{"RRULE:FREQ=DAILY;COUNT=4"})
 	requirements.NoError(err)
-	got, _, err := Expand(t.Context(), s, 0, 1, nil, instant(t, "2011-12-27T00:00:00Z"), instant(t, "2012-01-03T00:00:00Z"), 100)
+	got, _, err := Expand(t.Context(), s, 0, 1, instant(t, "2011-12-27T00:00:00Z"), instant(t, "2012-01-03T00:00:00Z"), 100)
 	requirements.NoError(err)
 	var dates []string
 	for _, o := range got {
@@ -52,7 +52,7 @@ func TestAllDaySkippedDateDoesNotConsumeCount(t *testing.T) {
 
 func TestDTStartMismatchUntilOnly(t *testing.T) {
 	s := parsed(t, "RRULE:FREQ=WEEKLY;BYDAY=MO;UNTIL=20270315T170000Z")
-	got, _, err := Expand(t.Context(), s, time.Hour, 0, nil, instant(t, "2027-03-01T00:00:00Z"), instant(t, "2027-04-01T00:00:00Z"), 100)
+	got, _, err := Expand(t.Context(), s, time.Hour, 0, instant(t, "2027-03-01T00:00:00Z"), instant(t, "2027-04-01T00:00:00Z"), 100)
 	require.NoError(t, err)
 	var starts []string
 	for _, o := range got {

@@ -78,7 +78,7 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 	if exists && oldVersion == calendarEventProjectionVersion && oldHash == hash {
 		return nil
 	}
-	recurrenceEnd, recurrenceError := calendarRecurrenceEnd(ctx, event)
+	recurrenceEnd := calendarRecurrenceEnd(ctx, event)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -95,8 +95,8 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 			originalAt = &event.Original.Instant
 		}
 	}
-	columns := []string{"message_id", "projection_version", "content_hash", "provider_event_id", "series_provider_id", "kind", "original_start_at", "original_start_date", "status", "all_day", "start_at", "end_at", "start_date", "end_date", "event_time_zone", "calendar_time_zone", "recurrence_json", "recurrence_end_at", "recurrence_error"}
-	values := []any{messageID, calendarEventProjectionVersion, hash, event.ProviderEventID, event.SeriesProviderID, event.Kind, originalAt, originalDate, event.Status, event.AllDay, event.Start, event.End, event.StartDate, event.EndDate, event.EventTimeZone, event.CalendarTimeZone, string(recurrence), recurrenceEnd, recurrenceError}
+	columns := []string{"message_id", "projection_version", "content_hash", "provider_event_id", "series_provider_id", "kind", "original_start_at", "original_start_date", "status", "all_day", "start_at", "end_at", "start_date", "end_date", "event_time_zone", "calendar_time_zone", "recurrence_json", "recurrence_end_at"}
+	values := []any{messageID, calendarEventProjectionVersion, hash, event.ProviderEventID, event.SeriesProviderID, event.Kind, originalAt, originalDate, event.Status, event.AllDay, event.Start, event.End, event.StartDate, event.EndDate, event.EventTimeZone, event.CalendarTimeZone, string(recurrence), recurrenceEnd}
 	updates := make([]string, 0, len(columns)-1)
 	for _, column := range columns[1:] {
 		updates = append(updates, column+" = excluded."+column)
@@ -130,19 +130,19 @@ func decodeCalendarProjection(stored []byte, compression sql.NullString, metadat
 	return event, ok
 }
 
-func calendarRecurrenceEnd(ctx context.Context, event calevent.Event) (*time.Time, string) {
+func calendarRecurrenceEnd(ctx context.Context, event calevent.Event) *time.Time {
 	if event.Kind != "series" {
-		return nil, ""
+		return nil
 	}
 	set, duration, days, err := prepareCalendarRecurrence(event)
 	if err != nil {
-		return nil, err.Error()
+		return nil
 	}
 	end, bounded := calrecur.ConservativeEnd(ctx, set, duration, days, calrecur.SeriesReadBudget)
 	if !bounded {
-		return nil, ""
+		return nil
 	}
-	return &end, ""
+	return &end
 }
 
 func (s *Store) refreshSourceCalendarEventsTx(ctx context.Context, tx *loggedTx, sourceID int64) error {

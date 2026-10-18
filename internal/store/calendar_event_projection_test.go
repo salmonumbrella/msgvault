@@ -174,7 +174,6 @@ func TestCalendarEventBackfillMalformedRecurrenceDoesNotFailInit(t *testing.T) {
 	requirements.NoError(st.InitSchemaContext(t.Context()))
 	rows := calendarRows(t, st, id)
 	requirements.Len(rows, 1)
-	assertions.NotEmpty(rows[0].RecurrenceError)
 	var end sql.NullTime
 	requirements.NoError(st.db.QueryRow(`SELECT recurrence_end_at FROM calendar_events WHERE message_id = ?`, id).Scan(&end))
 	assertions.False(end.Valid)

@@ -21,7 +21,6 @@ type CalendarEventRow struct {
 	Subject             string
 	DeletedFromSource   bool
 	Event               calevent.Event
-	RecurrenceError     string
 }
 
 const maxCalendarSeries = 2000
@@ -32,7 +31,7 @@ const calendarEventSelect = `SELECT e.message_id, m.source_id, COALESCE(m.subjec
  m.deleted_from_source_at IS NOT NULL,
  e.provider_event_id, e.series_provider_id, e.kind, e.original_start_at, e.original_start_date,
  e.status, e.all_day, e.start_at, e.end_at, e.start_date, e.end_date,
- e.event_time_zone, e.calendar_time_zone, e.recurrence_json, e.recurrence_error
+ e.event_time_zone, e.calendar_time_zone, e.recurrence_json
  ` + calendarEventFrom
 
 const calendarEventFrom = `FROM calendar_events e JOIN messages m ON m.id = e.message_id
@@ -81,7 +80,7 @@ func queryCalendarEventRows(ctx context.Context, r *loggedDB, predicate string, 
 		var originalDate, recurrence string
 		err := result.Scan(&row.MessageID, &row.SourceID, &row.Subject, &row.DeletedFromSource,
 			&e.ProviderEventID, &e.SeriesProviderID, &e.Kind, &original, &originalDate, &e.Status, &e.AllDay,
-			&start, &end, &e.StartDate, &e.EndDate, &e.EventTimeZone, &e.CalendarTimeZone, &recurrence, &row.RecurrenceError)
+			&start, &end, &e.StartDate, &e.EndDate, &e.EventTimeZone, &e.CalendarTimeZone, &recurrence)
 		if err != nil {
 			_ = result.Close()
 			return nil, fmt.Errorf("scan calendar event: %w", err)
@@ -165,7 +164,7 @@ func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, from, to time.T
 	// Standalones count toward the request budget; cap them before materializing
 	// more candidates than any occurrence reader could consider. Unknown bounds
 	// remain candidates so the reader can report them.
-	singles, err := queryCalendarEventRowsWithinBudget(ctx, r, `e.kind = 'single' AND ((e.start_at < ? AND e.end_at >= ?) OR e.start_at IS NULL OR e.end_at IS NULL)`, []any{upper, lower}, calrecur.RequestReadBudget)
+	singles, err := queryCalendarEventRowsWithinBudget(ctx, r, `e.kind = 'single' AND ((e.start_at < ? AND e.end_at >= ?) OR (e.status <> 'cancelled' AND (e.start_at IS NULL OR e.end_at IS NULL)))`, []any{upper, lower}, calrecur.RequestReadBudget)
 	if err != nil {
 		return nil, err
 	}
@@ -256,8 +255,7 @@ func calendarMasterDuration(masters []CalendarEventRow) time.Duration {
 	return longest
 }
 
-// Sparse cancellations retain details omitted by the provider. Raw field presence
-// distinguishes omission from an explicitly cleared summary or attendee list.
+// Only sparse cancellations inherit omitted details from the master.
 func inheritCalendarCancellation(ctx context.Context, r *loggedDB, row, master CalendarEventRow) (CalendarEventRow, error) {
 	var stored []byte
 	var compression sql.NullString
@@ -272,6 +270,13 @@ func inheritCalendarCancellation(ctx context.Context, r *loggedDB, row, master C
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		return row, fmt.Errorf("decode cancellation evidence: %w", err)
 	}
+	if fields["start"] != nil || fields["end"] != nil {
+		return row, nil
+	}
+	return inheritSparseCalendarCancellation(row, master, fields), nil
+}
+
+func inheritSparseCalendarCancellation(row, master CalendarEventRow, fields map[string]any) CalendarEventRow {
 	if _, supplied := fields["summary"]; !supplied {
 		row.Subject = master.Subject
 	}
@@ -283,5 +288,5 @@ func inheritCalendarCancellation(ctx context.Context, r *loggedDB, row, master C
 		}
 		row.Event.Attendees = attendees
 	}
-	return row, nil
+	return row
 }

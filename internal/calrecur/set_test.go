@@ -90,7 +90,7 @@ func TestTimedDateTimeRDateAndExDateUseFirstFoldOccurrence(t *testing.T) {
 func TestIterBudgetCountsUnderlyingCandidates(t *testing.T) {
 	s, err := ParseSet(instant(t, "1997-03-02T17:00:00Z"), false, "", time.UTC, []string{"RRULE:FREQ=DAILY"})
 	require.NoError(t, err)
-	got, _, err := Expand(t.Context(), s, time.Hour, 0, nil, instant(t, "2027-03-02T00:00:00Z"), instant(t, "2027-03-03T00:00:00Z"), 1000)
+	got, _, err := Expand(t.Context(), s, time.Hour, 0, instant(t, "2027-03-02T00:00:00Z"), instant(t, "2027-03-03T00:00:00Z"), 1000)
 	require.ErrorIs(t, err, ErrBudgetExceeded)
 	assert.Empty(t, got)
 }
@@ -401,7 +401,7 @@ func TestYearlyByMonthInheritsStartDay(t *testing.T) {
 			require := require.New(t)
 			set, err := ParseSet(instant(t, tc.start), false, "", time.UTC, []string{tc.rule})
 			require.NoError(err)
-			got, _, err := Expand(t.Context(), set, time.Hour, 0, nil, instant(t, "2028-03-01T00:00:00Z"), instant(t, "2028-04-01T00:00:00Z"), 100)
+			got, _, err := Expand(t.Context(), set, time.Hour, 0, instant(t, "2028-03-01T00:00:00Z"), instant(t, "2028-04-01T00:00:00Z"), 100)
 			require.NoError(err)
 			require.Len(got, 1)
 			assert.Equal(t, instant(t, tc.want), got[0].Start)

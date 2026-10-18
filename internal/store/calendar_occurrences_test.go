@@ -328,6 +328,52 @@ func TestListCalendarOccurrencesUnexpandableKeepsEditedExceptions(t *testing.T) 
 	}
 }
 
+func TestListCalendarOccurrencesUnexpandableKeepsCancelledExceptions(t *testing.T) {
+	for _, tc := range []struct{ recurrence, reason string }{
+		{"RRULE:FREQ=HOURLY", "unsupported recurrence"},
+		{"RRULE:FREQ=DAILY", "recurrence generation budget exceeded"},
+	} {
+		t.Run(tc.recurrence, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			_, master := calendarFixture(t, st, "master", fmt.Sprintf(`{"id":"master","start":{"dateTime":"1800-01-01T17:00:00Z"},"end":{"dateTime":"1800-01-01T18:00:00Z"},"recurrence":[%q]}`, tc.recurrence))
+			_, cancelled := calendarFixture(t, st, "cancelled", `{"id":"cancelled","recurringEventId":"master","status":"cancelled","originalStartTime":{"dateTime":"2027-03-04T17:00:00Z"},"start":{"dateTime":"2027-03-04T19:00:00Z"},"end":{"dateTime":"2027-03-04T20:00:00Z"}}`)
+			from := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+			page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 1, 0))
+			requirements.NoError(err)
+			requirements.Len(page.Unexpandable, 1)
+			assertions.Equal(master, page.Unexpandable[0].MessageID)
+			assertions.Equal(tc.reason, page.Unexpandable[0].Reason)
+			requirements.Len(page.Occurrences, 1)
+			assertions.Equal(cancelled, page.Occurrences[0].MessageID)
+			assertions.Equal(master, page.Occurrences[0].SeriesMessageID)
+			assertions.Equal("cancelled", page.Occurrences[0].Status)
+			assertions.Equal("2027-03-04T19:00:00Z", page.Occurrences[0].Start.Format(time.RFC3339))
+			assertions.Equal("2027-03-04T20:00:00Z", page.Occurrences[0].End.Format(time.RFC3339))
+		})
+	}
+}
+
+func TestListCalendarOccurrencesCancelledSinglesWithoutBounds(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	for i := range 3 {
+		calendarFixture(t, st, fmt.Sprintf("cancelled-%d", i), fmt.Sprintf(`{"id":"cancelled-%d","status":"cancelled"}`, i))
+	}
+	from := time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC)
+	rows, err := calendarEventRowsInWindow(t.Context(), st.db, from, from.AddDate(0, 0, 1))
+	requirements.NoError(err)
+	assertions.Empty(rows, "tombstones must consume no request budget")
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	requirements.NoError(err)
+	assertions.Empty(page.Occurrences)
+	assertions.Empty(page.Unexpandable)
+	_, unknown := calendarFixture(t, st, "unknown", `{"id":"unknown"}`)
+	page, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	requirements.NoError(err)
+	assertions.Equal([]CalendarUnexpandable{{MessageID: unknown, Reason: "missing event bounds"}}, page.Unexpandable)
+}
+
 func TestListCalendarOccurrencesExceptionMessageIDZero(t *testing.T) {
 	assert, require := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
