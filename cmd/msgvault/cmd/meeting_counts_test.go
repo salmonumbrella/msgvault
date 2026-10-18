@@ -192,6 +192,80 @@ func TestMeetingSyncsStayIncremental(t *testing.T) {
 	}
 }
 
+func TestMeetingKeysExcludeTranscriptsImportedAfterSnapshot(t *testing.T) {
+	for _, csv := range []bool{false, true} {
+		for _, derived := range []bool{false, true} {
+			t.Run(fmt.Sprintf("csv_%t/derived_%t", csv, derived), func(t *testing.T) {
+				assert, require := assert.New(t), require.New(t)
+				t.Setenv("MSGVAULT_FORCE_CSV_SNAPSHOT", "")
+				if csv {
+					t.Setenv("MSGVAULT_FORCE_CSV_SNAPSHOT", "1")
+				}
+				root := t.TempDir()
+				path, cache := filepath.Join(root, "archive.db"), filepath.Join(root, "analytics")
+				st, err := store.OpenForTest(path)
+				require.NoError(err)
+				defer func() { require.NoError(st.Close()) }()
+				require.NoError(st.InitSchema())
+				source, err := st.GetOrCreateSource("twenty", "owner@example.org")
+				require.NoError(err)
+				owner, err := st.EnsureParticipant("owner@example.org", "Owner", "example.org")
+				require.NoError(err)
+				require.NoError(st.AddAccountIdentity(source.ID, "owner@example.org", "explicit"))
+				human, err := st.EnsureParticipant("person@example.org", "Person", "example.org")
+				require.NoError(err)
+				persist := func(id, kind, format, raw string) int64 {
+					messageID, err := st.PersistMessage(&store.MessagePersistData{
+						Message:      &store.Message{SourceID: source.ID, SourceMessageID: id, MessageType: kind, SentAt: sql.NullTime{Time: time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC), Valid: true}},
+						Conversation: &store.ConversationPersistData{SourceConversationID: id, ConversationType: "meeting"},
+						RawFormat:    format, RawMIME: []byte(raw),
+					})
+					require.NoError(err)
+					require.NoError(st.ReplaceMessageRecipients(messageID, "to", []int64{human, owner}, []string{"Person", "Owner"}))
+					return messageID
+				}
+				event := persist("event", "calendar_event", "gcal_json", `{"id":"event","iCalUID":"shared@example.org","start":{"dateTime":"2026-08-01T10:00:00Z"},"end":{"dateTime":"2026-08-01T11:00:00Z"}}`)
+				require.NoError(st.SetMessageMetadata(event, sql.NullString{String: `{"ical_uid":"shared@example.org"}`, Valid: true}))
+				const transcript = `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org","startsAt":"2026-08-01T10:00:00Z"}}`
+				first := persist("first", "meeting_transcript", "twenty_json", transcript)
+				hook := func() { persist("second", "meeting_transcript", "twenty_json", transcript) }
+				if derived {
+					_, err = buildCache(path, cache, true)
+					require.NoError(err)
+					require.NoError(st.RepairParticipantDisplayNames([]store.ParticipantDisplayNameRepair{{ParticipantID: human, DisplayName: "Updated Person"}}))
+					derivedRefreshBeforeSnapshotHook = hook
+				} else {
+					buildCacheAfterSnapshotHook = hook
+				}
+				t.Cleanup(func() { derivedRefreshBeforeSnapshotHook = nil; buildCacheAfterSnapshotHook = nil })
+				if derived {
+					_, err = buildCacheDerivedOnly(path, cache)
+				} else {
+					_, err = buildCache(path, cache, true)
+				}
+				require.NoError(err)
+				derivedRefreshBeforeSnapshotHook, buildCacheAfterSnapshotHook = nil, nil
+				state, err := query.ReadCacheSyncState(cache)
+				require.NoError(err)
+				assert.Equal(first, state.LastMessageID, "the late transcript is outside the exported message population")
+				stale := cacheNeedsBuild(path, cache)
+				assert.True(stale.NeedsBuild)
+				require.False(stale.FullRebuild)
+				result, err := buildCache(path, cache, false)
+				require.NoError(err)
+				assert.Equal(int64(1), result.StagedCount, "append the late transcript")
+				assert.False(cacheNeedsBuild(path, cache).NeedsBuild)
+				db, err := sql.Open("duckdb", "")
+				require.NoError(err)
+				defer func() { require.NoError(db.Close()) }()
+				var count int64
+				require.NoError(db.QueryRow(`SELECT sum(meeting_count) FROM read_parquet(?) WHERE canonical_id = ?`, filepath.Join(cache, identityindex.DatasetTemperatureContributions, "*.parquet"), human).Scan(&count))
+				assert.Equal(int64(1), count, "linked transcripts contribute one meeting after the append")
+			})
+		}
+	}
+}
+
 func TestMeetingKeysRespectPublicationBoundary(t *testing.T) {
 	for _, csv := range []bool{false, true} {
 		for _, derived := range []bool{false, true} {

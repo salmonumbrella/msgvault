@@ -1463,7 +1463,7 @@ func buildCacheLockedAttempt(
 		return nil, fmt.Errorf("export owner participants: %w", err)
 	}
 
-	if err := stageMeetingKeys(ctx, exportDB, meetingKeys); err != nil {
+	if err := stageMeetingKeys(ctx, exportDB, meetingKeys, maxID); err != nil {
 		return nil, err
 	}
 	if err := runExport(tableMeetingKeys, copyDataset(tableMeetingKeys, meetingKeysSelectSQL)); err != nil {

@@ -249,7 +249,7 @@ func refreshDerivedDatasetsOnly(
 	derivedCopy := func(table, selectSQL string) error {
 		return copyParquet(ctx, exportDB, filepath.Join(staging.root, table), table+".parquet", selectSQL)
 	}
-	if err := stageMeetingKeys(ctx, exportDB, meetingKeys); err != nil {
+	if err := stageMeetingKeys(ctx, exportDB, meetingKeys, state.LastMessageID); err != nil {
 		return nil, err
 	}
 	if err := derivedCopy(tableMeetingKeys, meetingKeysSelectSQL); err != nil {
@@ -615,7 +615,14 @@ func verifyRelatedOnlyAdditions(snapshot *cacheSourceSnapshot, state syncState) 
 	return nil
 }
 
-func stageMeetingKeys(ctx context.Context, db sqlRunner, keys map[int64]string) error {
+func stageMeetingKeys(ctx context.Context, db sqlRunner, keys map[int64]string, maxMessageID int64) error {
+	// Keys use a separate store snapshot. Leave later imports pending so their
+	// append detects changed keys and recomputes meeting contributions.
+	for id := range keys {
+		if id > maxMessageID {
+			delete(keys, id)
+		}
+	}
 	return stageIdentityMap(ctx, db, "tmp_meeting_keys", "message_id BIGINT, meeting_key VARCHAR", keys,
 		func(id int64, value string) string { return fmt.Sprintf("(%d,'%s')", id, quoteCacheSQL(value)) })
 }
