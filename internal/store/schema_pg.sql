@@ -4273,7 +4273,6 @@ CREATE TABLE IF NOT EXISTS meeting_link_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_meeting_link_keys_scheduled ON meeting_link_keys(scheduled_at);
 CREATE INDEX IF NOT EXISTS idx_meeting_details_duration ON meeting_details(duration_seconds);
-CREATE INDEX IF NOT EXISTS idx_messages_meeting_start ON messages(COALESCE(sent_at,received_at,internal_date)) WHERE message_type = 'meeting_transcript' AND deleted_at IS NULL;
 CREATE TABLE IF NOT EXISTS meeting_link_decisions (
     member_message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     target_message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
