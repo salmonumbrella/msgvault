@@ -4252,6 +4252,7 @@ CREATE INDEX IF NOT EXISTS idx_calendar_events_provider_id ON calendar_events(pr
 CREATE INDEX IF NOT EXISTS idx_calendar_events_series_id ON calendar_events(series_provider_id);
 CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_at);
 CREATE INDEX IF NOT EXISTS idx_calendar_events_recurrence_end ON calendar_events(recurrence_end_at);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_provider_id ON calendar_events(provider_event_id);
 CREATE TABLE IF NOT EXISTS calendar_event_attendees (
     message_id BIGINT NOT NULL REFERENCES calendar_events(message_id) ON DELETE CASCADE,
     ordinal INTEGER NOT NULL,
