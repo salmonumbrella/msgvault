@@ -339,6 +339,40 @@ func TestArchiverUnchangedCanonicalMergedParticipantsPreservesRevision(t *testin
 	checks.Equal(before, after)
 }
 
+func TestArchiverUnchangedPrimaryEmailWithAmbiguousAlias(t *testing.T) {
+	checks, must := assert.New(t), require.New(t)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource("meeting_import", "work")
+	must.NoError(err)
+	snapshot := testSnapshot(source.ID)
+	archiver := New(st)
+	first, err := archiver.Upsert(t.Context(), snapshot, UpsertOptions{})
+	must.NoError(err)
+	other, err := st.EnsureParticipant("other@example.com", "Other attendee", "example.com")
+	must.NoError(err)
+	must.NoError(st.SetParticipantIdentifier(other, "apple_id", snapshot.Attendees[0].Email))
+	ambiguous, err := st.EmailParticipantContext(t.Context(), snapshot.Attendees[0].Email)
+	must.NoError(err)
+	must.Zero(ambiguous, "the alias lookup alone cannot choose a participant")
+	before, err := st.DerivedDataRevision()
+	must.NoError(err)
+	var beforeRow int64
+	must.NoError(st.DB().QueryRow(st.Rebind(`SELECT id FROM message_recipients WHERE message_id = ? AND recipient_type = 'to'`), first.MessageID).Scan(&beforeRow))
+	unchanged, err := archiver.Unchanged(t.Context(), snapshot)
+	must.NoError(err)
+	checks.True(unchanged)
+	second, err := archiver.Upsert(t.Context(), snapshot, UpsertOptions{})
+	must.NoError(err)
+	checks.Equal(first.MessageID, second.MessageID)
+	checks.False(second.Changed)
+	after, err := st.DerivedDataRevision()
+	must.NoError(err)
+	checks.Equal(before, after)
+	var afterRow int64
+	must.NoError(st.DB().QueryRow(st.Rebind(`SELECT id FROM message_recipients WHERE message_id = ? AND recipient_type = 'to'`), first.MessageID).Scan(&afterRow))
+	checks.Equal(beforeRow, afterRow, "identical imports preserve the stored recipient")
+}
+
 func TestArchiverWithoutOrganizerDoesNotInventSender(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)

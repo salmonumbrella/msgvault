@@ -7051,6 +7051,20 @@ func (s *Store) PhoneParticipantContext(ctx context.Context, phone string) (int6
 	return id, nil
 }
 
+// PrimaryEmailParticipantContext looks up the exact address used by email
+// participant persistence. A missing address returns zero.
+func (s *Store) PrimaryEmailParticipantContext(ctx context.Context, email string) (int64, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM participants WHERE email_address = ?`, email).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("look up primary email participant: %w", err)
+	}
+	return id, nil
+}
+
 // EmailParticipantContext finds the one participant holding an email address,
 // as its primary address or as an alias, without creating identities from
 // review-only evidence. A missing or ambiguous email returns zero.

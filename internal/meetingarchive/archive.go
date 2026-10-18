@@ -293,7 +293,10 @@ func (a *Archiver) storedMatches(ctx context.Context, snapshot Snapshot, existin
 		}
 		var err error
 		if person.Email != "" {
-			person.ParticipantID, err = a.store.EmailParticipantContext(ctx, person.Email)
+			person.ParticipantID, err = a.store.PrimaryEmailParticipantContext(ctx, person.Email)
+			if err == nil && person.ParticipantID == 0 {
+				person.ParticipantID, err = a.store.EmailParticipantContext(ctx, person.Email)
+			}
 		} else {
 			person.ParticipantID, err = a.store.PhoneParticipantContext(ctx, person.Phone)
 		}
