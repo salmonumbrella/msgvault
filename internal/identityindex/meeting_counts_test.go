@@ -53,3 +53,45 @@ func TestPersonMeetingCountDedupesCopiesGlobalAndSourceFiltered(t *testing.T) {
 	assertions.Equal(int64(2), first)
 	assertions.Equal(int64(1), second)
 }
+
+func TestMeetingContributionsDeduplicateAcrossAppend(t *testing.T) {
+	require := require.New(t)
+	committed, db := writeRelationshipBaseFixture(t, true)
+	writeSyntheticRelationshipFanOut(t, db, committed, syntheticRelationshipFanOutOptions{
+		firstMessageID: 1, messageCount: 1, memberCount: 5, startDate: "2026-01-01",
+		messageType: "meeting_transcript", conversationType: "meeting",
+	})
+	replaceRelationshipParquet(t, db, committed, "message_recipients", `SELECT 1::BIGINT AS message_id, participant_id::BIGINT AS participant_id, 'to'::VARCHAR AS recipient_type, ''::VARCHAR AS display_name FROM (VALUES (1), (2)) t(participant_id)`)
+	replaceRelationshipParquet(t, db, committed, "meeting_keys", `SELECT 1::BIGINT AS message_id, 'ical:shared@example.org|'::VARCHAR AS meeting_key`)
+	_, err := Build(t.Context(), db, BuildOptions{Mode: ModeFull, StagedBaseRoot: committed, OutputRoot: committed})
+	require.NoError(err)
+	staged := t.TempDir()
+	writeRelationshipParquet(t, db, staged, "person_display_names", `SELECT 0::BIGINT AS participant_id, 0::BIGINT AS person_id, NULL::VARCHAR AS display_name WHERE false`)
+	writeRelationshipParquet(t, db, staged, "meeting_keys", `SELECT message_id::BIGINT AS message_id, 'ical:shared@example.org|'::VARCHAR AS meeting_key FROM (VALUES (1), (101)) t(message_id)`)
+	writeSyntheticRelationshipFanOut(t, db, staged, syntheticRelationshipFanOutOptions{
+		firstMessageID: 101, messageCount: 1, memberCount: 5, startDate: "2026-01-01",
+		messageType: "meeting_transcript", conversationType: "meeting",
+	})
+	replaceRelationshipParquet(t, db, staged, "message_recipients", `SELECT 101::BIGINT AS message_id, participant_id::BIGINT AS participant_id, 'to'::VARCHAR AS recipient_type, ''::VARCHAR AS display_name FROM (VALUES (1), (2)) t(participant_id)`)
+	_, err = Build(t.Context(), db, BuildOptions{Mode: ModeIncremental, CommittedRoot: committed, StagedBaseRoot: staged, OutputRoot: staged})
+	require.NoError(err)
+	var count int64
+	require.NoError(db.QueryRow(`SELECT sum(meeting_count) FROM read_parquet(?) WHERE canonical_id = 2`, relationshipParquetGlob(staged, DatasetTemperatureContributions)).Scan(&count))
+	assert.Equal(t, int64(1), count)
+	require.NoError(db.QueryRow(`SELECT sum(meeting_units) FROM read_parquet(?) WHERE canonical_id = 2`, relationshipParquetGlob(staged, DatasetRelationshipDaily)).Scan(&count))
+	assert.Equal(t, int64(1), count)
+}
+
+func TestValidateRejectsMeetingTotalBelowSourceCount(t *testing.T) {
+	require := require.New(t)
+	root, db := writeRelationshipBaseFixture(t, false)
+	_, err := Build(t.Context(), db, BuildOptions{Mode: ModeFull, StagedBaseRoot: root, OutputRoot: root})
+	require.NoError(err)
+	old := moveRelationshipDatasetAside(t, root, DatasetPeople)
+	writeRelationshipParquet(t, db, root, DatasetPeople, `SELECT * REPLACE (
+		0::BIGINT AS meeting_count,
+		list_transform(source_rollups, item -> struct_update(item, meeting_count := 1::BIGINT)) AS source_rollups
+	) FROM read_parquet('`+quoteSQLString(relationshipParquetGlob(old, DatasetPeople))+`')`)
+	err = Validate(t.Context(), db, ValidationOptions{OutputRoot: root, RequiredOutputDatasets: RequiredDatasets})
+	require.ErrorContains(err, "source rollups do not decompose identity totals")
+}

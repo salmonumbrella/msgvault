@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"go.kenn.io/msgvault/internal/calevent"
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -61,19 +60,26 @@ func (a *Archiver) LinkIdentities(ctx context.Context, sourceID int64, people []
 	if a == nil || a.store == nil {
 		return result, ErrUnavailable
 	}
+	isRoom, err := a.store.RoomClassifierContext(ctx)
+	if err != nil {
+		return result, err
+	}
 	for _, raw := range people {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
 		person := raw.Normalized()
-		if calevent.IsRoomAttendee(person.Email, false) {
+		if isRoom(person.Email, false) {
 			continue
 		}
 		identities := person.identities()
+		identities = slices.DeleteFunc(identities, func(id identity) bool {
+			return id.kind == identityEmail && isRoom(id.value, false)
+		})
 		if person.Anchor == "" || len(identities) == 0 {
 			continue
 		}
-		if err := a.linkPerson(ctx, sourceID, person, identities, &result); err != nil {
+		if err := a.linkPerson(ctx, sourceID, person, identities, isRoom, &result); err != nil {
 			return result, err
 		}
 	}
@@ -81,7 +87,7 @@ func (a *Archiver) LinkIdentities(ctx context.Context, sourceID int64, people []
 }
 
 func (a *Archiver) linkPerson(
-	ctx context.Context, sourceID int64, person Person, identities []identity, result *LinkResult,
+	ctx context.Context, sourceID int64, person Person, identities []identity, isRoom func(string, bool) bool, result *LinkResult,
 ) error {
 	anchor := person.Anchor
 	// The archive owner's own contact card or record can list a shared number
@@ -154,7 +160,7 @@ func (a *Archiver) linkPerson(
 	seen := map[int64]bool{primary: true}
 	for _, observation := range observations {
 		other := observation.ParticipantID
-		if seen[other] || slices.Contains(person.LinkExcludedAddresses, observation.NormalizedValue) {
+		if isRoom(observation.NormalizedValue, false) || seen[other] || slices.Contains(person.LinkExcludedAddresses, observation.NormalizedValue) {
 			continue
 		}
 		seen[other] = true

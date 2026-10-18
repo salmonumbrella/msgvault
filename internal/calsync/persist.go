@@ -1,6 +1,7 @@
 package calsync
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json/v2"
 	"fmt"
@@ -8,7 +9,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"go.kenn.io/msgvault/internal/calevent"
 	"go.kenn.io/msgvault/internal/gcal"
 	"go.kenn.io/msgvault/internal/gcal/gcalmodel"
 	"go.kenn.io/msgvault/internal/store"
@@ -60,6 +60,11 @@ type eventMetadata struct {
 // plus the metadata helper, and indexes it for FTS/embeddings. It is idempotent
 // via UpsertMessage's ON CONFLICT(source_id, source_message_id).
 func (s *Syncer) ingestEvent(sourceID int64, cal gcal.Calendar, ev gcal.Event) (int64, error) {
+	isRoom, err := s.store.RoomClassifierContext(context.Background())
+	if err != nil {
+		return 0, err
+	}
+
 	smid := deriveSourceMessageID(ev)
 	ev.Organizer.Email = gcalmodel.NormalizeParticipantEmail(ev.Organizer.Email)
 	for i := range ev.Attendees {
@@ -75,7 +80,7 @@ func (s *Syncer) ingestEvent(sourceID int64, cal gcal.Calendar, ev gcal.Event) (
 			organizerResource = true
 		}
 	}
-	if ev.Organizer.Email != "" && !calevent.IsRoomAttendee(ev.Organizer.Email, organizerResource) {
+	if ev.Organizer.Email != "" && !isRoom(ev.Organizer.Email, organizerResource) {
 		id, err := s.store.EnsureParticipant(ev.Organizer.Email, ev.Organizer.DisplayName, emailDomain(ev.Organizer.Email))
 		if err != nil {
 			return 0, fmt.Errorf("organizer participant: %w", err)
@@ -92,7 +97,7 @@ func (s *Syncer) ingestEvent(sourceID int64, cal gcal.Calendar, ev gcal.Event) (
 			continue
 		}
 		attendeeEmails = append(attendeeEmails, a.Email)
-		if calevent.IsRoomAttendee(a.Email, a.Resource) {
+		if isRoom(a.Email, a.Resource) {
 			continue
 		}
 		pid, err := s.store.EnsureParticipant(a.Email, a.DisplayName, emailDomain(a.Email))

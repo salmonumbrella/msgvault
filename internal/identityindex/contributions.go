@@ -29,14 +29,14 @@ func (b builder) materializeContributions(ctx context.Context, activity string, 
 		}
 		activity = "(SELECT * FROM " + activityBuildRelation + ")"
 	}
-	temperatureSQL := buildRelationshipTemperatureDailySQL(activity, effectiveAt)
+	temperatureSQL := buildRelationshipTemperatureDailySQL(activity, effectiveAt, b.base("meeting_keys"))
 	logicalSQL := buildLogicalActivityMaterializationSQL(activity)
 	if reuseContributions {
 		delta := "(SELECT * FROM " + deltaActivityBuildRelation + ")"
 		if reuseTemperature {
 			temperatureSQL = mergeTemperatureContributionsSQL(
 				b.committed(DatasetTemperatureContributions),
-				buildRelationshipTemperatureDailySQL(delta, effectiveAt),
+				buildRelationshipTemperatureDailySQL(delta, effectiveAt, b.base("meeting_keys")),
 			)
 		}
 		logicalSQL = mergeLogicalContributionsSQL(
@@ -59,6 +59,15 @@ func (b builder) materializeContributions(ctx context.Context, activity string, 
 // new activity shard. In that rare case the daily score reduction must read
 // the committed activity once instead of adding only the new contribution.
 func (b builder) canReuseTemperatureContributions(ctx context.Context, effectiveAt time.Time) (bool, error) {
+	// Daily sums have discarded occurrence keys. Recompute them when linked
+	// meetings exist so a new copy or changed decision can re-key old rows.
+	var hasLinkedMeetings bool
+	if err := b.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM read_parquet(['`+quoteSQLString(b.base("meeting_keys"))+`','`+quoteSQLString(b.committed("meeting_keys"))+`']))`).Scan(&hasLinkedMeetings); err != nil {
+		return false, fmt.Errorf("inspect linked meeting contributions: %w", err)
+	}
+	if hasLinkedMeetings {
+		return false, nil
+	}
 	var priorCutoff sql.NullTime
 	query := `SELECT max(temperature_effective_at) FROM read_parquet('` +
 		quoteSQLString(b.committed(DatasetPeople)) + `')`

@@ -1,6 +1,7 @@
 package meetingarchive
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"unicode"
@@ -10,11 +11,15 @@ import (
 	"go.kenn.io/msgvault/internal/store"
 )
 
-func normalizedPeople(snapshot Snapshot) (Person, []Person) {
+func (a *Archiver) normalizedPeople(ctx context.Context, snapshot Snapshot) (Person, []Person, error) {
+	isRoom, err := a.store.RoomClassifierContext(ctx)
+	if err != nil {
+		return Person{}, nil, err
+	}
 	var organizer Person
 	if snapshot.Organizer != nil {
 		organizer = snapshot.Organizer.Normalized()
-		if calevent.IsRoomAttendee(organizer.Email, false) {
+		if isRoom(organizer.Email, false) {
 			organizer = Person{}
 		}
 	}
@@ -22,7 +27,7 @@ func normalizedPeople(snapshot Snapshot) (Person, []Person) {
 	seen := make(map[string]bool, len(snapshot.Attendees))
 	for _, raw := range snapshot.Attendees {
 		attendee := raw.Normalized()
-		if calevent.IsRoomAttendee(attendee.Email, false) {
+		if isRoom(attendee.Email, false) {
 			continue
 		}
 		key := archiveParticipantKey(attendee)
@@ -31,7 +36,7 @@ func normalizedPeople(snapshot Snapshot) (Person, []Person) {
 			attendees = append(attendees, attendee)
 		}
 	}
-	return organizer, attendees
+	return organizer, attendees, nil
 }
 
 // archiveParticipantKey keeps resolved people distinct even when they share an address.

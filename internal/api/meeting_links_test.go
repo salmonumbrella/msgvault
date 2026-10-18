@@ -18,6 +18,7 @@ import (
 )
 
 type meetingLinksTestStore struct {
+	refreshes int
 	*mockStore
 
 	member   int64
@@ -26,6 +27,11 @@ type meetingLinksTestStore struct {
 	ref      store.MeetingLinkRef
 	err      error
 	calls    int
+}
+
+func (s *meetingLinksTestStore) RefreshIdentityDatasets(context.Context) (int64, error) {
+	s.refreshes++
+	return 0, nil
 }
 
 func (s *meetingLinksTestStore) LinkMeetingContext(_ context.Context, id int64, ref store.OccurrenceRef) error {
@@ -87,6 +93,7 @@ func TestMeetingLinkRoutes(t *testing.T) {
 			requirements := require.New(t)
 			backend.err = tc.err
 			before := backend.calls
+			beforeRefresh := backend.refreshes
 			r := httptest.NewRequest(tc.method, "/api/v1"+tc.path, strings.NewReader(tc.body))
 			r.Header.Set("Content-Type", "application/json")
 			if tc.token == secret {
@@ -99,6 +106,11 @@ func TestMeetingLinkRoutes(t *testing.T) {
 			w := httptest.NewRecorder()
 			srv.Router().ServeHTTP(w, r)
 			requirements.Equal(tc.status, w.Code, w.Body.String())
+			if tc.status == 200 && tc.method == http.MethodPost {
+				assertions.Equal(beforeRefresh+1, backend.refreshes)
+			} else {
+				assertions.Equal(beforeRefresh, backend.refreshes)
+			}
 			if tc.status >= 400 && tc.err == nil {
 				assertions.Equal(before, backend.calls)
 			}

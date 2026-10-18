@@ -123,14 +123,7 @@ func refreshDerivedDatasetsOnly(
 		_ = st.Close()
 		return nil, fmt.Errorf("read participant clusters: %w", err)
 	}
-	meetingKeys, err := st.MeetingCountKeysContext(ctx)
-	if err != nil {
-		_ = st.Close()
-		return nil, fmt.Errorf("read meeting count keys: %w", err)
-	}
-	if err := st.Close(); err != nil {
-		return nil, fmt.Errorf("close identity store: %w", err)
-	}
+	defer func() { _ = st.Close() }()
 
 	spillDir := filepath.Join(staging.root, "duckdb-tmp")
 	duckDB, err := duckdbutil.Open(ctx, duckdbutil.BuilderPolicyWithOverrides(
@@ -154,6 +147,11 @@ func refreshDerivedDatasetsOnly(
 		return nil, err
 	}
 	defer func() { _ = sourceSnapshot.Close() }()
+	meetingKeys, err := st.MeetingCountKeysFromSnapshotContext(ctx, sourceSnapshot)
+	if err != nil {
+		return nil, fmt.Errorf("read meeting count keys: %w", err)
+	}
+
 	datasets := []string{
 		tableMessages,
 		tableConversations,
@@ -477,19 +475,23 @@ func fingerprintConversationTypesFromSnapshot(
 // stageParticipantClusters loads the Go-computed clusters into a DuckDB temp
 // table that participantClustersSelectSQL reads.
 func stageParticipantClusters(ctx context.Context, db sqlRunner, clusters map[int64]int64) error {
-	if _, err := db.ExecContext(ctx,
-		`CREATE TEMP TABLE tmp_participant_clusters (participant_id BIGINT, canonical_id BIGINT)`); err != nil {
-		return fmt.Errorf("create participant clusters temp table: %w", err)
+	return stageIdentityMap(ctx, db, "tmp_participant_clusters", "participant_id BIGINT, canonical_id BIGINT", clusters,
+		func(id int64, value int64) string { return fmt.Sprintf("(%d,%d)", id, value) })
+}
+
+func stageIdentityMap[V any](ctx context.Context, db sqlRunner, table, columns string, entries map[int64]V, row func(int64, V) string) error {
+	if _, err := db.ExecContext(ctx, `CREATE TEMP TABLE `+table+` (`+columns+`)`); err != nil {
+		return fmt.Errorf("create %s: %w", table, err)
 	}
-	if len(clusters) == 0 {
+	if len(entries) == 0 {
 		return nil
 	}
-	values := make([]string, 0, len(clusters))
-	for participantID, canonicalID := range clusters {
-		values = append(values, fmt.Sprintf("(%d,%d)", participantID, canonicalID))
+	values := make([]string, 0, len(entries))
+	for id, value := range entries {
+		values = append(values, row(id, value))
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO tmp_participant_clusters VALUES `+strings.Join(values, ",")); err != nil {
-		return fmt.Errorf("populate participant clusters temp table: %w", err)
+	if _, err := db.ExecContext(ctx, `INSERT INTO `+table+` VALUES `+strings.Join(values, ",")); err != nil {
+		return fmt.Errorf("populate %s: %w", table, err)
 	}
 	return nil
 }
@@ -612,20 +614,8 @@ func verifyRelatedOnlyAdditions(snapshot *cacheSourceSnapshot, state syncState) 
 }
 
 func stageMeetingKeys(ctx context.Context, db sqlRunner, keys map[int64]string) error {
-	if _, err := db.ExecContext(ctx, `CREATE TEMP TABLE tmp_meeting_keys (message_id BIGINT, meeting_key VARCHAR)`); err != nil {
-		return fmt.Errorf("create meeting keys temp table: %w", err)
-	}
-	if len(keys) == 0 {
-		return nil
-	}
-	values := make([]string, 0, len(keys))
-	for id, key := range keys {
-		values = append(values, fmt.Sprintf("(%d,'%s')", id, quoteCacheSQL(key)))
-	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO tmp_meeting_keys VALUES `+strings.Join(values, ",")); err != nil {
-		return fmt.Errorf("populate meeting keys temp table: %w", err)
-	}
-	return nil
+	return stageIdentityMap(ctx, db, "tmp_meeting_keys", "message_id BIGINT, meeting_key VARCHAR", keys,
+		func(id int64, value string) string { return fmt.Sprintf("(%d,'%s')", id, quoteCacheSQL(value)) })
 }
 
 const meetingKeysSelectSQL = `SELECT message_id, meeting_key FROM tmp_meeting_keys`

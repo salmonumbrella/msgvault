@@ -85,6 +85,9 @@ func setupTestSQLite(t *testing.T) string {
 
 	// Create schema
 	schema := `
+		CREATE TABLE meeting_link_decisions (member_message_id INTEGER, target_message_id INTEGER, occurrence_key TEXT, decision TEXT, created_at DATETIME);
+		CREATE TABLE meeting_link_key (message_id INTEGER PRIMARY KEY, kind TEXT, value TEXT, calendar_id TEXT, scheduled_at DATETIME);
+
 		CREATE TABLE source_merge_archive_only_messages (message_id INTEGER PRIMARY KEY);
 		CREATE TABLE sources (
 			id INTEGER PRIMARY KEY,

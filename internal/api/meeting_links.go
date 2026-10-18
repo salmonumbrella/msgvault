@@ -101,6 +101,7 @@ func (s *Server) handleMeetingLinkDecision(w http.ResponseWriter, r *http.Reques
 		s.writeMeetingLinkError(w, err)
 		return
 	}
+	s.refreshIdentityCacheState(r.Context())
 	writeJSON(w, 200, MeetingLinkDecisionResponse(request))
 }
 

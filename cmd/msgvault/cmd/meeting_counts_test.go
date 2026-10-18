@@ -1,13 +1,21 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/api"
+	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
 )
@@ -58,6 +66,27 @@ func TestMeetingCountsLinkedCopies(t *testing.T) {
 	incremental, err := buildCache(path, cache, false)
 	requirements.NoError(err)
 	assertions.Equal(int64(1), incremental.StagedCount)
+	readCount(1)
+	previousRefresh := runDerivedCacheSubprocess
+	runDerivedCacheSubprocess = func(_ context.Context, dir string) error {
+		_, err := buildCacheDerivedOnly(path, dir)
+		return err
+	}
+	t.Cleanup(func() { runDerivedCacheSubprocess = previousRefresh })
+	srv := api.NewServerWithOptions(api.ServerOptions{
+		Config: &config.Config{}, Store: &storeAPIAdapter{store: st, analyticsDir: cache}, Logger: slog.New(slog.DiscardHandler),
+	})
+	decide := func(decision string) {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/meetings/links/decisions", strings.NewReader(fmt.Sprintf(`{"message_id":%d,"event":"evt:%d","decision":%q}`, second, event, decision)))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		srv.Router().ServeHTTP(response, request)
+		requirements.Equal(http.StatusOK, response.Code, response.Body.String())
+		assertions.False(cacheNeedsBuild(path, cache).NeedsBuild)
+	}
+	decide("unlink")
+	readCount(2)
+	decide("link")
 	readCount(1)
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), second, store.OccurrenceRef{MessageID: event}))
 	assertions.False(cacheNeedsBuild(path, cache).FullRebuild)
@@ -128,4 +157,91 @@ func TestMeetingSyncsStayIncremental(t *testing.T) {
 		_, err := buildCache(path, cache, false)
 		requirements.NoError(err)
 	}
+}
+
+func TestMeetingKeysSharePublicationSnapshot(t *testing.T) {
+	for _, csv := range []bool{false, true} {
+		for _, derived := range []bool{false, true} {
+			t.Run(fmt.Sprintf("csv=%t/derived=%t", csv, derived), func(t *testing.T) {
+				t.Setenv("MSGVAULT_FORCE_CSV_SNAPSHOT", "")
+				if csv {
+					t.Setenv("MSGVAULT_FORCE_CSV_SNAPSHOT", "1")
+				}
+				require := require.New(t)
+				root := t.TempDir()
+				path, cache := filepath.Join(root, "archive.db"), filepath.Join(root, "analytics")
+				st, err := store.OpenForTest(path)
+				require.NoError(err)
+				defer func() { require.NoError(st.Close()) }()
+				require.NoError(st.InitSchema())
+				source, err := st.GetOrCreateSource("twenty", "owner@example.org")
+				require.NoError(err)
+				human, err := st.EnsureParticipant("person@example.org", "Person", "example.org")
+				require.NoError(err)
+				persist := func(id, kind, format, raw string) int64 {
+					messageID, err := st.PersistMessage(&store.MessagePersistData{
+						Message:      &store.Message{SourceID: source.ID, SourceMessageID: id, MessageType: kind, SentAt: sql.NullTime{Time: time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC), Valid: true}},
+						Conversation: &store.ConversationPersistData{SourceConversationID: id, ConversationType: "meeting"},
+						RawFormat:    format, RawMIME: []byte(raw),
+					})
+					require.NoError(err)
+					require.NoError(st.ReplaceMessageRecipients(messageID, "to", []int64{human}, []string{"Person"}))
+					return messageID
+				}
+				event := persist("event", "calendar_event", "gcal_json", `{"id":"event","iCalUID":"shared@example.org","start":{"dateTime":"2026-08-01T10:00:00Z"},"end":{"dateTime":"2026-08-01T11:00:00Z"}}`)
+				require.NoError(st.SetMessageMetadata(event, sql.NullString{String: `{"ical_uid":"shared@example.org"}`, Valid: true}))
+				persist("first", "meeting_transcript", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org","startsAt":"2026-08-01T10:00:00Z"}}`)
+				second := persist("second", "meeting_transcript", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org","startsAt":"2026-08-01T10:00:00Z"}}`)
+				_, err = buildCache(path, cache, true)
+				require.NoError(err)
+				require.NoError(st.UnlinkMeetingContext(t.Context(), second, store.OccurrenceRef{MessageID: event}))
+				hook := func() {
+					require.NoError(st.LinkMeetingContext(t.Context(), second, store.OccurrenceRef{MessageID: event}))
+				}
+				if derived {
+					derivedRefreshBeforeSnapshotHook = hook
+				} else {
+					buildCacheBeforeSnapshotHook = hook
+				}
+				t.Cleanup(func() { derivedRefreshBeforeSnapshotHook = nil; buildCacheBeforeSnapshotHook = nil })
+				_, err = buildCache(path, cache, !derived)
+				require.NoError(err)
+				engine, err := query.NewDuckDBEngine(cache, "", nil)
+				require.NoError(err)
+				defer func() { require.NoError(engine.Close()) }()
+				people, err := engine.SearchPeople(t.Context(), query.PersonSearchRequest{})
+				require.NoError(err)
+				require.Len(people.Rows, 1)
+				assert.Equal(t, int64(1), people.Rows[0].MeetingCount)
+				assert.False(t, cacheNeedsBuild(path, cache).NeedsBuild)
+			})
+		}
+	}
+}
+
+func TestMeetingKeyResolutionSkipsAndUsesCallerContext(t *testing.T) {
+	require := require.New(t)
+	root := t.TempDir()
+	path, cache := filepath.Join(root, "archive.db"), filepath.Join(root, "analytics")
+	st, err := store.OpenForTest(path)
+	require.NoError(err)
+	defer func() { require.NoError(st.Close()) }()
+	require.NoError(st.InitSchema())
+	source, err := st.GetOrCreateSource("twenty", "owner@example.org")
+	require.NoError(err)
+	_, err = st.PersistMessage(&store.MessagePersistData{
+		Message:      &store.Message{SourceID: source.ID, SourceMessageID: "note", MessageType: "meeting_transcript", SentAt: sql.NullTime{Time: time.Now().UTC(), Valid: true}},
+		Conversation: &store.ConversationPersistData{SourceConversationID: "note", ConversationType: "meeting"},
+	})
+	require.NoError(err)
+	_, err = buildCache(path, cache, true)
+	require.NoError(err)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	result, err := buildCacheLockedAttempt(ctx, path, cache, false, false, acquirePublishLock)
+	require.NoError(err)
+	assert.True(t, result.Skipped)
+	_, err = buildCacheLockedAttempt(ctx, path, cache, true, false, acquirePublishLock)
+	require.ErrorIs(err, context.Canceled)
+	require.ErrorContains(err, "read meeting count keys")
 }

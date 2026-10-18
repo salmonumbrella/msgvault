@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/identityindex"
 )
 
 func TestMeetingCountsAcrossFilters(t *testing.T) {
@@ -43,6 +44,58 @@ func TestMeetingCountsAcrossFilters(t *testing.T) {
 			requirements.NoError(err)
 			requirements.NotNil(detail)
 			assertions.Equal(tc.want, detail.MeetingCount)
+		})
+	}
+}
+
+func TestRelationshipMeetingCountsCollapseLinkedOccurrence(t *testing.T) {
+	for _, calendarOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("calendarOnly=%t", calendarOnly), func(t *testing.T) {
+			require := require.New(t)
+			b := NewTestDataBuilder(t)
+			first := b.AddSourceWithType("owner@example.org", "granola")
+			second := b.AddSourceWithType("owner@example.org", "twenty")
+			owner := b.AddParticipant("owner@example.org", "example.org", "Owner")
+			person := b.AddParticipant("person@example.org", "example.org", "Person")
+			b.AddOwnerParticipant(first, owner)
+			b.AddOwnerParticipant(second, owner)
+			at := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+			for i, kind := range []string{"calendar_event", "meeting_transcript", "meeting_transcript", "calendar_event"} {
+				if i == 3 && !calendarOnly {
+					break
+				}
+				source := first
+				if i == 2 {
+					source = second
+				}
+				id := b.AddMessage(MessageOpt{SourceID: source, ConversationID: int64(100 + i), MessageType: kind, SentAt: at})
+				b.AddTo(id, owner, "Owner")
+				b.AddTo(id, person, "Person")
+				if i < 3 {
+					b.meetingKeys = append(b.meetingKeys, fmt.Sprintf("(%d, 'ical:shared@example.org|')", id))
+				}
+			}
+			engine := b.BuildEngine()
+			want := int64(1)
+			if calendarOnly {
+				want = 2
+			}
+			for _, scope := range []Context{{}, {SourceIDs: []int64{first, second}, ParticipantIDs: []int64{person}}} {
+				result, err := engine.Relationships(t.Context(), RelationshipsRequest{Context: scope, Now: at.Add(time.Hour)})
+				require.NoError(err)
+				require.Len(result.Rows, 1)
+				assert.Equal(t, want, result.Rows[0].Signals.MeetingCount)
+			}
+			calendar, err := engine.RelationshipCalendar(t.Context(), RelationshipCalendarRequest{CanonicalID: person, Year: 2026, Timezone: "UTC"})
+			require.NoError(err)
+			var meetings int64
+			for _, day := range calendar.Days {
+				meetings += day.Meetings
+			}
+			assert.Equal(t, want, meetings)
+			var scored int64
+			require.NoError(engine.db.QueryRow(`SELECT sum(meeting_count) FROM read_parquet(?) WHERE canonical_id = ?`, engine.parquetPath(identityindex.DatasetTemperatureContributions), person).Scan(&scored))
+			assert.Equal(t, want, scored)
 		})
 	}
 }

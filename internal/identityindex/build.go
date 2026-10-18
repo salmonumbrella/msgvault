@@ -155,7 +155,7 @@ func Build(
 	if err := b.copyDataset(ctx, DatasetDomains, buildRelationshipDomainsSQL()); err != nil {
 		return BuildResult{}, err
 	}
-	if err := b.copyDataset(ctx, DatasetRelationshipDaily, buildRelationshipDailySQL()); err != nil {
+	if err := b.copyDataset(ctx, DatasetRelationshipDaily, buildRelationshipDailySQL(b.base("meeting_keys"))); err != nil {
 		return BuildResult{}, err
 	}
 	validationActivity := activity

@@ -138,10 +138,10 @@ LEFT JOIN domain_people p USING (domain)
 ORDER BY t.domain`
 }
 
-func buildRelationshipDailySQL() string {
+func buildRelationshipDailySQL(meetingKeys string) string {
 	return fmt.Sprintf(`
 WITH logical_people AS (
-	SELECT entry_key, occurred_at, entry_kind, is_from_me, canonical_id,
+	SELECT entry_key, anchor_message_id, occurred_at, entry_kind, is_from_me, canonical_id,
 	       is_author, is_owner, with_owner
 	FROM `+logicalBuildRelation+`
 	WHERE relation_kind = 1
@@ -162,7 +162,7 @@ WITH logical_people AS (
 	           WHEN p.entry_kind IN ('email','item') THEN %d::UTINYINT
 	           ELSE 0::UTINYINT
 	       END AS modality_mask
-	FROM logical_people p
+	FROM (`+DeduplicateMeetingSQL("(SELECT * FROM logical_people WHERE with_owner OR entry_kind NOT IN ('event','meeting'))", meetingKeys, "anchor_message_id")+`) p
 	WHERE NOT p.is_owner
 	  AND NOT (p.entry_kind IN ('event','meeting') AND NOT p.with_owner)
 )
@@ -375,5 +375,19 @@ ORDER BY m.canonical_id`,
 
 // MeetingKeySQL counts linked transcript copies once and unlinked messages individually.
 func MeetingKeySQL(keys, messageType, messageID string) string {
-	return "CASE WHEN " + messageType + " = 'meeting_transcript' THEN coalesce(" + keys + ".meeting_key, 'msg:' || CAST(" + messageID + " AS VARCHAR)) END"
+	return "CASE WHEN " + messageType + " = 'meeting_transcript' THEN " + meetingIdentityKeySQL(keys, messageID) + " END"
+}
+
+// DeduplicateMeetingSQL keeps one linked occurrence per person. Unlinked
+// calendar entries and transcripts retain their existing individual counts.
+func DeduplicateMeetingSQL(relation, meetingKeys, messageID string) string {
+	return `SELECT p.* FROM ` + relation + ` p
+	LEFT JOIN read_parquet('` + quoteSQLString(meetingKeys) + `') mk ON mk.message_id = p.` + messageID + `
+	QUALIFY p.entry_kind NOT IN ('event','meeting') OR row_number() OVER (
+	    PARTITION BY p.canonical_id, ` + meetingIdentityKeySQL("mk", "p."+messageID) + `
+	    ORDER BY p.occurred_at, p.` + messageID + `) = 1`
+}
+
+func meetingIdentityKeySQL(keys, messageID string) string {
+	return "coalesce(" + keys + ".meeting_key, 'msg:' || CAST(" + messageID + " AS VARCHAR))"
 }

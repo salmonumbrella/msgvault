@@ -323,7 +323,7 @@ func assertIncrementalContributionsMatchFullReduction(
 		{"logical", DatasetLogicalContributions,
 			buildLogicalActivityMaterializationSQL(fullActivity)},
 		{"temperature", DatasetTemperatureContributions,
-			buildRelationshipTemperatureDailySQL(fullActivity, effectiveAt)},
+			buildRelationshipTemperatureDailySQL(fullActivity, effectiveAt, relationshipParquetGlob(stagedRoot, "meeting_keys"))},
 	} {
 		t.Run(check.name+" contributions match full reduction", func(t *testing.T) {
 			expectedTable := "expected_" + check.name
