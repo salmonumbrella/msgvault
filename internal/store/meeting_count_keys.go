@@ -18,7 +18,7 @@ func (s *Store) MeetingCountKeysContext(ctx context.Context) (keys map[int64]str
 				return fmt.Errorf("read meeting key boundary: %w", err)
 			}
 		}
-		r := reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind}
+		r := reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind, dialect: s.dialect}
 		rows, err := r.QueryContext(ctx, `SELECT id FROM messages m
    WHERE message_type = 'meeting_transcript' AND deleted_at IS NULL
    AND (EXISTS (SELECT 1 FROM meeting_link_key k WHERE k.message_id = m.id)
