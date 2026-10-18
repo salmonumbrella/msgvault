@@ -45,12 +45,19 @@ type rawBatchWithIdentityValidation interface {
 func (s *Syncer) getMessagesRawBatchWithDiagnostics(ctx context.Context, messageIDs []string) (results []gmail.RawMessageBatchResult, err error) {
 	defer func() { err = s.observeNativeRawBatchDenials(ctx, results, err) }()
 	if client, ok := s.client.(rawBatchWithErrors); ok {
-		return client.GetMessagesRawBatchWithErrors(ctx, messageIDs)
+		results, err := client.GetMessagesRawBatchWithErrors(ctx, messageIDs)
+		if err != nil {
+			return nil, s.nativeMailPermissionFailure(ctx, err)
+		}
+		for i := range results {
+			results[i].Err = s.nativeMailPermissionFailure(ctx, results[i].Err)
+		}
+		return results, nil
 	}
 
 	rawMessages, err := s.client.GetMessagesRawBatch(ctx, messageIDs)
 	if err != nil {
-		return nil, err
+		return nil, s.nativeMailPermissionFailure(ctx, err)
 	}
 
 	results = make([]gmail.RawMessageBatchResult, len(messageIDs))
@@ -111,9 +118,10 @@ func (s *Syncer) getMessagesRawBatchWithIdentityValidation(
 	required, err := client.GetMessagesRawBatchWithIdentityValidation(ctx, requiredIDs)
 	err = s.observeNativeRawBatchDenials(ctx, required, err)
 	if err != nil {
-		return nil, err
+		return nil, s.nativeMailPermissionFailure(ctx, err)
 	}
 	for i, result := range required {
+		result.Err = s.nativeMailPermissionFailure(ctx, result.Err)
 		results[requiredIdx[i]] = result
 	}
 	if len(ordinaryIDs) == 0 {

@@ -133,6 +133,9 @@ func Import(ctx context.Context, st *store.Store, c *Client, opts Options, log *
 	if err != nil {
 		return sum, fmt.Errorf("list mail folders: %w", err)
 	}
+	if err = recheckNativeMailPermission(ctx, st, permission, c); err != nil {
+		return sum, fmt.Errorf("refresh native mail permission after folder listing: %w", err)
+	}
 	if permission.MessageRead {
 		inventory := store.NativeMessageScopeInventory{SourceID: src.ID, SourceReference: permission.SourceReference, SourceType: SourceType, NativeIdentity: src.Identifier, Kind: "msmail_folder", Complete: true}
 		for _, folder := range folders {
@@ -149,6 +152,9 @@ func Import(ctx context.Context, st *store.Store, c *Client, opts Options, log *
 	s.labels, err = s.ensureLabels(ctx, folders)
 	if err = errors.Join(err, recheckNativeMailPermission(ctx, st, permission, c)); err != nil {
 		return sum, err
+	}
+	if err = recheckNativeMailPermission(ctx, st, permission, c); err != nil {
+		return sum, fmt.Errorf("refresh native mail permission after folder resolution: %w", err)
 	}
 	if err = s.retryMessages(ctx); err != nil {
 		return sum, err

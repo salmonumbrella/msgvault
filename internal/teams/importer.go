@@ -245,7 +245,7 @@ func (imp *Importer) syncChats(ctx context.Context, sourceID, syncID int64, opts
 		return ctx.Err()
 	}
 	if err != nil {
-		if nativeTeamsInvalidGrant(err) {
+		if nativeTeamsAuthenticationFailure(err) {
 			return err
 		}
 		sum.Errors++
@@ -267,6 +267,9 @@ func (imp *Importer) syncChats(ctx context.Context, sourceID, syncID int64, opts
 		// Member fetch failure is non-fatal; we proceed with empty toRecips
 		// rather than aborting the chat import.
 		members, merr := imp.chatMembers(ctx, ch.ID, selfMembers)
+		if nativeTeamsAuthenticationFailure(merr) {
+			return merr
+		}
 		// Only the roster's size and read outcome matter to media policy; the
 		// members are resolved below, where their display names are kept too.
 		roster := &memberRoster{memberCount: len(members), err: merr}
@@ -310,7 +313,7 @@ func (imp *Importer) syncChats(ctx context.Context, sourceID, syncID int64, opts
 		}
 		msgs, pageTruncated, err := imp.client.ListChatMessages(ctx, ch.ID, chatQuerySince(since), opts.Limit)
 		if err != nil {
-			if errors.Is(err, msgraph.ErrUnauthorized) || nativeTeamsInvalidGrant(err) {
+			if nativeTeamsAuthenticationFailure(err) {
 				return err
 			}
 			if errors.Is(err, msgraph.ErrForbidden) || errors.Is(err, msgraph.ErrNotFound) {
@@ -471,6 +474,9 @@ func (imp *Importer) syncChannels(ctx context.Context, sourceID, syncID int64, o
 		}
 		channels, cerr := imp.client.ListChannels(ctx, team.ID)
 		if cerr != nil {
+			if nativeTeamsAuthenticationFailure(cerr) {
+				return cerr
+			}
 			sum.Errors++
 			continue
 		}
@@ -502,6 +508,9 @@ func (imp *Importer) syncChannels(ctx context.Context, sourceID, syncID int64, o
 			var roster *memberRoster
 			if channelHasOwnRoster(ch.MembershipType) {
 				roster = imp.resolveChannelRoster(ctx, team.ID, ch.ID)
+				if nativeTeamsAuthenticationFailure(roster.err) {
+					return roster.err
+				}
 				if roster.err != nil && opts.MediaPolicy.MaxParticipants > 0 {
 					sum.Errors++
 				}

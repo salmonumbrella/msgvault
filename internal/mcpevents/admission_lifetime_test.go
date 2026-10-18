@@ -56,7 +56,7 @@ func TestNewSubscriptionRejectsResourceRebindDuringChallenge(t *testing.T) {
 			case <-time.After(30 * time.Second):
 				require.FailNow("source mutation blocked behind callback")
 			}
-			assertCurrentReplacementGrant := func() {
+			assertCurrentReplacementGrant := func(expectedIdentity string) {
 				sourceResource, err := fixture.Store.GetMCPResource(t.Context(), "source", fixture.Source.ID)
 				require.NoError(err)
 				conversationResource, err := fixture.Store.GetMCPResource(t.Context(), "conversation", fixture.ConvID)
@@ -68,13 +68,17 @@ func TestNewSubscriptionRejectsResourceRebindDuringChallenge(t *testing.T) {
 					SourceType: sourceResource.SourceType, NativeIdentity: sourceResource.ProviderID,
 					Known: true, MessageRead: true,
 				}))
+				allowed, err := fixture.Store.NativeSourceMessagePermission(t.Context(), fixture.Source.ID)
+				require.NoError(err)
+				require.True(allowed, "replacement source lifetime has current native permission")
 				_, _, err = fixture.Store.ValidateMCPEventScope(t.Context(), request.Name, "conversation", fixture.ConvID, nil)
 				require.NoError(err, "replacement resource must have current native permission")
+				require.Equal(expectedIdentity, sourceResource.ProviderID)
 			}
-			assertCurrentReplacementGrant()
+			assertCurrentReplacementGrant("replacement@example.net")
 			if awayBack {
 				require.NoError(fixture.Store.UpdateSourceIdentifier(fixture.Source.ID, fixture.Source.Identifier))
-				assertCurrentReplacementGrant()
+				assertCurrentReplacementGrant(fixture.Source.Identifier)
 			}
 			unblock()
 			select {

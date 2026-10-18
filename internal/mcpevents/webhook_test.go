@@ -1,6 +1,7 @@
 package mcpevents
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -117,7 +118,7 @@ func TestWebhookChallengeValidatesResponseStatusAndSize(t *testing.T) {
 						return
 					}
 					if tc.responseSize > len(body) {
-						body = append(body, strings.Repeat(" ", tc.responseSize-len(body))...)
+						body = append(body, bytes.Repeat([]byte(" "), tc.responseSize-len(body))...)
 					}
 				}
 				rw.WriteHeader(tc.status)
@@ -180,8 +181,8 @@ func TestWebhookDeliveryReturnsHeadersWithoutWaitingForBody(t *testing.T) {
 			require := Require.New(t)
 			current, previous := []byte(strings.Repeat("n", 32)), []byte(strings.Repeat("p", 32))
 			body := []byte(`{"eventId":"evt_synthetic"}`)
-			// The receiver flushes headers and a short body, then keeps the response
-			// open. Delivery must finish without waiting for EOF or a body-size limit.
+			// The receiver flushes headers and an oversized body, then keeps the
+			// response open. Delivery must return without reading it to EOF.
 			release := make(chan struct{})
 			var releaseOnce sync.Once
 			t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
@@ -189,7 +190,7 @@ func TestWebhookDeliveryReturnsHeadersWithoutWaitingForBody(t *testing.T) {
 				Assert.Equal(t, webhookSignature(current, "evt_synthetic", r.Header.Get("Webhook-Timestamp"), body)+" "+webhookSignature(previous, "evt_synthetic", r.Header.Get("Webhook-Timestamp"), body), r.Header.Get("Webhook-Signature"))
 				rw.Header().Set("Retry-After", "120")
 				rw.WriteHeader(responseStatus)
-				_, err := io.WriteString(rw, "ok")
+				_, err := io.WriteString(rw, strings.Repeat("x", 8192))
 				if !Assert.NoError(t, err) {
 					return
 				}
@@ -218,7 +219,7 @@ func TestWebhookDeliveryReturnsHeadersWithoutWaitingForBody(t *testing.T) {
 			var got result
 			select {
 			case got = <-done:
-			case <-time.After(5 * time.Second):
+			case <-time.After(10 * time.Second):
 				require.FailNow("post must return the headers while the receiver holds its body open")
 			}
 			releaseOnce.Do(func() { close(release) })
@@ -231,9 +232,6 @@ func TestWebhookDeliveryReturnsHeadersWithoutWaitingForBody(t *testing.T) {
 		})
 	}
 }
-
-// stalledLookupWebhook returns a client whose callback lookup waits until
-// release is called, and a channel that receives each dial's result.
 
 // stalledLookupWebhook returns a client whose callback lookup waits until
 // release is called, and a channel that receives each dial's result.

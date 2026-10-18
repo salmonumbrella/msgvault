@@ -41,6 +41,9 @@ func TestMCPSourceAdmissionUsesExactSourceLifetime(t *testing.T) {
 				for _, identifier := range []string{"replacement-source@example.net", f.Source.Identifier} {
 					require.NoError(f.Store.UpdateSourceIdentifier(f.Source.ID, identifier))
 					grantSyntheticSourceFixture(t, f)
+					allowed, err := f.Store.NativeSourceMessagePermission(t.Context(), f.Source.ID)
+					require.NoError(err)
+					assert.True(allowed, "replacement source lifetime has native message-read permission")
 					current, err := f.Store.GetMCPResource(t.Context(), "source", f.Source.ID)
 					require.NoError(err)
 					currentSource, currentBinding, err := f.Store.ResolveMCPSubscriptionResource(t.Context(), family, "source", f.Source.ID, []string{"message"}, current.Reference)

@@ -32,7 +32,7 @@ func TestOptionalResourceReferenceAdmissionBeforeChallenge(t *testing.T) {
 			case "stale":
 				for _, identifier := range []string{"replacement@example.net", f.Source.Identifier} {
 					require.NoError(f.Store.UpdateSourceIdentifier(f.Source.ID, identifier))
-					requireNativeGmailFixtureRead(t, f)
+					requireNativeGmailFixtureReadForIdentity(t, f, identifier)
 					requireCurrentConversationAdmission(t, f)
 				}
 			}

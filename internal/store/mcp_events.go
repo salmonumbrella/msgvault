@@ -739,7 +739,7 @@ func (s *Store) removeMCPEventSource(ctx context.Context, db contextQuerier, sou
 
 // Source admission has no conversation yet; every occurrence validates its
 // actual origin separately. A source ID is never used as a conversation ID.
-func (s *Store) mcpSubscriptionTeamsChatAllowed(ctx context.Context, db SQLReader, sub *MCPSubscription) (bool, error) {
+func (s *Store) mcpSubscriptionConversationAllowed(ctx context.Context, db SQLReader, sub *MCPSubscription) (bool, error) {
 	if sub.ScopeKind != mcpScopeConversation {
 		return true, nil
 	}
@@ -748,6 +748,7 @@ func (s *Store) mcpSubscriptionTeamsChatAllowed(ctx context.Context, db SQLReade
 
 func (s *Store) removeMCPEventConversations(ctx context.Context, db contextQuerier, targets string, args []any) error {
 	queries := []string{
+		`UPDATE mcp_event_subscriptions SET cursor_seq=CASE WHEN pending_seq>cursor_seq THEN pending_seq ELSE cursor_seq END,pending_seq=NULL,pending_envelope=NULL,pending_generation=NULL,attempt_count=0,next_attempt_at=NULL WHERE scope_kind<>'conversation' AND pending_seq IS NOT NULL AND EXISTS (SELECT 1 FROM mcp_event_log event WHERE event.seq=mcp_event_subscriptions.pending_seq AND event.conversation_id IN (` + targets + `))`,
 		`DELETE FROM mcp_event_log WHERE conversation_id IN (` + targets + `)`,
 		`DELETE FROM mcp_event_dead_letters WHERE EXISTS (SELECT 1 FROM mcp_event_subscriptions s WHERE s.id=mcp_event_dead_letters.subscription_id AND s.scope_kind='conversation' AND s.scope_id IN (` + targets + `))`,
 	}
