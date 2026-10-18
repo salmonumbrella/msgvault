@@ -48,7 +48,7 @@ func TestMeetingLinksSuggestionsBatchParticipants(t *testing.T) {
 		assertions.Equal(1, suggestion.SharedAttendees)
 	}
 	// Circleback's room URL stays a suggestion, including when the times overlap.
-	assertions.Equal(fmt.Sprintf("msg:%d", notes[0]), exportedMeetingKeys(t, st, notes[0])[notes[0]])
+	assertions.Equal("", linkedMeetingRefs(t, st, notes[0])[notes[0]])
 	reverse, err := observed.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: notes[0]}}, 1)
 	requirements.NoError(err)
 	requirements.Len(reverse, 1)

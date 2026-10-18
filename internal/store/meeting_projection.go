@@ -57,7 +57,7 @@ func (s *Store) refreshMeetingProjectionWith(ctx context.Context, tx *loggedTx, 
 		if err != nil {
 			return fmt.Errorf("read prior meeting projection: %w", err)
 		}
-		if err := replaceMeetingLinkKeys(ctx, tx, messageID, nil); err != nil {
+		if err := replaceMeetingLinkKey(ctx, tx, messageID, meetingLinkKey{}); err != nil {
 			return err
 		}
 		if _, err := q.Exec(`DELETE FROM meeting_action_items WHERE message_id = ?`, messageID); err != nil {
@@ -90,11 +90,11 @@ func (s *Store) refreshMeetingProjectionWith(ctx context.Context, tx *loggedTx, 
 			ActionReason:   reason,
 		}
 	}
-	keys := deriveMeetingLinkKeys(content)
+	key := deriveMeetingLinkKey(content)
 	full, err := json.Marshal(struct {
 		Content meetingcontent.Content
-		Keys    []meetingLinkKey
-	}{content, keys})
+		Key     meetingLinkKey
+	}{content, key})
 	if err != nil {
 		return fmt.Errorf("marshal meeting content hash: %w", err)
 	}
@@ -109,7 +109,7 @@ func (s *Store) refreshMeetingProjectionWith(ctx context.Context, tx *loggedTx, 
 	if err == nil && oldVersion == meetingProjectionVersion && oldHash == hash {
 		return nil
 	}
-	if err := replaceMeetingLinkKeys(ctx, tx, messageID, keys); err != nil {
+	if err := replaceMeetingLinkKey(ctx, tx, messageID, key); err != nil {
 		return err
 	}
 	compact, err := json.Marshal(meetingcontent.ProjectionContent(content))

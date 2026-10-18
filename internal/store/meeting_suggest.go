@@ -93,7 +93,7 @@ func suggestionMembers(ctx context.Context, r SQLReader, ids []int64) (out []sug
 		args[i] = id
 	}
 	rows, err := r.QueryContext(ctx, `SELECT m.id,COALESCE(m.subject,''),m.sent_at,m.received_at,m.internal_date,d.duration_seconds,k.scheduled_at
- FROM messages m LEFT JOIN meeting_details d ON d.message_id = m.id LEFT JOIN meeting_link_keys k ON k.message_id = m.id
+ FROM messages m LEFT JOIN meeting_details d ON d.message_id = m.id LEFT JOIN meeting_link_key k ON k.message_id = m.id
  WHERE m.message_type = 'meeting_transcript' AND m.deleted_at IS NULL AND m.id IN (`+placeholders(len(ids))+`) ORDER BY m.id`, args...)
 	if err != nil {
 		return nil, err
@@ -229,16 +229,16 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref MeetingLinkR
 			filter = `julianday(effective_start) < julianday(?) AND julianday(effective_start) + duration_seconds / 86400.0 > julianday(?)`
 		}
 		rows, err := r.QueryContext(ctx, `WITH window_ids AS (
- SELECT message_id AS id FROM meeting_link_keys WHERE `+scheduledStart+` >= ? AND `+scheduledStart+` < ?
+ SELECT message_id AS id FROM meeting_link_key WHERE `+scheduledStart+` >= ? AND `+scheduledStart+` < ?
  UNION ALL
  SELECT id FROM messages m WHERE message_type = 'meeting_transcript' AND deleted_at IS NULL
  AND `+messageStart+` >= ? AND `+messageStart+` < ?
- AND NOT EXISTS (SELECT 1 FROM meeting_link_keys k WHERE k.message_id = m.id AND k.scheduled_at IS NOT NULL)
+ AND NOT EXISTS (SELECT 1 FROM meeting_link_key k WHERE k.message_id = m.id AND k.scheduled_at IS NOT NULL)
 ), candidates AS (
  SELECT m.id, COALESCE(k.scheduled_at,m.sent_at,m.received_at,m.internal_date) AS effective_start,
  CASE WHEN d.duration_seconds > 0 THEN d.duration_seconds ELSE 1800 END AS duration_seconds
  FROM window_ids w JOIN messages m ON m.id = w.id
- LEFT JOIN meeting_details d ON d.message_id = m.id LEFT JOIN meeting_link_keys k ON k.message_id = m.id
+ LEFT JOIN meeting_details d ON d.message_id = m.id LEFT JOIN meeting_link_key k ON k.message_id = m.id
  WHERE m.message_type = 'meeting_transcript' AND m.deleted_at IS NULL)
  SELECT id FROM candidates WHERE `+filter+` ORDER BY id LIMIT 2001`, lowerBound, upperBound, lowerBound, upperBound, target.End, target.Start)
 		if err != nil {

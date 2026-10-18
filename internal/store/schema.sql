@@ -4710,7 +4710,7 @@ CREATE TABLE IF NOT EXISTS calendar_event_attendees (
     PRIMARY KEY (message_id, ordinal)
 );
 
-CREATE TABLE IF NOT EXISTS meeting_link_keys (
+CREATE TABLE IF NOT EXISTS meeting_link_key (
     message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
     value TEXT NOT NULL,
@@ -4718,7 +4718,7 @@ CREATE TABLE IF NOT EXISTS meeting_link_keys (
     scheduled_at DATETIME,
     PRIMARY KEY (message_id)
 );
-CREATE INDEX IF NOT EXISTS idx_meeting_link_keys_scheduled ON meeting_link_keys(scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_meeting_link_key_scheduled ON meeting_link_key(msgvault_timestamp_key(scheduled_at));
 CREATE INDEX IF NOT EXISTS idx_meeting_details_duration ON meeting_details(duration_seconds);
 CREATE TABLE IF NOT EXISTS meeting_link_decisions (
     member_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,

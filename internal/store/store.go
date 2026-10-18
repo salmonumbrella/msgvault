@@ -1636,7 +1636,11 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 	}
 	// The meeting index needs deleted_at, which old archives gain above.
 	if err := s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
-		_, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_messages_meeting_start ON messages(COALESCE(sent_at,received_at,internal_date)) WHERE message_type = 'meeting_transcript' AND deleted_at IS NULL`)
+		start := "COALESCE(sent_at,received_at,internal_date)"
+		if !s.IsPostgreSQL() {
+			start = sqliteutil.TimestampKeyFunction + "(" + start + ")"
+		}
+		_, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_messages_meeting_start ON messages(`+start+`) WHERE message_type = 'meeting_transcript' AND deleted_at IS NULL`)
 		return err
 	}); err != nil {
 		return fmt.Errorf("create meeting start index: %w", err)

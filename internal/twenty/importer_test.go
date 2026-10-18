@@ -615,7 +615,7 @@ func TestImportTwentyLinksArchivedCalendarUID(t *testing.T) {
 	source.pages[""].Records[0].Calendar.Raw = jsontext.Value(`{"id":"event-1","iCalUid":"shared@example.org","startsAt":"2026-09-01T09:30:00Z","endsAt":"2026-09-01T10:30:00Z"}`)
 	calendar, err := st.GetOrCreateSource("gcal", "calendar@example.com")
 	requirements.NoError(err)
-	_, err = st.PersistMessage(&store.MessagePersistData{
+	event, err := st.PersistMessage(&store.MessagePersistData{
 		Message:      &store.Message{SourceID: calendar.ID, SourceMessageID: "event", MessageType: "calendar_event"},
 		Conversation: &store.ConversationPersistData{SourceConversationID: "event", ConversationType: "calendar", Title: "Planning"},
 		Metadata:     &sql.NullString{String: `{"calendar_id":"calendar@example.com","ical_uid":"shared@example.org"}`, Valid: true},
@@ -625,10 +625,8 @@ func TestImportTwentyLinksArchivedCalendarUID(t *testing.T) {
 	_, err = NewImporter(st, source).Import(t.Context(), options)
 	requirements.NoError(err)
 	note := archivedID(t, st, "r1")
-	ctx, release, err := st.BeginReadSnapshotContext(t.Context())
+	links, err := st.MeetingLinksContext(t.Context(), note)
 	requirements.NoError(err)
-	defer release()
-	keys, err := st.ExportLogicalMeetingKeysContext(ctx, store.ReadDBContext(ctx, st.DB()), []int64{note})
-	requirements.NoError(err)
-	assert.Equal(t, `["shared@example.org",0,""]`, keys[note])
+	requirements.Len(links, 1)
+	assert.Equal(t, fmt.Sprintf("evt:%d", event), links[0].Ref)
 }

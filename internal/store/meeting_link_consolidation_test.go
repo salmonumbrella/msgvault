@@ -31,21 +31,23 @@ func TestMeetingLinksDedupUndoAndPurge(t *testing.T) {
 			}
 			_, err := st.MergeDuplicates(survivor, []int64{duplicate}, "meetings")
 			requirements.NoError(err)
-			assertions.Equal(`["dedup@example.org",0,""]`, exportedMeetingKeys(t, st, note)[note])
+			assertions.Equal(fmt.Sprintf("evt:%d", event), linkedMeetingRefs(t, st, note)[note])
 			count, err := st.UndoDedup("meetings")
 			requirements.NoError(err)
 			assertions.Equal(int64(1), count)
-			keys := exportedMeetingKeys(t, st, note, duplicate)
-			assertions.Equal(`["dedup@example.org",0,""]`, keys[note])
-			if !targetSide {
-				assertions.Equal(`["dedup@example.org",0,""]`, keys[duplicate])
+			if targetSide {
+				assertions.Equal(fmt.Sprintf("evt:%d,evt:%d", event, duplicate), linkedMeetingRefs(t, st, note)[note])
+			} else {
+				keys := linkedMeetingRefs(t, st, note, duplicate)
+				assertions.Equal(fmt.Sprintf("evt:%d", event), keys[note])
+				assertions.Equal(fmt.Sprintf("evt:%d", event), keys[duplicate])
 			}
 			_, err = st.MergeDuplicates(survivor, []int64{duplicate}, "purge")
 			requirements.NoError(err)
 			count, err = st.DeleteDedupedBatchesContext(t.Context(), []string{"purge"})
 			requirements.NoError(err)
 			assertions.Equal(int64(1), count)
-			assertions.Equal(`["dedup@example.org",0,""]`, exportedMeetingKeys(t, st, note)[note])
+			assertions.Equal(fmt.Sprintf("evt:%d", event), linkedMeetingRefs(t, st, note)[note])
 		})
 	}
 }
@@ -83,11 +85,11 @@ func TestMeetingLinksConsolidationDecisionOrder(t *testing.T) {
 				var decision string
 				requirements.NoError(st.db.QueryRow(`SELECT decision FROM meeting_link_decisions WHERE member_message_id = ?`, a).Scan(&decision))
 				assertions.Equal(tc.want, decision)
-				want := fmt.Sprintf("msg:%d", a)
+				want := ""
 				if tc.want == "link" {
-					want = `["copy@example.org",0,""]`
+					want = fmt.Sprintf("evt:%d", event)
 				}
-				assertions.Equal(want, exportedMeetingKeys(t, st, a)[a])
+				assertions.Equal(want, linkedMeetingRefs(t, st, a)[a])
 			})
 		}
 	}
@@ -115,7 +117,7 @@ func TestMeetingLinksSourceMessageIDMigration(t *testing.T) {
 				source, conversation = noteData.Message.SourceID, oldData.Message.ConversationID
 			}
 			requirements.NoError(st.MigrateSourceMessageID(source, conversation, oldKey, newKey))
-			assertions.Equal(`["migration@example.org",0,""]`, exportedMeetingKeys(t, st, note)[note])
+			assertions.Equal(fmt.Sprintf("evt:%d", event), linkedMeetingRefs(t, st, note)[note])
 		})
 	}
 }
@@ -150,7 +152,7 @@ func TestMeetingLinksSourceMerge(t *testing.T) {
 	requirements.NoError(st.db.QueryRow(`SELECT source_id FROM messages WHERE id = ?`, note).Scan(&originalSource))
 	_, err = st.MergeSourcesContext(t.Context(), MergeSourcesRequest{FromSourceID: source.ID, IntoSourceID: originalSource})
 	requirements.NoError(err)
-	assertions.Equal(`["merge@example.org",0,""]`, exportedMeetingKeys(t, st, note)[note])
+	assertions.Equal(fmt.Sprintf("evt:%d", event), linkedMeetingRefs(t, st, note)[note])
 }
 
 func TestMeetingLinksSubsetCopy(t *testing.T) {
@@ -183,7 +185,7 @@ func TestMeetingLinksSubsetCopy(t *testing.T) {
 		requirements.NoError(dst.db.QueryRow(`SELECT count(*) FROM meeting_link_decisions`).Scan(&count))
 		assertions.Equal(limit-1, count)
 		if limit == 2 {
-			assertions.Equal(`["subset@example.org",0,""]`, exportedMeetingKeys(t, dst, note)[note])
+			assertions.Equal(fmt.Sprintf("evt:%d", event), linkedMeetingRefs(t, dst, note)[note])
 		}
 		requirements.NoError(dst.Close())
 	}

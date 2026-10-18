@@ -83,7 +83,7 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 			attendees = []calevent.Attendee{}
 		}
 		ref := OccurrenceRef{MessageID: row.MessageID}
-		if seriesID != 0 {
+		if seriesID != 0 && o.Original != (calrecur.Identity{}) {
 			ref = OccurrenceRef{MessageID: seriesID, Key: o.Original.Key()}
 		}
 		page.Occurrences = append(page.Occurrences, CalendarOccurrence{Ref: formatMeetingOccurrence(ref), MessageID: row.MessageID, SeriesMessageID: seriesID, SourceID: row.SourceID, Subject: row.Subject, Start: o.Start, End: o.End, AllDay: o.AllDay, StartDate: o.StartDate, EndDate: o.EndDate, Status: status, DeletedFromSource: row.DeletedFromSource, Attendees: attendees})
@@ -194,7 +194,11 @@ func resolveCalendarExceptions(ctx context.Context, set *calrecur.Set, rows []Ca
 	for _, row := range rows {
 		e := row.Event
 		if e.Start != nil && e.End != nil {
-			bounded = append(bounded, calrecur.Occurrence{Start: *e.Start, End: *e.End, AllDay: e.AllDay, StartDate: e.StartDate, EndDate: e.EndDate, Cancelled: e.Status == "cancelled", ExceptionRef: row.MessageID, HasException: true})
+			var original calrecur.Identity
+			if e.Original != nil {
+				original = *e.Original
+			}
+			bounded = append(bounded, calrecur.Occurrence{Original: original, Start: *e.Start, End: *e.End, AllDay: e.AllDay, StartDate: e.StartDate, EndDate: e.EndDate, Cancelled: e.Status == "cancelled", ExceptionRef: row.MessageID, HasException: true})
 		}
 	}
 	if set == nil {
