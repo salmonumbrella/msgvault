@@ -30,7 +30,7 @@ const calendarCandidateMargin = 28 * time.Hour
 
 const calendarEventSelect = `SELECT e.message_id, m.source_id, COALESCE(m.subject, ''),
  m.deleted_from_source_at IS NOT NULL,
- m.metadata, e.provider_event_id, e.series_provider_id, e.kind, e.original_start_at, e.original_start_date,
+ %s, e.provider_event_id, e.series_provider_id, e.kind, e.original_start_at, e.original_start_date,
  e.status, e.all_day, e.start_at, e.end_at, e.start_date, e.end_date,
  e.event_time_zone, e.calendar_time_zone, e.recurrence_json
  ` + calendarEventFrom
@@ -40,7 +40,14 @@ const calendarEventFrom = `FROM calendar_events e JOIN messages m ON m.id = e.me
  AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
  AND `
 
-func queryCalendarEventRowsWithinBudget(ctx context.Context, r SQLReader, predicate string, args []any, budget int) ([]CalendarEventRow, error) {
+func calendarUIDExpression(d Dialect, column string) string {
+	if d.DriverName() == postgresDriverName {
+		return column + " ->> 'ical_uid'"
+	}
+	return "CASE WHEN json_valid(" + column + ") THEN json_extract(" + column + ", '$.ical_uid') END"
+}
+
+func queryCalendarEventRowsWithinBudget(ctx context.Context, r reboundReader, predicate string, args []any, budget int) ([]CalendarEventRow, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -59,11 +66,11 @@ func queryCalendarEventRowsWithinBudget(ctx context.Context, r SQLReader, predic
 	return queryCalendarEventRows(ctx, r, predicate, args, budget+1)
 }
 
-func queryCalendarEventRows(ctx context.Context, r SQLReader, predicate string, args []any, limit int) ([]CalendarEventRow, error) {
+func queryCalendarEventRows(ctx context.Context, r reboundReader, predicate string, args []any, limit int) ([]CalendarEventRow, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	query := calendarEventSelect + "(" + predicate + ") ORDER BY e.message_id"
+	query := fmt.Sprintf(calendarEventSelect, calendarUIDExpression(r.dialect, "m.metadata")) + "(" + predicate + ") ORDER BY e.message_id"
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)
@@ -79,23 +86,15 @@ func queryCalendarEventRows(ctx context.Context, r SQLReader, predicate string, 
 		e := &row.Event
 		var original, start, end sql.NullTime
 		var originalDate, recurrence string
-		var metadata sql.NullString
+		var uid sql.NullString
 		err := result.Scan(&row.MessageID, &row.SourceID, &row.Subject, &row.DeletedFromSource,
-			&metadata, &e.ProviderEventID, &e.SeriesProviderID, &e.Kind, &original, &originalDate, &e.Status, &e.AllDay,
+			&uid, &e.ProviderEventID, &e.SeriesProviderID, &e.Kind, &original, &originalDate, &e.Status, &e.AllDay,
 			&start, &end, &e.StartDate, &e.EndDate, &e.EventTimeZone, &e.CalendarTimeZone, &recurrence)
 		if err != nil {
 			_ = result.Close()
 			return nil, fmt.Errorf("scan calendar event: %w", err)
 		}
-		var meta struct {
-			ICalUID string `json:"ical_uid"`
-		}
-		if metadata.Valid {
-			if err := json.Unmarshal([]byte(metadata.String), &meta); err != nil {
-				return nil, fmt.Errorf("decode calendar metadata %d: %w", row.MessageID, err)
-			}
-		}
-		row.ICalUID = meta.ICalUID
+		row.ICalUID = uid.String
 		if originalDate != "" {
 			e.Original = &calrecur.Identity{Date: originalDate, AllDay: true}
 		} else if original.Valid {
@@ -165,7 +164,7 @@ func loadCalendarAttendees(ctx context.Context, r SQLReader, events []CalendarEv
 	return nil
 }
 
-func calendarEventRowsInWindow(ctx context.Context, r SQLReader, from, to time.Time) ([]CalendarEventRow, error) {
+func calendarEventRowsInWindow(ctx context.Context, r reboundReader, from, to time.Time) ([]CalendarEventRow, error) {
 	lower, upper := from.UTC().Add(-calendarCandidateMargin), to.UTC().Add(calendarCandidateMargin)
 	// RDATE can precede DTSTART by any amount. Retain those masters for exact
 	// expansion rather than treating their stored start as the earliest instance.
@@ -229,7 +228,7 @@ func calendarSeriesLimitError() error {
 	return fmt.Errorf("%w: more than %d recurring series overlap the window; a narrower window will not reduce open-ended series", ErrQueryTooBroad, maxCalendarSeries)
 }
 
-func queryCalendarSeriesWithinBudget(ctx context.Context, r SQLReader, predicate string, args []any) ([]CalendarEventRow, error) {
+func queryCalendarSeriesWithinBudget(ctx context.Context, r reboundReader, predicate string, args []any) ([]CalendarEventRow, error) {
 	rows, err := queryCalendarEventRowsWithinBudget(ctx, r, predicate, args, maxCalendarSeries)
 	if errors.Is(err, ErrQueryTooBroad) {
 		return nil, calendarSeriesLimitError()
@@ -237,7 +236,7 @@ func queryCalendarSeriesWithinBudget(ctx context.Context, r SQLReader, predicate
 	return rows, err
 }
 
-func queryCalendarExceptionsInWindow(ctx context.Context, r SQLReader, masters []CalendarEventRow, lower, upper time.Time) ([]CalendarEventRow, error) {
+func queryCalendarExceptionsInWindow(ctx context.Context, r reboundReader, masters []CalendarEventRow, lower, upper time.Time) ([]CalendarEventRow, error) {
 	predicate, args := calendarExceptionWindow(masters, lower, upper)
 	return queryCalendarEventRowsWithinBudget(ctx, r, predicate, args, maxCalendarExceptions)
 }

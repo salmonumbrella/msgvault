@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	"go.kenn.io/msgvault/internal/calevent"
 	"go.kenn.io/msgvault/internal/calrecur"
 )
 
@@ -161,41 +162,15 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref MeetingLinkR
 			return nil, sql.ErrNoRows
 		}
 		member := members[0]
-		rows, err := calendarEventRowsInWindow(ctx, s.meetingReader(ctx), member.Start, member.End)
+		page, err := s.ListCalendarOccurrencesContext(ctx, member.Start, member.End)
 		if err != nil {
 			return nil, err
 		}
-		// Charge both the master-index pass and the candidate pass. Exceptions
-		// are read per series through the bounded calendar query.
-		if err := spendMeetingBudget(ctx, &budget, 2*len(rows)); err != nil {
-			return nil, err
-		}
-		masters := map[string]bool{}
-		for _, row := range rows {
-			if row.Event.Kind == meetingSeriesKind {
-				masters[fmt.Sprintf("%d:%s", row.SourceID, row.Event.ProviderEventID)] = true
-			}
-		}
-		for _, row := range rows {
-			if row.Event.Status == meetingCancelledStatus {
-				continue
-			}
-			var occurrences []linkOccurrence
-			if row.Event.Kind == meetingSeriesKind {
-				occurrences, err = expandMeetingSeries(ctx, s.meetingReader(ctx), row, member.Start, member.End, &budget)
-				if err != nil && !errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
-					return nil, err
-				}
-			} else {
-				if row.Event.Kind == "exception" && masters[fmt.Sprintf("%d:%s", row.SourceID, row.Event.SeriesProviderID)] {
-					continue
-				}
-				occurrences = []linkOccurrence{occurrenceFromRow(row, "")}
-			}
-			for _, o := range occurrences {
-				if suggestion, ok := rankMeetingSuggestion(member, o); ok {
-					out = append(out, suggestion)
-				}
+		for _, event := range page.Occurrences {
+			o := linkOccurrence{Start: event.Start, End: event.End, Row: CalendarEventRow{Subject: event.Subject, Event: calevent.Event{Status: event.Status, Attendees: event.Attendees}}}
+			if suggestion, ok := rankMeetingSuggestion(member, o); ok {
+				suggestion.Ref = event.Ref
+				out = append(out, suggestion)
 			}
 		}
 	} else {

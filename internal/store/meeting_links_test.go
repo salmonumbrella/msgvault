@@ -27,7 +27,7 @@ func TestMeetingLinksCalendarUIDLookupPlan(t *testing.T) {
 	var query string
 	var args []any
 	observed := gatedMeetingProjectionStore(t, st, &meetingProjectionGate{before: func(_ context.Context, q string, values []driver.NamedValue) error {
-		if strings.Contains(q, "FROM calendar_events e") && strings.Contains(q, "ical_uid") {
+		if strings.Contains(q, "FROM calendar_events e") && strings.Contains(q, "ical_uid") && len(values) > 0 && values[0].Value == "metadata@example.org" {
 			query = q
 			args = nil
 			for _, v := range values {
@@ -201,9 +201,9 @@ func TestMeetingLinksTwentyCopiesAndAmbiguity(t *testing.T) {
 				key = ""
 			}
 			_, one := calendarFixture(t, st, "one", raw)
-			_, copyID := calendarFixture(t, st, "copy", raw, "copy@example.com")
+			calendarFixture(t, st, "copy", raw, "copy@example.com")
 			_, note := projectionFixture(t, st, "twenty", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"weekly@example.org","startsAt":"2027-03-14T10:00:00Z"}}`)
-			want := fmt.Sprintf("evt:%d%s,evt:%d%s", one, key, copyID, key)
+			want := fmt.Sprintf("evt:%d%s", one, key)
 			if kind == "different occurrences" {
 				calendarFixture(t, st, "single", singleLinkRaw("single", "weekly@example.org"))
 				want = ""
@@ -383,4 +383,102 @@ func linkedMeetingRefs(t *testing.T, st *Store, ids ...int64) map[int64]string {
 		out[id] = strings.Join(refs, ",")
 	}
 	return out
+}
+
+func TestMeetingLinksPrimaryCalendar(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	data, event := calendarFixture(t, st, "event", singleLinkRaw("event", "primary@example.org"))
+	requirements.NoError(st.UpdateSourceSyncConfig(data.Message.SourceID, `{"calendar_id":"primary","account_email":"Calendar@Example.COM","primary":true,"time_zone":"UTC"}`))
+	note := granolaLinkFixture(t, st, "event")
+	links, err := st.MeetingLinksContext(t.Context(), note)
+	requirements.NoError(err)
+	requirements.Len(links, 1)
+	assertions.Equal(fmt.Sprintf("evt:%d", event), links[0].Ref)
+}
+
+func TestMeetingLinksTwoOccurrenceAliases(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, master := calendarFixture(t, st, "master", linkSeriesRaw)
+	_, exception := calendarFixture(t, st, "exception", `{"id":"edited","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`)
+	_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
+	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: master, Key: "20270314T100000Z"}))
+	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: exception}))
+	links, err := st.MeetingLinksContext(t.Context(), note)
+	requirements.NoError(err)
+	requirements.Len(links, 1)
+	assertions.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", master), links[0].Ref)
+	assertions.Equal("2027-03-14T12:00:00Z", links[0].Start.Format(time.RFC3339))
+}
+
+func TestMeetingLinksSplitSurvivesSourceRemoval(t *testing.T) {
+	for _, recurring := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recurring=%t", recurring), func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			raw, key := singleLinkRaw("event", "weekly@example.org"), ""
+			if recurring {
+				raw, key = linkSeriesRaw, "20270314T100000Z"
+			}
+			data, a := calendarFixture(t, st, "a", raw, "a@example.com")
+			_, b := calendarFixture(t, st, "b", raw, "b@example.com")
+			_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"weekly@example.org","startsAt":"2027-03-14T10:00:00Z"}}`)
+			requirements.NotEmpty(linkedMeetingRefs(t, st, note)[note])
+			requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: a, Key: key}))
+			requirements.Empty(linkedMeetingRefs(t, st, note)[note])
+			requirements.NoError(st.RemoveSource(data.Message.SourceID))
+			assertions.Empty(linkedMeetingRefs(t, st, note)[note], "the surviving calendar must retain the split")
+			calendarFixture(t, st, "a", raw, "a@example.com")
+			assertions.Empty(linkedMeetingRefs(t, st, note)[note], "reimport must retain the split")
+			requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: b, Key: key}))
+			assertions.NotEmpty(linkedMeetingRefs(t, st, note)[note], "a new owner decision can undo the split")
+		})
+	}
+}
+
+func TestMeetingLinksUnknownKeyKind(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	calendarFixture(t, st, "event", singleLinkRaw("event", "unknown@example.org"))
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"unknown@example.org"}}`)
+	requirements.NotEmpty(linkedMeetingRefs(t, st, note)[note])
+	_, err := st.db.Exec(`UPDATE meeting_link_key SET kind = 'future_kind' WHERE message_id = ?`, note)
+	requirements.NoError(err)
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
+}
+
+func TestMeetingLinksDecisionLifetime(t *testing.T) {
+	for _, uid := range []string{"lifetime@example.org", ""} {
+		t.Run("uid="+uid, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			data, event := calendarFixture(t, st, "event", singleLinkRaw("event", uid))
+			noteData, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
+			requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+			requirements.NoError(st.RemoveSource(data.Message.SourceID))
+			links, err := st.MeetingLinksContext(t.Context(), note)
+			requirements.NoError(err)
+			assertions.Empty(links)
+			var count int
+			requirements.NoError(st.db.QueryRow(`SELECT COUNT(*) FROM meeting_link_decisions WHERE member_message_id = ?`, note).Scan(&count))
+			if uid == "" {
+				assertions.Zero(count, "a UID-less target retains its message lifetime")
+			} else {
+				assertions.Equal(1, count, "a UID target survives loss of every copy")
+			}
+			_, replacement := calendarFixture(t, st, "event", singleLinkRaw("event", uid))
+			links, err = st.MeetingLinksContext(t.Context(), note)
+			requirements.NoError(err)
+			if uid == "" {
+				assertions.Empty(links)
+			} else {
+				requirements.Len(links, 1)
+				assertions.Equal(fmt.Sprintf("evt:%d", replacement), links[0].Ref)
+			}
+			requirements.NoError(st.RemoveSource(noteData.Message.SourceID))
+			requirements.NoError(st.db.QueryRow(`SELECT COUNT(*) FROM meeting_link_decisions`).Scan(&count))
+			assertions.Zero(count, "decisions follow the member note's lifetime")
+		})
+	}
 }

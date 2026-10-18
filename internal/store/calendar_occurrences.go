@@ -89,18 +89,9 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 		page.Occurrences = append(page.Occurrences, CalendarOccurrence{Ref: formatMeetingOccurrence(ref), MessageID: row.MessageID, SeriesMessageID: seriesID, SourceID: row.SourceID, Subject: row.Subject, Start: o.Start, End: o.End, AllDay: o.AllDay, StartDate: o.StartDate, EndDate: o.EndDate, Status: status, DeletedFromSource: row.DeletedFromSource, Attendees: attendees})
 	}
 	addSeriesOccurrence := func(row CalendarEventRow, o calrecur.Occurrence) error {
-		effective := row
-		if o.HasException {
-			effective = byID[o.ExceptionRef]
-			if effective.Event.Status == "cancelled" {
-				effective, err = inheritCalendarCancellation(ctx, s.meetingReader(ctx), effective, row)
-				if err != nil {
-					return err
-				}
-			}
-		}
-		if row.Event.Status == "cancelled" {
-			o.Cancelled = true
+		effective, o, err := materializeCalendarOccurrence(ctx, s.meetingReader(ctx), row, byID, o)
+		if err != nil {
+			return err
 		}
 		add(effective, row.MessageID, o)
 		return nil
@@ -303,4 +294,25 @@ func prepareCalendarRecurrence(e calevent.Event) (calrecur.Set, time.Duration, i
 		days = int(last.Sub(first) / (24 * time.Hour))
 	}
 	return set, e.End.Sub(*e.Start), days, nil
+}
+
+func materializeCalendarOccurrence(ctx context.Context, r SQLReader, master CalendarEventRow, byID map[int64]CalendarEventRow, o calrecur.Occurrence) (CalendarEventRow, calrecur.Occurrence, error) {
+	effective := master
+	if o.HasException {
+		effective = byID[o.ExceptionRef]
+		if effective.Event.Status == meetingCancelledStatus {
+			var err error
+			effective, err = inheritCalendarCancellation(ctx, r, effective, master)
+			if err != nil {
+				return effective, o, err
+			}
+		}
+	}
+	if master.Event.Status == meetingCancelledStatus {
+		o.Cancelled = true
+	}
+	if o.Cancelled {
+		effective.Event.Status = meetingCancelledStatus
+	}
+	return effective, o, nil
 }

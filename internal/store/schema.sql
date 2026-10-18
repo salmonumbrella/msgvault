@@ -4722,11 +4722,13 @@ CREATE INDEX IF NOT EXISTS idx_meeting_link_key_scheduled ON meeting_link_key(ju
 CREATE INDEX IF NOT EXISTS idx_meeting_details_duration ON meeting_details(duration_seconds);
 CREATE TABLE IF NOT EXISTS meeting_link_decisions (
     member_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-    target_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    target_ical_uid TEXT NOT NULL DEFAULT '',
+    target_message_id INTEGER REFERENCES messages(id) ON DELETE CASCADE,
     occurrence_key TEXT NOT NULL DEFAULT '',
     decision TEXT NOT NULL CHECK(decision IN ('link', 'split')),
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (member_message_id, target_message_id, occurrence_key)
+    CHECK ((target_ical_uid <> '' AND target_message_id IS NULL) OR (target_ical_uid = '' AND target_message_id IS NOT NULL))
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_link_decisions_identity ON meeting_link_decisions(member_message_id, target_ical_uid, COALESCE(target_message_id, 0), occurrence_key);
 CREATE INDEX IF NOT EXISTS idx_meeting_link_decisions_target ON meeting_link_decisions(target_message_id);
-CREATE INDEX IF NOT EXISTS idx_messages_calendar_ical_uid ON messages(json_extract(metadata, '$.ical_uid')) WHERE message_type = 'calendar_event';
+CREATE INDEX IF NOT EXISTS idx_messages_calendar_ical_uid ON messages(CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.ical_uid') END) WHERE message_type = 'calendar_event';

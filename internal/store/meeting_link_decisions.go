@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -10,14 +11,14 @@ import (
 )
 
 func readMeetingLinkDecisions(ctx context.Context, r SQLReader, memberID int64) (out []meetingLinkDecision, err error) {
-	rows, err := r.QueryContext(ctx, `SELECT target_message_id,occurrence_key,decision,created_at FROM meeting_link_decisions WHERE member_message_id = ? ORDER BY target_message_id,occurrence_key`, memberID)
+	rows, err := r.QueryContext(ctx, `SELECT target_ical_uid,COALESCE(target_message_id,0),occurrence_key,decision,created_at FROM meeting_link_decisions WHERE member_message_id = ? ORDER BY target_ical_uid,target_message_id,occurrence_key`, memberID)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { err = errors.Join(err, rows.Close()) }()
 	for rows.Next() {
 		var d meetingLinkDecision
-		if err := rows.Scan(&d.Ref.MessageID, &d.Ref.Key, &d.Decision, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.Identity.ICalUID, &d.Identity.EventMessageID, &d.Identity.OccurrenceKey, &d.Decision, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -56,10 +57,11 @@ func (s *Store) writeMeetingLinkDecision(ctx context.Context, memberID int64, oc
 			return err
 		}
 		budget := calrecur.RequestReadBudget
-		if _, err := resolveMeetingOccurrence(ctx, reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind}, occurrence, &budget); err != nil {
+		target, err := resolveMeetingOccurrence(ctx, reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind, dialect: s.dialect}, occurrence, &budget)
+		if err != nil {
 			return fmt.Errorf("resolve meeting decision target: %w", err)
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO meeting_link_decisions(member_message_id,target_message_id,occurrence_key,decision,created_at) VALUES (?,?,?,?,?) ON CONFLICT(member_message_id,target_message_id,occurrence_key) DO UPDATE SET decision = excluded.decision,created_at = excluded.created_at`, memberID, occurrence.MessageID, occurrence.Key, decision, time.Now().UTC())
+		_, err = tx.ExecContext(ctx, meetingDecisionUpsert, memberID, target.Identity.ICalUID, sql.NullInt64{Int64: target.Identity.EventMessageID, Valid: target.Identity.ICalUID == ""}, target.Identity.OccurrenceKey, decision, time.Now().UTC())
 		return err
 	})
 }
@@ -69,19 +71,20 @@ func copyMeetingLinkDecisionsTx(ctx context.Context, tx *loggedTx, from, to int6
 	if from == to {
 		return nil
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT member_message_id,target_message_id,occurrence_key,decision,created_at FROM meeting_link_decisions WHERE member_message_id = ? OR target_message_id = ?`, from, from)
+	rows, err := tx.QueryContext(ctx, `SELECT member_message_id,target_ical_uid,target_message_id,occurrence_key,decision,created_at FROM meeting_link_decisions WHERE member_message_id = ? OR target_message_id = ?`, from, from)
 	if err != nil {
 		return err
 	}
 	type copyDecision struct {
-		member, target int64
-		key, decision  string
-		created        time.Time
+		member             int64
+		target             sql.NullInt64
+		uid, key, decision string
+		created            time.Time
 	}
 	var decisions []copyDecision
 	for rows.Next() {
 		var d copyDecision
-		if err := rows.Scan(&d.member, &d.target, &d.key, &d.decision, &d.created); err != nil {
+		if err := rows.Scan(&d.member, &d.uid, &d.target, &d.key, &d.decision, &d.created); err != nil {
 			_ = rows.Close()
 			return err
 		}
@@ -94,13 +97,15 @@ func copyMeetingLinkDecisionsTx(ctx context.Context, tx *loggedTx, from, to int6
 		if d.member == from {
 			d.member = to
 		}
-		if d.target == from {
-			d.target = to
+		if d.target.Valid && d.target.Int64 == from {
+			d.target.Int64 = to
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO meeting_link_decisions(member_message_id,target_message_id,occurrence_key,decision,created_at) VALUES (?,?,?,?,?) ON CONFLICT(member_message_id,target_message_id,occurrence_key) DO UPDATE SET decision = excluded.decision,created_at = excluded.created_at WHERE meeting_link_decisions.created_at < excluded.created_at OR (meeting_link_decisions.created_at = excluded.created_at AND excluded.decision = 'split')`, d.member, d.target, d.key, d.decision, d.created)
+		_, err := tx.ExecContext(ctx, meetingDecisionUpsert+` WHERE meeting_link_decisions.created_at < excluded.created_at OR (meeting_link_decisions.created_at = excluded.created_at AND excluded.decision = 'split')`, d.member, d.uid, d.target, d.key, d.decision, d.created)
 		if err != nil {
 			return fmt.Errorf("copy meeting decision: %w", err)
 		}
 	}
 	return nil
 }
+
+const meetingDecisionUpsert = `INSERT INTO meeting_link_decisions(member_message_id,target_ical_uid,target_message_id,occurrence_key,decision,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(member_message_id,target_ical_uid,(COALESCE(target_message_id,0)),occurrence_key) DO UPDATE SET decision = excluded.decision,created_at = excluded.created_at`

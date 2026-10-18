@@ -42,7 +42,7 @@ msgvault meetings metrics --domain example.com --after 2026-01-01 --json
 
 ### meetings link, unlink, links, and suggest
 
-See which calendar events belong to a meeting note, and correct missing or wrong links. These commands are unreleased and require owner access and daemon API schema 3.25.0 or newer.
+See which calendar events belong to a meeting note, and correct missing or wrong links. These commands are unreleased and require owner access and daemon API schema 3.26.0 or newer.
 
 ```bash
 msgvault meetings suggest msg:42
@@ -56,7 +56,7 @@ msgvault meetings unlink 42 --event evt:81@20270314T100000Z
 
 `suggest` accepts `msg:<id>` for a note or `evt:<id>[@occurrence key]` for an event. It returns up to ten overlapping candidates, ranked by overlap minutes, shared attendees, and shared title words. `--json` prints the same evidence. Suggestions leave links unchanged.
 
-`links <note-id>` shows each linked event's reference, title, start, and end. `--json` returns the same fields. Exact shared IDs can link a note automatically. After `link`, this list shows the chosen event instead of automatic matches. After `unlink`, it excludes that event and calendar copies of the same occurrence.
+`links <note-id>` shows each linked occurrence once, with its reference, title, start, and end. `--json` returns the same fields. Exact shared IDs can link a note automatically. After `link`, this list shows the chosen occurrence instead of automatic matches. `unlink` applies to all calendar copies of that occurrence and survives source removal and reimport when the event has an iCalendar UID.
 
 ### meetings context
 

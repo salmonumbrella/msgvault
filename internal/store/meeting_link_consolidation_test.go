@@ -36,7 +36,7 @@ func TestMeetingLinksDedupUndoAndPurge(t *testing.T) {
 			requirements.NoError(err)
 			assertions.Equal(int64(1), count)
 			if targetSide {
-				assertions.Equal(fmt.Sprintf("evt:%d,evt:%d", event, duplicate), linkedMeetingRefs(t, st, note)[note])
+				assertions.Equal(fmt.Sprintf("evt:%d", event), linkedMeetingRefs(t, st, note)[note])
 			} else {
 				keys := linkedMeetingRefs(t, st, note, duplicate)
 				assertions.Equal(fmt.Sprintf("evt:%d", event), keys[note])
@@ -74,7 +74,7 @@ func TestMeetingLinksConsolidationDecisionOrder(t *testing.T) {
 					kind   string
 					day    int
 				}{{a, "link", tc.linkDay}, {b, "split", tc.splitDay}} {
-					_, err := st.db.Exec(`INSERT INTO meeting_link_decisions(member_message_id,target_message_id,occurrence_key,decision,created_at) VALUES (?,?,'',?,?)`, d.member, event, d.kind, time.Date(2027, 1, d.day, 0, 0, 0, 0, time.UTC))
+					_, err := st.db.Exec(`INSERT INTO meeting_link_decisions(member_message_id,target_ical_uid,occurrence_key,decision,created_at) VALUES (?,'copy@example.org','',?,?)`, d.member, d.kind, time.Date(2027, 1, d.day, 0, 0, 0, 0, time.UTC))
 					requirements.NoError(err)
 				}
 				if reverse {
