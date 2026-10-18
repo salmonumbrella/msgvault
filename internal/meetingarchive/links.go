@@ -56,10 +56,15 @@ type LinkResult struct {
 // a link that would join two different persons becomes a conflict, and a user
 // rejection is kept. Names never match anything.
 func (a *Archiver) LinkIdentities(ctx context.Context, sourceID int64, people []Person) (LinkResult, error) {
-	var result LinkResult
-	if a == nil || a.store == nil {
-		return result, ErrUnavailable
+	people, err := a.normalizePeople(ctx, people)
+	if err != nil {
+		return LinkResult{}, err
 	}
+	return a.linkIdentities(ctx, sourceID, people)
+}
+
+func (a *Archiver) linkIdentities(ctx context.Context, sourceID int64, people []Person) (LinkResult, error) {
+	var result LinkResult
 	for _, raw := range people {
 		if err := ctx.Err(); err != nil {
 			return result, err

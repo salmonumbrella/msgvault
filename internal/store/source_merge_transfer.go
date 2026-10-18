@@ -149,7 +149,7 @@ func (s *Store) applySourceMergePlan(ctx context.Context, tx *loggedTx, from, in
 		if m.survivor == 0 {
 			continue
 		}
-		if err := copyMergedMessageEvidence(ctx, tx, m.id, m.survivor, from); err != nil {
+		if err := s.copyMergedMessageEvidence(ctx, tx, m.id, m.survivor, from); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE messages SET reply_to_message_id = ? WHERE reply_to_message_id = ?`, m.survivor, m.id); err != nil {
@@ -259,8 +259,8 @@ const missingMergedAttachmentPredicate = `(
  AND COALESCE(h.content_id, '') = COALESCE(a.content_id, '')
 ) OR COALESCE(a.content_hash, '') = ''`
 
-func copyMergedMessageEvidence(ctx context.Context, tx *loggedTx, from, into, originalSource int64) error {
-	if err := copyMeetingLinkDecisionsTx(ctx, tx, from, into); err != nil {
+func (s *Store) copyMergedMessageEvidence(ctx context.Context, tx *loggedTx, from, into, originalSource int64) error {
+	if err := s.copyMeetingLinkDecisionsTx(ctx, tx, from, into); err != nil {
 		return err
 	}
 	for _, statement := range []string{

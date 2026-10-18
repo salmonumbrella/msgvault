@@ -34,10 +34,5 @@ func (s *Store) replaceMeetingLinkKey(ctx context.Context, tx *loggedTx, message
 			return fmt.Errorf("write meeting key: %w", err)
 		}
 	}
-	if !s.IsPostgreSQL() {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO cache_related_change_journal(dataset,message_id) VALUES('meeting_links', ?)`, messageID); err != nil {
-			return fmt.Errorf("journal meeting key: %w", err)
-		}
-	}
-	return nil
+	return s.journalMeetingLinks(ctx, tx, messageID)
 }

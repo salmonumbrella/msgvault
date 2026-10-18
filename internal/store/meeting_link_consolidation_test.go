@@ -206,3 +206,53 @@ func TestMeetingLinksSubsetCopy(t *testing.T) {
 		requirements.NoError(dst.Close())
 	}
 }
+
+func TestMeetingDecisionDedupJournalsDerivedRefresh(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "journal@example.org"))
+	_, survivor := projectionFixture(t, st, "survivor", "plaud_json", `{}`)
+	_, duplicate := projectionFixture(t, st, "duplicate", "plaud_json", `{}`)
+	requirements.NoError(st.LinkMeetingContext(t.Context(), duplicate, OccurrenceRef{MessageID: event}))
+	_, before, err := st.MeetingCountKeysContext(t.Context())
+	requirements.NoError(err)
+	_, err = st.MergeDuplicates(survivor, []int64{duplicate}, "journal")
+	requirements.NoError(err)
+	assertions.Equal(fmt.Sprintf("evt:%d", event), linkedMeetingRefs(t, st, survivor)[survivor])
+	if !st.IsPostgreSQL() {
+		var count int
+		requirements.NoError(st.db.QueryRow(`SELECT count(*) FROM cache_related_change_journal WHERE seq > ? AND dataset = 'meeting_links' AND message_id = ?`, before, survivor).Scan(&count))
+		assertions.Positive(count, "the cache must refresh derived meeting counts after moving the decision")
+	}
+}
+
+func TestMeetingDecisionSubsetJournalsBeforeProjection(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	path := filepath.Join(t.TempDir(), "source.db")
+	src, err := OpenForTest(path)
+	requirements.NoError(err)
+	t.Cleanup(func() { requirements.NoError(src.Close()) })
+	requirements.NoError(src.InitSchema())
+	_, event := calendarFixture(t, src, "event", singleLinkRaw("event", "subset@example.org"))
+	_, note := projectionFixture(t, src, "note", "plaud_json", `{}`)
+	requirements.NoError(src.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+	dst, err := OpenForTest(filepath.Join(t.TempDir(), "destination.db"))
+	requirements.NoError(err)
+	t.Cleanup(func() { requirements.NoError(dst.Close()) })
+	requirements.NoError(dst.InitSchema())
+	conn, err := dst.db.Conn(t.Context())
+	requirements.NoError(err)
+	defer conn.Close()
+	_, err = conn.ExecContext(t.Context(), `ATTACH DATABASE ? AS src`, path)
+	requirements.NoError(err)
+	tx, err := conn.BeginTx(t.Context(), nil)
+	requirements.NoError(err)
+	defer tx.Rollback()
+	_, err = copyData(tx, 2, CopySubsetOptions{})
+	requirements.NoError(err)
+	var count int
+	requirements.NoError(tx.QueryRow(`SELECT count(*) FROM meeting_link_decisions WHERE member_message_id = ?`, note).Scan(&count))
+	assertions.Equal(1, count)
+	requirements.NoError(tx.QueryRow(`SELECT count(*) FROM cache_related_change_journal WHERE dataset = 'meeting_links' AND message_id = ?`, note).Scan(&count))
+	assertions.Positive(count, "copying a decision must request a derived refresh in the copy transaction")
+}

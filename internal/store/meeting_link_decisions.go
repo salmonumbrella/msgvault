@@ -70,10 +70,7 @@ func (s *Store) writeMeetingLinkDecision(ctx context.Context, memberID int64, oc
 		if err != nil {
 			return err
 		}
-		if !s.IsPostgreSQL() {
-			_, err = tx.ExecContext(ctx, `INSERT INTO cache_related_change_journal(dataset,message_id) VALUES('meeting_links', ?)`, memberID)
-		}
-		return err
+		return s.journalMeetingLinks(ctx, tx, memberID)
 	})
 }
 
@@ -181,7 +178,7 @@ func (s *Store) resolveMeetingDecisionTarget(ctx context.Context, r reboundReade
 }
 
 // Retain the original decisions for undo; purge removes only that hidden copy.
-func copyMeetingLinkDecisionsTx(ctx context.Context, tx *loggedTx, from, to int64) error {
+func (s *Store) copyMeetingLinkDecisionsTx(ctx context.Context, tx *loggedTx, from, to int64) error {
 	if from == to {
 		return nil
 	}
@@ -218,8 +215,19 @@ func copyMeetingLinkDecisionsTx(ctx context.Context, tx *loggedTx, from, to int6
 		if err != nil {
 			return fmt.Errorf("copy meeting decision: %w", err)
 		}
+		if err := s.journalMeetingLinks(ctx, tx, d.member); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 const meetingDecisionUpsert = `INSERT INTO meeting_link_decisions(member_message_id,target_ical_uid,target_message_id,occurrence_key,decision,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(member_message_id,target_ical_uid,(COALESCE(target_message_id,0)),occurrence_key) DO UPDATE SET decision = excluded.decision,created_at = excluded.created_at`
+
+func (s *Store) journalMeetingLinks(ctx context.Context, tx *loggedTx, memberID int64) error {
+	if s.IsPostgreSQL() {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO cache_related_change_journal(dataset,message_id) VALUES('meeting_links', ?)`, memberID)
+	return err
+}

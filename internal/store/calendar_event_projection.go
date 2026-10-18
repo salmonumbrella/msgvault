@@ -109,12 +109,22 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 	if _, err := q.Exec(query, values...); err != nil {
 		return fmt.Errorf("write calendar projection: %w", err)
 	}
+	return replaceCalendarAttendees(ctx, tx, messageID, event.Attendees)
+}
+
+func replaceCalendarAttendees(ctx context.Context, tx *loggedTx, messageID int64, attendees []calevent.Attendee) error {
+	q := boundQuerier{ctx: ctx, q: tx}
 	if _, err := q.Exec(`DELETE FROM calendar_event_attendees WHERE message_id = ?`, messageID); err != nil {
 		return fmt.Errorf("replace calendar attendees: %w", err)
 	}
-	for ordinal, attendee := range event.Attendees {
+	for ordinal, attendee := range attendees {
 		if _, err := q.Exec(`INSERT INTO calendar_event_attendees (message_id, ordinal, email, display_name, role, rsvp, is_copy_self) VALUES (?, ?, ?, ?, ?, ?, ?)`, messageID, ordinal, attendee.Email, attendee.DisplayName, attendee.Role, attendee.RSVP, attendee.IsCopySelf); err != nil {
 			return fmt.Errorf("write calendar attendee %d: %w", ordinal, err)
+		}
+		if attendee.Role == "room" {
+			if err := removeRoomAddressEdges(ctx, tx, attendee.Email); err != nil {
+				return fmt.Errorf("remove calendar room edges: %w", err)
+			}
 		}
 	}
 	return nil

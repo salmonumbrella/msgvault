@@ -241,11 +241,10 @@ func refreshDerivedDatasetsOnly(
 		// it active pagination cursors — for no analytical difference.
 		return &buildResult{OutputDir: analyticsDir, IdentityOnly: true, Skipped: true}, nil
 	}
-	meetingKeys, keysSeq, err := st.MeetingCountKeysContext(ctx)
+	meetingKeys, _, err := st.MeetingCountKeysContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("read meeting count keys: %w", err)
 	}
-	relatedChangeSeq = min(relatedChangeSeq, keysSeq)
 
 	derivedCopy := func(table, selectSQL string) error {
 		return copyParquet(ctx, exportDB, filepath.Join(staging.root, table), table+".parquet", selectSQL)

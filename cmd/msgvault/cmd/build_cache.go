@@ -1327,12 +1327,10 @@ func buildCacheLockedAttempt(
 	if buildCacheAfterSnapshotHook != nil {
 		buildCacheAfterSnapshotHook()
 	}
-	meetingKeys, keysSeq, err := identityStore.MeetingCountKeysContext(context.Background())
+	meetingKeys, _, err := identityStore.MeetingCountKeysContext(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("read meeting count keys: %w", err)
 	}
-
-	relatedChangeSeq = min(relatedChangeSeq, keysSeq)
 
 	var attachmentMIMEColumnCount int
 	if err := sourceSnapshot.QueryRow(`

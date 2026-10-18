@@ -34,21 +34,10 @@ func (s *Store) repairRoomRecipientsContext(ctx context.Context) error {
 			return err
 		}
 		for _, id := range rooms {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM message_recipients
-   WHERE participant_id = ? AND message_id IN
-   (SELECT id FROM messages WHERE message_type IN ('calendar_event','meeting_transcript'))`, id); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_participants
-   WHERE participant_id = ? AND conversation_id IN
-   (SELECT conversation_id FROM messages WHERE message_type IN ('calendar_event','meeting_transcript'))`, id); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `UPDATE messages SET sender_id = NULL
-   WHERE message_type IN ('calendar_event','meeting_transcript') AND sender_id = ?`, id); err != nil {
+			if err := removeRoomParticipantEdges(boundQuerier{ctx: ctx, q: tx}, id); err != nil {
 				return err
 			}
 		}
-		return s.markMigrationAppliedContext(ctx, tx, migrationRoomRecipientsV1, 1)
+		return nil
 	})
 }

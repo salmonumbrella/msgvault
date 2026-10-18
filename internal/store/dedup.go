@@ -564,7 +564,7 @@ func (s *Store) MergeDuplicates(
 				WHERE reply_to_message_id = ?`, survivorID, dupID); err != nil {
 				return fmt.Errorf("repoint replies from duplicate %d: %w", dupID, err)
 			}
-			if err := copyMeetingLinkDecisionsTx(ctx, tx, dupID, survivorID); err != nil {
+			if err := s.copyMeetingLinkDecisionsTx(ctx, tx, dupID, survivorID); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(softDeleteSQL, batchID, dupID); err != nil {

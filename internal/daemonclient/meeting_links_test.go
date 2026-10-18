@@ -90,3 +90,21 @@ func TestMeetingLinksClient(t *testing.T) {
 	requirements.NoError(err)
 	assertions.Empty(links)
 }
+
+func TestMeetingDecisionReportsStaleCache(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertions.Equal("/api/v1/meetings/links/decisions", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"message_id":42,"event":"evt:81","decision":"link","cache_state":"stale"}`))
+		assertions.NoError(err)
+	}))
+	t.Cleanup(server.Close)
+	client, err := daemonclient.New(daemonclient.Config{URL: server.URL, AllowInsecure: true, HTTPClient: server.Client()})
+	requirements.NoError(err)
+	t.Cleanup(func() { requirements.NoError(client.Close()) })
+	err = client.DecideMeetingLink(t.Context(), 42, "evt:81", "link")
+	requirements.Error(err)
+	assertions.Contains(err.Error(), "decision saved")
+	assertions.Contains(err.Error(), "counts are stale")
+}

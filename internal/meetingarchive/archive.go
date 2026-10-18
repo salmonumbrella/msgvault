@@ -88,26 +88,22 @@ func New(s *store.Store) *Archiver {
 	return &Archiver{store: s}
 }
 
-func (a *Archiver) Upsert(
+func (a *Archiver) Upsert(ctx context.Context, snapshot Snapshot, opts UpsertOptions) (Result, error) {
+	if err := snapshot.validatePeople(); err != nil {
+		return Result{}, err
+	}
+	snapshot, err := a.normalizeSnapshot(ctx, snapshot)
+	if err != nil {
+		return Result{}, err
+	}
+	return a.upsert(ctx, snapshot, opts)
+}
+
+func (a *Archiver) upsert(
 	ctx context.Context,
 	snapshot Snapshot,
 	opts UpsertOptions,
 ) (Result, error) {
-	if a == nil || a.store == nil {
-		return Result{}, ErrUnavailable
-	}
-	if err := ctx.Err(); err != nil {
-		return Result{}, err
-	}
-	if snapshot.Organizer != nil && snapshot.Organizer.ParticipantID < 0 {
-		return Result{}, errors.New("meeting organizer participant ID cannot be negative")
-	}
-	for _, attendee := range snapshot.Attendees {
-		if attendee.ParticipantID < 0 {
-			return Result{}, errors.New("meeting attendee participant ID cannot be negative")
-		}
-	}
-
 	existing, err := a.store.MessageMetadataBatch(snapshot.SourceID, []string{snapshot.SourceMessageID})
 	if err != nil {
 		return Result{}, fmt.Errorf("lookup existing meeting: %w", err)
@@ -154,7 +150,7 @@ func (a *Archiver) Upsert(
 				return Result{}, fmt.Errorf("recompute meeting conversation stats: %w", err)
 			}
 			result := Result{MessageID: existingMessageID}
-			result.Links, err = a.LinkIdentities(ctx, snapshot.SourceID, snapshotPeople(snapshot))
+			result.Links, err = a.linkIdentities(ctx, snapshot.SourceID, snapshotPeople(snapshot))
 			if err != nil {
 				return result, fmt.Errorf("link meeting attendee identities: %w", err)
 			}
@@ -230,7 +226,7 @@ func (a *Archiver) Upsert(
 	if err := a.store.RecomputeConversationStatsForMessageContext(ctx, messageID); err != nil {
 		return result, fmt.Errorf("recompute meeting conversation stats: %w", err)
 	}
-	result.Links, err = a.LinkIdentities(ctx, snapshot.SourceID, snapshotPeople(snapshot))
+	result.Links, err = a.linkIdentities(ctx, snapshot.SourceID, snapshotPeople(snapshot))
 	if err != nil {
 		return result, fmt.Errorf("link meeting attendee identities: %w", err)
 	}
@@ -240,12 +236,11 @@ func (a *Archiver) Upsert(
 // Unchanged reports whether Upsert without Force would keep the stored meeting snapshot.
 // It only reads.
 func (a *Archiver) Unchanged(ctx context.Context, snapshot Snapshot) (bool, error) {
-	if a == nil || a.store == nil {
-		return false, ErrUnavailable
-	}
-	if err := ctx.Err(); err != nil {
+	snapshot, err := a.normalizeSnapshot(ctx, snapshot)
+	if err != nil {
 		return false, err
 	}
+
 	existing, err := a.store.MessageMetadataBatch(snapshot.SourceID, []string{snapshot.SourceMessageID})
 	if err != nil {
 		return false, fmt.Errorf("lookup existing meeting: %w", err)
