@@ -68,7 +68,7 @@ func (s *Store) writeMeetingLinkDecision(ctx context.Context, memberID int64, oc
 func resolveMeetingDecisionTarget(ctx context.Context, r reboundReader, memberID int64, ref OccurrenceRef, decision string) (linkOccurrence, error) {
 	budget := calrecur.RequestReadBudget
 	target, err := resolveMeetingOccurrence(ctx, r, ref, &budget)
-	if decision != "split" || !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
+	if decision != "split" || !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, calrecur.ErrUnsupportedRecurrence) && !errors.Is(err, ErrQueryTooBroad) {
 		return target, err
 	}
 	// A series edit can remove an occurrence while its saved link still

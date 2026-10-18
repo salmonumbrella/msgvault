@@ -355,6 +355,18 @@ func (s *Store) meetingMemberOccurrences(ctx context.Context, r reboundReader, m
 	var resolved []resolvedDecision
 	splits := map[meetingIdentity]time.Time{}
 	for _, d := range decisions {
+		if d.Decision == "split" {
+			identities, err := s.meetingSplitIdentities(ctx, r, d.Identity, budget)
+			if err != nil {
+				return nil, err
+			}
+			for _, identity := range identities {
+				if !d.CreatedAt.Before(splits[identity]) {
+					splits[identity] = d.CreatedAt
+				}
+			}
+			continue
+		}
 		targets, err := s.resolveMeetingIdentity(ctx, r, d.Identity, budget)
 		if err != nil {
 			return nil, err
@@ -363,15 +375,8 @@ func (s *Store) meetingMemberOccurrences(ctx context.Context, r reboundReader, m
 		if len(targets) == 0 {
 			targets = []linkOccurrence{{Identity: d.Identity}}
 		}
-		// A UID split still suppresses automatic evidence when its last copy is absent.
-		if d.Decision == "split" && !d.CreatedAt.Before(splits[d.Identity]) {
-			splits[d.Identity] = d.CreatedAt
-		}
 		for _, o := range targets {
 			resolved = append(resolved, resolvedDecision{d, o})
-			if d.Decision == "split" && !d.CreatedAt.Before(splits[o.Identity]) {
-				splits[o.Identity] = d.CreatedAt
-			}
 		}
 	}
 	var out []linkOccurrence
@@ -427,7 +432,7 @@ func uniqueMeetingOccurrences(out []linkOccurrence) []linkOccurrence {
 	})
 }
 
-func (s *Store) resolveMeetingIdentity(ctx context.Context, r reboundReader, identity meetingIdentity, budget *int) ([]linkOccurrence, error) {
+func (s *Store) meetingIdentityRows(ctx context.Context, r reboundReader, identity meetingIdentity, budget *int) ([]CalendarEventRow, error) {
 	predicate, args := s.calendarUIDPredicate(), []any{identity.ICalUID}
 	if identity.ICalUID == "" {
 		predicate, args = "e.message_id = ?", []any{identity.EventMessageID}
@@ -449,7 +454,35 @@ func (s *Store) resolveMeetingIdentity(ctx context.Context, r reboundReader, ide
 		}
 	}
 
-	rows, err := meetingEventRows(ctx, r, predicate, args, budget)
+	return meetingEventRows(ctx, r, predicate, args, budget)
+}
+
+// Splits retain their saved identity even when a series can no longer expand.
+// Complete exceptions can acquire a master's identity without expansion.
+func (s *Store) meetingSplitIdentities(ctx context.Context, r reboundReader, identity meetingIdentity, budget *int) ([]meetingIdentity, error) {
+	rows, err := s.meetingIdentityRows(ctx, r, identity, budget)
+	if err != nil {
+		return nil, err
+	}
+	identities := []meetingIdentity{identity}
+	for _, row := range rows {
+		if row.Event.Kind != "exception" || row.Event.Start == nil || row.Event.End == nil {
+			continue
+		}
+		if row.Event.Original != nil && row.Event.Original.Key() != identity.OccurrenceKey {
+			continue
+		}
+		target, err := resolveMeetingOccurrence(ctx, r, OccurrenceRef{MessageID: row.MessageID}, budget)
+		if err != nil {
+			return nil, err
+		}
+		identities = append(identities, target.Identity)
+	}
+	return identities, nil
+}
+
+func (s *Store) resolveMeetingIdentity(ctx context.Context, r reboundReader, identity meetingIdentity, budget *int) ([]linkOccurrence, error) {
+	rows, err := s.meetingIdentityRows(ctx, r, identity, budget)
 	if err != nil {
 		return nil, err
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -16,32 +17,70 @@ import (
 
 const linkSeriesRaw = `{"id":"series","iCalUID":"weekly@example.org","start":{"dateTime":"2027-03-07T10:00:00Z","timeZone":"UTC"},"end":{"dateTime":"2027-03-07T11:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=6"]}`
 
-func TestMeetingLinksUnlinkRemovedOccurrence(t *testing.T) {
-	for _, uid := range []string{"weekly@example.org", ""} {
-		for _, tc := range []struct {
-			recurrence string
-			resolveErr error
-		}{
-			{"RRULE:FREQ=WEEKLY;COUNT=1", sql.ErrNoRows},
-			{`RRULE:FREQ=WEEKLY;COUNT=6","EXDATE:20270314T100000Z`, sql.ErrNoRows},
-			{"RRULE:FREQ=HOURLY;COUNT=6", calrecur.ErrUnsupportedRecurrence},
-		} {
-			t.Run(uid+"/"+tc.recurrence, func(t *testing.T) {
-				assert, require := assert.New(t), require.New(t)
+func TestMeetingLinksUnlinkSavedIdentityWhenRecurrenceCannotBeResolved(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		updatedRaw string
+		wantErr    error
+	}{
+		{
+			name:       "shortened series",
+			updatedRaw: strings.Replace(linkSeriesRaw, "RRULE:FREQ=WEEKLY;COUNT=6", "RRULE:FREQ=WEEKLY;COUNT=1", 1),
+			wantErr:    sql.ErrNoRows,
+		},
+		{
+			name:       "excluded occurrence",
+			updatedRaw: strings.Replace(linkSeriesRaw, "RRULE:FREQ=WEEKLY;COUNT=6", `RRULE:FREQ=WEEKLY;COUNT=6","EXDATE:20270314T100000Z`, 1),
+			wantErr:    sql.ErrNoRows,
+		},
+		{
+			name:       "unsupported recurrence",
+			updatedRaw: strings.Replace(linkSeriesRaw, "RRULE:FREQ=WEEKLY;COUNT=6", "RRULE:FREQ=HOURLY", 1),
+			wantErr:    calrecur.ErrUnsupportedRecurrence,
+		},
+		{
+			name: "recurrence budget",
+			updatedRaw: strings.NewReplacer(
+				"2027-03-07T10:00:00Z", "1800-01-01T10:00:00Z",
+				"2027-03-07T11:00:00Z", "1800-01-01T11:00:00Z",
+				"RRULE:FREQ=WEEKLY;COUNT=6", "RRULE:FREQ=DAILY;COUNT=100000",
+			).Replace(linkSeriesRaw),
+			wantErr: ErrQueryTooBroad,
+		},
+	} {
+		for _, uid := range []string{"weekly@example.org", ""} {
+			t.Run(uid+"/"+tc.name, func(t *testing.T) {
+				assertions, requirements := assert.New(t), require.New(t)
 				st := newRFC822IDBackfillBackendStore(t)
 				_, automatic := calendarFixture(t, st, "automatic", singleLinkRaw("automatic", "automatic@example.org"))
 				_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"automatic@example.org"}}`)
 				raw := strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", uid)
 				_, master := calendarFixture(t, st, "master", raw)
 				ref := OccurrenceRef{MessageID: master, Key: "20270314T100000Z"}
-				require.NoError(st.LinkMeetingContext(t.Context(), note, ref))
-				require.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", master), linkedMeetingRefs(t, st, note)[note])
-				require.NoError(st.UpsertMessageRawWithFormat(master, []byte(strings.ReplaceAll(raw, "RRULE:FREQ=WEEKLY;COUNT=6", tc.recurrence)), "gcal_json"))
-				require.Empty(linkedMeetingRefs(t, st, note)[note], "the saved override still suppresses the automatic match")
-				require.ErrorIs(st.LinkMeetingContext(t.Context(), note, ref), tc.resolveErr)
-				require.NoError(st.UnlinkMeetingContext(t.Context(), note, ref))
-				assert.Equal(fmt.Sprintf("evt:%d", automatic), linkedMeetingRefs(t, st, note)[note])
-				require.ErrorIs(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: master, Key: "20270425T100000Z"}), sql.ErrNoRows)
+				requirements.NoError(st.LinkMeetingContext(t.Context(), note, ref))
+				requirements.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", master), linkedMeetingRefs(t, st, note)[note])
+				requirements.NoError(st.UpsertMessageRawWithFormat(master, []byte(strings.ReplaceAll(tc.updatedRaw, "weekly@example.org", uid)), "gcal_json"))
+				links, err := st.MeetingLinksContext(t.Context(), note)
+				if errors.Is(tc.wantErr, ErrQueryTooBroad) {
+					requirements.ErrorIs(err, ErrQueryTooBroad)
+				} else {
+					requirements.NoError(err)
+					requirements.Empty(links, "the saved override still suppresses the automatic match")
+				}
+				requirements.ErrorIs(st.LinkMeetingContext(t.Context(), note, ref), tc.wantErr)
+
+				readCtx, release, err := st.BeginReadSnapshotContext(t.Context())
+				requirements.NoError(err)
+				budget := calrecur.RequestReadBudget
+				_, err = resolveMeetingOccurrence(readCtx, st.meetingReader(readCtx), ref, &budget)
+				release()
+				requirements.ErrorIs(err, tc.wantErr)
+
+				requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, ref))
+				assertions.Equal(fmt.Sprintf("evt:%d", automatic), linkedMeetingRefs(t, st, note)[note], "other links remain readable before the recurrence is repaired")
+				requirements.NoError(st.UpsertMessageRawWithFormat(master, []byte(raw), "gcal_json"))
+				assertions.Equal(fmt.Sprintf("evt:%d", automatic), linkedMeetingRefs(t, st, note)[note], "the saved split continues to suppress the restored occurrence")
+				requirements.ErrorIs(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: master, Key: "20270425T100000Z"}), sql.ErrNoRows)
 			})
 		}
 	}
@@ -443,6 +482,30 @@ func TestMeetingLinksTwoOccurrenceAliases(t *testing.T) {
 	requirements.Len(links, 1)
 	assertions.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", master), links[0].Ref)
 	assertions.Equal("2027-03-14T12:00:00Z", links[0].Start.Format(time.RFC3339))
+}
+
+func TestMeetingLinksOrphanSplitAfterMasterArrives(t *testing.T) {
+	for _, uid := range []string{"", "orphan@example.org"} {
+		t.Run(uid, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			_, orphan := calendarFixture(t, st, "orphan", fmt.Sprintf(`{"id":"series_20270314T100000Z","iCalUID":%q,"recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`, uid))
+			note := granolaLinkFixture(t, st, "series_20270314T100000Z")
+			requirements.Equal(fmt.Sprintf("evt:%d", orphan), linkedMeetingRefs(t, st, note)[note])
+			requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: orphan}))
+			// The saved split predates the master and therefore uses the orphan's identity.
+			decisions, err := readMeetingLinkDecisions(t.Context(), st.meetingReader(t.Context()), note)
+			requirements.NoError(err)
+			requirements.Len(decisions, 1)
+			assertions.Equal(uid, decisions[0].Identity.ICalUID)
+			assertions.Equal("20270314T100000Z", decisions[0].Identity.OccurrenceKey)
+			_, master := calendarFixture(t, st, "master", strings.Replace(linkSeriesRaw, "RRULE:FREQ=WEEKLY;COUNT=6", "RRULE:FREQ=HOURLY", 1))
+			_, automatic := projectionFixture(t, st, "automatic", "plaud_json", `{}`)
+			requirements.NoError(st.LinkMeetingContext(t.Context(), automatic, OccurrenceRef{MessageID: master, Key: "20270314T100000Z"}))
+			requirements.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", master), linkedMeetingRefs(t, st, automatic)[automatic])
+			assertions.Empty(linkedMeetingRefs(t, st, note)[note], "the orphan split suppresses the master's canonical identity without expanding its unsupported recurrence")
+		})
+	}
 }
 
 func TestMeetingLinksSplitSurvivesSourceRemoval(t *testing.T) {
