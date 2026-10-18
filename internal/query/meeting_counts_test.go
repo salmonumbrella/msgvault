@@ -101,6 +101,7 @@ func TestRelationshipMeetingCountsCollapseLinkedOccurrence(t *testing.T) {
 }
 
 func TestRelationshipCalendarLinkedMeetingAcrossYears(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
 	b := NewTestDataBuilder(t)
 	source := b.AddSourceWithType("owner@example.org", "gcal")
 	owner := b.AddParticipant("owner@example.org", "example.org", "Owner")
@@ -119,11 +120,14 @@ func TestRelationshipCalendarLinkedMeetingAcrossYears(t *testing.T) {
 		want int64
 	}{{2024, 1}, {2025, 0}} {
 		calendar, err := engine.RelationshipCalendar(t.Context(), RelationshipCalendarRequest{CanonicalID: person, Year: tc.year, Timezone: "UTC"})
-		require.NoError(t, err)
+		requirements.NoError(err)
 		var meetings int64
 		for _, day := range calendar.Days {
 			meetings += day.Meetings
 		}
-		assert.Equal(t, tc.want, meetings, "year %d", tc.year)
+		assertions.Equal(tc.want, meetings, "year %d", tc.year)
 	}
+	var temperatureMeetings int64
+	requirements.NoError(engine.db.QueryRow(`SELECT sum(meeting_count) FROM read_parquet(?) WHERE canonical_id = ?`, engine.parquetPath(identityindex.DatasetTemperatureContributions), person).Scan(&temperatureMeetings))
+	assertions.Equal(int64(1), temperatureMeetings)
 }

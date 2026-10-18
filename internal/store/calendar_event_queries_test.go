@@ -73,10 +73,10 @@ func TestCalendarEventRowsManyExceptionsBounded(t *testing.T) {
 	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
 	requirements.NoError(err)
 	assertions.Len(page.Occurrences, 1)
-	// The same budget still rejects exceptions that actually affect the window.
-	_, err = st.db.Exec(`UPDATE calendar_events SET original_start_date = '2027-03-14' WHERE kind = 'exception'`)
-	requirements.NoError(err)
-	_, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	// The fixture's distinct exception dates exceed the candidate budget when
+	// one window actually covers them all.
+	broadFrom := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, err = st.ListCalendarOccurrencesContext(t.Context(), broadFrom, broadFrom.AddDate(0, 0, 20001))
 	requirements.ErrorIs(err, ErrQueryTooBroad)
 	assertions.Contains(err.Error(), "narrow the window")
 }

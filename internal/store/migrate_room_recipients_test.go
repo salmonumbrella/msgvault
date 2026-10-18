@@ -90,14 +90,25 @@ func TestRoomRecipientsSubsetRepair(t *testing.T) {
 	assertRepairedRoomEdges(t, subset)
 }
 
-func TestRoomRecipientsMigrationPreservesContactHistory(t *testing.T) {
-	requirements := require.New(t)
+func TestRoomRecipientsMigrationKeepsResourceFlagsLocal(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
 	seedLegacyRoomEdges(t, st)
-	_, err := st.DB().Exec(st.Rebind(`DELETE FROM applied_migrations WHERE name = ?`), migrationRoomRecipientsV1)
+	_, err := st.DB().Exec(`DELETE FROM messages WHERE message_type = 'email'`)
+	requirements.NoError(err)
+	_, err = st.DB().Exec(st.Rebind(`DELETE FROM applied_migrations WHERE name = ?`), migrationRoomRecipientsV1)
 	requirements.NoError(err)
 	requirements.NoError(st.InitSchemaContext(t.Context()))
-	var count int
-	requirements.NoError(st.DB().QueryRow(`SELECT count(*) FROM message_recipients r JOIN participants p ON p.id = r.participant_id JOIN messages m ON m.id = r.message_id WHERE p.email_address = 'resource@example.org' AND m.message_type IN ('calendar_event','meeting_transcript')`).Scan(&count))
-	assert.Equal(t, 4, count, "an invite's resource flag must preserve a contact's meeting edges")
+	for _, kind := range []string{"calendar_event", "meeting_transcript"} {
+		var recipients, roster int
+		requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT count(*) FROM message_recipients r JOIN participants p ON p.id = r.participant_id JOIN messages m ON m.id = r.message_id WHERE p.email_address = 'resource@example.org' AND m.message_type = ?`), kind).Scan(&recipients))
+		requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT count(*) FROM conversation_participants cp JOIN participants p ON p.id = cp.participant_id WHERE p.email_address = 'resource@example.org' AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = cp.conversation_id AND m.message_type = ?)`), kind).Scan(&roster))
+		if kind == "calendar_event" {
+			assertions.Zero(recipients)
+			assertions.Zero(roster)
+		} else {
+			assertions.Equal(2, recipients)
+			assertions.Equal(1, roster)
+		}
+	}
 }

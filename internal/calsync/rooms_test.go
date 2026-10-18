@@ -137,7 +137,7 @@ func TestCalsyncResourceFlagPreservesContactHistory(t *testing.T) {
 			assertions.Equal(sql.NullInt64{Int64: personID, Valid: true}, sender)
 			var unseen int
 			requirements.NoError(st.DB().QueryRow(`SELECT count(*) FROM participants WHERE email_address = 'unseen@example.org'`).Scan(&unseen))
-			assertions.Zero(unseen)
+			assertions.Equal(1, unseen, "an event resource flag must not suppress an attendee in another meeting")
 		})
 	}
 }

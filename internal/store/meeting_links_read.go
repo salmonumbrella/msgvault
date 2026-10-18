@@ -32,6 +32,7 @@ func (s *Store) MeetingLinksContext(ctx context.Context, messageID int64) ([]Mee
 	if err != nil {
 		return nil, err
 	}
+	occurrences = uniqueMeetingOccurrences(occurrences)
 	links := make([]MeetingLink, 0, len(occurrences))
 	for _, occurrence := range occurrences {
 		links = append(links, MeetingLink{Ref: formatMeetingOccurrence(occurrence.Ref), Subject: occurrence.Row.Subject, Start: occurrence.Start, End: occurrence.End})

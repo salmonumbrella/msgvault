@@ -20,11 +20,6 @@ func isRoomAddressWith(q querier, email string, resource bool) (bool, error) {
 		return true, nil
 	}
 	if !resource {
-		if err := q.QueryRow(`SELECT EXISTS (SELECT 1 FROM calendar_event_attendees WHERE role = 'room' AND lower(trim(email)) = ?)`, email).Scan(&resource); err != nil {
-			return false, err
-		}
-	}
-	if !resource {
 		return false, nil
 	}
 	var history bool
@@ -37,7 +32,9 @@ func isRoomAddressWith(q querier, email string, resource bool) (bool, error) {
 	return !history, err
 }
 
-// RoomAddressesContext reads room evidence once for an import.
+// RoomAddressesContext returns provider-verified resource addresses. An
+// event's resource flag describes only that event and cannot exclude the same
+// address from other archived meetings.
 func (s *Store) RoomAddressesContext(ctx context.Context) (map[string]bool, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT email FROM calendar_event_attendees WHERE role = 'room'`)
 	if err != nil {
@@ -49,30 +46,15 @@ func (s *Store) RoomAddressesContext(ctx context.Context) (map[string]bool, erro
 		if err := rows.Scan(&email); err != nil {
 			return nil, errors.Join(err, rows.Close())
 		}
-		rooms[strings.ToLower(strings.TrimSpace(email))] = true
-	}
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
-		return nil, err
-	}
-	for email := range rooms {
-		room, err := s.IsRoomAddressContext(ctx, email, true)
-		if err != nil {
-			return nil, err
+		email = strings.ToLower(strings.TrimSpace(email))
+		if calevent.IsRoomAttendee(email, false) {
+			rooms[email] = true
 		}
-		rooms[email] = room
 	}
-	return rooms, nil
+	return rooms, errors.Join(rows.Err(), rows.Close())
 }
 
 func removeRoomParticipantEdges(q querier, id int64) error {
-	var email string
-	if err := q.QueryRow(`SELECT coalesce(email_address, '') FROM participants WHERE id = ?`, id).Scan(&email); err != nil {
-		return err
-	}
-	room, err := isRoomAddressWith(q, email, true)
-	if err != nil || !room {
-		return err
-	}
 	for _, query := range []string{
 		`DELETE FROM message_recipients WHERE participant_id = ? AND message_id IN
    (SELECT id FROM messages WHERE message_type IN ('calendar_event','meeting_transcript'))`,
@@ -87,30 +69,30 @@ func removeRoomParticipantEdges(q querier, id int64) error {
 	return nil
 }
 
-func removeRoomAddressEdges(ctx context.Context, tx *loggedTx, email string) error {
-	email = strings.ToLower(strings.TrimSpace(email))
-	if email == "" {
-		return nil
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM participants WHERE lower(trim(email_address)) = ?`, email)
-	if err != nil {
+func removeRoomEventMessageEdges(q querier, messageID, participantID int64) error {
+	var email string
+	if err := q.QueryRow(`SELECT coalesce(email_address, '') FROM participants WHERE id = ?`, participantID).Scan(&email); err != nil {
 		return err
 	}
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return errors.Join(err, rows.Close())
-		}
-		ids = append(ids, id)
-	}
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+	room, err := isRoomAddressWith(q, email, true)
+	if err != nil || !room {
 		return err
 	}
-	for _, id := range ids {
-		if err := removeRoomParticipantEdges(boundQuerier{ctx: ctx, q: tx}, id); err != nil {
-			return err
-		}
+	if _, err := q.Exec(`DELETE FROM message_recipients WHERE message_id = ? AND participant_id = ?`, messageID, participantID); err != nil {
+		return err
 	}
-	return nil
+	if _, err := q.Exec(`UPDATE messages SET sender_id = NULL WHERE id = ? AND sender_id = ?`, messageID, participantID); err != nil {
+		return err
+	}
+	_, err = q.Exec(`DELETE FROM conversation_participants
+         WHERE conversation_id = (SELECT conversation_id FROM messages WHERE id = ?)
+           AND participant_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM messages m
+             WHERE m.conversation_id = (SELECT conversation_id FROM messages WHERE id = ?)
+               AND (m.sender_id = ? OR EXISTS (
+                 SELECT 1 FROM message_recipients r WHERE r.message_id = m.id AND r.participant_id = ?
+               ))
+           )`, messageID, participantID, messageID, participantID, participantID)
+	return err
 }

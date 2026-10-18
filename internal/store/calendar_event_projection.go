@@ -121,11 +121,6 @@ func replaceCalendarAttendees(ctx context.Context, tx *loggedTx, messageID int64
 		if _, err := q.Exec(`INSERT INTO calendar_event_attendees (message_id, ordinal, email, display_name, role, rsvp, is_copy_self) VALUES (?, ?, ?, ?, ?, ?, ?)`, messageID, ordinal, attendee.Email, attendee.DisplayName, attendee.Role, attendee.RSVP, attendee.IsCopySelf); err != nil {
 			return fmt.Errorf("write calendar attendee %d: %w", ordinal, err)
 		}
-		if attendee.Role == "room" {
-			if err := removeRoomAddressEdges(ctx, tx, attendee.Email); err != nil {
-				return fmt.Errorf("remove calendar room edges: %w", err)
-			}
-		}
 	}
 	return nil
 }
@@ -191,7 +186,7 @@ func (s *Store) refreshSourceCalendarEventsTx(ctx context.Context, tx *loggedTx,
 			return closeErr
 		}
 		if len(ids) == 0 {
-			return s.journalSourceCalendarMeetingLinks(ctx, tx, sourceID)
+			return s.journalCalendarMeetingLinks(ctx, tx)
 		}
 		for _, id := range ids {
 			if err := s.lockMeetingEvidenceWith(ctx, tx, id); err != nil {

@@ -24,10 +24,11 @@ func TestMeetingCountKeysContext(t *testing.T) {
 		{"over budget", "budget", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			assertions := assert.New(t)
 			requirements := require.New(t)
 			st := newRFC822IDBackfillBackendStore(t)
 			_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org"}}`)
-			var event int64
+			var event, copyID int64
 			switch tc.mode {
 			case "series":
 				_, event = calendarFixture(t, st, "event", `{"id":"event","iCalUID":"shared@example.org","start":{"dateTime":"2027-03-07T10:00:00Z"},"end":{"dateTime":"2027-03-07T11:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY"]}`)
@@ -51,7 +52,7 @@ func TestMeetingCountKeysContext(t *testing.T) {
 					requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
 				}
 				if tc.mode == "shared" {
-					calendarFixture(t, st, "copy", singleLinkRaw("copy", uid), "copy@example.org")
+					_, copyID = calendarFixture(t, st, "copy", singleLinkRaw("copy", uid), "copy@example.org")
 				}
 				if tc.mode == "ambiguous" {
 					_, other := calendarFixture(t, st, "other", singleLinkRaw("other", "other@example.org"))
@@ -67,14 +68,42 @@ func TestMeetingCountKeysContext(t *testing.T) {
 			if want == "event" {
 				want = fmt.Sprintf("event:%d|", event)
 			}
-			assert.Equal(t, want, keys[note])
+			assertions.Equal(want, keys[note])
 			if tc.mode == "series" {
-				assert.NotContains(t, keys, event, "series master stays a separate calendar item")
+				assertions.NotContains(keys, event, "series master stays a separate calendar item")
 			}
 			if tc.mode == "shared" || tc.mode == "event" {
-				assert.Equal(t, want, keys[event])
+				assertions.Equal(want, keys[event])
+			}
+			if tc.mode == "shared" {
+				assertions.Equal(want, keys[copyID], "each effective calendar copy receives the shared count key")
 			}
 		})
+	}
+}
+
+func TestCalendarSourceZoneChangeJournalsMeetingLinks(t *testing.T) {
+	requirements := require.New(t)
+	assertions := assert.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	uid := "zone-change@example.org"
+	data, event := calendarFixture(t, st, "zone-event", `{"id":"zone-event","iCalUID":"zone-change@example.org","start":{"date":"2027-03-14"},"end":{"date":"2027-03-15"},"recurrence":["RRULE:FREQ=DAILY;COUNT=2"]}`)
+	_, note := projectionFixture(t, st, "zone-note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"zone-change@example.org","startsAt":"2027-03-14T00:00:00Z"}}`)
+	keys, seq, err := st.MeetingCountKeysContext(t.Context())
+	requirements.NoError(err)
+	requirements.Equal("ical:"+uid+"|20270314", keys[note])
+	requirements.NotContains(keys, event, "series masters keep their own count")
+
+	requirements.NoError(st.UpdateSourceSyncConfig(data.Message.SourceID, `{"calendar_id":"calendar@example.com","time_zone":"Asia/Tokyo"}`))
+	keys, _, err = st.MeetingCountKeysContext(t.Context())
+	requirements.NoError(err)
+	assertions.NotContains(keys, note, "a schedule no longer matching the reprojected local date must lose its automatic link")
+	assertions.NotContains(keys, event)
+	if !st.IsPostgreSQL() {
+		var journaled int
+		requirements.NoError(st.db.QueryRow(`SELECT count(*) FROM cache_related_change_journal
+         WHERE dataset = 'meeting_links' AND message_id = ? AND seq > ?`, note, seq).Scan(&journaled))
+		assertions.Equal(1, journaled, "the source-config transaction invalidates cached meeting keys")
 	}
 }
 
@@ -101,18 +130,6 @@ func TestMeetingCountKeysJournalSnapshot(t *testing.T) {
 	assert.NotContains(current, note)
 	if !st.IsPostgreSQL() {
 		assert.Greater(currentSeq, pinnedSeq)
-	}
-}
-
-func TestMeetingCountKeysAllCalendarCopies(t *testing.T) {
-	st := newRFC822IDBackfillBackendStore(t)
-	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org"}}`)
-	_, first := calendarFixture(t, st, "first", singleLinkRaw("first", "shared@example.org"), "first@example.org")
-	_, second := calendarFixture(t, st, "second", singleLinkRaw("second", "shared@example.org"), "second@example.org")
-	keys, _, err := st.MeetingCountKeysContext(t.Context())
-	require.NoError(t, err)
-	for _, id := range []int64{note, first, second} {
-		assert.Equal(t, "ical:shared@example.org|", keys[id])
 	}
 }
 

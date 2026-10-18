@@ -38,14 +38,15 @@ func TestArchiverExcludesRooms(t *testing.T) {
 
 func TestArchiverDropsWholeRoomIdentity(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		person Person
-		stored bool
+		name        string
+		person      Person
+		stored      bool
+		wantDropped bool
 	}{
-		{"stored resource", Person{Email: " ROOM@example.org ", Phone: "+15550100001", Anchor: "test:room"}, true},
-		{"resource with phone", Person{Email: "c@resource.calendar.google.com", Phone: "+15550100001", Anchor: "test:room"}, false},
-		{"resource with participant", Person{Email: "c@resource.calendar.google.com", ParticipantID: 1}, false},
-		{"secondary room email", Person{Email: "alias@example.org", OtherEmails: []string{"c@resource.calendar.google.com"}, Anchor: "test:room"}, false},
+		{"event resource flag does not blacklist another meeting", Person{Email: "ROOM@example.org", Phone: "+15550100001", Anchor: "test:person"}, true, false},
+		{"resource with phone", Person{Email: "c@resource.calendar.google.com", Phone: "+15550100001", Anchor: "test:room"}, false, true},
+		{"resource with participant", Person{Email: "c@resource.calendar.google.com", ParticipantID: 1}, false, true},
+		{"secondary room email", Person{Email: "alias@example.org", OtherEmails: []string{"c@resource.calendar.google.com"}, Anchor: "test:room"}, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assertions, requirements := assert.New(t), require.New(t)
@@ -75,13 +76,23 @@ func TestArchiverDropsWholeRoomIdentity(t *testing.T) {
 			requirements.NoError(err)
 			var count int
 			requirements.NoError(st.DB().QueryRow(`SELECT count(*) FROM participants`).Scan(&count))
-			assertions.Equal(1, count, "room identifiers must not create participants")
+			wantParticipants := 1
+			wantEdges := 0
+			wantRecipients := 0
+			wantSender := 0
+			if !tc.wantDropped {
+				wantParticipants = 3
+				wantEdges = 1
+				wantRecipients = 2
+				wantSender = 1
+			}
+			assertions.Equal(wantParticipants, count, "event-local resource flags must not suppress people in another meeting")
 			requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT count(*) FROM message_recipients WHERE message_id = ?`), result.MessageID).Scan(&count))
-			assertions.Zero(count)
+			assertions.Equal(wantRecipients, count)
 			requirements.NoError(st.DB().QueryRow(`SELECT count(*) FROM conversation_participants`).Scan(&count))
-			assertions.Zero(count)
+			assertions.Equal(wantEdges, count)
 			requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT count(*) FROM messages WHERE id = ? AND sender_id IS NOT NULL`), result.MessageID).Scan(&count))
-			assertions.Zero(count)
+			assertions.Equal(wantSender, count)
 		})
 	}
 }

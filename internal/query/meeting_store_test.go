@@ -128,10 +128,16 @@ func TestResourceFlagContactRemainsInMeetingPeopleLists(t *testing.T) {
 	for _, id := range []int64{before.MessageID, after.MessageID} {
 		addStoredMeeting(t, b, st, id)
 	}
+	b.AddParticipant("unseen@example.org", "example.org", "")
 	engine := b.BuildEngine()
 	people, err := engine.SearchPeople(t.Context(), PersonSearchRequest{})
 	requirements.NoError(err)
-	requirements.Len(people.Rows, 1)
-	assertions.Equal(person, people.Rows[0].ID)
-	assertions.Equal(int64(2), people.Rows[0].MeetingCount)
+	requirements.Len(people.Rows, 2)
+	for _, row := range people.Rows {
+		if row.ID == person {
+			assertions.Equal(int64(2), row.MeetingCount)
+		} else {
+			assertions.Equal(int64(1), row.MeetingCount, "the other event's resource flag stays local")
+		}
+	}
 }

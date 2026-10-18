@@ -104,6 +104,50 @@ func TestCalendarEventProjectionPersistRefreshDelete(t *testing.T) {
 	assertions.Empty(calendarRows(t, st, id))
 }
 
+func TestEventResourceClassificationDoesNotRemoveOtherMessageAttribution(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	participantID, err := st.EnsureParticipant("person@example.org", "Person", "example.org")
+	requirements.NoError(err)
+	otherCalendar, err := st.GetOrCreateSource("gcal", "other-calendar@example.org")
+	requirements.NoError(err)
+	meetingSource, err := st.GetOrCreateSource("meeting_import", "meetings@example.org")
+	requirements.NoError(err)
+	var otherIDs []int64
+	for index, fixture := range []struct {
+		sourceID int64
+		kind     string
+	}{
+		{otherCalendar.ID, "calendar_event"},
+		{meetingSource.ID, "meeting_transcript"},
+		{meetingSource.ID, "email"},
+	} {
+		id, err := st.PersistMessage(&MessagePersistData{
+			Message: &Message{
+				SourceID: fixture.sourceID, SourceMessageID: fmt.Sprintf("attributed-%d", index),
+				MessageType: fixture.kind, SenderID: sql.NullInt64{Int64: participantID, Valid: true},
+			},
+			Conversation: &ConversationPersistData{SourceConversationID: fmt.Sprintf("attributed-%d", index), ConversationType: "meeting"},
+		})
+		requirements.NoError(err)
+		otherIDs = append(otherIDs, id)
+		requirements.NoError(st.ReplaceMessageRecipients(id, "to", []int64{participantID}, []string{"Person"}))
+		var conversationID int64
+		requirements.NoError(st.db.QueryRow(`SELECT conversation_id FROM messages WHERE id = ?`, id).Scan(&conversationID))
+		requirements.NoError(st.EnsureConversationParticipant(conversationID, participantID, "member"))
+	}
+	calendarFixture(t, st, "resource-claim", `{"id":"resource-claim","start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"},"attendees":[{"email":"person@example.org","resource":true}]}`)
+	for _, id := range otherIDs {
+		var recipientCount, conversationCount, senderCount int
+		requirements.NoError(st.db.QueryRow(`SELECT count(*) FROM message_recipients WHERE message_id = ? AND participant_id = ?`, id, participantID).Scan(&recipientCount))
+		requirements.NoError(st.db.QueryRow(`SELECT count(*) FROM conversation_participants cp JOIN messages m ON m.conversation_id = cp.conversation_id WHERE m.id = ? AND cp.participant_id = ?`, id, participantID).Scan(&conversationCount))
+		requirements.NoError(st.db.QueryRow(`SELECT count(*) FROM messages WHERE id = ? AND sender_id = ?`, id, participantID).Scan(&senderCount))
+		assertions.Equal(1, recipientCount)
+		assertions.Equal(1, conversationCount)
+		assertions.Equal(1, senderCount)
+	}
+}
+
 func TestCalendarEventProjectionSkipsUnchanged(t *testing.T) {
 	requirements := require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
