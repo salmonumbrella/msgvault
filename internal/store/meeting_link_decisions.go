@@ -56,14 +56,34 @@ func (s *Store) writeMeetingLinkDecision(ctx context.Context, memberID int64, oc
 		if err := tx.QueryRowContext(ctx, `SELECT id FROM messages WHERE id = ? AND message_type = 'meeting_transcript' AND deleted_at IS NULL`, memberID).Scan(&found); err != nil {
 			return err
 		}
-		budget := calrecur.RequestReadBudget
-		target, err := resolveMeetingOccurrence(ctx, reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind, dialect: s.dialect}, occurrence, &budget)
+		target, err := resolveMeetingDecisionTarget(ctx, reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind, dialect: s.dialect}, memberID, occurrence, decision)
 		if err != nil {
 			return fmt.Errorf("resolve meeting decision target: %w", err)
 		}
 		_, err = tx.ExecContext(ctx, meetingDecisionUpsert, memberID, target.Identity.ICalUID, sql.NullInt64{Int64: target.Identity.EventMessageID, Valid: target.Identity.ICalUID == ""}, target.Identity.OccurrenceKey, decision, time.Now().UTC())
 		return err
 	})
+}
+
+func resolveMeetingDecisionTarget(ctx context.Context, r reboundReader, memberID int64, ref OccurrenceRef, decision string) (linkOccurrence, error) {
+	budget := calrecur.RequestReadBudget
+	target, err := resolveMeetingOccurrence(ctx, r, ref, &budget)
+	if decision != "split" || !errors.Is(err, sql.ErrNoRows) {
+		return target, err
+	}
+	// A series edit can remove an occurrence while its saved link still
+	// suppresses automatic matches. Only supersede a saved identity here.
+	rows, err := meetingEventRows(ctx, r, `e.message_id = ?`, []any{ref.MessageID}, &budget)
+	if err != nil {
+		return linkOccurrence{}, err
+	}
+	if len(rows) != 1 {
+		return linkOccurrence{}, sql.ErrNoRows
+	}
+	target = occurrenceFromRow(rows[0], ref.Key)
+	var found int
+	err = r.QueryRowContext(ctx, `SELECT 1 FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND COALESCE(target_message_id,0) = ? AND occurrence_key = ?`, memberID, target.Identity.ICalUID, target.Identity.EventMessageID, target.Identity.OccurrenceKey).Scan(&found)
+	return target, err
 }
 
 // Retain the original decisions for undo; purge removes only that hidden copy.

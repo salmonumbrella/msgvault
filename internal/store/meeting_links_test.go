@@ -16,6 +16,30 @@ import (
 
 const linkSeriesRaw = `{"id":"series","iCalUID":"weekly@example.org","start":{"dateTime":"2027-03-07T10:00:00Z","timeZone":"UTC"},"end":{"dateTime":"2027-03-07T11:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=6"]}`
 
+func TestMeetingLinksUnlinkRemovedOccurrence(t *testing.T) {
+	for _, uid := range []string{"weekly@example.org", ""} {
+		for _, recurrence := range []string{"RRULE:FREQ=WEEKLY;COUNT=1", `RRULE:FREQ=WEEKLY;COUNT=6","EXDATE:20270314T100000Z`} {
+			t.Run(uid+"/"+recurrence, func(t *testing.T) {
+				assert, require := assert.New(t), require.New(t)
+				st := newRFC822IDBackfillBackendStore(t)
+				_, automatic := calendarFixture(t, st, "automatic", singleLinkRaw("automatic", "automatic@example.org"))
+				_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"automatic@example.org"}}`)
+				raw := strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", uid)
+				_, master := calendarFixture(t, st, "master", raw)
+				ref := OccurrenceRef{MessageID: master, Key: "20270314T100000Z"}
+				require.NoError(st.LinkMeetingContext(t.Context(), note, ref))
+				require.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", master), linkedMeetingRefs(t, st, note)[note])
+				require.NoError(st.UpsertMessageRawWithFormat(master, []byte(strings.ReplaceAll(raw, "RRULE:FREQ=WEEKLY;COUNT=6", recurrence)), "gcal_json"))
+				require.Empty(linkedMeetingRefs(t, st, note)[note], "the saved override still suppresses the automatic match")
+				require.ErrorIs(st.LinkMeetingContext(t.Context(), note, ref), sql.ErrNoRows)
+				require.ErrorIs(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: master, Key: "20270425T100000Z"}), sql.ErrNoRows)
+				require.NoError(st.UnlinkMeetingContext(t.Context(), note, ref))
+				assert.Equal(fmt.Sprintf("evt:%d", automatic), linkedMeetingRefs(t, st, note)[note])
+			})
+		}
+	}
+}
+
 func TestMeetingLinksCalendarUIDLookupPlan(t *testing.T) {
 	requirements := require.New(t)
 	assertions := assert.New(t)
