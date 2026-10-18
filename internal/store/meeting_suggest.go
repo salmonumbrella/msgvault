@@ -39,7 +39,7 @@ func titleTokenSet(title string) map[string]bool {
 }
 
 func rankMeetingSuggestion(member suggestMember, event linkOccurrence) (MeetingSuggestion, bool) {
-	if event.Row.Event.Status == "cancelled" {
+	if event.Row.Event.Status == meetingCancelledStatus {
 		return MeetingSuggestion{}, false
 	}
 	start, end := member.Start, member.End
@@ -98,12 +98,12 @@ func suggestionMembers(ctx context.Context, r SQLReader, ids []int64) (out []sug
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var member suggestMember
 		var sent, received, internal, scheduled sql.NullTime
 		var duration sql.NullFloat64
 		if err := rows.Scan(&member.ID, &member.Title, &sent, &received, &internal, &duration, &scheduled); err != nil {
-			_ = rows.Close()
 			return nil, err
 		}
 		for _, at := range []sql.NullTime{scheduled, sent, received, internal} {
@@ -176,16 +176,16 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref string, limi
 		}
 		masters := map[string]bool{}
 		for _, row := range rows {
-			if row.Event.Kind == "series" {
+			if row.Event.Kind == meetingSeriesKind {
 				masters[fmt.Sprintf("%d:%s", row.SourceID, row.Event.ProviderEventID)] = true
 			}
 		}
 		for _, row := range rows {
-			if row.Event.Status == "cancelled" {
+			if row.Event.Status == meetingCancelledStatus {
 				continue
 			}
 			var occurrences []linkOccurrence
-			if row.Event.Kind == "series" {
+			if row.Event.Kind == meetingSeriesKind {
 				occurrences, err = expandMeetingSeries(ctx, s.meetingReader(ctx), row, member.Start, member.End, &budget)
 				if errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
 					continue
@@ -210,7 +210,7 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref string, limi
 		if err != nil {
 			return nil, err
 		}
-		if target.Row.Event.Status == "cancelled" {
+		if target.Row.Event.Status == meetingCancelledStatus {
 			return []MeetingSuggestion{}, nil
 		}
 		r := s.meetingReader(ctx)
@@ -241,11 +241,11 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref string, limi
 		if err != nil {
 			return nil, err
 		}
+		defer func() { _ = rows.Close() }()
 		var ids []int64
 		for rows.Next() {
 			var id int64
 			if err := rows.Scan(&id); err != nil {
-				_ = rows.Close()
 				return nil, err
 			}
 			ids = append(ids, id)

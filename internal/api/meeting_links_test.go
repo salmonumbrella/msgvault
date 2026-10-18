@@ -19,6 +19,7 @@ import (
 
 type meetingLinksTestStore struct {
 	*mockStore
+
 	member        int64
 	event         store.OccurrenceRef
 	decision, ref string
@@ -42,11 +43,13 @@ func (s *meetingLinksTestStore) SuggestMeetingLinksContext(_ context.Context, re
 	return []store.MeetingSuggestion{{Ref: "evt:81@20270314T100000Z", MemberMessageID: 42, OverlapMinutes: 30, SharedAttendees: 1, TitleTokens: 2, Reasons: []string{"time_overlap", "shared_attendees", "title_tokens"}}}, s.err
 }
 func TestMeetingLinkRoutes(t *testing.T) {
+	requirements := require.New(t)
+
 	backend := &meetingLinksTestStore{mockStore: &mockStore{stats: &StoreStats{}}}
 	srv := NewServer(&config.Config{Server: config.ServerConfig{APIKey: "synthetic-owner-key", AgentAccess: true, RemoteClients: []config.RemoteClientConfig{{ClientID: "reader", APIKey: "synthetic-reader-key"}}}}, backend, nil, testLogger())
 	srv.agentGrants = agentgrant.NewRegistry()
 	_, secret, _, err := srv.agentGrants.Issue("calendar", []agentgrant.Permission{agentgrant.PermissionCalendarWrite}, []agentgrant.SourceRef{{ID: 1, Type: "gcal", Identifier: "calendar@example.com"}}, time.Time{})
-	require.NoError(t, err)
+	requirements.NoError(err)
 	for _, tc := range []struct {
 		name, method, path, body, token string
 		status                          int
@@ -67,6 +70,8 @@ func TestMeetingLinkRoutes(t *testing.T) {
 		{"remote write", "POST", "/meetings/links/decisions", `{"message_id":42,"event":"evt:81","decision":"link"}`, "synthetic-reader-key", 403, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			assertions := assert.New(t)
+			requirements := require.New(t)
 			backend.err = tc.err
 			before := backend.calls
 			r := httptest.NewRequest(tc.method, "/api/v1"+tc.path, strings.NewReader(tc.body))
@@ -80,21 +85,21 @@ func TestMeetingLinkRoutes(t *testing.T) {
 			}
 			w := httptest.NewRecorder()
 			srv.Router().ServeHTTP(w, r)
-			require.Equal(t, tc.status, w.Code, w.Body.String())
+			requirements.Equal(tc.status, w.Code, w.Body.String())
 			if tc.status >= 400 && tc.err == nil {
-				assert.Equal(t, before, backend.calls)
+				assertions.Equal(before, backend.calls)
 			}
 			if tc.status != 200 {
 				return
 			}
 			if tc.method == http.MethodPost {
-				assert.Equal(t, int64(42), backend.member)
-				assert.Equal(t, store.OccurrenceRef{MessageID: 81, Key: "20270314T100000Z"}, backend.event)
-				assert.Equal(t, tc.name, backend.decision)
-				assert.JSONEq(t, tc.body, w.Body.String())
+				assertions.Equal(int64(42), backend.member)
+				assertions.Equal(store.OccurrenceRef{MessageID: 81, Key: "20270314T100000Z"}, backend.event)
+				assertions.Equal(tc.name, backend.decision)
+				assertions.JSONEq(tc.body, w.Body.String())
 			} else {
-				assert.Equal(t, strings.TrimPrefix(tc.path, "/meetings/suggestions?ref="), backend.ref)
-				assert.JSONEq(t, `{"suggestions":[{"ref":"evt:81@20270314T100000Z","member_message_id":42,"overlap_minutes":30,"shared_attendees":1,"title_tokens":2,"reasons":["time_overlap","shared_attendees","title_tokens"]}]}`, w.Body.String())
+				assertions.Equal(strings.TrimPrefix(tc.path, "/meetings/suggestions?ref="), backend.ref)
+				assertions.JSONEq(`{"suggestions":[{"ref":"evt:81@20270314T100000Z","member_message_id":42,"overlap_minutes":30,"shared_attendees":1,"title_tokens":2,"reasons":["time_overlap","shared_attendees","title_tokens"]}]}`, w.Body.String())
 			}
 		})
 	}

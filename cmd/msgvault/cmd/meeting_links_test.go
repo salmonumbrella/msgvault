@@ -31,6 +31,9 @@ func (f *meetingLinkFakeClient) SuggestMeetingLinks(_ context.Context, ref strin
 }
 
 func TestMeetingLinkCommands(t *testing.T) {
+	requirements := require.New(t)
+	assertions := assert.New(t)
+
 	for _, tc := range []struct {
 		name                   string
 		args                   []string
@@ -46,6 +49,8 @@ func TestMeetingLinkCommands(t *testing.T) {
 		{"invalid note", []string{"link", "0", "--event", "evt:81"}, "", "positive message ID", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			assertions := assert.New(t)
+			requirements := require.New(t)
 			fake := &meetingLinkFakeClient{version: tc.version}
 			if fake.version == "" {
 				fake.version = meetingLinksMinAPISchemaVersion
@@ -65,23 +70,23 @@ func TestMeetingLinkCommands(t *testing.T) {
 			root.SetArgs(tc.args)
 			err := root.Execute()
 			if tc.wantErr != "" {
-				require.ErrorContains(t, err, tc.wantErr)
-				assert.Zero(t, fake.calls)
+				requirements.ErrorContains(err, tc.wantErr)
+				assertions.Zero(fake.calls)
 				if tc.version != "" {
-					assert.True(t, cleaned)
+					assertions.True(cleaned)
 				}
 				return
 			}
-			require.NoError(t, err)
-			assert.True(t, cleaned)
-			assert.Equal(t, 1, fake.calls)
+			requirements.NoError(err)
+			assertions.True(cleaned)
+			assertions.Equal(1, fake.calls)
 			if tc.args[0] == "suggest" {
-				assert.Equal(t, tc.args[1], fake.ref)
-				assert.Contains(t, out.String(), tc.want)
+				assertions.Equal(tc.args[1], fake.ref)
+				assertions.Contains(out.String(), tc.want)
 			} else {
-				assert.Equal(t, int64(42), fake.id)
-				assert.Equal(t, "evt:81@20270314T100000Z", fake.event)
-				assert.Equal(t, tc.args[0], fake.decision)
+				assertions.Equal(int64(42), fake.id)
+				assertions.Equal("evt:81@20270314T100000Z", fake.event)
+				assertions.Equal(tc.args[0], fake.decision)
 			}
 		})
 	}
@@ -89,7 +94,7 @@ func TestMeetingLinkCommands(t *testing.T) {
 	root := newMeetingsCommand(meetingCommandDeps{})
 	for _, name := range []string{"link", "unlink", "suggest"} {
 		command, _, err := root.Find([]string{name})
-		require.NoError(t, err)
-		assert.Equal(t, name, command.Name())
+		requirements.NoError(err)
+		assertions.Equal(name, command.Name())
 	}
 }

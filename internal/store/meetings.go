@@ -321,9 +321,13 @@ func loadMeetingContextParticipantsPage(ctx context.Context, r SQLReader, ids []
 	if len(ids) == 0 {
 		return out, nil
 	}
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
+	args := make([]any, 0, 2*len(ids)+1)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, meetingSenderRole)
+	for _, id := range ids {
+		args = append(args, id)
 	}
 	marks := placeholders(len(ids))
 	rows, err := r.QueryContext(ctx, `SELECT mr.message_id, p.id,
@@ -332,9 +336,9 @@ func loadMeetingContextParticipantsPage(ctx context.Context, r SQLReader, ids []
  COALESCE(p.phone_number, ''), LOWER(mr.recipient_type), 0 AS position, mr.id AS ordinal
  FROM message_recipients mr JOIN participants p ON p.id = mr.participant_id WHERE mr.message_id IN (`+marks+`)
  UNION ALL
- SELECT m.id, p.id, COALESCE(p.display_name, ''), COALESCE(p.email_address, ''), COALESCE(p.phone_number, ''), 'from', 1, 0
+ SELECT m.id, p.id, COALESCE(p.display_name, ''), COALESCE(p.email_address, ''), COALESCE(p.phone_number, ''), ?, 1, 0
  FROM messages m JOIN participants p ON p.id = m.sender_id WHERE m.id IN (`+marks+`)
- ORDER BY 1, 7, 8`, append(args, args...)...)
+ ORDER BY 1, 7, 8`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("load meeting participants: %w", err)
 	}

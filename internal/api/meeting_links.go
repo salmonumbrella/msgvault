@@ -14,9 +14,9 @@ import (
 )
 
 type MeetingLinkStore interface {
-	LinkMeetingContext(context.Context, int64, store.OccurrenceRef) error
-	UnlinkMeetingContext(context.Context, int64, store.OccurrenceRef) error
-	SuggestMeetingLinksContext(context.Context, string, int) ([]store.MeetingSuggestion, error)
+	LinkMeetingContext(ctx context.Context, memberID int64, ref store.OccurrenceRef) error
+	UnlinkMeetingContext(ctx context.Context, memberID int64, ref store.OccurrenceRef) error
+	SuggestMeetingLinksContext(ctx context.Context, ref string, limit int) ([]store.MeetingSuggestion, error)
 }
 
 type MeetingLinkDecisionRequest struct {
@@ -49,7 +49,7 @@ func (s *Server) registerMeetingLinkRoutes(api huma.API) {
 func parseMeetingLinkRef(value string, eventOnly bool) (store.OccurrenceRef, error) {
 	kind, value, ok := strings.Cut(value, ":")
 	if !ok || kind != "evt" && (eventOnly || kind != "msg") {
-		return store.OccurrenceRef{}, errors.New("use msg:<id> or evt:<id>[@occurrence key]; decisions require evt:")
+		return store.OccurrenceRef{}, errors.New("use msg:<id> or evt:<id>[@occurrence key]; decisions require an event reference")
 	}
 	message, key, hasKey := strings.Cut(value, "@")
 	id, err := strconv.ParseInt(message, 10, 64)

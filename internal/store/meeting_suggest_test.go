@@ -69,7 +69,7 @@ func TestMeetingLinksSuggestionsBatchParticipants(t *testing.T) {
 func TestMeetingLinksSuggestionsTimeWindow(t *testing.T) {
 	requirements := require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
-	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "window@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "window@example.org"))
 	var want []int64
 	for _, tc := range []struct {
 		name, sent, received, internal, raw string

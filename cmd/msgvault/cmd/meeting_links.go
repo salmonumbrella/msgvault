@@ -16,9 +16,9 @@ import (
 const meetingLinksMinAPISchemaVersion = "3.25.0"
 
 type meetingLinkClient interface {
-	DecideMeetingLink(context.Context, int64, string, string) error
-	SuggestMeetingLinks(context.Context, string) ([]store.MeetingSuggestion, error)
-	APISchemaVersion(context.Context) (string, error)
+	DecideMeetingLink(ctx context.Context, messageID int64, event, decision string) error
+	SuggestMeetingLinks(ctx context.Context, ref string) ([]store.MeetingSuggestion, error)
+	APISchemaVersion(ctx context.Context) (string, error)
 }
 
 type meetingLinkOpen func(context.Context) (meetingLinkClient, func(), error)
@@ -89,11 +89,11 @@ func newMeetingSuggestCommand(open meetingLinkOpen) *cobra.Command {
 		}
 		writer := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 		if _, err := fmt.Fprintln(writer, "EVENT\tNOTE\tOVERLAP (MIN)\tSHARED ATTENDEES\tTITLE TOKENS"); err != nil {
-			return err
+			return fmt.Errorf("write meeting suggestions: %w", err)
 		}
 		for _, suggestion := range suggestions {
 			if _, err := fmt.Fprintf(writer, "%s\t%d\t%d\t%d\t%d\n", suggestion.Ref, suggestion.MemberMessageID, suggestion.OverlapMinutes, suggestion.SharedAttendees, suggestion.TitleTokens); err != nil {
-				return err
+				return fmt.Errorf("write meeting suggestions: %w", err)
 			}
 		}
 		return writer.Flush()

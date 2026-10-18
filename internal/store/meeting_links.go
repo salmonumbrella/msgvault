@@ -11,6 +11,11 @@ import (
 	"go.kenn.io/msgvault/internal/calrecur"
 )
 
+const (
+	meetingSeriesKind      = "series"
+	meetingCancelledStatus = "cancelled"
+)
+
 // OccurrenceRef identifies an event, or one original occurrence of a series.
 type OccurrenceRef struct {
 	MessageID int64
@@ -105,7 +110,7 @@ func expandMeetingSeries(ctx context.Context, r SQLReader, master CalendarEventR
 		o.Row = instance.Row
 		o.Start, o.End = instance.Occurrence.Start, instance.Occurrence.End
 		if instance.Occurrence.Cancelled {
-			o.Row.Event.Status = "cancelled"
+			o.Row.Event.Status = meetingCancelledStatus
 		}
 		out = append(out, o)
 	}
@@ -135,12 +140,12 @@ func resolveMeetingOccurrence(ctx context.Context, r SQLReader, ref OccurrenceRe
 		}
 	}
 	if ref.Key == "" {
-		if row.Event.Kind == "series" {
+		if row.Event.Kind == meetingSeriesKind {
 			return linkOccurrence{}, sql.ErrNoRows
 		}
 		return occurrenceFromRow(row, ""), nil
 	}
-	if row.Event.Kind != "series" {
+	if row.Event.Kind != meetingSeriesKind {
 		return linkOccurrence{}, sql.ErrNoRows
 	}
 	_, id, ok := calrecur.ParseInstanceID("event_" + ref.Key)
@@ -213,12 +218,12 @@ func automaticMeetingOccurrences(ctx context.Context, r SQLReader, key meetingLi
 		if err != nil {
 			return nil, err
 		}
+		defer func() { _ = sources.Close() }()
 		var sourceIDs []any
 		for sources.Next() {
 			var id int64
 			var config sql.NullString
 			if err := sources.Scan(&id, &config); err != nil {
-				_ = sources.Close()
 				return nil, err
 			}
 			if decodeCalendarSourceConfig(config).CalendarID == key.CalendarID {
@@ -251,7 +256,7 @@ candidatesLoop:
 	for _, row := range rows {
 		if row.Event.Kind == "exception" {
 			for _, master := range rows {
-				if master.Event.Kind == "series" && master.SourceID == row.SourceID && master.Event.ProviderEventID == row.Event.SeriesProviderID {
+				if master.Event.Kind == meetingSeriesKind && master.SourceID == row.SourceID && master.Event.ProviderEventID == row.Event.SeriesProviderID {
 					continue candidatesLoop
 				}
 			}
@@ -259,7 +264,7 @@ candidatesLoop:
 		var candidates []linkOccurrence
 		if key.Kind == "google_event_id" {
 			ref := OccurrenceRef{MessageID: row.MessageID}
-			if row.Event.Kind == "series" {
+			if row.Event.Kind == meetingSeriesKind {
 				if base == "" {
 					continue
 				}
@@ -273,7 +278,7 @@ candidatesLoop:
 				return nil, err
 			}
 			candidates = append(candidates, o)
-		} else if row.Event.Kind == "series" {
+		} else if row.Event.Kind == meetingSeriesKind {
 			if key.ScheduledAt == nil {
 				continue
 			}
@@ -389,11 +394,11 @@ func (s *Store) ExportLogicalMeetingKeysContext(ctx context.Context, reader SQLR
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 	var members []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
 			return nil, err
 		}
 		members = append(members, id)

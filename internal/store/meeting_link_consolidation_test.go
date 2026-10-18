@@ -17,11 +17,12 @@ func TestMeetingLinksDedupUndoAndPurge(t *testing.T) {
 			requirements := require.New(t)
 
 			st := newRFC822IDBackfillBackendStore(t)
-			_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "dedup@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+			_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "dedup@example.org"))
 			_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
-			survivor, duplicate := note, int64(0)
+			survivor := note
+			var duplicate int64
 			if targetSide {
-				_, duplicate = calendarFixture(t, st, "duplicate", singleLinkRaw("duplicate", "dedup@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+				_, duplicate = calendarFixture(t, st, "duplicate", singleLinkRaw("duplicate", "dedup@example.org"))
 				survivor = event
 				requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: duplicate}))
 			} else {
@@ -63,7 +64,7 @@ func TestMeetingLinksConsolidationDecisionOrder(t *testing.T) {
 				requirements := require.New(t)
 
 				st := newRFC822IDBackfillBackendStore(t)
-				_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "copy@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+				_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "copy@example.org"))
 				_, a := projectionFixture(t, st, "a", "plaud_json", `{}`)
 				_, b := projectionFixture(t, st, "b", "plaud_json", `{}`)
 				for _, d := range []struct {
@@ -99,12 +100,12 @@ func TestMeetingLinksSourceMessageIDMigration(t *testing.T) {
 			requirements := require.New(t)
 
 			st := newRFC822IDBackfillBackendStore(t)
-			eventData, event := calendarFixture(t, st, "event", singleLinkRaw("event", "migration@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+			eventData, event := calendarFixture(t, st, "event", singleLinkRaw("event", "migration@example.org"))
 			noteData, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
 			var source, conversation int64
 			oldKey, newKey := "legacy-note", "note"
 			if targetSide {
-				oldData, old := calendarFixture(t, st, "legacy-event", singleLinkRaw("legacy-event", "migration@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+				oldData, old := calendarFixture(t, st, "legacy-event", singleLinkRaw("legacy-event", "migration@example.org"))
 				requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: old}))
 				source, conversation = eventData.Message.SourceID, oldData.Message.ConversationID
 				oldKey, newKey = "legacy-event", "event"
@@ -124,7 +125,7 @@ func TestMeetingLinksSourceMerge(t *testing.T) {
 	requirements := require.New(t)
 
 	st := newRFC822IDBackfillBackendStore(t)
-	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "merge@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "merge@example.org"))
 	data, note := projectionFixture(t, st, "same-note", "plaud_json", `{}`)
 	source, err := st.GetOrCreateSource("meeting_import", "copy@example.com")
 	requirements.NoError(err)
@@ -161,7 +162,7 @@ func TestMeetingLinksSubsetCopy(t *testing.T) {
 	requirements.NoError(err)
 	t.Cleanup(func() { require.NoError(t, st.Close()) })
 	requirements.NoError(st.InitSchemaContext(t.Context()))
-	data, event := calendarFixture(t, st, "event", singleLinkRaw("event", "subset@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+	data, event := calendarFixture(t, st, "event", singleLinkRaw("event", "subset@example.org"))
 	data.Message.SentAt.Time = time.Date(2027, 3, 14, 10, 0, 0, 0, time.UTC)
 	data.Message.SentAt.Valid = true
 	_, err = st.UpsertMessage(data.Message)

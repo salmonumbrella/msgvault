@@ -63,7 +63,7 @@ func TestMeetingLinksBatchMemberFailure(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			assertions, requirements := assert.New(t), require.New(t)
 			st := newRFC822IDBackfillBackendStore(t)
-			calendarFixture(t, st, "good", singleLinkRaw("good", "good@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+			calendarFixture(t, st, "good", singleLinkRaw("good", "good@example.org"))
 			_, bad := projectionFixture(t, st, "bad-note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"bad@example.org"}}`)
 			good := granolaLinkFixture(t, st, "good-note", "good")
 			_, unlinked := projectionFixture(t, st, "unlinked", "plaud_json", `{}`)
@@ -72,7 +72,7 @@ func TestMeetingLinksBatchMemberFailure(t *testing.T) {
 				count = 1
 			}
 			for i := range count {
-				_, id := calendarFixture(t, st, fmt.Sprintf("bad-%d", i), singleLinkRaw(fmt.Sprintf("bad-%d", i), "bad@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+				_, id := calendarFixture(t, st, fmt.Sprintf("bad-%d", i), singleLinkRaw(fmt.Sprintf("bad-%d", i), "bad@example.org"))
 				if failure == "invalid recurrence" {
 					_, err := st.db.Exec(`UPDATE calendar_events SET recurrence_json = 'broken' WHERE message_id = ?`, id)
 					requirements.NoError(err)
@@ -98,7 +98,7 @@ func TestMeetingLinksBatchMemberFailure(t *testing.T) {
 func TestMeetingLinksSplitSurvivesReingest(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
-	eventData, event := calendarFixture(t, st, "event", singleLinkRaw("event", "same@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+	eventData, event := calendarFixture(t, st, "event", singleLinkRaw("event", "same@example.org"))
 	noteData, note := projectionFixture(t, st, "note", "granola_json", `{"owner":{"email":"calendar@example.com"},"calendar_event":{"calendar_event_id":"event"}}`)
 	assertions.Equal(`["same@example.org",0,""]`, exportedMeetingKeys(t, st, note)[note])
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
@@ -113,8 +113,8 @@ func TestMeetingLinksSplitSurvivesReingest(t *testing.T) {
 	assertions.Equal(fmt.Sprintf("msg:%d", note), exportedMeetingKeys(t, st, note)[note])
 }
 
-func singleLinkRaw(id, uid, start, end string) string {
-	return fmt.Sprintf(`{"id":%q,"iCalUID":%q,"start":{"dateTime":%q},"end":{"dateTime":%q}}`, id, uid, start, end)
+func singleLinkRaw(id, uid string) string {
+	return fmt.Sprintf(`{"id":%q,"iCalUID":%q,"start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"}}`, id, uid)
 }
 func granolaLinkFixture(t *testing.T, st *Store, key, event string) int64 {
 	t.Helper()
@@ -134,7 +134,7 @@ func exportedMeetingKeys(t *testing.T, st *Store, ids ...int64) map[int64]string
 func TestMeetingLinksGranolaOwnCalendar(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
-	raw := singleLinkRaw("event", "own@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z")
+	raw := singleLinkRaw("event", "own@example.org")
 	_, other := calendarFixture(t, st, "other", raw, "other@example.com")
 	note := granolaLinkFixture(t, st, "note", "event")
 	assertions.Equal(fmt.Sprintf("msg:%d", note), exportedMeetingKeys(t, st, note)[note])
@@ -151,7 +151,7 @@ func TestMeetingLinksIdentityHasSeparateFields(t *testing.T) {
 	requirements := require.New(t)
 
 	st := newRFC822IDBackfillBackendStore(t)
-	_, single := calendarFixture(t, st, "single", singleLinkRaw("single", "x@20270314T100000Z", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+	_, single := calendarFixture(t, st, "single", singleLinkRaw("single", "x@20270314T100000Z"))
 	_, series := calendarFixture(t, st, "series", strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", "x"))
 	_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
 	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: single}))
@@ -204,14 +204,14 @@ func TestMeetingLinksTwentyCopiesAndAmbiguity(t *testing.T) {
 			raw := linkSeriesRaw
 			want := `["weekly@example.org",0,"20270314T100000Z"]`
 			if kind == "single copies" {
-				raw = singleLinkRaw("one", "weekly@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z")
+				raw = singleLinkRaw("one", "weekly@example.org")
 				want = `["weekly@example.org",0,""]`
 			}
 			calendarFixture(t, st, "one", raw)
 			calendarFixture(t, st, "copy", raw, "copy@example.com")
 			_, note := projectionFixture(t, st, "twenty", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"weekly@example.org","startsAt":"2027-03-14T10:00:00Z"}}`)
 			if kind == "different occurrences" {
-				calendarFixture(t, st, "single", singleLinkRaw("single", "weekly@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+				calendarFixture(t, st, "single", singleLinkRaw("single", "weekly@example.org"))
 				want = fmt.Sprintf("msg:%d", note)
 			}
 			assert.Equal(t, want, exportedMeetingKeys(t, st, note)[note])
@@ -224,10 +224,10 @@ func TestMeetingLinksUserDecisions(t *testing.T) {
 	requirements := require.New(t)
 
 	st := newRFC822IDBackfillBackendStore(t)
-	raw := singleLinkRaw("event", "same@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z")
+	raw := singleLinkRaw("event", "same@example.org")
 	_, event := calendarFixture(t, st, "one", raw)
 	_, copyID := calendarFixture(t, st, "copy", raw, "copy@example.com")
-	_, other := calendarFixture(t, st, "other", singleLinkRaw("other", "other@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+	_, other := calendarFixture(t, st, "other", singleLinkRaw("other", "other@example.org"))
 	note := granolaLinkFixture(t, st, "note", "event")
 	fallback := fmt.Sprintf("msg:%d", note)
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: copyID}))
@@ -285,7 +285,7 @@ func TestMeetingLinksActualRecurrenceBudget(t *testing.T) {
 
 func TestMeetingLinksFallbackWithoutUIDAndBatchLimit(t *testing.T) {
 	st := newRFC822IDBackfillBackendStore(t)
-	_, event := calendarFixture(t, st, "single", singleLinkRaw("event", "", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+	_, event := calendarFixture(t, st, "single", singleLinkRaw("event", ""))
 	note := granolaLinkFixture(t, st, "note", "event")
 	assert.Equal(t, fmt.Sprintf(`["",%d,""]`, event), exportedMeetingKeys(t, st, note)[note])
 	ctx, release, err := st.BeginReadSnapshotContext(t.Context())
@@ -300,7 +300,7 @@ func TestMeetingLinksProjectionEnvelopeAndRepair(t *testing.T) {
 	requirements := require.New(t)
 
 	st := newRFC822IDBackfillBackendStore(t)
-	calendarFixture(t, st, "event", singleLinkRaw("event", "valid@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+	calendarFixture(t, st, "event", singleLinkRaw("event", "valid@example.org"))
 	data, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":2,"recording":{},"calendar_event":{"iCalUid":"valid@example.org"}}`)
 	requirements.NoError(st.SetMessageMetadata(note, sql.NullString{String: `{"platform":"twenty","calendar_ical_uid":"valid@example.org"}`, Valid: true}))
 	assertions.Equal(fmt.Sprintf("msg:%d", note), exportedMeetingKeys(t, st, note)[note])
@@ -335,7 +335,7 @@ func TestMeetingLinksUpgradeFromSchema11(t *testing.T) {
 	requirements := require.New(t)
 
 	st := newRFC822IDBackfillBackendStore(t)
-	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "upgraded@example.org", "2027-03-14T10:00:00Z", "2027-03-14T11:00:00Z"))
+	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "upgraded@example.org"))
 	note := granolaLinkFixture(t, st, "note", "event")
 	_, err := st.db.Exec(`DROP TABLE meeting_link_decisions; DROP TABLE meeting_link_keys; DROP INDEX idx_calendar_events_ical_uid; ALTER TABLE calendar_events DROP COLUMN ical_uid`)
 	requirements.NoError(err)
