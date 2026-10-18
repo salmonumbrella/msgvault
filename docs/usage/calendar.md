@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-04"
+last_edited: "2026-10-17"
 title: Google Calendar
 description: Archive Google Calendar events alongside your email, with full-text and semantic search over meetings, organizers, and attendees.
 ---
@@ -13,6 +13,21 @@ against the messages you exchanged with her.
 Calendar sync is **read-only**. The separate event-control commands can change
 live events when you opt in to write consent and source permissions. Event
 control described below is unreleased functionality.
+
+## List archived events, unreleased
+
+```bash
+msgvault calendar events --from 2027-03-01 --to 2027-04-01
+msgvault calendar events --from 2027-03-01 --to 2027-04-01 --json
+```
+
+Repeating events expand into occurrences. Edited occurrences appear at their new times, and cancelled occurrences show `cancelled`. Existing archives rebuild event and attendee tables during setup, so a re-sync isn't needed.
+
+Date-only bounds use midnight in your machine's time zone. You can also pass RFC3339 timestamps with offsets. The end is exclusive and must follow the start. Timed events print in your machine's time zone; all-day events show their dates, with an exclusive end date. The ID is the archive message ID, or the series master ID for expanded occurrences.
+
+JSON includes attendees, roles, RSVPs, and series that could not be expanded. The table prints a warning for those series. Narrow the window when the command reports that a query is too broad.
+
+This archive read requires daemon API schema 3.24.0 or newer and owner access. Use the live commands below for `--account`, `--dry-run`, `--read-only`, and `--send-updates`. See the [CLI reference](https://msgvault.io/docs/cli-reference/#calendar) for the command contract.
 
 ## Prerequisites
 
@@ -144,7 +159,7 @@ without changing Google or the archive. `--read-only` rejects every event write,
 including a dry run. Use `--all-day` with date-only bounds; `--to` is exclusive.
 For timed events, use RFC3339 with an offset, or local `YYYY-MM-DDTHH:MM` with an
 IANA `--tz`. Timed recurrence uses the target calendar's time zone when the
-event has no explicit zone. See the [CLI contract](../cli-reference.md#calendar) for field and
+event has no explicit zone. See the [CLI contract](https://msgvault.io/docs/cli-reference/#calendar) for field and
 reminder flags.
 
 Recurring edits default to `--scope single`. A series ID requires

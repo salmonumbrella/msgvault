@@ -225,6 +225,10 @@ func (s *Server) humaAuthMiddleware(ctx huma.Context, next func(huma.Context)) {
 			next(ctx)
 			return
 		}
+		if op := ctx.Operation(); op != nil && op.OperationID == "listCalendarEvents" {
+			writeHumaError(ctx, http.StatusForbidden, "permission_denied", "Archived calendar events require owner access")
+			return
+		}
 		s.logUnauthorizedAPIRequest(req)
 		writeHumaError(ctx, http.StatusUnauthorized, "unauthorized", "Invalid or missing API key")
 		return
@@ -460,6 +464,7 @@ func (s *Server) registerHumaRoutes(api huma.API, apiV1 huma.API) {
 	s.registerMuesliImportRoute(apiV1)
 	s.registerMeetingRoutes(apiV1)
 	s.registerCalendarControlRoute(apiV1)
+	s.registerCalendarEventsRoute(apiV1)
 	registerAPIV1RawHumaJSONRoute[ConversationResponse](apiV1, "getConversation", http.MethodGet, "/conversations/{id}", "Get a bounded containing conversation", s.handleGetConversation)
 	registerAPIV1RawHumaJSONRoute[AttachmentInfo](apiV1, "getAttachment", http.MethodGet, "/attachments/{id}", "Get attachment metadata", s.handleGetAttachment)
 	registerAPIV1RawHumaBinaryRoute(
