@@ -15,10 +15,12 @@ import (
 )
 
 type MeetingSuggestion struct {
-	Ref                                          string
-	MemberMessageID                              int64
-	OverlapMinutes, SharedAttendees, TitleTokens int
-	Reasons                                      []string
+	Ref             string   `json:"ref"`
+	MemberMessageID int64    `json:"member_message_id"`
+	OverlapMinutes  int      `json:"overlap_minutes"`
+	SharedAttendees int      `json:"shared_attendees"`
+	TitleTokens     int      `json:"title_tokens"`
+	Reasons         []string `json:"reasons"`
 }
 
 type suggestMember struct {

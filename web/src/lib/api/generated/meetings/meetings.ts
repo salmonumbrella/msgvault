@@ -5,9 +5,13 @@ import type {
   ActionsPage,
   MeetingActionsRequest,
   MeetingContextRequest,
+  MeetingLinkDecisionRequest,
+  MeetingLinkDecisionResponse,
   MeetingMetricsRequest,
+  MeetingSuggestionsResponse,
   Metrics,
   PacketResult,
+  SuggestMeetingLinksParams,
 } from "../models";
 
 import { orvalFetch } from "../../runtime";
@@ -49,6 +53,23 @@ export const getMeetingContext = (
   );
 };
 /**
+ * @summary Link or unlink an archived meeting
+ */
+export const decideMeetingLink = (
+  meetingLinkDecisionRequest: MeetingLinkDecisionRequest,
+  options?: SecondParameter<typeof orvalFetch<MeetingLinkDecisionResponse>>,
+) => {
+  return orvalFetch<MeetingLinkDecisionResponse>(
+    {
+      url: `/api/v1/meetings/links/decisions`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: meetingLinkDecisionRequest,
+    },
+    options,
+  );
+};
+/**
  * @summary Get archived meeting duration metrics
  */
 export const getMeetingMetrics = (
@@ -62,6 +83,18 @@ export const getMeetingMetrics = (
       headers: { "Content-Type": "application/json" },
       data: meetingMetricsRequest,
     },
+    options,
+  );
+};
+/**
+ * @summary Suggest archived meeting links
+ */
+export const suggestMeetingLinks = (
+  params: SuggestMeetingLinksParams,
+  options?: SecondParameter<typeof orvalFetch<MeetingSuggestionsResponse>>,
+) => {
+  return orvalFetch<MeetingSuggestionsResponse>(
+    { url: `/api/v1/meetings/suggestions`, method: "GET", params },
     options,
   );
 };

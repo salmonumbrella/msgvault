@@ -13,6 +13,7 @@ import (
 )
 
 type CalendarOccurrence struct {
+	Ref               string              `json:"ref"`
 	MessageID         int64               `json:"message_id"`
 	SeriesMessageID   int64               `json:"series_message_id"`
 	SourceID          int64               `json:"source_id"`
@@ -81,7 +82,11 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 		if attendees == nil {
 			attendees = []calevent.Attendee{}
 		}
-		page.Occurrences = append(page.Occurrences, CalendarOccurrence{MessageID: row.MessageID, SeriesMessageID: seriesID, SourceID: row.SourceID, Subject: row.Subject, Start: o.Start, End: o.End, AllDay: o.AllDay, StartDate: o.StartDate, EndDate: o.EndDate, Status: status, DeletedFromSource: row.DeletedFromSource, Attendees: attendees})
+		ref := OccurrenceRef{MessageID: row.MessageID}
+		if seriesID != 0 {
+			ref = OccurrenceRef{MessageID: seriesID, Key: o.Original.Key()}
+		}
+		page.Occurrences = append(page.Occurrences, CalendarOccurrence{Ref: formatMeetingOccurrence(ref), MessageID: row.MessageID, SeriesMessageID: seriesID, SourceID: row.SourceID, Subject: row.Subject, Start: o.Start, End: o.End, AllDay: o.AllDay, StartDate: o.StartDate, EndDate: o.EndDate, Status: status, DeletedFromSource: row.DeletedFromSource, Attendees: attendees})
 	}
 	addSeriesOccurrence := func(row CalendarEventRow, o calrecur.Occurrence) error {
 		effective := row
