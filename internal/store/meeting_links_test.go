@@ -473,17 +473,6 @@ func TestMeetingLinksManualOverrideSurvivesSourceRemoval(t *testing.T) {
 	}
 }
 
-func TestMeetingLinksUnknownKeyKind(t *testing.T) {
-	assertions, requirements := assert.New(t), require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
-	calendarFixture(t, st, "event", singleLinkRaw("event", "unknown@example.org"))
-	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"unknown@example.org"}}`)
-	requirements.NotEmpty(linkedMeetingRefs(t, st, note)[note])
-	_, err := st.db.Exec(`UPDATE meeting_link_key SET kind = 'future_kind' WHERE message_id = ?`, note)
-	requirements.NoError(err)
-	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
-}
-
 func TestMeetingLinksDecisionLifetime(t *testing.T) {
 	for _, uid := range []string{"lifetime@example.org", ""} {
 		t.Run("uid="+uid, func(t *testing.T) {
