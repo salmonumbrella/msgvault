@@ -115,21 +115,8 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 				fail()
 				continue
 			}
-			var exc []calrecur.Exception
-			invalid := false
-			for _, x := range exceptions[seriesKey{row.SourceID, e.ProviderEventID}] {
-				if x.Event.Original == nil {
-					invalid = true
-					break
-				}
-				xzone, err := calendarEventZone(x.Event)
-				if err != nil {
-					invalid = true
-					break
-				}
-				exc = append(exc, calrecur.Exception{Original: *x.Event.Original, Start: x.Event.Start, End: x.Event.End, StartDate: x.Event.StartDate, EndDate: x.Event.EndDate, Zone: xzone, Cancelled: x.Event.Status == "cancelled", Ref: x.MessageID})
-			}
-			if invalid {
+			exc, err := calendarRecurrenceExceptions(exceptions[seriesKey{row.SourceID, e.ProviderEventID}])
+			if err != nil {
 				fail()
 				continue
 			}
@@ -175,6 +162,28 @@ func (s *Store) ListCalendarOccurrencesContext(ctx context.Context, from, to tim
 	})
 	return page, nil
 }
+
+func calendarRecurrenceExceptions(rows []CalendarEventRow) ([]calrecur.Exception, error) {
+	exceptions := make([]calrecur.Exception, 0, len(rows))
+	for _, row := range rows {
+		e := row.Event
+		if e.Original == nil {
+			return nil, errors.New("missing exception original start")
+		}
+		// An omitted event zone inherits the master's zone during expansion.
+		var zone *time.Location
+		if e.EventTimeZone != "" {
+			var err error
+			zone, err = calendarEventZone(e)
+			if err != nil {
+				return nil, err
+			}
+		}
+		exceptions = append(exceptions, calrecur.Exception{Original: *e.Original, Start: e.Start, End: e.End, StartDate: e.StartDate, EndDate: e.EndDate, Zone: zone, Cancelled: e.Status == "cancelled", Ref: row.MessageID})
+	}
+	return exceptions, nil
+}
+
 func calendarEventZone(e calevent.Event) (*time.Location, error) {
 	name := e.EventTimeZone
 	if name == "" {

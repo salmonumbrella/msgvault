@@ -124,9 +124,12 @@ func TestCalendarEventSourceZoneRebuild(t *testing.T) {
 	requirements.NoError(st.UpdateSourceSyncConfig(dest.ID, `{"time_zone":"Asia/Tokyo"}`))
 	_, err = st.MergeSourcesContext(t.Context(), MergeSourcesRequest{FromSourceID: data.Message.SourceID, IntoSourceID: dest.ID})
 	requirements.NoError(err)
-	row = calendarRows(t, st, id)[0]
-	assertions.Equal(dest.ID, row.SourceID)
-	assertions.Equal("2027-03-13T15:00:00Z", row.Event.Start.Format(time.RFC3339))
+	// The merged copy is archive-only, so inspect its stored projection directly.
+	var sourceID int64
+	var start time.Time
+	requirements.NoError(st.db.QueryRow(`SELECT m.source_id, e.start_at FROM calendar_events e JOIN messages m ON m.id = e.message_id WHERE e.message_id = ?`, id).Scan(&sourceID, &start))
+	assertions.Equal(dest.ID, sourceID)
+	assertions.Equal("2027-03-13T15:00:00Z", start.UTC().Format(time.RFC3339))
 }
 
 func TestCalendarExceptionsOriginalAndEffectiveWindows(t *testing.T) {
@@ -146,4 +149,30 @@ func TestCalendarExceptionsOriginalAndEffectiveWindows(t *testing.T) {
 	requirements.Len(page.Occurrences, 1)
 	assertions.Equal(moved, page.Occurrences[0].MessageID)
 	assertions.Equal(master, page.Occurrences[0].SeriesMessageID)
+}
+
+func TestCalendarExceptionsPartialBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name, original, bounds, start, end string
+	}{
+		{"end only", "2027-03-02T09:00:00Z", `"end":{"dateTime":"2027-04-03T10:00:00Z"}`, "2027-03-02T09:00:00Z", "2027-04-03T10:00:00Z"},
+		{"start only", "2027-05-02T09:00:00Z", `"start":{"dateTime":"2027-04-01T09:00:00Z"}`, "2027-04-01T09:00:00Z", "2027-05-02T10:00:00Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			_, master := calendarFixture(t, st, "master", fmt.Sprintf(`{"id":"weekly","start":{"dateTime":%q},"end":{"dateTime":%q},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=1"]}`, tc.original, tc.original[:11]+"10:00:00Z"))
+			_, exception := calendarFixture(t, st, "partial", fmt.Sprintf(`{"id":"partial","recurringEventId":"weekly","originalStartTime":{"dateTime":%q},%s}`, tc.original, tc.bounds))
+			from := time.Date(2027, 4, 2, 0, 0, 0, 0, time.UTC)
+			page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+			requirements.NoError(err)
+			assertions.Empty(page.Unexpandable)
+			requirements.Len(page.Occurrences, 1)
+			o := page.Occurrences[0]
+			assertions.Equal(exception, o.MessageID)
+			assertions.Equal(master, o.SeriesMessageID)
+			assertions.Equal(tc.start, o.Start.Format(time.RFC3339))
+			assertions.Equal(tc.end, o.End.Format(time.RFC3339))
+		})
+	}
 }

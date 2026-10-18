@@ -36,7 +36,9 @@ const calendarEventSelect = `SELECT e.message_id, m.source_id, COALESCE(m.subjec
  ` + calendarEventFrom
 
 const calendarEventFrom = `FROM calendar_events e JOIN messages m ON m.id = e.message_id
- WHERE m.deleted_at IS NULL AND `
+ WHERE m.deleted_at IS NULL
+ AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
+ AND `
 
 func queryCalendarEventRowsWithinBudget(ctx context.Context, r *loggedDB, predicate string, args []any, budget int) ([]CalendarEventRow, error) {
 	if err := ctx.Err(); err != nil {
@@ -228,10 +230,12 @@ func queryCalendarExceptionsInWindow(ctx context.Context, r *loggedDB, masters [
 	// Include the full nominal interval of an occurrence cancelled or moved away.
 	originalLower := lower.Add(-calendarMasterDuration(masters))
 	predicate := `e.kind = 'exception' AND ((e.start_at < ? AND e.end_at >= ?) OR
+  (e.start_at IS NULL AND e.end_at >= ?) OR
+  (e.end_at IS NULL AND e.start_at < ?) OR
   (e.original_start_at >= ? AND e.original_start_at < ?) OR
    (e.original_start_date >= ? AND e.original_start_date < ?) OR
    (e.original_start_at IS NULL AND e.original_start_date = ''))`
-	return queryCalendarEventRowsWithinBudget(ctx, r, predicate, []any{upper, lower, originalLower, upper, originalLower.Format(time.DateOnly), upper.AddDate(0, 0, 1).Format(time.DateOnly)}, maxCalendarExceptions)
+	return queryCalendarEventRowsWithinBudget(ctx, r, predicate, []any{upper, lower, lower, upper, originalLower, upper, originalLower.Format(time.DateOnly), upper.AddDate(0, 0, 1).Format(time.DateOnly)}, maxCalendarExceptions)
 }
 
 func calendarMasterDuration(masters []CalendarEventRow) time.Duration {
