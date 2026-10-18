@@ -142,6 +142,9 @@ func TestCalendarMutationsJournalLinearMeetingLinks(t *testing.T) {
 	for i := range 5 {
 		projectionFixture(t, st, fmt.Sprintf("note-%d", i), "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org"}}`)
 	}
+	source, err := st.GetOrCreateSource("gcal", "calendar@example.com")
+	requirements.NoError(err)
+	requirements.NoError(st.UpdateSourceSyncConfig(source.ID, `{"calendar_id":"calendar@example.com","time_zone":"UTC"}`))
 	var baseline int64
 	requirements.NoError(st.DB().QueryRow(`SELECT coalesce(max(seq), 0) FROM cache_related_change_journal`).Scan(&baseline))
 	for i := range 3 {
