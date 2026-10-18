@@ -17,10 +17,12 @@ import (
 const linkSeriesRaw = `{"id":"series","iCalUID":"weekly@example.org","start":{"dateTime":"2027-03-07T10:00:00Z","timeZone":"UTC"},"end":{"dateTime":"2027-03-07T11:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=6"]}`
 
 func TestMeetingLinksCalendarUIDLookupPlan(t *testing.T) {
+	requirements := require.New(t)
+	assertions := assert.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
 	_, id := calendarFixture(t, st, "event", singleLinkRaw("event", "shared@example.org"))
 	// Metadata is the UID source even if the archived provider payload differs.
-	require.NoError(t, st.SetMessageMetadata(id, sql.NullString{String: `{"ical_uid":"metadata@example.org"}`, Valid: true}))
+	requirements.NoError(st.SetMessageMetadata(id, sql.NullString{String: `{"ical_uid":"metadata@example.org"}`, Valid: true}))
 	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"metadata@example.org"}}`)
 	var query string
 	var args []any
@@ -34,29 +36,29 @@ func TestMeetingLinksCalendarUIDLookupPlan(t *testing.T) {
 		}
 		return nil
 	}})
-	assert.Equal(t, fmt.Sprintf("evt:%d", id), linkedMeetingRefs(t, observed, note)[note])
-	require.NotEmpty(t, query)
+	assertions.Equal(fmt.Sprintf("evt:%d", id), linkedMeetingRefs(t, observed, note)[note])
+	requirements.NotEmpty(query)
 
 	explain := "EXPLAIN QUERY PLAN "
 	if st.IsPostgreSQL() {
 		explain = "EXPLAIN "
 	}
 	rows, err := st.db.QueryContext(t.Context(), explain+query, args...)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, rows.Close()) }()
+	requirements.NoError(err)
+	defer func() { requirements.NoError(rows.Close()) }()
 	var plan []string
 	for rows.Next() {
 		var detail string
 		if st.IsPostgreSQL() {
-			require.NoError(t, rows.Scan(&detail))
+			requirements.NoError(rows.Scan(&detail))
 		} else {
 			var id, parent, unused int
-			require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+			requirements.NoError(rows.Scan(&id, &parent, &unused, &detail))
 		}
 		plan = append(plan, detail)
 	}
-	require.NoError(t, rows.Err())
-	assert.Contains(t, strings.Join(plan, "\n"), "idx_messages_calendar_ical_uid")
+	requirements.NoError(rows.Err())
+	assertions.Contains(strings.Join(plan, "\n"), "idx_messages_calendar_ical_uid")
 }
 
 func TestMeetingLinksWindowedExceptions(t *testing.T) {
@@ -83,8 +85,8 @@ func TestMeetingLinksTwentyExactInstant(t *testing.T) {
 	st := newRFC822IDBackfillBackendStore(t)
 	_, master := calendarFixture(t, st, "master", linkSeriesRaw)
 	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"weekly@example.org","startsAt":"2027-03-14T10:00:30Z"}}`)
-	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
-	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: note}}, 10)
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
+	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", MessageID: note}, 10)
 	requirements.NoError(err)
 	requirements.Len(suggestions, 1)
 	assertions.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", master), suggestions[0].Ref)
@@ -105,15 +107,15 @@ func TestMeetingLinksSplitSurvivesReingest(t *testing.T) {
 		requirements.NoError(err)
 		assertions.Equal(tc.id, id)
 	}
-	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
 }
 
 func singleLinkRaw(id, uid string) string {
 	return fmt.Sprintf(`{"id":%q,"iCalUID":%q,"start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"}}`, id, uid)
 }
-func granolaLinkFixture(t *testing.T, st *Store, key, event string) int64 {
+func granolaLinkFixture(t *testing.T, st *Store, event string) int64 {
 	t.Helper()
-	_, id := projectionFixture(t, st, key, "granola_json", fmt.Sprintf(`{"owner":{"email":"calendar@example.com"},"calendar_event":{"calendar_event_id":%q,"scheduled_start_time":"2027-03-14T10:00:00Z"}}`, event))
+	_, id := projectionFixture(t, st, "note", "granola_json", fmt.Sprintf(`{"owner":{"email":"calendar@example.com"},"calendar_event":{"calendar_event_id":%q,"scheduled_start_time":"2027-03-14T10:00:00Z"}}`, event))
 	return id
 }
 
@@ -128,8 +130,8 @@ func TestMeetingLinksGranolaOwnCalendar(t *testing.T) {
 			raw := singleLinkRaw("event", "own@example.org")
 			_, other := calendarFixture(t, st, "other", raw, "other@example.com")
 			_, note := projectionFixture(t, st, "note", "granola_json", fmt.Sprintf(`{"owner":{"email":%q},"calendar_event":{"calendar_event_id":"event","scheduled_start_time":"2027-03-14T10:00:00Z"}}`, tc.owner))
-			assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
-			suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: note}}, 10)
+			assertions.Empty(linkedMeetingRefs(t, st, note)[note])
+			suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", MessageID: note}, 10)
 			requirements.NoError(err)
 			requirements.Len(suggestions, 1)
 			assertions.Equal(fmt.Sprintf("evt:%d", other), suggestions[0].Ref)
@@ -151,7 +153,7 @@ func TestMeetingLinksIdentityHasSeparateFields(t *testing.T) {
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: series, Key: "20270314T100000Z"}))
 	assertions.Equal(fmt.Sprintf("evt:%d", single), linkedMeetingRefs(t, st, note)[note])
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: single}))
-	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
 }
 
 func TestMeetingLinksGranolaOccurrences(t *testing.T) {
@@ -178,7 +180,7 @@ func TestMeetingLinksGranolaOccurrences(t *testing.T) {
 			if key == "" {
 				key = "20270314T100000Z"
 			}
-			note := granolaLinkFixture(t, st, "note", "series_"+key)
+			note := granolaLinkFixture(t, st, "series_"+key)
 			want := ""
 			if tc.want {
 				want = fmt.Sprintf("evt:%d@%s", master, key)
@@ -220,13 +222,13 @@ func TestMeetingLinksUserDecisions(t *testing.T) {
 	_, event := calendarFixture(t, st, "one", raw)
 	_, copyID := calendarFixture(t, st, "copy", raw, "copy@example.com")
 	_, other := calendarFixture(t, st, "other", singleLinkRaw("other", "other@example.org"))
-	note := granolaLinkFixture(t, st, "note", "event")
+	note := granolaLinkFixture(t, st, "event")
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: copyID}))
-	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
 	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
 	assertions.Equal(fmt.Sprintf("evt:%d", event), linkedMeetingRefs(t, st, note)[note])
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: copyID}))
-	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
 	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: other}))
 	assertions.Equal(fmt.Sprintf("evt:%d", other), linkedMeetingRefs(t, st, note)[note])
 	requirements.ErrorIs(st.LinkMeetingContext(t.Context(), event, OccurrenceRef{MessageID: other}), sql.ErrNoRows)
@@ -245,7 +247,7 @@ func TestMeetingLinksOrphanDecisionAfterMasterArrives(t *testing.T) {
 	_, master := calendarFixture(t, st, "master", linkSeriesRaw)
 	assertions.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", master), linkedMeetingRefs(t, st, note)[note])
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: master, Key: "20270314T100000Z"}))
-	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
 }
 
 func TestMeetingLinksActualRecurrenceBudget(t *testing.T) {
@@ -282,7 +284,7 @@ func TestMeetingLinksProjectionEnvelopeAndRepair(t *testing.T) {
 	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "valid@example.org"))
 	data, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":2,"recording":{},"calendar_event":{"iCalUid":"valid@example.org"}}`)
 	requirements.NoError(st.SetMessageMetadata(note, sql.NullString{String: `{"platform":"twenty","calendar_ical_uid":"valid@example.org"}`, Valid: true}))
-	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
 	valid := `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"valid@example.org"}}`
 	requirements.NoError(st.UpsertMessageRawWithFormat(note, []byte(valid), "twenty_json"))
 	assertions.Equal(fmt.Sprintf("evt:%d", event), linkedMeetingRefs(t, st, note)[note])
@@ -292,7 +294,7 @@ func TestMeetingLinksProjectionEnvelopeAndRepair(t *testing.T) {
 	after, newHash := readProjection(t, st, note)
 	assertions.Equal(before, after)
 	assertions.NotEqual(hash, newHash)
-	assertions.Equal("", linkedMeetingRefs(t, st, note)[note])
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
 	requirements.NoError(st.UpsertMessageRawWithFormat(note, []byte(`{broken`), "twenty_json"))
 	var count int
 	requirements.NoError(st.db.QueryRow(`SELECT count(*) FROM meeting_link_key WHERE message_id = ?`, note).Scan(&count))
@@ -312,7 +314,7 @@ func TestMeetingLinksUpgradeFromSchema11(t *testing.T) {
 
 	st := newRFC822IDBackfillBackendStore(t)
 	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "upgraded@example.org"))
-	note := granolaLinkFixture(t, st, "note", "event")
+	note := granolaLinkFixture(t, st, "event")
 	_, err := st.db.Exec(`DROP TABLE meeting_link_decisions; DROP TABLE meeting_link_key; DROP INDEX idx_messages_calendar_ical_uid`)
 	requirements.NoError(err)
 	_, err = st.db.Exec(`UPDATE meeting_details SET projection_version = 1; UPDATE archive_metadata SET value = '11' WHERE key = 'schema_version'`)
@@ -332,37 +334,39 @@ func TestMeetingLinksIgnoreUnresolvableDecision(t *testing.T) {
 	_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
 	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: master, Key: "20270314T100000Z"}))
 	requirements.NoError(st.UpsertMessageRawWithFormat(master, []byte(`{"id":"series","recurrence":["RRULE:FREQ=WEEKLY"]}`), "gcal_json"))
-	assert.Equal(t, "", linkedMeetingRefs(t, st, note)[note])
+	assert.Empty(t, linkedMeetingRefs(t, st, note)[note])
 }
 
 func TestMeetingLinksReadDecisions(t *testing.T) {
+	requirements := require.New(t)
+	assertions := assert.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
-	note := granolaLinkFixture(t, st, "note", "event")
+	note := granolaLinkFixture(t, st, "event")
 	links, err := st.MeetingLinksContext(t.Context(), note)
-	require.NoError(t, err)
-	assert.Empty(t, links)
+	requirements.NoError(err)
+	assertions.Empty(links)
 	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "linked@example.org"))
 	for step := range 3 {
 		if step == 1 {
-			require.NoError(t, st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+			requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
 		}
 		if step == 2 {
-			require.NoError(t, st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+			requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
 		}
 		links, err = st.MeetingLinksContext(t.Context(), note)
-		require.NoError(t, err)
+		requirements.NoError(err)
 		if step == 2 {
-			assert.Empty(t, links)
+			assertions.Empty(links)
 			continue
 		}
-		require.Len(t, links, 1)
-		assert.Equal(t, fmt.Sprintf("evt:%d", event), links[0].Ref)
-		assert.Equal(t, "Example event", links[0].Subject)
-		assert.Equal(t, "2027-03-14T10:00:00Z", links[0].Start.Format(time.RFC3339))
-		assert.Equal(t, "2027-03-14T11:00:00Z", links[0].End.Format(time.RFC3339))
+		requirements.Len(links, 1)
+		assertions.Equal(fmt.Sprintf("evt:%d", event), links[0].Ref)
+		assertions.Equal("Example event", links[0].Subject)
+		assertions.Equal("2027-03-14T10:00:00Z", links[0].Start.Format(time.RFC3339))
+		assertions.Equal("2027-03-14T11:00:00Z", links[0].End.Format(time.RFC3339))
 	}
 	_, err = st.MeetingLinksContext(t.Context(), event)
-	assert.ErrorIs(t, err, sql.ErrNoRows)
+	assertions.ErrorIs(err, sql.ErrNoRows)
 }
 
 // Read the same references returned to CLI and API users.

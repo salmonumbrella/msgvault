@@ -114,9 +114,9 @@ func TestMeetingLinkRoutes(t *testing.T) {
 				assertions.Equal(int64(42), backend.member)
 				assertions.JSONEq(`{"links":[{"ref":"evt:81","subject":"Planning","start":"2027-03-14T10:00:00Z","end":"2027-03-14T11:00:00Z"}]}`, w.Body.String())
 			} else {
-				want := store.MeetingLinkRef{Kind: "msg", OccurrenceRef: store.OccurrenceRef{MessageID: 42}}
+				want := store.MeetingLinkRef{Kind: "msg", MessageID: 42}
 				if strings.Contains(tc.path, "ref=evt:") {
-					want = store.MeetingLinkRef{Kind: "evt", OccurrenceRef: store.OccurrenceRef{MessageID: 81, Key: "20270314T100000Z"}}
+					want = store.MeetingLinkRef{Kind: "evt", MessageID: 81, Key: "20270314T100000Z"}
 				}
 				assertions.Equal(want, backend.ref)
 				assertions.JSONEq(`{"suggestions":[{"ref":"evt:81@20270314T100000Z","member_message_id":42,"overlap_minutes":30,"shared_attendees":1,"title_tokens":2,"reasons":["time_overlap","shared_attendees","title_tokens"]}]}`, w.Body.String())

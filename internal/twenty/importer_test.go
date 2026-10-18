@@ -609,6 +609,7 @@ func TestTwentyArchiveBoundsUnicodeSnippet(t *testing.T) {
 }
 
 func TestImportTwentyLinksArchivedCalendarUID(t *testing.T) {
+	assertions := assert.New(t)
 	requirements := require.New(t)
 	st, source, options := newImportFixture(t)
 	source.pages[""].Records[0].Calendar.Raw = jsontext.Value(`{"id":"event-1","iCalUid":"shared@example.org","startsAt":"2026-09-01T09:30:00Z","endsAt":"2026-09-01T10:30:00Z"}`)
@@ -620,8 +621,8 @@ func TestImportTwentyLinksArchivedCalendarUID(t *testing.T) {
 	requirements.True(metadata.Valid)
 	var fields map[string]any
 	requirements.NoError(json.Unmarshal([]byte(metadata.String), &fields))
-	assert.Equal(t, "shared@example.org", fields["calendar_ical_uid"])
-	assert.Equal(t, "2026-09-01T09:30:00Z", fields["scheduled_start"])
+	assertions.Equal("shared@example.org", fields["calendar_ical_uid"])
+	assertions.Equal("2026-09-01T09:30:00Z", fields["scheduled_start"])
 	raw, err := st.GetMessageRaw(note)
 	requirements.NoError(err)
 	var envelope struct {
@@ -629,6 +630,6 @@ func TestImportTwentyLinksArchivedCalendarUID(t *testing.T) {
 		CalendarEvent jsontext.Value `json:"calendar_event"`
 	}
 	requirements.NoError(json.Unmarshal(raw, &envelope))
-	assert.JSONEq(t, string(source.pages[""].Records[0].Raw), string(envelope.Recording))
-	assert.JSONEq(t, `{"id":"event-1","iCalUid":"shared@example.org","startsAt":"2026-09-01T09:30:00Z","endsAt":"2026-09-01T10:30:00Z"}`, string(envelope.CalendarEvent))
+	assertions.JSONEq(string(source.pages[""].Records[0].Raw), string(envelope.Recording))
+	assertions.JSONEq(`{"id":"event-1","iCalUid":"shared@example.org","startsAt":"2026-09-01T09:30:00Z","endsAt":"2026-09-01T10:30:00Z"}`, string(envelope.CalendarEvent))
 }

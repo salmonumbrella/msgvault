@@ -95,11 +95,12 @@ func expandMeetingSeries(ctx context.Context, r SQLReader, master CalendarEventR
 	if err != nil {
 		return nil, err
 	}
+	var expansionErr error
 	if reason != "" {
 		if *budget <= 0 || reason == calrecur.ErrBudgetExceeded.Error() {
 			return nil, calendarRecurrenceBudgetError()
 		}
-		return nil, fmt.Errorf("%w: %s", calrecur.ErrUnsupportedRecurrence, reason)
+		expansionErr = fmt.Errorf("%w: %s", calrecur.ErrUnsupportedRecurrence, reason)
 	}
 	byID := make(map[int64]CalendarEventRow, len(related))
 	for _, row := range related {
@@ -110,6 +111,9 @@ func expandMeetingSeries(ctx context.Context, r SQLReader, master CalendarEventR
 		o := occurrenceFromRow(master, instance.Original.Key())
 		if instance.HasException {
 			o.Row = byID[instance.ExceptionRef]
+			if instance.Original == (calrecur.Identity{}) {
+				o = occurrenceFromRow(o.Row, "")
+			}
 			if o.Row.Event.Status == meetingCancelledStatus {
 				o.Row, err = inheritCalendarCancellation(ctx, r, o.Row, master)
 				if err != nil {
@@ -123,7 +127,7 @@ func expandMeetingSeries(ctx context.Context, r SQLReader, master CalendarEventR
 		}
 		out = append(out, o)
 	}
-	return out, nil
+	return out, expansionErr
 }
 
 func resolveMeetingOccurrence(ctx context.Context, r SQLReader, ref OccurrenceRef, budget *int) (linkOccurrence, error) {
@@ -151,6 +155,9 @@ func resolveMeetingOccurrence(ctx context.Context, r SQLReader, ref OccurrenceRe
 			}
 			row, ref = masters[0], OccurrenceRef{MessageID: masters[0].MessageID, Key: row.Event.Original.Key()}
 		} else {
+			if row.Event.Start == nil || row.Event.End == nil {
+				return linkOccurrence{}, fmt.Errorf("%s: %w", calendarMissingBoundsReason(row.Event), sql.ErrNoRows)
+			}
 			o := occurrenceFromRow(row, row.Event.Original.Key())
 			o.Ref.Key = ""
 			return o, nil
@@ -159,6 +166,9 @@ func resolveMeetingOccurrence(ctx context.Context, r SQLReader, ref OccurrenceRe
 	if ref.Key == "" {
 		if row.Event.Kind == meetingSeriesKind {
 			return linkOccurrence{}, sql.ErrNoRows
+		}
+		if row.Event.Start == nil || row.Event.End == nil {
+			return linkOccurrence{}, fmt.Errorf("%s: %w", calendarMissingBoundsReason(row.Event), sql.ErrNoRows)
 		}
 		return occurrenceFromRow(row, ""), nil
 	}
@@ -203,13 +213,16 @@ func resolveMeetingOccurrence(ctx context.Context, r SQLReader, ref OccurrenceRe
 		}
 	}
 	occurrences, err := expandMeetingSeries(ctx, r, row, at.Add(-calendarCandidateMargin), at.Add(calendarCandidateMargin), budget)
-	if err != nil {
+	if err != nil && !errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
 		return linkOccurrence{}, err
 	}
 	for _, o := range occurrences {
 		if o.Ref.Key == ref.Key {
 			return o, nil
 		}
+	}
+	if err != nil {
+		return linkOccurrence{}, err
 	}
 	return linkOccurrence{}, sql.ErrNoRows
 }
@@ -310,14 +323,14 @@ candidatesLoop:
 			}
 			// PostgreSQL rounds a nanosecond window to zero; compare exact starts below.
 			candidates, err = expandMeetingSeries(ctx, r, row, *key.ScheduledAt, key.ScheduledAt.Add(time.Second), budget)
-			if errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
-				continue
-			}
-			if err != nil {
+			if err != nil && !errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
 				return nil, err
 			}
 		} else {
 			o, err := resolveMeetingOccurrence(ctx, r, OccurrenceRef{MessageID: row.MessageID}, budget)
+			if errors.Is(err, sql.ErrNoRows) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
+				continue
+			}
 			if err != nil {
 				return nil, err
 			}

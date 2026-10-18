@@ -74,7 +74,7 @@ func parseMeetingLinkRef(value string, eventOnly bool) (store.MeetingLinkRef, er
 			return store.MeetingLinkRef{}, errors.New("invalid occurrence key")
 		}
 	}
-	return store.MeetingLinkRef{Kind: kind, OccurrenceRef: store.OccurrenceRef{MessageID: id, Key: key}}, nil
+	return store.MeetingLinkRef{Kind: kind, MessageID: id, Key: key}, nil
 }
 
 func (s *Server) handleMeetingLinkDecision(w http.ResponseWriter, r *http.Request) {

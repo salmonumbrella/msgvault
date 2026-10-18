@@ -39,7 +39,7 @@ func TestMeetingLinksSuggestionsRankingAndReadOnly(t *testing.T) {
 		}
 		return nil
 	}})
-	suggestions, err := observed.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "evt", OccurrenceRef: OccurrenceRef{MessageID: event}}, 10)
+	suggestions, err := observed.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "evt", MessageID: event}, 10)
 	requirements.NoError(err)
 	requirements.Len(suggestions, 3)
 	assertions.Equal(int64(1), queries.Load())
@@ -48,17 +48,17 @@ func TestMeetingLinksSuggestionsRankingAndReadOnly(t *testing.T) {
 		assertions.Equal(1, suggestion.SharedAttendees)
 	}
 	// Circleback's room URL stays a suggestion, including when the times overlap.
-	assertions.Equal("", linkedMeetingRefs(t, st, notes[0])[notes[0]])
-	reverse, err := observed.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: notes[0]}}, 1)
+	assertions.Empty(linkedMeetingRefs(t, st, notes[0])[notes[0]])
+	reverse, err := observed.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", MessageID: notes[0]}, 1)
 	requirements.NoError(err)
 	requirements.Len(reverse, 1)
 	assertions.Equal(fmt.Sprintf("evt:%d", event), reverse[0].Ref)
 	assertions.Equal(int64(2), queries.Load())
 	requirements.NoError(st.UpsertMessageRawWithFormat(event, []byte(`{"id":"event","status":"cancelled","start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"}}`), "gcal_json"))
-	suggestions, err = observed.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "evt", OccurrenceRef: OccurrenceRef{MessageID: event}}, 10)
+	suggestions, err = observed.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "evt", MessageID: event}, 10)
 	requirements.NoError(err)
 	assertions.Empty(suggestions)
-	reverse, err = observed.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: notes[0]}}, 10)
+	reverse, err = observed.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", MessageID: notes[0]}, 10)
 	requirements.NoError(err)
 	assertions.Empty(reverse)
 	var count int
@@ -67,6 +67,7 @@ func TestMeetingLinksSuggestionsRankingAndReadOnly(t *testing.T) {
 }
 
 func TestMeetingLinksSuggestionsTimeWindow(t *testing.T) {
+	assertions := assert.New(t)
 	requirements := require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
 	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "window@example.org"))
@@ -110,22 +111,22 @@ func TestMeetingLinksSuggestionsTimeWindow(t *testing.T) {
 			want = append(want, id)
 		}
 	}
-	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "evt", OccurrenceRef: OccurrenceRef{MessageID: event}}, 100)
+	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "evt", MessageID: event}, 100)
 	requirements.NoError(err)
 	var got []int64
 	for _, suggestion := range suggestions {
 		got = append(got, suggestion.MemberMessageID)
 		if suggestion.MemberMessageID == uidless {
-			assert.Equal(t, fmt.Sprintf("evt:%d", event), suggestion.Ref)
-			assert.Equal(t, 30, suggestion.OverlapMinutes)
+			assertions.Equal(fmt.Sprintf("evt:%d", event), suggestion.Ref)
+			assertions.Equal(30, suggestion.OverlapMinutes)
 		}
 	}
-	assert.ElementsMatch(t, want, got)
-	suggestions, err = st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: uidless}}, 10)
+	assertions.ElementsMatch(want, got)
+	suggestions, err = st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{Kind: "msg", MessageID: uidless}, 10)
 	requirements.NoError(err)
 	requirements.Len(suggestions, 1)
-	assert.Equal(t, uidless, suggestions[0].MemberMessageID)
-	assert.Equal(t, fmt.Sprintf("evt:%d", event), suggestions[0].Ref)
-	assert.Equal(t, 30, suggestions[0].OverlapMinutes)
-	assert.Empty(t, linkedMeetingRefs(t, st, uidless)[uidless])
+	assertions.Equal(uidless, suggestions[0].MemberMessageID)
+	assertions.Equal(fmt.Sprintf("evt:%d", event), suggestions[0].Ref)
+	assertions.Equal(30, suggestions[0].OverlapMinutes)
+	assertions.Empty(linkedMeetingRefs(t, st, uidless)[uidless])
 }

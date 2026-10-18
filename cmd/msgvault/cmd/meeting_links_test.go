@@ -91,15 +91,16 @@ func TestMeetingLinkCommands(t *testing.T) {
 			requirements.NoError(err)
 			assertions.True(cleaned)
 			assertions.Equal(1, fake.calls)
-			if tc.args[0] == "suggest" {
+			switch tc.args[0] {
+			case "suggest":
 				assertions.Equal(tc.args[1], fake.ref)
 				assertions.Contains(out.String(), tc.want)
-			} else if tc.args[0] == "links" {
+			case "links":
 				assertions.Equal(int64(42), fake.id)
 				assertions.Contains(out.String(), tc.want)
 				assertions.Contains(out.String(), "evt:81")
 				assertions.Contains(out.String(), "2027-03-14T10:00:00Z")
-			} else {
+			default:
 				assertions.Equal(int64(42), fake.id)
 				assertions.Equal("evt:81@20270314T100000Z", fake.event)
 				assertions.Equal(tc.args[0], fake.decision)

@@ -138,8 +138,9 @@ func suggestionMembers(ctx context.Context, r SQLReader, ids []int64) (out []sug
 
 // MeetingLinkRef identifies a note or calendar occurrence for suggestions.
 type MeetingLinkRef struct {
-	Kind string
 	OccurrenceRef
+
+	Kind string
 }
 
 // SuggestMeetingLinksContext ranks overlapping events or transcripts.
@@ -182,10 +183,7 @@ func (s *Store) SuggestMeetingLinksContext(ctx context.Context, ref MeetingLinkR
 			var occurrences []linkOccurrence
 			if row.Event.Kind == meetingSeriesKind {
 				occurrences, err = expandMeetingSeries(ctx, s.meetingReader(ctx), row, member.Start, member.End, &budget)
-				if errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
-					continue
-				}
-				if err != nil {
+				if err != nil && !errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
 					return nil, err
 				}
 			} else {

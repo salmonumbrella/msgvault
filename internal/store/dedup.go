@@ -572,6 +572,12 @@ func (s *Store) MergeDuplicates(
 			}
 		}
 		if result.RawMIMEBackfilled > 0 {
+			if err := s.refreshMeetingProjectionWith(ctx, tx, survivorID); err != nil {
+				return err
+			}
+			if err := s.refreshCalendarEventProjectionWith(ctx, tx, survivorID); err != nil {
+				return err
+			}
 			_, err := s.refreshAccountAttributionTx(ctx, tx, survivorID, deliveryInput{reloadMIME: true})
 			return err
 		}

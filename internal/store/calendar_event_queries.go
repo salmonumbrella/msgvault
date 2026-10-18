@@ -143,6 +143,7 @@ func loadCalendarAttendees(ctx context.Context, r SQLReader, events []CalendarEv
 		if err != nil {
 			return fmt.Errorf("read calendar attendees: %w", err)
 		}
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var id int64
 			var attendee calevent.Attendee
@@ -242,6 +243,8 @@ func queryCalendarExceptionsInWindow(ctx context.Context, r SQLReader, masters [
 }
 
 func calendarExceptionWindow(masters []CalendarEventRow, lower, upper time.Time) (string, []any) {
+	// Calendar projections store UTC instants; SQLite compares these bounds as text.
+	lower, upper = lower.UTC(), upper.UTC()
 	// Include the full nominal interval of an occurrence cancelled or moved away.
 	originalLower := lower.Add(-calendarMasterDuration(masters))
 	predicate := `e.kind = 'exception' AND ((e.start_at < ? AND e.end_at >= ?) OR

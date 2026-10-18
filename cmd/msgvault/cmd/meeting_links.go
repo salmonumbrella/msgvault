@@ -125,16 +125,18 @@ func newMeetingLinksCommand(open meetingLinkOpen) *cobra.Command {
 			return json.MarshalWrite(cmd.OutOrStdout(), links)
 		}
 		if len(links) == 0 {
-			_, err := fmt.Fprintln(cmd.OutOrStdout(), "No linked calendar events")
-			return err
+			if _, err := fmt.Fprintln(cmd.OutOrStdout(), "No linked calendar events"); err != nil {
+				return fmt.Errorf("write meeting links: %w", err)
+			}
+			return nil
 		}
 		writer := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 		if _, err := fmt.Fprintln(writer, "EVENT\tSTART\tEND\tTITLE"); err != nil {
-			return err
+			return fmt.Errorf("write meeting links: %w", err)
 		}
 		for _, link := range links {
 			if _, err := fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", link.Ref, link.Start.Format(time.RFC3339), link.End.Format(time.RFC3339), normalizeSearchTableText(link.Subject)); err != nil {
-				return err
+				return fmt.Errorf("write meeting links: %w", err)
 			}
 		}
 		return writer.Flush()

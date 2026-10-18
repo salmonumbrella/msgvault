@@ -38,7 +38,6 @@ func TestMeetingLinksClient(t *testing.T) {
 		}
 		if r.URL.Path == "/api/v1/meetings/links" {
 			assertions.Equal(http.MethodGet, r.Method)
-			assertions.Equal("/api/v1/meetings/links", r.URL.Path)
 			w.Header().Set("Content-Type", "application/json")
 			if r.URL.Query().Get("message_id") == "43" {
 				_, err := w.Write([]byte(`{"links":[]}`))
@@ -82,12 +81,12 @@ func TestMeetingLinksClient(t *testing.T) {
 	requirements.ErrorAs(err, &apiError)
 	assertions.Equal(404, apiError.Status)
 	links, err := client.MeetingLinks(t.Context(), 42)
-	require.NoError(t, err)
-	require.Len(t, links, 1)
-	assert.Equal(t, "evt:81", links[0].Ref)
-	assert.Equal(t, "Planning", links[0].Subject)
-	assert.Equal(t, "2027-03-14T10:00:00Z", links[0].Start.Format(time.RFC3339))
+	requirements.NoError(err)
+	requirements.Len(links, 1)
+	assertions.Equal("evt:81", links[0].Ref)
+	assertions.Equal("Planning", links[0].Subject)
+	assertions.Equal("2027-03-14T10:00:00Z", links[0].Start.Format(time.RFC3339))
 	links, err = client.MeetingLinks(t.Context(), 43)
-	require.NoError(t, err)
-	assert.Empty(t, links)
+	requirements.NoError(err)
+	assertions.Empty(links)
 }
