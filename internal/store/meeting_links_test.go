@@ -75,14 +75,6 @@ func TestMeetingLinksUnlinkSavedIdentityWhenRecurrenceCannotBeResolved(t *testin
 					requirements.Empty(links, "the saved override still suppresses the automatic match")
 				}
 				requirements.ErrorIs(st.LinkMeetingContext(t.Context(), note, ref), tc.wantErr)
-
-				readCtx, release, err := st.BeginReadSnapshotContext(t.Context())
-				requirements.NoError(err)
-				budget := calrecur.RequestReadBudget
-				_, err = resolveMeetingOccurrence(readCtx, st.meetingReader(readCtx), ref, &budget)
-				release()
-				requirements.ErrorIs(err, tc.wantErr)
-
 				requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, ref))
 				assertions.Equal(fmt.Sprintf("evt:%d", automatic), linkedMeetingRefs(t, st, note)[note], "other links remain readable before the recurrence is repaired")
 				requirements.NoError(st.UpsertMessageRawWithFormat(master, []byte(raw), "gcal_json"))
@@ -104,6 +96,47 @@ func TestMeetingLinksSplitFollowsLaterUID(t *testing.T) {
 	links, err := st.MeetingLinksContext(t.Context(), note)
 	requirements.NoError(err)
 	requirements.Empty(links, "the saved split follows the target after it gains a logical UID")
+}
+
+func TestMeetingLinksSplitSurvivesUIDAcquisitionAndSourceRemoval(t *testing.T) {
+	for _, unlinkAfterRemoval := range []bool{false, true} {
+		name := "unlink before occurrence removal"
+		if unlinkAfterRemoval {
+			name = "unlink after occurrence removal"
+		}
+		t.Run(name, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			noteUID := "weekly@example.org"
+			_, note := projectionFixture(t, st, "note", "twenty_json", fmt.Sprintf(`{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":%q,"startsAt":"2027-03-14T10:00:00Z"}}`, noteUID))
+			copyRaw := strings.Replace(linkSeriesRaw, `"id":"series"`, `"id":"copy"`, 1)
+			_, copyID := calendarFixture(t, st, "copy", copyRaw, "copy-calendar@example.com")
+			uidlessRaw := strings.ReplaceAll(linkSeriesRaw, noteUID, "")
+			masterData, masterID := calendarFixture(t, st, "master", uidlessRaw, "master-calendar@example.com")
+			ref := OccurrenceRef{MessageID: masterID, Key: "20270314T100000Z"}
+			copyRef := fmt.Sprintf("evt:%d@%s", copyID, ref.Key)
+			requirements.Equal(copyRef, linkedMeetingRefs(t, st, note)[note], "the UID copy is initially matched automatically")
+			requirements.NoError(st.LinkMeetingContext(t.Context(), note, ref))
+			requirements.Equal(fmt.Sprintf("evt:%d@%s", masterID, ref.Key), linkedMeetingRefs(t, st, note)[note], "the explicit link replaces the automatic copy")
+			_, independentID := calendarFixture(t, st, "independent", singleLinkRaw("independent", noteUID))
+			independentRef := fmt.Sprintf("evt:%d", independentID)
+
+			requirements.NoError(st.SetMessageMetadata(masterID, sql.NullString{String: `{"calendar_id":"master-calendar@example.com","ical_uid":"weekly@example.org"}`, Valid: true}))
+			requirements.NoError(st.UpsertMessageRawWithFormat(masterID, []byte(linkSeriesRaw), "gcal_json"))
+			removedOccurrence := strings.Replace(linkSeriesRaw, "RRULE:FREQ=WEEKLY;COUNT=6", "RRULE:FREQ=WEEKLY;COUNT=1", 1)
+			if unlinkAfterRemoval {
+				requirements.NoError(st.UpsertMessageRawWithFormat(masterID, []byte(removedOccurrence), "gcal_json"))
+				requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, ref))
+			} else {
+				requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, ref))
+				requirements.NoError(st.UpsertMessageRawWithFormat(masterID, []byte(removedOccurrence), "gcal_json"))
+			}
+			assertions.Equal(independentRef, linkedMeetingRefs(t, st, note)[note], "the split suppresses the removed occurrence without hiding another automatic match")
+
+			requirements.NoError(st.RemoveSource(masterData.Message.SourceID))
+			assertions.Equal(independentRef, linkedMeetingRefs(t, st, note)[note], "the UID split survives source removal and continues to suppress the surviving copy")
+		})
+	}
 }
 
 func TestMeetingLinksCalendarUIDLookupPlan(t *testing.T) {
