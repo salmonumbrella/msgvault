@@ -359,6 +359,10 @@ func (s *Store) meetingMemberOccurrences(ctx context.Context, r reboundReader, m
 		if err != nil {
 			return nil, err
 		}
+		// Keep an absent target's identity so its decision still overrides automatic matches.
+		if len(targets) == 0 {
+			targets = []linkOccurrence{{Identity: d.Identity}}
+		}
 		// A UID split still suppresses automatic evidence when its last copy is absent.
 		if d.Decision == "split" && !d.CreatedAt.Before(splits[d.Identity]) {
 			splits[d.Identity] = d.CreatedAt
@@ -371,12 +375,16 @@ func (s *Store) meetingMemberOccurrences(ctx context.Context, r reboundReader, m
 		}
 	}
 	var out []linkOccurrence
+	hasManualLink := false
 	for _, d := range resolved {
 		if d.Decision == "link" && d.CreatedAt.After(splits[d.target.Identity]) {
-			out = append(out, d.target)
+			hasManualLink = true
+			if d.target.Ref.MessageID != 0 {
+				out = append(out, d.target)
+			}
 		}
 	}
-	if len(out) > 0 {
+	if hasManualLink {
 		return uniqueMeetingOccurrences(out), nil
 	}
 	key, err := memberLinkKey(ctx, r, memberID)

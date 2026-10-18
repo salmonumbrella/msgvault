@@ -240,14 +240,16 @@ func TestMeetingLinksOrphanDecisionAfterMasterArrives(t *testing.T) {
 	requirements := require.New(t)
 
 	st := newRFC822IDBackfillBackendStore(t)
+	_, automatic := calendarFixture(t, st, "automatic", singleLinkRaw("automatic", "automatic@example.org"))
 	_, orphan := calendarFixture(t, st, "orphan", `{"id":"series_20270314T100000Z","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"}}`)
-	_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"automatic@example.org"}}`)
+	requirements.Equal(fmt.Sprintf("evt:%d", automatic), linkedMeetingRefs(t, st, note)[note])
 	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: orphan}))
 	assertions.Equal(fmt.Sprintf("evt:%d", orphan), linkedMeetingRefs(t, st, note)[note])
 	_, master := calendarFixture(t, st, "master", linkSeriesRaw)
 	assertions.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", master), linkedMeetingRefs(t, st, note)[note])
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: master, Key: "20270314T100000Z"}))
-	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
+	assertions.Equal(fmt.Sprintf("evt:%d", automatic), linkedMeetingRefs(t, st, note)[note])
 }
 
 func TestMeetingLinksActualRecurrenceBudget(t *testing.T) {
@@ -433,6 +435,40 @@ func TestMeetingLinksSplitSurvivesSourceRemoval(t *testing.T) {
 			assertions.Empty(linkedMeetingRefs(t, st, note)[note], "reimport must retain the split")
 			requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: b, Key: key}))
 			assertions.NotEmpty(linkedMeetingRefs(t, st, note)[note], "a new owner decision can undo the split")
+		})
+	}
+}
+
+func TestMeetingLinksManualOverrideSurvivesSourceRemoval(t *testing.T) {
+	for _, recurring := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recurring=%t", recurring), func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			_, automatic := calendarFixture(t, st, "automatic", singleLinkRaw("automatic", "automatic@example.org"))
+			_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"automatic@example.org"}}`)
+			raw, key := singleLinkRaw("manual", "manual@example.org"), ""
+			if recurring {
+				raw, key = linkSeriesRaw, "20270314T100000Z"
+			}
+			data, manual := calendarFixture(t, st, "manual", raw, "manual@example.com")
+			requirements.Equal(fmt.Sprintf("evt:%d", automatic), linkedMeetingRefs(t, st, note)[note])
+			requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: manual, Key: key}))
+			suffix := ""
+			if recurring {
+				suffix = "@20270314T100000Z"
+			}
+			want := fmt.Sprintf("evt:%d%s", manual, suffix)
+			requirements.Equal(want, linkedMeetingRefs(t, st, note)[note])
+			requirements.NoError(st.RemoveSource(data.Message.SourceID))
+			assertions.Empty(linkedMeetingRefs(t, st, note)[note], "an absent manual target must still override the available automatic match")
+
+			data, replacement := calendarFixture(t, st, "manual", raw, "manual@example.com")
+			want = fmt.Sprintf("evt:%d%s", replacement, suffix)
+			assertions.Equal(want, linkedMeetingRefs(t, st, note)[note], "reimport must resolve the saved UID decision")
+			requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: replacement, Key: key}))
+			assertions.Equal(fmt.Sprintf("evt:%d", automatic), linkedMeetingRefs(t, st, note)[note], "a later split must allow automatic matching again")
+			requirements.NoError(st.RemoveSource(data.Message.SourceID))
+			assertions.Equal(fmt.Sprintf("evt:%d", automatic), linkedMeetingRefs(t, st, note)[note], "an absent split target must keep the earlier link superseded")
 		})
 	}
 }
