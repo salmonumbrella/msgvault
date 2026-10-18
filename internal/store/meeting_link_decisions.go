@@ -60,6 +60,12 @@ func (s *Store) writeMeetingLinkDecision(ctx context.Context, memberID int64, oc
 		if err != nil {
 			return fmt.Errorf("resolve meeting decision target: %w", err)
 		}
+		if decision == "split" {
+			// The UID upsert supersedes UID links; clear its older message identity too.
+			if _, err := tx.ExecContext(ctx, `DELETE FROM meeting_link_decisions WHERE member_message_id = ? AND target_message_id = ? AND occurrence_key = ? AND decision = 'link'`, memberID, target.Ref.MessageID, target.Identity.OccurrenceKey); err != nil {
+				return err
+			}
+		}
 		_, err = tx.ExecContext(ctx, meetingDecisionUpsert, memberID, target.Identity.ICalUID, sql.NullInt64{Int64: target.Identity.EventMessageID, Valid: target.Identity.ICalUID == ""}, target.Identity.OccurrenceKey, decision, time.Now().UTC())
 		return err
 	})
@@ -92,7 +98,6 @@ func (s *Store) resolveMeetingDecisionTarget(ctx context.Context, r reboundReade
 			return linkOccurrence{}, err
 		}
 		if err == nil {
-			target.Identity = identity
 			return target, nil
 		}
 	}
