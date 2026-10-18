@@ -2,10 +2,7 @@
 package calevent
 
 import (
-	"errors"
-	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"go.kenn.io/msgvault/internal/calrecur"
@@ -21,104 +18,31 @@ func IsRoomAttendee(email string, resourceFlag bool) bool {
 	return ok && (domain == "resource.calendar.google.com" || strings.HasSuffix(domain, ".resource.calendar.google.com"))
 }
 
-// JoinKey returns a provider-specific comparison key, preserving no credentials.
-// Callers keep the original URL separately for joining the meeting.
-func JoinKey(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
-		return ""
-	}
-	host := strings.ToLower(u.Hostname())
-	path := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
-	switch {
-	case host == "meet.google.com":
-		if len(path) == 1 && path[0] != "" {
-			return "meet:" + strings.ToLower(path[0])
-		}
-	case host == "zoom.us" || strings.HasSuffix(host, ".zoom.us"):
-		if len(path) == 2 && path[0] == "j" && path[1] != "" {
-			for _, c := range path[1] {
-				if c < '0' || c > '9' {
-					return ""
-				}
-			}
-			return "zoom:" + path[1]
-		}
-	case host == "teams.microsoft.com":
-		escaped := strings.Split(strings.TrimPrefix(u.EscapedPath(), "/"), "/")
-		if len(escaped) >= 3 && escaped[0] == "l" && escaped[1] == "meetup-join" && escaped[2] != "" {
-			thread, err := url.PathUnescape(escaped[2])
-			if err == nil {
-				return "teams:" + thread
-			}
-		}
-	}
-	return ""
-}
-
-// SourceContext provides the calendar identity and current source time zone.
-type SourceContext struct{ CalendarID, CalendarTimeZone string }
-
 type Attendee struct {
-	Email, DisplayName, Role, RSVP string
-	IsCopySelf                     bool
+	Email       string `json:"email"`
+	DisplayName string `json:"display_name"`
+	Role        string `json:"role"`
+	RSVP        string `json:"rsvp"`
+	IsCopySelf  bool   `json:"is_self"`
 }
-
 type Event struct {
-	Provider, Namespace, ProviderEventID, SeriesProviderID, Kind string
-	Original                                                     *calrecur.Identity
-	ICalUID                                                      string
-	Sequence                                                     int64
-	Status                                                       string
-	HasBounds, AllDay                                            bool
-	Start, End                                                   *time.Time
-	StartDate, EndDate                                           string
-	EventTimeZone, CalendarTimeZone                              string
-	Recurrence                                                   []string
-
-	JoinURL              string
-	JoinKey              string
-	OrganizerEmail       string
-	CalendarID           string
-	Transparency         string
-	Visibility           string
-	EventType            string
-	Location             string
-	CopySelfRSVP         string
-	Description          string
-	DescriptionTruncated bool
-	Attendees            []Attendee
+	ProviderEventID, SeriesProviderID, Kind string
+	Original                                *calrecur.Identity
+	Status                                  string
+	AllDay                                  bool
+	Start, End                              *time.Time
+	StartDate, EndDate                      string
+	EventTimeZone, CalendarTimeZone         string
+	Recurrence                              []string
+	Attendees                               []Attendee
 }
 
-type Decoder func(raw, metadata []byte, sc SourceContext) (Event, bool, error)
-
-const maxRawBytes = 64 << 20
-
-var errRawTooLarge = errors.New("calendar event raw exceeds decode limit")
-
-var decoders = struct {
-	sync.RWMutex
-
-	byFormat map[string]Decoder
-}{byFormat: make(map[string]Decoder)}
-
-// Register installs a decoder for an archived raw format.
-func Register(rawFormat string, d Decoder) {
-	decoders.Lock()
-	defer decoders.Unlock()
-	decoders.byFormat[rawFormat] = d
-}
-
-// Decode returns ok=false when no decoder accepts the stored raw format.
-func Decode(rawFormat string, raw, metadata []byte, sc SourceContext) (Event, bool, error) {
-	decoders.RLock()
-	decoder := decoders.byFormat[rawFormat]
-	decoders.RUnlock()
-	if decoder == nil {
+// Decode reads a provider snapshot with the source calendar's time zone.
+func Decode(rawFormat string, raw, metadata []byte, calendarZone string) (Event, bool, error) {
+	switch rawFormat {
+	case "gcal_json":
+		return decodeGoogleEvent(raw, metadata, calendarZone)
+	default:
 		return Event{}, false, nil
 	}
-	if len(raw) > maxRawBytes {
-		return Event{}, false, errRawTooLarge
-	}
-	return decoder(raw, metadata, sc)
 }
