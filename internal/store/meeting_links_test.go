@@ -86,6 +86,19 @@ func TestMeetingLinksUnlinkSavedIdentityWhenRecurrenceCannotBeResolved(t *testin
 	}
 }
 
+func TestMeetingLinksSplitFollowsLaterUID(t *testing.T) {
+	requirements := require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", ""))
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org"}}`)
+	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+	requirements.NoError(st.SetMessageMetadata(event, sql.NullString{String: `{"calendar_id":"calendar@example.com","ical_uid":"shared@example.org"}`, Valid: true}))
+	links, err := st.MeetingLinksContext(t.Context(), note)
+	requirements.NoError(err)
+	requirements.Empty(links, "the saved split follows the target after it gains a logical UID")
+}
+
 func TestMeetingLinksCalendarUIDLookupPlan(t *testing.T) {
 	requirements := require.New(t)
 	assertions := assert.New(t)

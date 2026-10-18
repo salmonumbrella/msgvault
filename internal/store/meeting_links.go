@@ -466,6 +466,10 @@ func (s *Store) meetingSplitIdentities(ctx context.Context, r reboundReader, ide
 	}
 	identities := []meetingIdentity{identity}
 	for _, row := range rows {
+		// A split saved without a UID follows the event when it gains one.
+		if identity.ICalUID == "" && row.ICalUID != "" {
+			identities = append(identities, meetingIdentity{ICalUID: row.ICalUID, OccurrenceKey: identity.OccurrenceKey})
+		}
 		if row.Event.Kind != "exception" || row.Event.Start == nil || row.Event.End == nil {
 			continue
 		}
