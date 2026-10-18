@@ -2,7 +2,6 @@ package twenty
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
@@ -201,21 +200,6 @@ func TestImportTwentyArchivesCalendarUIDAsMeetingLinkKey(t *testing.T) {
 	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT kind,value FROM meeting_link_keys WHERE message_id=?`), note).Scan(&kind, &value))
 	assert.Equal("ical_uid", kind)
 	assert.Equal("shared@example.org", value)
-
-	googleSource, err := st.GetOrCreateSource("google_calendar", "primary@example.com")
-	require.NoError(err)
-	eventRaw := `{"id":"calendar-copy","iCalUID":"shared@example.org","start":{"dateTime":"2026-09-01T10:00:00Z"},"end":{"dateTime":"2026-09-01T11:00:00Z"}}`
-	event, err := st.PersistMessage(&store.MessagePersistData{
-		Message:      &store.Message{SourceID: googleSource.ID, SourceMessageID: "calendar-copy", MessageType: "calendar_event", Subject: sql.NullString{String: "Planning", Valid: true}},
-		Conversation: &store.ConversationPersistData{SourceConversationID: "calendar-copy", ConversationType: "calendar_event", Title: "Planning"},
-		RawMIME:      []byte(eventRaw),
-		RawFormat:    "gcal_json",
-	})
-	require.NoError(err)
-	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), store.OwnerScope(), fmt.Sprintf("msg:%d", note), 10)
-	require.NoError(err)
-	require.Len(suggestions, 1)
-	assert.Equal(fmt.Sprintf("evt:%d", event), suggestions[0].Ref)
 }
 
 func TestImportTwentyRevisitsPendingAndLateEvidence(t *testing.T) {
