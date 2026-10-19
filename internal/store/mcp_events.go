@@ -65,9 +65,9 @@ type MCPEvent struct {
 }
 
 type mcpRuntime struct {
-	config      MCPEventsConfig
-	kinds       map[string]map[string]bool
-	fingerprint string
+	config              MCPEventsConfig
+	kinds               map[string]map[string]bool
+	coverageFingerprint string
 }
 
 type mcpWakeCallback struct{ wake func() }
@@ -234,8 +234,8 @@ func mcpNewRuntime(cfg MCPEventsConfig) (*mcpRuntime, string) {
 		Capabilities []MCPEventCapability
 	}{cfg.Enabled, coverage})
 	sum := sha256.Sum256(data)
-	r.fingerprint = hex.EncodeToString(sum[:])
-	return r, r.fingerprint
+	r.coverageFingerprint = hex.EncodeToString(sum[:])
+	return r, r.coverageFingerprint
 }
 
 func mcpEventRetention(runtime *mcpRuntime) time.Duration {
@@ -323,7 +323,7 @@ func (s *Store) mcpFenceWriterTx(ctx context.Context, tx *sql.Tx, runtime *mcpRu
 			// capture back on after another process disabled it.
 			return mcpStoreError("capture_configuration_changed")
 		}
-		if clock.fingerprint != runtime.fingerprint {
+		if clock.fingerprint != runtime.coverageFingerprint {
 			// Keep the persisted configuration authoritative, but stop existing
 			// subscriptions before this stale writer can make an uncaptured
 			// mutation under its older coverage.
@@ -347,7 +347,7 @@ func (s *Store) mcpChangeCaptureTx(ctx context.Context, tx *sql.Tx, runtime *mcp
 	now := mcpTime(time.Now().UTC())
 	var clock MCPEventClock
 	//nolint:gosec // The SQL is static; Rebind only changes placeholders.
-	err := tx.QueryRowContext(ctx, s.Rebind(`UPDATE mcp_event_clock SET capture_epoch=capture_epoch+1,epoch_started_at=?,coverage_fingerprint=?,enabled=? WHERE singleton=1 RETURNING head_seq,pruned_through_seq,capture_epoch,enabled,coverage_fingerprint`), now, runtime.fingerprint, runtime.config.Enabled).Scan(&clock.HeadSeq, &clock.PrunedThroughSeq, &clock.Epoch, &clock.enabled, &clock.fingerprint)
+	err := tx.QueryRowContext(ctx, s.Rebind(`UPDATE mcp_event_clock SET capture_epoch=capture_epoch+1,epoch_started_at=?,coverage_fingerprint=?,enabled=? WHERE singleton=1 RETURNING head_seq,pruned_through_seq,capture_epoch,enabled,coverage_fingerprint`), now, runtime.coverageFingerprint, runtime.config.Enabled).Scan(&clock.HeadSeq, &clock.PrunedThroughSeq, &clock.Epoch, &clock.enabled, &clock.fingerprint)
 	if err != nil {
 		return MCPEventClock{}, err
 	}
@@ -386,7 +386,18 @@ func (s *Store) mcpStopCaptureGapSubscriptionsTx(ctx context.Context, tx *sql.Tx
 // then stop activating and delivering until it restarts and reconfigures.
 func (s *Store) mcpCaptureCurrent(clock MCPEventClock) bool {
 	r := s.mcpRoot().mcpConfig.Load()
-	return r != nil && r.config.Enabled && clock.enabled && clock.fingerprint == r.fingerprint
+	return r != nil && r.config.Enabled && clock.enabled && clock.fingerprint == r.coverageFingerprint
+}
+
+// mcpRuntimeCurrentTx checks the in-memory capture snapshot against the
+// durable configuration while the caller holds the Events clock fence.
+func (s *Store) mcpRuntimeCurrentTx(ctx context.Context, tx SQLReader, runtime *mcpRuntime) (bool, error) {
+	var enabled bool
+	var fingerprint string
+	if err := tx.QueryRowContext(ctx, `SELECT enabled,coverage_fingerprint FROM mcp_event_clock WHERE singleton=1`).Scan(&enabled, &fingerprint); err != nil {
+		return false, mcpSafeError(err)
+	}
+	return runtime != nil && runtime.config.Enabled && enabled && runtime.coverageFingerprint == fingerprint, nil
 }
 
 // Events control transactions use the raw driver only inside this boundary,
@@ -638,6 +649,14 @@ func (s *Store) appendMCPEventTx(ctx context.Context, logged *loggedTx, event MC
 		}
 	}
 	tx := logged.Tx
+	r := s.mcpRoot().mcpConfig.Load()
+	current, err := s.mcpRuntimeCurrentTx(ctx, tx, r)
+	if err != nil {
+		return err
+	}
+	if !current {
+		return nil
+	}
 	var sourceType string
 	if err := logged.QueryRowContext(ctx, `SELECT source_type FROM sources WHERE id=?`, event.SourceID).Scan(&sourceType); err != nil {
 		return mcpSafeError(err)
@@ -645,7 +664,6 @@ func (s *Store) appendMCPEventTx(ctx context.Context, logged *loggedTx, event MC
 	if importEvent {
 		sourceType = s.mcpIngest.importRun.Format
 	}
-	r := s.mcpRoot().mcpConfig.Load()
 	if !r.kinds[event.Family+"\x00"+sourceType][event.Kind] {
 		return nil
 	}
@@ -702,7 +720,7 @@ func (s *Store) appendMCPEventTx(ctx context.Context, logged *loggedTx, event MC
 			event.OccurredAt = event.RecordedAt
 		}
 	}
-	_, err := logged.ExecContext(ctx, `INSERT INTO mcp_event_log (seq,epoch,family,kind,scope_kind,scope_id,item_key,message_id,message_reference_seq,conversation_id,source_id,attachment_id,from_me,occurred_at,recorded_at,data) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, event.Seq, event.Epoch, event.Family, event.Kind, event.ScopeKind, event.ScopeID, event.ItemKey, mcpOptionalID(event.MessageID), mcpOptionalID(event.MessageReferenceSeq), event.ConversationID, event.SourceID, mcpOptionalID(event.AttachmentID), event.FromMe, mcpTime(event.OccurredAt), mcpTime(event.RecordedAt), string(event.Data))
+	_, err = logged.ExecContext(ctx, `INSERT INTO mcp_event_log (seq,epoch,family,kind,scope_kind,scope_id,item_key,message_id,message_reference_seq,conversation_id,source_id,attachment_id,from_me,occurred_at,recorded_at,data) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, event.Seq, event.Epoch, event.Family, event.Kind, event.ScopeKind, event.ScopeID, event.ItemKey, mcpOptionalID(event.MessageID), mcpOptionalID(event.MessageReferenceSeq), event.ConversationID, event.SourceID, mcpOptionalID(event.AttachmentID), event.FromMe, mcpTime(event.OccurredAt), mcpTime(event.RecordedAt), string(event.Data))
 	if err != nil {
 		return mcpSafeError(err)
 	}

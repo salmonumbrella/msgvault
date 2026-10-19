@@ -355,7 +355,6 @@ func ingestRawMessageMode(
 			messageID,
 		).Scan(&storedCount); err != nil {
 			incomplete(fmt.Errorf("count attachments: %w", err))
-		}
 			log.Warn("failed to count stored attachments",
 				"message", messageID, "error", err,
 			)

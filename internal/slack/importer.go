@@ -656,6 +656,9 @@ func (imp *Importer) ensureMembership(ctx context.Context, syncID, convID int64,
 			if ctx.Err() != nil {
 				return nil, 0, nil, ctx.Err()
 			}
+			if errors.Is(err, ErrCredentialRevoked) {
+				return nil, 0, nil, err
+			}
 			if errors.Is(err, ErrNotFound) {
 				if retireErr := imp.retireNativeSlackReadScope(ctx, c.ID, ""); retireErr != nil {
 					return nil, 0, nil, retireErr
@@ -743,6 +746,9 @@ func (imp *Importer) walkWindow(ctx context.Context, cc *convScope, state *SyncS
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+			if errors.Is(err, ErrCredentialRevoked) {
+				return err
 			}
 			if errors.Is(err, ErrInvalidCursor) && cs.BackfillCursor != "" {
 				cs.BackfillCursor = ""
@@ -909,6 +915,9 @@ func (imp *Importer) drainPendingThreads(ctx context.Context, cc *convScope, sum
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if errors.Is(err, ErrCredentialRevoked) {
+				return err
+			}
 			if errors.Is(err, ErrNotFound) {
 				if retireErr := imp.retireNativeSlackReadScope(ctx, cc.channelID, pt.RootTS); retireErr != nil {
 					return retireErr
@@ -1058,6 +1067,9 @@ func (imp *Importer) threadCatchUp(ctx context.Context, cc *convScope, state *Sy
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+			if errors.Is(err, ErrCredentialRevoked) {
+				return err
 			}
 			if errors.Is(err, ErrInvalidCursor) && cs.CatchUpCursor != "" {
 				cs.CatchUpCursor = ""
@@ -1212,6 +1224,9 @@ func (imp *Importer) rescanHead(ctx context.Context, cc *convScope, sum *ImportS
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if errors.Is(err, ErrCredentialRevoked) {
+				return err
+			}
 			if errors.Is(err, ErrNotFound) {
 				if retireErr := imp.retireNativeSlackReadScope(ctx, cc.channelID, ""); retireErr != nil {
 					return retireErr
@@ -1278,6 +1293,9 @@ func (imp *Importer) rescanThread(ctx context.Context, cc *convScope, rootTS str
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+			if errors.Is(err, ErrCredentialRevoked) {
+				return err
 			}
 			if errors.Is(err, ErrNotFound) {
 				if retireErr := imp.retireNativeSlackReadScope(ctx, cc.channelID, rootTS); retireErr != nil {

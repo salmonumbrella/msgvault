@@ -89,8 +89,8 @@ func DefaultOptions() *Options {
 // Syncer performs Gmail synchronization.
 type Syncer struct {
 	// Set only on the per-run copy, before message fetches or worker startup.
-	nativeSourcePermission     *store.NativeSourcePermission
-	nativeGmailSourceReference string
+	nativeSourcePermission         *store.NativeSourcePermission
+	nativeGmailSourceReference     string
 	nativeGmailPermissionReference string
 	nativeGmailInitiallyReadGrant  bool
 	nativeGmailPermissionReduced   bool
