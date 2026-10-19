@@ -254,7 +254,7 @@ func (h *handlers) searchVisualAttachments(ctx context.Context, req toolRequest)
 		}
 		return int64(raw), nil
 	}
-	sourceID, toolErr := parsePositiveID("source_id")
+	sourceID, toolErr := parsePositiveID(mcpFieldSourceID)
 	if toolErr != nil {
 		return toolErr, nil
 	}

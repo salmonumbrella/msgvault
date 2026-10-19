@@ -234,6 +234,9 @@ func TestWebhookDeliveryReturnsHeadersWithoutWaitingForBody(t *testing.T) {
 
 // stalledLookupWebhook returns a client whose callback lookup waits until
 // release is called, and a channel that receives each dial's result.
+
+// stalledLookupWebhook returns a client whose callback lookup waits until
+// release is called, and a channel that receives each dial's result.
 func stalledLookupWebhook(t *testing.T) (w *webhookClient, lookupStarted chan struct{}, release func(), dials chan error) {
 	t.Helper()
 	w = tlsWebhook(t, func(rw http.ResponseWriter, r *http.Request) { rw.WriteHeader(http.StatusNoContent) })

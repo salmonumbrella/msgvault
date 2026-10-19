@@ -48,7 +48,7 @@ func draftCreatorSQL(ctx context.Context) any {
 const (
 	draftKindGmail  = "gmail"
 	draftKindIMAP   = "imap"
-	draftKindBeeper = "beeper"
+	draftKindBeeper = sourceTypeBeeper
 	draftKindChat   = "chat"
 )
 
@@ -105,5 +105,5 @@ func (s *Store) appendDraftSnapshotTx(ctx context.Context, tx *loggedTx, draftKi
 		return err
 	}
 	live := s.WithIngestContext(IngestContext{Mode: IngestLive, ObservedAt: changed})
-	return live.appendMCPEventTx(ctx, tx, MCPEvent{Family: "msgvault.draft_changed", Kind: kind, ScopeKind: "conversation", ScopeID: snapshot.conversation, ConversationID: snapshot.conversation, SourceID: snapshot.source, MessageID: snapshot.message, ItemKey: fmt.Sprintf("draft:%s:%d:%s", draftID, snapshot.revision, kind), OccurredAt: changed, Data: raw})
+	return live.appendMCPEventTx(ctx, tx, MCPEvent{Family: "msgvault.draft_changed", Kind: kind, ScopeKind: mcpScopeConversation, ScopeID: snapshot.conversation, ConversationID: snapshot.conversation, SourceID: snapshot.source, MessageID: snapshot.message, ItemKey: fmt.Sprintf("draft:%s:%d:%s", draftID, snapshot.revision, kind), OccurredAt: changed, Data: raw})
 }
