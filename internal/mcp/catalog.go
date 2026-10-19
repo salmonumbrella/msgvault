@@ -19,6 +19,11 @@ import (
 )
 
 const (
+	mcpFieldSourceID    = "source_id"
+	mcpSchemaTypeObject = "object"
+)
+
+const (
 	schemaTypeArray    = "array"
 	schema202012       = "https://json-schema.org/draft/2020-12/schema"
 	maxJSONSafeInteger = float64(9007199254740991)
@@ -82,7 +87,7 @@ func searchVisualAttachmentsDefinition() toolDefinition {
 				Type: schemaTypeArray, Description: "Optional union of from_person, to_person, and group; requires a person reference",
 				Items: direction,
 			},
-			"source_id":      safeIDSchema("Only attachments from this source ID"),
+			mcpFieldSourceID: safeIDSchema("Only attachments from this source ID"),
 			toolArgMessageID: safeIDSchema("Only attachments owned by this message ID"),
 			"filename":       stringSchema("Case-insensitive filename substring filter"),
 			"mime_prefix":    stringSchema("Case-insensitive MIME prefix filter, such as image/"),
@@ -294,7 +299,7 @@ func querySQLDefinition() toolDefinition {
 			"sql":   stringSchema("One read-only SQL statement"),
 			"fresh": booleanSchema("Request a background cache check including writes committed before this request"),
 		}, "sql"),
-		&jsonschema.Schema{Schema: schema202012, Type: "object", OneOf: []*jsonschema.Schema{result, accepted}},
+		&jsonschema.Schema{Schema: schema202012, Type: mcpSchemaTypeObject, OneOf: []*jsonschema.Schema{result, accepted}},
 		(*handlers).querySQL,
 	)
 	definition.availability = func(capabilities catalogCapabilities) bool { return capabilities.sqlQuery }
@@ -395,7 +400,7 @@ func toolAnnotations(readOnly bool) *sdkmcp.ToolAnnotations {
 func closedObject(properties map[string]*jsonschema.Schema, required ...string) *jsonschema.Schema {
 	return &jsonschema.Schema{
 		Schema:               schema202012,
-		Type:                 "object",
+		Type:                 mcpSchemaTypeObject,
 		Properties:           properties,
 		Required:             required,
 		AdditionalProperties: rejectAllSchema(),
@@ -481,7 +486,7 @@ func searchMessagesOutputSchema() *jsonschema.Schema {
 	semantic.Schema = ""
 	return &jsonschema.Schema{
 		Schema: schema202012,
-		Type:   "object",
+		Type:   mcpSchemaTypeObject,
 		OneOf:  []*jsonschema.Schema{metadata, semantic},
 	}
 }

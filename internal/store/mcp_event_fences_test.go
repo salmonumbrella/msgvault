@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
@@ -55,4 +56,72 @@ func TestMCPEventsEnabledWriterFencesIdentityBeforeClock(t *testing.T) {
 	var clockSeen string
 	require.NoError(f.Store.DB().QueryRow(`SELECT value FROM archive_metadata WHERE key='synthetic_mcp_clock_seen'`).Scan(&clockSeen))
 	assert.Equal("1", clockSeen)
+}
+
+func TestMCPEnabledWriterWithStaleCoverageRecordsCaptureGap(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	f := storetest.New(t)
+	grantSyntheticSourceFixture(t, f)
+
+	staleWriter, err := store.OpenForTest(store.DBPathForTest(f.Store))
+	require.NoError(err)
+	t.Cleanup(func() { assert.NoError(staleWriter.Close()) })
+	narrow := mcpStoreConfig()
+	_, err = staleWriter.ConfigureMCPEvents(t.Context(), narrow)
+	require.NoError(err)
+	broad := narrow
+	broad.Capabilities = append(append([]store.MCPEventCapability(nil), narrow.Capabilities...), store.MCPEventCapability{
+		Family: "msgvault.source_message_archived", SourceType: "gmail", Kinds: []string{"message"},
+	})
+	_, err = f.Store.ConfigureMCPEvents(t.Context(), broad)
+	require.NoError(err)
+	var expectedFingerprint string
+	require.NoError(f.Store.DB().QueryRow(`SELECT coverage_fingerprint FROM mcp_event_clock WHERE singleton=1`).Scan(&expectedFingerprint))
+
+	now := time.Now().UTC()
+	input := store.MCPSubscription{
+		ID: "sub_stale_writer_coverage_fence", Principal: "owner:synthetic", Name: "msgvault.source_message_archived",
+		Arguments: []byte(`{"kinds":["message"]}`), ScopeKind: "source", ScopeID: f.Source.ID, SourceID: f.Source.ID,
+		CallbackURL: "https://receiver.example.net/events", SecretEnc: []byte("synthetic-secret"),
+		SecretRevision: 1, VerifiedRevision: 1, ExpiresAt: now.Add(time.Hour),
+	}
+	require.NoError(f.Store.BindMCPSubscriptionScope(t.Context(), &input))
+	active, _, err := f.Store.ActivateMCPSubscription(t.Context(), store.MCPActivation{Subscription: input, Now: now})
+	require.NoError(err)
+	require.NotNil(active)
+	assert.Equal("active", active.State)
+	var beforeEpoch int64
+	require.NoError(f.Store.DB().QueryRow(`SELECT capture_epoch FROM mcp_event_clock WHERE singleton=1`).Scan(&beforeEpoch))
+
+	message := f.NewMessage().WithSourceMessageID("synthetic-stale-coverage-message").Build()
+	_, err = staleWriter.WithIngestContext(store.IngestContext{Mode: store.IngestLive}).PersistMessageContext(t.Context(), &store.MessagePersistData{Message: message})
+	require.NoError(err)
+
+	stopped, err := f.Store.GetMCPSubscription(t.Context(), active.ID)
+	require.NoError(err)
+	require.NotNil(stopped)
+	assert.Equal("stopped", stopped.State, "a writer with incompatible coverage must stop subscriptions before it can omit arrivals")
+	assert.Equal("capture_gap", stopped.StopReason)
+	var afterEpoch int64
+	require.NoError(f.Store.DB().QueryRow(`SELECT capture_epoch FROM mcp_event_clock WHERE singleton=1`).Scan(&afterEpoch))
+	assert.Equal(beforeEpoch+1, afterEpoch, "the incompatible write records a new capture epoch")
+	var actualFingerprint string
+	require.NoError(f.Store.DB().QueryRow(`SELECT coverage_fingerprint FROM mcp_event_clock WHERE singleton=1`).Scan(&actualFingerprint))
+	assert.Equal(expectedFingerprint, actualFingerprint, "a stale writer must not replace the current coverage")
+	var captured int
+	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`SELECT COUNT(*) FROM mcp_event_log WHERE family=? AND source_id=?`), "msgvault.source_message_archived", f.Source.ID).Scan(&captured))
+	assert.Zero(captured, "the stale writer does not emit the newly selected source family")
+
+	_, err = f.Store.ConfigureMCPEvents(t.Context(), store.MCPEventsConfig{Principal: "owner:synthetic"})
+	require.NoError(err)
+	disabledMessage := f.NewMessage().WithSourceMessageID("synthetic-stale-disabled-coverage-message").Build()
+	_, err = staleWriter.WithIngestContext(store.IngestContext{Mode: store.IngestLive}).PersistMessageContext(t.Context(), &store.MessagePersistData{Message: disabledMessage})
+	require.ErrorContains(err, "capture_configuration_changed", "a stale enabled writer must not turn disabled capture back on")
+	var persisted int
+	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`SELECT COUNT(*) FROM messages WHERE source_id=? AND source_message_id=?`), f.Source.ID, disabledMessage.SourceMessageID).Scan(&persisted))
+	assert.Zero(persisted, "the incompatible mutation is rejected")
+	var enabled bool
+	require.NoError(f.Store.DB().QueryRow(`SELECT enabled FROM mcp_event_clock WHERE singleton=1`).Scan(&enabled))
+	assert.False(enabled, "stale writer configuration must not re-enable Events")
 }

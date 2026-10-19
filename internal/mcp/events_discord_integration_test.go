@@ -271,22 +271,28 @@ func TestEventsNativeDiscordImportAndReceiptRead(t *testing.T) {
 	assert.Equal(false, eventsWireObject(t, messageDefinition["inputSchema"])["additionalProperties"])
 	// The fixture implements Discord's read-only REST pagination contract.
 	var live, parentAvailable atomic.Bool
+	var guild atomic.Int64
+	guild.Store(200)
 	const body = "Synthetic Discord content read through a delivery receipt."
-	const guildID = "200"
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		guildID := strconv.FormatInt(guild.Load(), 10)
 		switch r.URL.Path {
 		case "/users/@me":
 			assert.NoError(json.NewEncoder(w).Encode(discord.User{ID: "101", Username: "Synthetic Owner", Bot: true}))
-		case "/guilds/200":
+		case "/guilds/200/members/101", "/guilds/201/members/101":
+			assert.NoError(json.NewEncoder(w).Encode(discord.NativeGuildMember{User: discord.User{ID: "101", Bot: true}, Roles: []string{}}))
+		case "/guilds/200/roles", "/guilds/201/roles":
+			assert.NoError(json.NewEncoder(w).Encode([]discord.NativeGuildRole{{ID: guildID, Permissions: "66560"}}))
+		case "/guilds/200", "/guilds/201":
 			assert.NoError(json.NewEncoder(w).Encode(discord.Guild{ID: guildID, Name: "Synthetic guild"}))
-		case "/guilds/200/channels":
+		case "/guilds/200/channels", "/guilds/201/channels":
 			assert.NoError(json.NewEncoder(w).Encode([]discord.Channel{{ID: "300", GuildID: guildID, Type: 0, Name: "Synthetic channel"}}))
-		case "/guilds/200/threads/active", "/channels/300/threads/archived/public", "/channels/300/users/@me/threads/archived/private":
+		case "/guilds/200/threads/active", "/guilds/201/threads/active", "/channels/300/threads/archived/public", "/channels/300/users/@me/threads/archived/private":
 			assert.NoError(json.NewEncoder(w).Encode(map[string]any{"threads": []any{}, "has_more": false}))
 		case "/channels/300/messages":
 			message := func(id, text, author, name string, bot bool) discord.Message {
@@ -391,14 +397,12 @@ func TestEventsNativeDiscordImportAndReceiptRead(t *testing.T) {
 	assert.Equal(strconv.FormatInt(messageID, 10), payload["message_id"])
 	require.NoError(resolvedPayload.Validate(payload), "actual occurrence must match its advertised schema")
 	assert.NotContains(string(envelope.Data), body)
+	var deliveredSeq int64
+	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`SELECT seq FROM mcp_event_log WHERE family='msgvault.message_archived' AND message_id=? AND source_id=?`), messageID, sourceID).Scan(&deliveredSeq))
 	require.Eventually(func() bool {
 		row, err := f.Store.GetMCPSubscription(t.Context(), subscriptionID)
-		var head int64
-		if queryErr := f.Store.DB().QueryRow(`SELECT head_seq FROM mcp_event_clock WHERE singleton=1`).Scan(&head); queryErr != nil {
-			return false
-		}
-		return err == nil && row != nil && row.CursorSeq == head && row.PendingSeq == 0
-	}, 30*time.Second, 20*time.Millisecond, "delivery success was not durably recorded")
+		return err == nil && row != nil && row.CursorSeq >= deliveredSeq && row.PendingSeq == 0
+	}, 30*time.Second, 20*time.Millisecond, "delivery acknowledgement must include the actual original-family occurrence")
 	_, wire = call("tools/call", map[string]any{"name": "get_mcp_event", "arguments": map[string]any{"event_id": envelope.EventID}})
 	require.Nil(wire["error"])
 	assert.Equal(envelope.EventID, eventsWireObject(t, eventsWireObject(t, wire["result"])["structuredContent"])["eventId"])
@@ -452,4 +456,20 @@ func TestEventsNativeDiscordImportAndReceiptRead(t *testing.T) {
 	var occurrences int
 	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`SELECT COUNT(*) FROM mcp_event_log WHERE message_id=?`), messageID).Scan(&occurrences))
 	assert.Equal(1, occurrences, "re-import does not duplicate the live message occurrence")
+	// Repeated native IDs in a second synthetic guild cannot borrow the receipt.
+	guild.Store(201)
+	otherImporter := discord.NewImporter(f.Store, nativeClient)
+	otherOpts := importOpts
+	otherOpts.GuildID = "201"
+	_, err = otherImporter.Import(t.Context(), otherOpts)
+	require.NoError(err)
+	otherSource, err := f.Store.GetOrCreateSource("discord", otherOpts.GuildID)
+	require.NoError(err)
+	var otherMessageID int64
+	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`SELECT id FROM messages WHERE source_id=? AND source_message_id=?`), otherSource.ID, "502").Scan(&otherMessageID))
+	assert.NotEqual(messageID, otherMessageID)
+	_, wire = call("tools/call", map[string]any{"name": "get_message", "arguments": map[string]any{"id": strconv.FormatInt(otherMessageID, 10), "event_id": envelope.EventID}})
+	require.NotNil(wire["error"], "another source cannot borrow a receipt")
+	require.NoError(f.Store.DB().QueryRow(`SELECT COUNT(*) FROM mcp_event_log WHERE family='msgvault.message_archived'`).Scan(&occurrences))
+	assert.Equal(2, occurrences, "re-import does not duplicate either archived message")
 }

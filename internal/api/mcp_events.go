@@ -18,7 +18,7 @@ const mcpEventsPath = "/api/v1/mcp/events"
 var mcpEventsOperationIDs = map[string]bool{
 	"listMCPEvents": true, "subscribeMCPEvents": true, "unsubscribeMCPEvents": true,
 	"getMCPEventsStatus": true, "listMCPCalendarSources": true,
-	"getMCPEvent": true, "getMCPEventMessage": true,
+	"getMCPEvent": true, "getMCPEventMessage": true, "discoverMCPEventResources": true,
 }
 
 type mcpEventsRequestKey struct{}
@@ -48,16 +48,11 @@ func (s *Server) SetMCPEventsUnavailable(err error) {
 	}
 }
 
-// MCPEventsOperation holds the archive gate only for a Store command. The
-// service resolves and contacts callbacks outside this function.
+// MCPEventsOperation admits only a Store command. Its transaction fences allow
+// it to run between manual sync commits. Callback I/O stays outside this gate.
 func (s *Server) MCPEventsOperation(ctx context.Context, operation func() error) error {
-	var release func()
-	var acquired bool
-	if requested, _ := ctx.Value(mcpEventsRequestKey{}).(bool); requested {
-		release, acquired = s.beginLabeledOperationGateWork(ctx, "MCP Events")
-	} else {
-		release, acquired = s.beginBackgroundOperationGateWork(ctx, "MCP Events")
-	}
+	requested, _ := ctx.Value(mcpEventsRequestKey{}).(bool)
+	release, acquired := s.beginMCPEventsOperationGateWork(ctx, "MCP Events", requested)
 	if !acquired {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -71,7 +66,7 @@ func (s *Server) MCPEventsOperation(ctx context.Context, operation func() error)
 // MCPEventsDeliveryOperation counts commit-triggered delivery as request work
 // so resumable scheduled jobs yield while a live occurrence is delivered.
 func (s *Server) MCPEventsDeliveryOperation(ctx context.Context, operation func() error) error {
-	release, acquired := s.beginLabeledOperationGateWork(ctx, "MCP Events delivery")
+	release, acquired := s.beginMCPEventsOperationGateWork(ctx, "MCP Events delivery", true)
 	if !acquired {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -82,7 +77,21 @@ func (s *Server) MCPEventsDeliveryOperation(ctx context.Context, operation func(
 	return operation()
 }
 
+func (s *Server) beginMCPEventsOperationGateWork(ctx context.Context, label string, requestWork bool) (func(), bool) {
+	if gate, ok := s.operationGate.(mcpEventsOperationGate); ok {
+		return gate.BeginMCPEventsWorkContext(ctx, label, requestWork)
+	}
+	if requestWork {
+		return s.beginLabeledOperationGateWork(ctx, label)
+	}
+	return s.beginBackgroundOperationGateWork(ctx, label)
+}
+
 func (s *Server) registerMCPEventsRoutes(api huma.API) {
+	discovery := rawAPIV1Operation("discoverMCPEventResources", http.MethodPost, "/mcp/events/resources", "Discover native source and inbox subscription resources")
+	discovery.RequestBody = jsonRequestBodyFor[mcpevents.ResourceQuery](api)
+	discovery.Responses = jsonResponsesFor[mcpevents.ResourcePage](api)
+	registerMCPEventsRoute(api, discovery, s.handleMCPEventResources)
 	list := rawAPIV1Operation("listMCPEvents", http.MethodPost, "/mcp/events/list", "List scoped MCP Events")
 	list.RequestBody = jsonRequestBodyFor[MCPEventsListRequest](api)
 	list.Responses = jsonResponsesFor[mcpevents.ListResult](api)
@@ -282,4 +291,31 @@ func (s *Server) handleMCPEventMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, cliMessageResponseFromQuery(message))
+}
+
+// Discovery needs owner archive access, independently of capture configuration.
+// It never enables Events, creates provider accounts or contacts a provider.
+func (s *Server) handleMCPEventResources(w http.ResponseWriter, r *http.Request) {
+	if s.requestAuthentication(r).Mode != AuthModeAPIKey || s.mcpEventsPrincipal == "" {
+		writeMCPEventsError(w, &mcpevents.Error{Code: -32012, Reason: "owner_required"})
+		return
+	}
+	if s.mcpEventsUnavailable != nil {
+		writeMCPEventsError(w, s.mcpEventsUnavailable)
+		return
+	}
+	if s.mcpEvents == nil {
+		writeMCPEventsError(w, &mcpevents.Error{Code: -32015, Reason: "events_unavailable"})
+		return
+	}
+	var query mcpevents.ResourceQuery
+	if !decodeMCPEventsRequest(w, r, &query) {
+		return
+	}
+	result, err := s.mcpEvents.DiscoverResources(mcpEventsRequestContext(r), s.mcpEventsPrincipal, query)
+	if err != nil {
+		writeMCPEventsError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }

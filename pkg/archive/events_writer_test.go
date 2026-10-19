@@ -49,6 +49,7 @@ func TestLibraryWriteRecordsGapAfterEventsReenabled(t *testing.T) {
 	daemon := daemonArchive.Store()
 	source, err := daemon.GetOrCreateSource("gmail", "library-writer@example.test")
 	require.NoError(err)
+	grantArchiveTestMessageRead(t, daemon, source)
 	conversation, err := daemon.EnsureConversation(source.ID, "library-writer-thread", "Library writer")
 	require.NoError(err)
 	cfg := store.MCPEventsConfig{

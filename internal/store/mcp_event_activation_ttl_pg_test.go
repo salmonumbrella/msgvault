@@ -21,6 +21,7 @@ func TestMCPActivationTimesStartAfterFencesPG(t *testing.T) {
 	st := requirePostgreSQLStore(t)
 	source, err := st.GetOrCreateSource("gmail", "activation-ttl@example.test")
 	require.NoError(err)
+	grantSyntheticSourceAuthority(t, st, source.ID)
 	conversation, err := st.EnsureConversation(source.ID, "activation-ttl-thread", "Activation TTL")
 	require.NoError(err)
 	_, err = st.ConfigureMCPEvents(t.Context(), store.MCPEventsConfig{

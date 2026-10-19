@@ -42,7 +42,8 @@ type rawBatchWithIdentityValidation interface {
 	GetMessagesRawBatchWithIdentityValidation(ctx context.Context, messageIDs []string) ([]gmail.RawMessageBatchResult, error)
 }
 
-func (s *Syncer) getMessagesRawBatchWithDiagnostics(ctx context.Context, messageIDs []string) ([]gmail.RawMessageBatchResult, error) {
+func (s *Syncer) getMessagesRawBatchWithDiagnostics(ctx context.Context, messageIDs []string) (results []gmail.RawMessageBatchResult, err error) {
+	defer func() { err = s.observeNativeRawBatchDenials(ctx, results, err) }()
 	if client, ok := s.client.(rawBatchWithErrors); ok {
 		return client.GetMessagesRawBatchWithErrors(ctx, messageIDs)
 	}
@@ -52,7 +53,7 @@ func (s *Syncer) getMessagesRawBatchWithDiagnostics(ctx context.Context, message
 		return nil, err
 	}
 
-	results := make([]gmail.RawMessageBatchResult, len(messageIDs))
+	results = make([]gmail.RawMessageBatchResult, len(messageIDs))
 	for i, id := range messageIDs {
 		var raw *gmail.RawMessage
 		if i < len(rawMessages) {
@@ -67,6 +68,23 @@ func (s *Syncer) getMessagesRawBatchWithDiagnostics(ctx context.Context, message
 		}
 	}
 	return results, nil
+}
+
+// A provider denial remains an item error after its grant is retired. A Gmail
+// revocation must also stop the batch so history cannot pass unarchived items.
+func (s *Syncer) observeNativeRawBatchDenials(ctx context.Context, results []gmail.RawMessageBatchResult, cause error) error {
+	pinnedGmail := s.nativeSourcePermission != nil && s.nativeSourcePermission.SourceType == sourceTypeGmail
+	cause = errors.Join(cause, s.observeNativeSourceDenial(ctx, cause))
+	for i := range results {
+		reduction := s.observeNativeSourceDenial(ctx, results[i].Err)
+		cause = errors.Join(cause, reduction)
+		results[i].Err = errors.Join(results[i].Err, reduction)
+	}
+	cause = errors.Join(cause, s.observeNativeSourcePermissionReduction(ctx))
+	if pinnedGmail && s.nativeSourcePermission == nil {
+		return errors.Join(cause, errNativeSourcePermissionReduction)
+	}
+	return cause
 }
 
 // getMessagesRawBatchWithIdentityValidation fetches validationIDs first with
@@ -96,6 +114,7 @@ func (s *Syncer) getMessagesRawBatchWithIdentityValidation(
 
 	results := make([]gmail.RawMessageBatchResult, len(messageIDs))
 	required, err := client.GetMessagesRawBatchWithIdentityValidation(ctx, requiredIDs)
+	err = s.observeNativeRawBatchDenials(ctx, required, err)
 	if err != nil {
 		return nil, err
 	}
