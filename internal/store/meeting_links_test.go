@@ -202,6 +202,83 @@ func TestMeetingLinksSplitPersistsAliasWhenSeriesArrives(t *testing.T) {
 	assertions.Empty(linkedMeetingRefs(t, st, note)[note], "the saved split still suppresses the series after its standalone evidence is removed")
 }
 
+func TestMeetingLinksSplitPersistsKeyedAliasWhenStandaloneArrives(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	uid := "late-moved-single@example.org"
+	seriesRaw := strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", uid)
+	seriesData, master := calendarFixture(t, st, "series", seriesRaw, "series-calendar@example.com")
+	calendarFixture(t, st, "exception", fmt.Sprintf(`{"id":"moved","iCalUID":%q,"recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`, uid), "series-calendar@example.com")
+	noteRaw := fmt.Sprintf(`{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":%q,"startsAt":"2027-03-14T12:00:00Z"}}`, uid)
+	_, note := projectionFixture(t, st, "note", "twenty_json", noteRaw)
+	key := "20270314T100000Z"
+
+	requirements.Equal(fmt.Sprintf("evt:%d@%s", master, key), linkedMeetingRefs(t, st, note)[note], "the Twenty note initially matches the moved occurrence")
+	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: master, Key: key}))
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
+	var splitCreatedAt time.Time
+	requirements.NoError(st.db.QueryRow(`SELECT created_at FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = ? AND decision = 'split'`, note, uid, key).Scan(&splitCreatedAt))
+
+	singleRaw := fmt.Sprintf(`{"id":"single","iCalUID":%q,"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`, uid)
+	calendarFixture(t, st, "single", singleRaw, "single-calendar@example.com")
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note], "the split still suppresses the moved standalone alias")
+	var aliasDecision string
+	var aliasCreatedAt time.Time
+	requirements.NoError(st.db.QueryRow(`SELECT decision,created_at FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = ''`, note, uid).Scan(&aliasDecision, &aliasCreatedAt))
+	assertions.Equal("split", aliasDecision)
+	assertions.True(splitCreatedAt.Equal(aliasCreatedAt), "the late standalone alias keeps the original split timestamp")
+
+	requirements.NoError(st.RemoveSource(seriesData.Message.SourceID))
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note], "the persisted standalone alias survives series source removal")
+}
+
+func TestMeetingLinksSplitSurvivesStandaloneBecomingSeries(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	uid := "single-becomes-series@example.org"
+	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", uid), "event-calendar@example.com")
+	noteRaw := fmt.Sprintf(`{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":%q,"startsAt":"2027-03-14T10:00:00Z"}}`, uid)
+	_, note := projectionFixture(t, st, "note", "twenty_json", noteRaw)
+	requirements.Equal(fmt.Sprintf("evt:%d", event), linkedMeetingRefs(t, st, note)[note])
+	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
+	var splitCreatedAt time.Time
+	requirements.NoError(st.db.QueryRow(`SELECT created_at FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = '' AND decision = 'split'`, note, uid).Scan(&splitCreatedAt))
+
+	seriesRaw := strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", uid)
+	requirements.NoError(st.UpsertMessageRawWithFormat(event, []byte(seriesRaw), "gcal_json"))
+	var aliasCreatedAt time.Time
+	requirements.NoError(st.db.QueryRow(`SELECT created_at FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = ? AND decision = 'split'`, note, uid, "20270314T100000Z").Scan(&aliasCreatedAt))
+	assertions.True(splitCreatedAt.Equal(aliasCreatedAt), "the recurrence alias keeps the standalone split timestamp")
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note], "the standalone split still suppresses the matching series occurrence")
+}
+
+func TestCalendarProjectionWriteKeepsEvidenceWhenSplitAliasExpansionIsTooBroad(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	uid := "broad-series@example.org"
+	_, standalone := calendarFixture(t, st, "standalone", singleLinkRaw("standalone", uid), "standalone-calendar@example.com")
+	noteRaw := fmt.Sprintf(`{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":%q,"startsAt":"2027-03-14T10:00:00Z"}}`, uid)
+	_, note := projectionFixture(t, st, "note", "twenty_json", noteRaw)
+	requirements.Equal(fmt.Sprintf("evt:%d", standalone), linkedMeetingRefs(t, st, note)[note], "the Twenty note initially matches the standalone event")
+	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: standalone}))
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note])
+
+	seriesRaw := strings.NewReplacer(
+		"2027-03-07T10:00:00Z", "1800-01-01T10:00:00Z",
+		"2027-03-07T11:00:00Z", "1800-01-01T11:00:00Z",
+		"weekly@example.org", uid,
+		"RRULE:FREQ=WEEKLY;COUNT=6", "RRULE:FREQ=DAILY;COUNT=100000",
+	).Replace(linkSeriesRaw)
+	_, series := calendarFixture(t, st, "broad-series", seriesRaw, "series-calendar@example.com")
+	rows := calendarRows(t, st, series)
+	requirements.Len(rows, 1, "the calendar projection is committed despite unresolved alias expansion")
+	assertions.Equal("series", rows[0].Event.Kind)
+	var splitCount int
+	requirements.NoError(st.db.QueryRow(`SELECT COUNT(*) FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = '' AND decision = 'split'`, note, uid).Scan(&splitCount))
+	assertions.Equal(1, splitCount, "the existing owner decision remains stored")
+}
+
 func TestMeetingLinksSplitAliasPreservesNewerExplicitLink(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
@@ -655,11 +732,13 @@ func TestMeetingLinksSplitStandaloneSupersedesSeriesOccurrence(t *testing.T) {
 	st := newRFC822IDBackfillBackendStore(t)
 	uid := "shared@example.org"
 	_, master := calendarFixture(t, st, "master", strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", uid))
-	singleData, single := calendarFixture(t, st, "single", singleLinkRaw("single", uid), "copy-calendar@example.com")
-	_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
+	noteRaw := fmt.Sprintf(`{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":%q,"startsAt":"2027-03-14T10:00:00Z"}}`, uid)
+	_, note := projectionFixture(t, st, "note", "twenty_json", noteRaw)
 	key := "20270314T100000Z"
+	requirements.Equal(fmt.Sprintf("evt:%d@%s", master, key), linkedMeetingRefs(t, st, note)[note], "the Twenty note initially matches the series occurrence")
 	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: master, Key: key}))
 	requirements.Equal(fmt.Sprintf("evt:%d@%s", master, key), linkedMeetingRefs(t, st, note)[note])
+	singleData, single := calendarFixture(t, st, "single", singleLinkRaw("single", uid), "copy-calendar@example.com")
 
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: single}))
 	assertions.Empty(linkedMeetingRefs(t, st, note)[note], "a standalone split supersedes the same UID occurrence in its series")
@@ -683,9 +762,11 @@ func TestMeetingLinksSplitAliasesMovedSeriesOccurrenceInBothDirections(t *testin
 			seriesRaw := strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", uid)
 			seriesData, master := calendarFixture(t, st, "master", seriesRaw, "series-calendar@example.com")
 			calendarFixture(t, st, "exception", fmt.Sprintf(`{"id":"moved","iCalUID":%q,"recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`, uid), "series-calendar@example.com")
-			singleData, single := calendarFixture(t, st, "single", fmt.Sprintf(`{"id":"single","iCalUID":%q,"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`, uid), "copy-calendar@example.com")
-			_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
+			noteRaw := fmt.Sprintf(`{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":%q,"startsAt":"2027-03-14T12:00:00Z"}}`, uid)
+			_, note := projectionFixture(t, st, "note", "twenty_json", noteRaw)
 			seriesRef := OccurrenceRef{MessageID: master, Key: "20270314T100000Z"}
+			requirements.Equal(fmt.Sprintf("evt:%d@%s", master, seriesRef.Key), linkedMeetingRefs(t, st, note)[note], "the Twenty note initially matches the moved series occurrence")
+			singleData, single := calendarFixture(t, st, "single", fmt.Sprintf(`{"id":"single","iCalUID":%q,"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`, uid), "copy-calendar@example.com")
 			singleRef := OccurrenceRef{MessageID: single}
 			linkRef, unlinkRef, aliasKey := seriesRef, singleRef, seriesRef.Key
 			removeSource := singleData.Message.SourceID

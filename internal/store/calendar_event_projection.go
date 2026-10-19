@@ -35,7 +35,11 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 	}
 	var oldVersion int
 	var oldHash string
-	err = q.QueryRow(`SELECT projection_version, content_hash FROM calendar_events WHERE message_id = ?`, messageID).Scan(&oldVersion, &oldHash)
+	var oldKind string
+	var oldAllDay bool
+	var oldStartAt sql.NullTime
+	var oldStartDate string
+	err = q.QueryRow(`SELECT projection_version, content_hash, kind, all_day, start_at, start_date FROM calendar_events WHERE message_id = ?`, messageID).Scan(&oldVersion, &oldHash, &oldKind, &oldAllDay, &oldStartAt, &oldStartDate)
 	exists := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("read calendar projection version: %w", err)
@@ -43,6 +47,9 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 	clearProjection := func() error {
 		if !exists {
 			return nil
+		}
+		if err := s.persistUIDSplitAliasesForCalendarMessage(ctx, tx, messageID, ""); err != nil {
+			return err
 		}
 		_, err := q.Exec(`DELETE FROM calendar_events WHERE message_id = ?`, messageID)
 		if err != nil {
@@ -86,7 +93,15 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 		if err := s.upgradeUIDlessMeetingDecisions(ctx, tx, messageID); err != nil {
 			return err
 		}
-		return s.persistUIDSplitAliasesForCalendarMessage(ctx, tx, messageID)
+		return s.persistUIDSplitAliasesForCalendarMessage(ctx, tx, messageID, "")
+	}
+	previousSingleStartKey := ""
+	if exists && oldKind == "single" && event.Kind == "series" {
+		if oldAllDay && oldStartDate != "" {
+			previousSingleStartKey = (calrecur.Identity{Date: oldStartDate, AllDay: true}).Key()
+		} else if oldStartAt.Valid {
+			previousSingleStartKey = (calrecur.Identity{Instant: oldStartAt.Time}).Key()
+		}
 	}
 	recurrenceEnd := calendarRecurrenceEnd(ctx, event)
 	if err := ctx.Err(); err != nil {
@@ -121,7 +136,7 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 	if err := s.upgradeUIDlessMeetingDecisions(ctx, tx, messageID); err != nil {
 		return err
 	}
-	if err := s.persistUIDSplitAliasesForCalendarMessage(ctx, tx, messageID); err != nil {
+	if err := s.persistUIDSplitAliasesForCalendarMessage(ctx, tx, messageID, previousSingleStartKey); err != nil {
 		return err
 	}
 	return s.journalCalendarMeetingLinks(ctx, tx)

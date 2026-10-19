@@ -69,7 +69,9 @@ func TestMeetingLinksDedupPromotesUIDlessTargetDecisions(t *testing.T) {
 			survivorData, survivor := calendarFixture(t, st, "survivor", singleLinkRaw("survivor", uid), "survivor-calendar@example.com")
 			duplicateData, duplicate := calendarFixture(t, st, "duplicate", singleLinkRaw("duplicate", ""), "duplicate-calendar@example.com")
 			_, uidCopy := calendarFixture(t, st, "uid-copy", singleLinkRaw("uid-copy", uid), "copy-calendar@example.com")
-			_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
+			noteRaw := fmt.Sprintf(`{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":%q,"startsAt":"2027-03-14T10:00:00Z"}}`, uid)
+			_, note := projectionFixture(t, st, "note", "twenty_json", noteRaw)
+			requirements.Equal(fmt.Sprintf("evt:%d", survivor), linkedMeetingRefs(t, st, note)[note], "the Twenty note initially matches its calendar evidence")
 
 			requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: duplicate}))
 			if decision == "split" {

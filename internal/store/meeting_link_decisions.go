@@ -248,7 +248,7 @@ func (s *Store) upgradeUIDlessMeetingDecisions(ctx context.Context, tx *loggedTx
 
 // Persist aliases discovered after calendar evidence changes. The original
 // split remains the source of truth for its timestamp and conflict precedence.
-func (s *Store) persistUIDSplitAliasesForCalendarMessage(ctx context.Context, tx *loggedTx, messageID int64) error {
+func (s *Store) persistUIDSplitAliasesForCalendarMessage(ctx context.Context, tx *loggedTx, messageID int64, previousSingleStartKey string) error {
 	var uid sql.NullString
 	query := `SELECT ` + calendarUIDExpression(s.dialect) + ` FROM messages m JOIN calendar_events e ON e.message_id = m.id WHERE m.id = ? AND m.message_type = 'calendar_event' AND m.deleted_at IS NULL`
 	if err := tx.QueryRowContext(ctx, query, messageID).Scan(&uid); err != nil {
@@ -261,18 +261,19 @@ func (s *Store) persistUIDSplitAliasesForCalendarMessage(ctx context.Context, tx
 		return nil
 	}
 
-	rows, err := tx.QueryContext(ctx, `SELECT member_message_id,created_at FROM meeting_link_decisions WHERE target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = '' AND decision = 'split'`, uid.String)
+	rows, err := tx.QueryContext(ctx, `SELECT member_message_id,occurrence_key,created_at FROM meeting_link_decisions WHERE target_ical_uid = ? AND target_message_id IS NULL AND decision = 'split'`, uid.String)
 	if err != nil {
 		return fmt.Errorf("read UID-based meeting splits for alias promotion: %w", err)
 	}
 	type splitDecision struct {
 		member    int64
+		key       string
 		createdAt time.Time
 	}
 	var decisions []splitDecision
 	for rows.Next() {
 		var decision splitDecision
-		if err := rows.Scan(&decision.member, &decision.createdAt); err != nil {
+		if err := rows.Scan(&decision.member, &decision.key, &decision.createdAt); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("scan UID-based meeting split for alias promotion: %w", err)
 		}
@@ -287,15 +288,55 @@ func (s *Store) persistUIDSplitAliasesForCalendarMessage(ctx context.Context, tx
 
 	reader := reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind, dialect: s.dialect}
 	budget := calrecur.RequestReadBudget
-	base := meetingIdentity{ICalUID: uid.String}
-	identities, err := s.meetingSplitIdentities(ctx, reader, base, &budget)
-	if err != nil {
-		return fmt.Errorf("resolve UID-based meeting split aliases: %w", err)
+	type splitAliasWork struct {
+		member      int64
+		sourceKey   string
+		identityKey string
+		createdAt   time.Time
+	}
+	aliasDecisions := make([]splitAliasWork, 0, len(decisions)+1)
+	seen := make(map[struct {
+		member      int64
+		identityKey string
+	}]struct{}, len(decisions)+1)
+	appendDecision := func(decision splitAliasWork) {
+		key := struct {
+			member      int64
+			identityKey string
+		}{member: decision.member, identityKey: decision.identityKey}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		aliasDecisions = append(aliasDecisions, decision)
 	}
 	upsert := meetingDecisionUpsert + ` WHERE meeting_link_decisions.created_at < excluded.created_at OR (meeting_link_decisions.created_at = excluded.created_at AND excluded.decision = 'split')`
 	for _, decision := range decisions {
+		appendDecision(splitAliasWork{
+			member: decision.member, sourceKey: decision.key,
+			identityKey: decision.key, createdAt: decision.createdAt,
+		})
+		if decision.key == "" && previousSingleStartKey != "" {
+			transition := splitAliasWork{
+				member: decision.member, sourceKey: decision.key,
+				identityKey: previousSingleStartKey, createdAt: decision.createdAt,
+			}
+			appendDecision(transition)
+		}
+	}
+	for _, decision := range aliasDecisions {
+		base := meetingIdentity{ICalUID: uid.String, OccurrenceKey: decision.identityKey}
+		identities, err := s.meetingSplitIdentities(ctx, reader, base, &budget)
+		if errors.Is(err, calrecur.ErrUnsupportedRecurrence) || errors.Is(err, ErrQueryTooBroad) {
+			// Alias discovery is best-effort. Keep calendar imports and their
+			// projections writable when a series cannot be expanded safely.
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("resolve UID-based meeting split aliases: %w", err)
+		}
 		for _, identity := range identities {
-			if identity == base {
+			if identity == base && decision.identityKey == decision.sourceKey {
 				continue
 			}
 			target := sql.NullInt64{}
@@ -367,7 +408,7 @@ func (s *Store) copyMeetingLinkDecisionsTx(ctx context.Context, tx *loggedTx, fr
 	if err := s.upgradeUIDlessMeetingDecisions(ctx, tx, to); err != nil {
 		return err
 	}
-	return s.persistUIDSplitAliasesForCalendarMessage(ctx, tx, to)
+	return s.persistUIDSplitAliasesForCalendarMessage(ctx, tx, to, "")
 }
 
 const meetingDecisionUpsert = `INSERT INTO meeting_link_decisions(member_message_id,target_ical_uid,target_message_id,occurrence_key,decision,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(member_message_id,target_ical_uid,(COALESCE(target_message_id,0)),occurrence_key) DO UPDATE SET decision = excluded.decision,created_at = excluded.created_at`
