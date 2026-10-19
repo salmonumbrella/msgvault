@@ -233,7 +233,7 @@ func memberLinkKey(ctx context.Context, r SQLReader, id int64) (meetingLinkKey, 
 }
 
 func (s *Store) calendarUIDPredicate() string {
-	return calendarUIDExpression(s.dialect, "m.metadata") + ` = ? AND m.message_type = 'calendar_event'`
+	return calendarUIDExpression(s.dialect) + ` = ? AND m.message_type = 'calendar_event'`
 }
 
 func (s *Store) automaticMeetingOccurrences(ctx context.Context, r reboundReader, key meetingLinkKey, budget *int) ([]linkOccurrence, error) {

@@ -200,7 +200,7 @@ func (s *Store) resolveMeetingDecisionTarget(ctx context.Context, r reboundReade
 // identity. Keep the original rows so their message lifetime remains intact.
 func (s *Store) upgradeUIDlessMeetingDecisions(ctx context.Context, tx *loggedTx, messageID int64) error {
 	var uid sql.NullString
-	query := `SELECT ` + calendarUIDExpression(s.dialect, "m.metadata") + ` FROM messages m WHERE m.id = ? AND m.message_type = 'calendar_event'`
+	query := `SELECT ` + calendarUIDExpression(s.dialect) + ` FROM messages m WHERE m.id = ? AND m.message_type = 'calendar_event'`
 	if err := tx.QueryRowContext(ctx, query, messageID).Scan(&uid); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
@@ -241,6 +241,80 @@ func (s *Store) upgradeUIDlessMeetingDecisions(ctx context.Context, tx *loggedTx
 		}
 		if err := s.journalMeetingLinks(ctx, tx, d.member); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// Persist aliases discovered after calendar evidence changes. The original
+// split remains the source of truth for its timestamp and conflict precedence.
+func (s *Store) persistUIDSplitAliasesForCalendarMessage(ctx context.Context, tx *loggedTx, messageID int64) error {
+	var uid sql.NullString
+	query := `SELECT ` + calendarUIDExpression(s.dialect) + ` FROM messages m JOIN calendar_events e ON e.message_id = m.id WHERE m.id = ? AND m.message_type = 'calendar_event' AND m.deleted_at IS NULL`
+	if err := tx.QueryRowContext(ctx, query, messageID).Scan(&uid); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("read calendar UID for split alias promotion: %w", err)
+	}
+	if !uid.Valid || uid.String == "" {
+		return nil
+	}
+
+	rows, err := tx.QueryContext(ctx, `SELECT member_message_id,created_at FROM meeting_link_decisions WHERE target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = '' AND decision = 'split'`, uid.String)
+	if err != nil {
+		return fmt.Errorf("read UID-based meeting splits for alias promotion: %w", err)
+	}
+	type splitDecision struct {
+		member    int64
+		createdAt time.Time
+	}
+	var decisions []splitDecision
+	for rows.Next() {
+		var decision splitDecision
+		if err := rows.Scan(&decision.member, &decision.createdAt); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan UID-based meeting split for alias promotion: %w", err)
+		}
+		decisions = append(decisions, decision)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return fmt.Errorf("read UID-based meeting splits for alias promotion: %w", err)
+	}
+	if len(decisions) == 0 {
+		return nil
+	}
+
+	reader := reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind, dialect: s.dialect}
+	budget := calrecur.RequestReadBudget
+	base := meetingIdentity{ICalUID: uid.String}
+	identities, err := s.meetingSplitIdentities(ctx, reader, base, &budget)
+	if err != nil {
+		return fmt.Errorf("resolve UID-based meeting split aliases: %w", err)
+	}
+	upsert := meetingDecisionUpsert + ` WHERE meeting_link_decisions.created_at < excluded.created_at OR (meeting_link_decisions.created_at = excluded.created_at AND excluded.decision = 'split')`
+	for _, decision := range decisions {
+		for _, identity := range identities {
+			if identity == base {
+				continue
+			}
+			target := sql.NullInt64{}
+			if identity.ICalUID == "" && identity.EventMessageID != 0 {
+				target = sql.NullInt64{Int64: identity.EventMessageID, Valid: true}
+			}
+			result, err := tx.ExecContext(ctx, upsert, decision.member, identity.ICalUID, target, identity.OccurrenceKey, "split", decision.createdAt)
+			if err != nil {
+				return fmt.Errorf("persist UID-based meeting split alias: %w", err)
+			}
+			changed, err := result.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("count UID-based meeting split aliases: %w", err)
+			}
+			if changed > 0 {
+				if err := s.journalMeetingLinks(ctx, tx, decision.member); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil
@@ -288,7 +362,12 @@ func (s *Store) copyMeetingLinkDecisionsTx(ctx context.Context, tx *loggedTx, fr
 			return err
 		}
 	}
-	return nil
+	// Retargeted decisions can now point at a UID-bearing survivor even when
+	// consolidation did not need to backfill its raw calendar payload.
+	if err := s.upgradeUIDlessMeetingDecisions(ctx, tx, to); err != nil {
+		return err
+	}
+	return s.persistUIDSplitAliasesForCalendarMessage(ctx, tx, to)
 }
 
 const meetingDecisionUpsert = `INSERT INTO meeting_link_decisions(member_message_id,target_ical_uid,target_message_id,occurrence_key,decision,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(member_message_id,target_ical_uid,(COALESCE(target_message_id,0)),occurrence_key) DO UPDATE SET decision = excluded.decision,created_at = excluded.created_at`

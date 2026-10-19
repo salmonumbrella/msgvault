@@ -153,7 +153,7 @@ func expandCalendarSeries(ctx context.Context, row CalendarEventRow, exceptionRo
 	if prepareErr == nil {
 		prepared = &set
 	}
-	resolved, bounded, err := resolveCalendarExceptions(ctx, prepared, exceptionRows, duration, days)
+	resolved, bounded, err := resolveCalendarExceptions(ctx, row, prepared, exceptionRows, duration, days)
 	if ctx.Err() != nil {
 		return nil, 0, "", ctx.Err()
 	}
@@ -181,7 +181,7 @@ func expandCalendarSeries(ctx context.Context, row CalendarEventRow, exceptionRo
 }
 
 // Keep independently bounded edits alongside resolved overrides for generation failures.
-func resolveCalendarExceptions(ctx context.Context, set *calrecur.Set, rows []CalendarEventRow, duration time.Duration, days int) (resolved, bounded []calrecur.Occurrence, err error) {
+func resolveCalendarExceptions(ctx context.Context, master CalendarEventRow, set *calrecur.Set, rows []CalendarEventRow, duration time.Duration, days int) (resolved, bounded []calrecur.Occurrence, err error) {
 	for _, row := range rows {
 		e := row.Event
 		if e.Start != nil && e.End != nil {
@@ -189,7 +189,15 @@ func resolveCalendarExceptions(ctx context.Context, set *calrecur.Set, rows []Ca
 			if e.Original != nil {
 				original = *e.Original
 			}
-			bounded = append(bounded, calrecur.Occurrence{Original: original, Start: *e.Start, End: *e.End, AllDay: e.AllDay, StartDate: e.StartDate, EndDate: e.EndDate, Cancelled: e.Status == "cancelled", ExceptionRef: row.MessageID, HasException: true})
+			fallback := calrecur.Occurrence{Original: original, Start: *e.Start, End: *e.End, AllDay: e.AllDay, StartDate: e.StartDate, EndDate: e.EndDate, Cancelled: e.Status == "cancelled", ExceptionRef: row.MessageID, HasException: true}
+			bounded = append(bounded, fallback)
+			if e.AllDay && e.Original != nil {
+				resolvedBounds, err := resolveCompleteCalendarException(master, row)
+				if err != nil {
+					return nil, bounded, err
+				}
+				bounded[len(bounded)-1] = resolvedBounds
+			}
 		}
 	}
 	if set == nil {

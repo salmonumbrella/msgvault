@@ -60,6 +60,73 @@ func TestMeetingLinksDedupUndoAndPurge(t *testing.T) {
 	}
 }
 
+func TestMeetingLinksDedupPromotesUIDlessTargetDecisions(t *testing.T) {
+	for _, decision := range []string{"split", "link"} {
+		t.Run(decision, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			uid := "consolidated@example.org"
+			survivorData, survivor := calendarFixture(t, st, "survivor", singleLinkRaw("survivor", uid), "survivor-calendar@example.com")
+			duplicateData, duplicate := calendarFixture(t, st, "duplicate", singleLinkRaw("duplicate", ""), "duplicate-calendar@example.com")
+			_, uidCopy := calendarFixture(t, st, "uid-copy", singleLinkRaw("uid-copy", uid), "copy-calendar@example.com")
+			_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
+
+			requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: duplicate}))
+			if decision == "split" {
+				requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: duplicate}))
+			} else {
+				// A later UID-based owner choice must win when the earlier
+				// message-based decision is promoted during consolidation.
+				requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: uidCopy}))
+			}
+
+			var sourceCreatedAt time.Time
+			requirements.NoError(st.db.QueryRow(`SELECT created_at FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = '' AND target_message_id = ?`, note, duplicate).Scan(&sourceCreatedAt))
+			var winningUIDCreatedAt time.Time
+			var winningUIDDecision string
+			if decision == "link" {
+				requirements.NoError(st.db.QueryRow(`SELECT created_at,decision FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = ''`, note, uid).Scan(&winningUIDCreatedAt, &winningUIDDecision))
+				winningUIDCreatedAt = sourceCreatedAt.Add(time.Minute)
+				_, err := st.db.Exec(`UPDATE meeting_link_decisions SET created_at = ? WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = ''`, winningUIDCreatedAt, note, uid)
+				requirements.NoError(err)
+			}
+
+			merged, err := st.MergeDuplicates(survivor, []int64{duplicate}, "promote-uidless-target")
+			requirements.NoError(err)
+			assertions.Zero(merged.RawMIMEBackfilled, "the regression requires the existing-survivor path without raw-data backfill")
+
+			var promotedCreatedAt time.Time
+			var promotedDecision string
+			requirements.NoError(st.db.QueryRow(`SELECT created_at,decision FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = ''`, note, uid).Scan(&promotedCreatedAt, &promotedDecision))
+			if decision == "split" {
+				assertions.Equal("split", promotedDecision)
+				assertions.True(sourceCreatedAt.Equal(promotedCreatedAt), "promotion preserves the original split timestamp")
+			} else {
+				assertions.Equal("link", promotedDecision)
+				assertions.True(winningUIDCreatedAt.Equal(promotedCreatedAt), "promotion preserves the newer UID decision")
+				assertions.Equal("link", winningUIDDecision)
+			}
+
+			count, err := st.UndoDedup("promote-uidless-target")
+			requirements.NoError(err)
+			assertions.Equal(int64(1), count)
+			var originalDecision string
+			var originalCreatedAt time.Time
+			requirements.NoError(st.db.QueryRow(`SELECT created_at,decision FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = '' AND target_message_id = ?`, note, duplicate).Scan(&originalCreatedAt, &originalDecision))
+			assertions.Equal(decision, originalDecision, "the original message-based choice remains available to undo consolidation")
+			assertions.True(sourceCreatedAt.Equal(originalCreatedAt), "the original decision timestamp is retained")
+
+			requirements.NoError(st.RemoveSource(duplicateData.Message.SourceID))
+			requirements.NoError(st.RemoveSource(survivorData.Message.SourceID))
+			if decision == "split" {
+				assertions.Empty(linkedMeetingRefs(t, st, note)[note], "the promoted split survives removal of both message targets")
+			} else {
+				assertions.Equal(fmt.Sprintf("evt:%d", uidCopy), linkedMeetingRefs(t, st, note)[note], "the newer UID link survives removal of both message targets")
+			}
+		})
+	}
+}
+
 func TestMeetingLinksConsolidationDecisionOrder(t *testing.T) {
 	for _, tc := range []struct {
 		name              string

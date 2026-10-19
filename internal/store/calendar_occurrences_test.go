@@ -206,6 +206,26 @@ func TestListCalendarOccurrencesAllDayQueryZone(t *testing.T) {
 	}
 }
 
+func TestListCalendarOccurrencesUnsupportedAllDayExceptionInheritsMasterZone(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	calendar := "fallback-zone@example.com"
+	masterData, master := calendarFixture(t, st, "master", `{"id":"series","start":{"date":"2027-03-01","timeZone":"America/Los_Angeles"},"end":{"date":"2027-03-02","timeZone":"America/Los_Angeles"},"recurrence":["RRULE:FREQ=HOURLY"]}`, calendar)
+	_, exception := calendarFixture(t, st, "exception", `{"id":"moved","recurringEventId":"series","originalStartTime":{"date":"2027-03-01"},"start":{"date":"2027-03-10"},"end":{"date":"2027-03-11"}}`, calendar)
+	requirements.NoError(st.UpdateSourceSyncConfig(masterData.Message.SourceID, `{"calendar_id":"fallback-zone@example.com","time_zone":"America/New_York"}`))
+
+	from := time.Date(2027, time.March, 10, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 2))
+	requirements.NoError(err)
+	requirements.Len(page.Unexpandable, 1)
+	assertions.Equal(master, page.Unexpandable[0].MessageID)
+	assertions.Equal("unsupported recurrence", page.Unexpandable[0].Reason)
+	requirements.Len(page.Occurrences, 1)
+	assertions.Equal(exception, page.Occurrences[0].MessageID)
+	assertions.Equal("2027-03-10T08:00:00Z", page.Occurrences[0].Start.UTC().Format(time.RFC3339))
+	assertions.Equal("2027-03-11T08:00:00Z", page.Occurrences[0].End.UTC().Format(time.RFC3339))
+}
+
 func TestListCalendarOccurrencesCancellationSuppliedFields(t *testing.T) {
 	for _, tc := range []struct {
 		name, fields, subject string

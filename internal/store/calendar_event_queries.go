@@ -40,7 +40,8 @@ const calendarEventFrom = `FROM calendar_events e JOIN messages m ON m.id = e.me
  AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
  AND `
 
-func calendarUIDExpression(d Dialect, column string) string {
+func calendarUIDExpression(d Dialect) string {
+	const column = "m.metadata"
 	if d.DriverName() == postgresDriverName {
 		return column + " ->> 'ical_uid'"
 	}
@@ -70,7 +71,7 @@ func queryCalendarEventRows(ctx context.Context, r reboundReader, predicate stri
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	query := fmt.Sprintf(calendarEventSelect, calendarUIDExpression(r.dialect, "m.metadata")) + "(" + predicate + ") ORDER BY e.message_id"
+	query := fmt.Sprintf(calendarEventSelect, calendarUIDExpression(r.dialect)) + "(" + predicate + ") ORDER BY e.message_id"
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)
