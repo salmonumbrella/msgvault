@@ -253,6 +253,41 @@ func TestMeetingLinksSplitSurvivesStandaloneBecomingSeries(t *testing.T) {
 	assertions.Empty(linkedMeetingRefs(t, st, note)[note], "the standalone split still suppresses the matching series occurrence")
 }
 
+func TestMeetingLinksManualLinkSurvivesStandaloneBecomingSeries(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	uid := "single-becomes-series-link@example.org"
+	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", uid), "event-calendar@example.com")
+	noteRaw := fmt.Sprintf(`{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":%q,"startsAt":"2027-03-14T10:00:00Z"}}`, uid)
+	_, note := projectionFixture(t, st, "note", "twenty_json", noteRaw)
+	_, splitNote := projectionFixture(t, st, "split-note", "twenty_json", noteRaw)
+
+	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
+	var linkCreatedAt time.Time
+	requirements.NoError(st.db.QueryRow(`SELECT created_at FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = '' AND decision = 'link'`, note, uid).Scan(&linkCreatedAt))
+	requirements.NoError(st.LinkMeetingContext(t.Context(), splitNote, OccurrenceRef{MessageID: event}))
+	var splitLinkCreatedAt time.Time
+	requirements.NoError(st.db.QueryRow(`SELECT created_at FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = '' AND decision = 'link'`, splitNote, uid).Scan(&splitLinkCreatedAt))
+	newerSplitAt := splitLinkCreatedAt.Add(time.Minute)
+	_, err := st.db.Exec(meetingDecisionUpsert, splitNote, uid, sql.NullInt64{}, "20270314T100000Z", "split", newerSplitAt)
+	requirements.NoError(err)
+
+	seriesRaw := strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", uid)
+	requirements.NoError(st.UpsertMessageRawWithFormat(event, []byte(seriesRaw), "gcal_json"))
+	assertions.Equal(fmt.Sprintf("evt:%d@20270314T100000Z", event), linkedMeetingRefs(t, st, note)[note], "the explicit standalone link follows its original series occurrence")
+	var decision string
+	var promotedCreatedAt time.Time
+	requirements.NoError(st.db.QueryRow(`SELECT decision,created_at FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = ?`, note, uid, "20270314T100000Z").Scan(&decision, &promotedCreatedAt))
+	assertions.Equal("link", decision)
+	assertions.True(linkCreatedAt.Equal(promotedCreatedAt), "the promoted link keeps its original timestamp")
+	assertions.Empty(linkedMeetingRefs(t, st, splitNote)[splitNote], "a newer occurrence split remains authoritative")
+	var splitDecision string
+	var promotedSplitAt time.Time
+	requirements.NoError(st.db.QueryRow(`SELECT decision,created_at FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = ?`, splitNote, uid, "20270314T100000Z").Scan(&splitDecision, &promotedSplitAt))
+	assertions.Equal("split", splitDecision)
+	assertions.True(newerSplitAt.Equal(promotedSplitAt), "a newer split keeps its timestamp over the promoted link")
+}
+
 func TestCalendarProjectionWriteKeepsEvidenceWhenSplitAliasExpansionIsTooBroad(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
@@ -277,6 +312,10 @@ func TestCalendarProjectionWriteKeepsEvidenceWhenSplitAliasExpansionIsTooBroad(t
 	var splitCount int
 	requirements.NoError(st.db.QueryRow(`SELECT COUNT(*) FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = '' AND decision = 'split'`, note, uid).Scan(&splitCount))
 	assertions.Equal(1, splitCount, "the existing owner decision remains stored")
+
+	_, other := calendarFixture(t, st, "other", singleLinkRaw("other", "manual-link@example.org"))
+	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: other}))
+	assertions.Equal(fmt.Sprintf("evt:%d", other), linkedMeetingRefs(t, st, note)[note], "an unresolved optional split alias does not block unrelated saved links")
 }
 
 func TestMeetingLinksSplitAliasPreservesNewerExplicitLink(t *testing.T) {
@@ -296,7 +335,6 @@ func TestMeetingLinksSplitAliasPreservesNewerExplicitLink(t *testing.T) {
 	linkCreatedAt = splitCreatedAt.Add(time.Minute)
 	_, err := st.db.Exec(`UPDATE meeting_link_decisions SET created_at = ? WHERE member_message_id = ? AND target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = ? AND decision = 'link'`, linkCreatedAt, note, uid, "20270314T100000Z")
 	requirements.NoError(err)
-	assertions.True(linkCreatedAt.After(splitCreatedAt), "the explicit link is newer than the standalone split")
 
 	seriesRaw := strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", uid)
 	calendarFixture(t, st, "series", seriesRaw, "series-calendar@example.com")

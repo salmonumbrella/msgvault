@@ -364,9 +364,17 @@ func (s *Store) meetingMemberOccurrences(ctx context.Context, r reboundReader, m
 	splits := map[meetingIdentity]time.Time{}
 	for _, d := range decisions {
 		if d.Decision == "split" {
-			identities, err := s.meetingSplitIdentities(ctx, r, d.Identity, budget)
-			if err != nil {
+			// Alias expansion is optional during a read. Keep the saved identity
+			// and its budget available for other links when a long or unsupported
+			// recurrence prevents discovering every alias.
+			aliasBudget := *budget
+			identities, err := s.meetingSplitIdentities(ctx, r, d.Identity, &aliasBudget)
+			if errors.Is(err, ErrQueryTooBroad) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
+				identities = []meetingIdentity{d.Identity}
+			} else if err != nil {
 				return nil, err
+			} else {
+				*budget = aliasBudget
 			}
 			for _, identity := range identities {
 				if !d.CreatedAt.Before(splits[identity]) {

@@ -260,6 +260,11 @@ func (s *Store) persistUIDSplitAliasesForCalendarMessage(ctx context.Context, tx
 	if !uid.Valid || uid.String == "" {
 		return nil
 	}
+	if previousSingleStartKey != "" {
+		if err := s.persistUIDLinkTransitionAlias(ctx, tx, uid.String, previousSingleStartKey); err != nil {
+			return err
+		}
+	}
 
 	rows, err := tx.QueryContext(ctx, `SELECT member_message_id,occurrence_key,created_at FROM meeting_link_decisions WHERE target_ical_uid = ? AND target_message_id IS NULL AND decision = 'split'`, uid.String)
 	if err != nil {
@@ -355,6 +360,50 @@ func (s *Store) persistUIDSplitAliasesForCalendarMessage(ctx context.Context, tx
 				if err := s.journalMeetingLinks(ctx, tx, decision.member); err != nil {
 					return err
 				}
+			}
+		}
+	}
+	return nil
+}
+
+// A manually linked standalone event keeps the same UID identity when it
+// becomes a series. Copy the link to the standalone's former start key so the
+// series resolver can keep showing that occurrence. The timestamp guard keeps
+// an existing newer decision, including a same-time split, authoritative.
+func (s *Store) persistUIDLinkTransitionAlias(ctx context.Context, tx *loggedTx, uid, occurrenceKey string) error {
+	rows, err := tx.QueryContext(ctx, `SELECT member_message_id,created_at FROM meeting_link_decisions WHERE target_ical_uid = ? AND target_message_id IS NULL AND occurrence_key = '' AND decision = 'link'`, uid)
+	if err != nil {
+		return fmt.Errorf("read UID-based meeting links for transition alias: %w", err)
+	}
+	type linkDecision struct {
+		member    int64
+		createdAt time.Time
+	}
+	var decisions []linkDecision
+	for rows.Next() {
+		var decision linkDecision
+		if err := rows.Scan(&decision.member, &decision.createdAt); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan UID-based meeting link for transition alias: %w", err)
+		}
+		decisions = append(decisions, decision)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return fmt.Errorf("read UID-based meeting links for transition alias: %w", err)
+	}
+	upsert := meetingDecisionUpsert + ` WHERE meeting_link_decisions.created_at < excluded.created_at OR (meeting_link_decisions.created_at = excluded.created_at AND excluded.decision = 'split')`
+	for _, decision := range decisions {
+		result, err := tx.ExecContext(ctx, upsert, decision.member, uid, sql.NullInt64{}, occurrenceKey, "link", decision.createdAt)
+		if err != nil {
+			return fmt.Errorf("persist UID-based meeting link transition alias: %w", err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("count UID-based meeting link transition aliases: %w", err)
+		}
+		if changed > 0 {
+			if err := s.journalMeetingLinks(ctx, tx, decision.member); err != nil {
+				return err
 			}
 		}
 	}
