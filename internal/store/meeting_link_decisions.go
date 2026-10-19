@@ -94,6 +94,32 @@ func (s *Store) supersedeMessageMeetingLinks(ctx context.Context, tx *loggedTx, 
 		seen[row.MessageID] = struct{}{}
 		messageIDs = append(messageIDs, row.MessageID)
 	}
+	decisions, err := readMeetingLinkDecisions(ctx, reader, memberID)
+	if err != nil {
+		return fmt.Errorf("read saved meeting links for split: %w", err)
+	}
+	for _, decision := range decisions {
+		if decision.Decision != "link" ||
+			decision.Identity.ICalUID != "" ||
+			decision.Identity.EventMessageID == 0 ||
+			decision.Identity.OccurrenceKey != identity.OccurrenceKey {
+			continue
+		}
+		identities, err := s.meetingSplitIdentities(ctx, reader, decision.Identity, &budget)
+		if err != nil {
+			return fmt.Errorf("resolve saved message-based meeting link for split: %w", err)
+		}
+		for _, resolved := range identities {
+			if resolved != identity {
+				continue
+			}
+			if _, ok := seen[decision.Identity.EventMessageID]; !ok {
+				seen[decision.Identity.EventMessageID] = struct{}{}
+				messageIDs = append(messageIDs, decision.Identity.EventMessageID)
+			}
+			break
+		}
+	}
 	if len(messageIDs) == 0 {
 		return nil
 	}
