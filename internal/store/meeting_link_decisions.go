@@ -56,52 +56,96 @@ func (s *Store) writeMeetingLinkDecision(ctx context.Context, memberID int64, oc
 		if err := tx.QueryRowContext(ctx, `SELECT id FROM messages WHERE id = ? AND message_type = 'meeting_transcript' AND deleted_at IS NULL`, memberID).Scan(&found); err != nil {
 			return err
 		}
-		target, err := s.resolveMeetingDecisionTarget(ctx, reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind, dialect: s.dialect}, memberID, occurrence, decision)
+		target, savedIdentity, err := s.resolveMeetingDecisionTarget(ctx, reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind, dialect: s.dialect}, memberID, occurrence, decision)
 		if err != nil {
 			return fmt.Errorf("resolve meeting decision target: %w", err)
 		}
-		if decision == "split" {
-			// The UID upsert supersedes UID links; clear its older message identity too.
-			if _, err := tx.ExecContext(ctx, `DELETE FROM meeting_link_decisions WHERE member_message_id = ? AND target_message_id = ? AND occurrence_key = ? AND decision = 'link'`, memberID, target.Ref.MessageID, target.Identity.OccurrenceKey); err != nil {
+		createdAt := time.Now().UTC()
+		if decision == "split" && target.Identity.ICalUID != "" {
+			if err := s.supersedeMessageMeetingLinks(ctx, tx, memberID, target.Identity, savedIdentity, createdAt); err != nil {
 				return err
 			}
 		}
-		_, err = tx.ExecContext(ctx, meetingDecisionUpsert, memberID, target.Identity.ICalUID, sql.NullInt64{Int64: target.Identity.EventMessageID, Valid: target.Identity.ICalUID == ""}, target.Identity.OccurrenceKey, decision, time.Now().UTC())
+		_, err = tx.ExecContext(ctx, meetingDecisionUpsert, memberID, target.Identity.ICalUID, sql.NullInt64{Int64: target.Identity.EventMessageID, Valid: target.Identity.ICalUID == ""}, target.Identity.OccurrenceKey, decision, createdAt)
 		return err
 	})
 }
 
-func (s *Store) resolveMeetingDecisionTarget(ctx context.Context, r reboundReader, memberID int64, ref OccurrenceRef, decision string) (linkOccurrence, error) {
+// A UID split must supersede earlier message-based links for the same
+// occurrence. Otherwise a later recurrence edit can make a hidden link
+// visible again after the split has moved to the UID identity.
+func (s *Store) supersedeMessageMeetingLinks(ctx context.Context, tx *loggedTx, memberID int64, identity meetingIdentity, savedIdentity *meetingIdentity, createdAt time.Time) error {
+	reader := reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind, dialect: s.dialect}
+	budget := calrecur.RequestReadBudget
+	rows, err := s.meetingIdentityRows(ctx, reader, identity, &budget)
+	if err != nil {
+		return fmt.Errorf("resolve message-based meeting links for split: %w", err)
+	}
+	messageIDs := make([]int64, 0, len(rows)+1)
+	seen := make(map[int64]struct{}, len(rows)+1)
+	if savedIdentity != nil && savedIdentity.ICalUID == "" && savedIdentity.EventMessageID != 0 {
+		messageIDs = append(messageIDs, savedIdentity.EventMessageID)
+		seen[savedIdentity.EventMessageID] = struct{}{}
+	}
+	for _, row := range rows {
+		if _, ok := seen[row.MessageID]; ok {
+			continue
+		}
+		seen[row.MessageID] = struct{}{}
+		messageIDs = append(messageIDs, row.MessageID)
+	}
+	if len(messageIDs) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(messageIDs)+3)
+	args = append(args, createdAt, memberID)
+	for _, messageID := range messageIDs {
+		args = append(args, messageID)
+	}
+	args = append(args, identity.OccurrenceKey)
+	query := `UPDATE meeting_link_decisions SET decision = 'split', created_at = ? WHERE member_message_id = ? AND target_ical_uid = '' AND target_message_id IN (` + placeholders(len(messageIDs)) + `) AND occurrence_key = ? AND decision = 'link'`
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("supersede message-based meeting links: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) resolveMeetingDecisionTarget(ctx context.Context, r reboundReader, memberID int64, ref OccurrenceRef, decision string) (linkOccurrence, *meetingIdentity, error) {
 	budget := calrecur.RequestReadBudget
 	target, err := resolveMeetingOccurrence(ctx, r, ref, &budget)
 	if decision != "split" || !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, calrecur.ErrUnsupportedRecurrence) && !errors.Is(err, ErrQueryTooBroad) {
-		return target, err
+		return target, nil, err
 	}
 	// A series edit can remove an occurrence while its saved link still
-	// suppresses automatic matches. Only supersede a saved identity here.
+	// suppresses automatic matches. Return the matched identity so the write
+	// can supersede it even if the current event no longer qualifies by UID.
 	rows, err := meetingEventRows(ctx, r, `e.message_id = ?`, []any{ref.MessageID}, &budget)
 	if err != nil {
-		return linkOccurrence{}, err
+		return linkOccurrence{}, nil, err
 	}
 	if len(rows) != 1 {
-		return linkOccurrence{}, sql.ErrNoRows
+		return linkOccurrence{}, nil, sql.ErrNoRows
 	}
 	target = occurrenceFromRow(rows[0], ref.Key)
 	identities, err := s.meetingSplitIdentities(ctx, r, meetingIdentity{EventMessageID: ref.MessageID, OccurrenceKey: ref.Key}, &budget)
 	if err != nil {
-		return linkOccurrence{}, err
+		return linkOccurrence{}, nil, err
 	}
 	for _, identity := range identities {
 		var found int
 		err := r.QueryRowContext(ctx, `SELECT 1 FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND COALESCE(target_message_id,0) = ? AND occurrence_key = ?`, memberID, identity.ICalUID, identity.EventMessageID, identity.OccurrenceKey).Scan(&found)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return linkOccurrence{}, err
+			return linkOccurrence{}, nil, err
 		}
 		if err == nil {
-			return target, nil
+			// Keep the current event identity for the new split. A saved
+			// message-based link may authorize unlinking, but its source can
+			// later be removed and cascade that identity away.
+			savedIdentity := identity
+			return target, &savedIdentity, nil
 		}
 	}
-	return linkOccurrence{}, sql.ErrNoRows
+	return linkOccurrence{}, nil, sql.ErrNoRows
 }
 
 // Retain the original decisions for undo; purge removes only that hidden copy.
