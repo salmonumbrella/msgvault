@@ -1709,6 +1709,10 @@ type GetMCPEventMessageResponse = CliMessageResponse
 
 type GetMCPEventMessageErrorResponse = MCPEventsErrorResponse
 
+type DiscoverMCPEventResourcesResponse = ResourcePage
+
+type DiscoverMCPEventResourcesErrorResponse = MCPEventsErrorResponse
+
 type GetMCPEventsStatusResponse []SubscriptionStatus
 
 type GetMCPEventsStatusErrorResponse = MCPEventsErrorResponse
@@ -5190,6 +5194,13 @@ type GetMCPEventMessageResp struct {
 	Body         []byte
 	StatusCode   int
 	JSON200      *GetMCPEventMessageResponse
+}
+
+type DiscoverMCPEventResourcesResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *DiscoverMCPEventResourcesResponse
 }
 
 type GetMCPEventsStatusResp struct {

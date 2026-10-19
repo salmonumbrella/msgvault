@@ -79,6 +79,11 @@ func Import(ctx context.Context, st *store.Store, c *Client, opts Options, log *
 		return nil, err
 	}
 	sum = &Summary{SourceID: src.ID}
+	execution, err := st.AcquireSyncExecutionContext(ctx, src.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = errors.Join(err, execution.Release()) }()
 
 	// Cursors: the last completed run, then any checkpoint of an interrupted
 	// run after it. A delta link is opaque, so the newer checkpoint wins.
@@ -91,7 +96,7 @@ func Import(ctx context.Context, st *store.Store, c *Client, opts Options, log *
 	}
 
 	rederive.Heal(ctx, log, st, src)
-	syncID, err := st.StartSync(src.ID, SourceType)
+	syncID, err := execution.StartSyncContext(ctx, SourceType, "")
 	if err != nil {
 		return nil, err
 	}
@@ -112,12 +117,42 @@ func Import(ctx context.Context, st *store.Store, c *Client, opts Options, log *
 		}
 	}()
 
-	s := &syncer{st: st, c: c, opts: opts, log: log, sourceID: src.ID, sum: sum, cursors: cursors}
+	permission, err := observeNativeMailPermission(ctx, st, src, c)
+	if err != nil {
+		return sum, err
+	}
+
+	// Run before FailSync releases this generation. A late native response from
+	// a superseded run cannot revoke a newer run's verified account authority.
+	defer func() {
+		if err != nil && nativeMailDenied(err) {
+			denied := *permission
+			denied.Known = true
+			denied.MessageRead = false
+			err = errors.Join(err, st.ObserveNativeSourcePermission(ctx, denied))
+		}
+	}()
+	s := &syncer{st: st, c: c, opts: opts, log: log, sourceID: src.ID, sum: sum, cursors: cursors, nativePermission: permission}
 	folders, err := c.ListFolders(ctx)
+	err = errors.Join(err, recheckNativeMailPermission(ctx, st, permission, c))
 	if err != nil {
 		return sum, fmt.Errorf("list mail folders: %w", err)
 	}
-	if s.labels, err = s.ensureLabels(ctx, folders); err != nil {
+	if permission.MessageRead {
+		inventory := store.NativeMessageScopeInventory{SourceID: src.ID, SourceReference: permission.SourceReference, SourceType: SourceType, NativeIdentity: src.Identifier, Kind: "msmail_folder", Complete: true}
+		for _, folder := range folders {
+			inventory.Scopes = append(inventory.Scopes, store.NativeMessageScope{ProviderID: folder.ID, DisplayName: folder.Path})
+		}
+		if err = st.ObserveNativeMessageScopes(ctx, inventory); err != nil {
+			return sum, err
+		}
+		s.nativeFolderScopes, err = pinNativeMailFolders(ctx, st, permission, folders)
+		if err != nil {
+			return sum, err
+		}
+	}
+	s.labels, err = s.ensureLabels(ctx, folders)
+	if err = errors.Join(err, recheckNativeMailPermission(ctx, st, permission, c)); err != nil {
 		return sum, err
 	}
 	if err = s.retryMessages(ctx); err != nil {
@@ -156,6 +191,9 @@ func Import(ctx context.Context, st *store.Store, c *Client, opts Options, log *
 		}
 		for {
 			page, perr := c.DeltaPage(ctx, link)
+			if grantErr := recheckNativeMailPermission(ctx, st, permission, c); grantErr != nil {
+				return sum, errors.Join(perr, grantErr)
+			}
 			if errors.Is(perr, msgraph.ErrGone) && replacementCursor != "" {
 				// The old cursor expired, but the replacement walk is complete.
 				link, replacementCursor = replacementCursor, ""
@@ -255,13 +293,15 @@ type syncer struct {
 	cursors    map[string]string
 	ingestMode store.IngestMode
 
-	st       *store.Store
-	c        *Client
-	opts     Options
-	log      *slog.Logger
-	sourceID int64
-	sum      *Summary
-	labels   map[string]int64 // Graph folder ID -> label ID
+	st                 *store.Store
+	c                  *Client
+	opts               Options
+	log                *slog.Logger
+	sourceID           int64
+	nativePermission   *store.NativeSourcePermission
+	nativeFolderScopes map[string]store.NativeMessageScopeIdentity
+	sum                *Summary
+	labels             map[string]int64 // Graph folder ID -> label ID
 
 	// drafts is the Drafts folder. A draft keeps its ID while it is edited,
 	// so a known draft is downloaded again when delta reports it.
@@ -464,6 +504,9 @@ func (s *syncer) retryMessages(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if nativeMailDenied(err) {
+				return err
+			}
 			s.log.Warn("message lookup failed, retrying on the next sync", "id", id, "error", err)
 			s.sum.Errors++
 			continue
@@ -631,22 +674,17 @@ func (s *syncer) download(ctx context.Context, folderID string, msgs []DeltaMess
 			continue
 		}
 		if r.err != nil {
+			if nativeMailDenied(r.err) {
+				storeErr = r.err
+				cancel()
+				continue
+			}
 			s.log.Warn("message download failed, retrying on the next sync", "id", r.msg.ID, "error", r.err)
 			s.sum.Errors++
 			s.saveRetry(r.msg.ID, folderID)
 			continue
 		}
 		sum := sha256.Sum256(r.raw)
-		labelIDs := []int64{folderLabel}
-		if r.msg.archiveID != 0 {
-			var err error
-			labelIDs, err = s.st.MessageLabelIDsContext(ctx, r.msg.archiveID)
-			if err != nil {
-				storeErr = fmt.Errorf("read labels for message %s: %w", r.msg.ID, err)
-				cancel()
-				continue
-			}
-		}
 		messageStore := s.st
 		if _, pending := s.cursors[retryPrefix+r.msg.ID]; pending {
 			mode := store.IngestBackfill
@@ -655,8 +693,72 @@ func (s *syncer) download(ctx context.Context, folderID string, msgs []DeltaMess
 			}
 			messageStore = s.st.WithIngestContext(store.IngestContext{Mode: mode, ObservedAt: time.Now().UTC()})
 		}
+		labelIDs := []int64{folderLabel}
+		if r.msg.archiveID != 0 {
+			var labelErr error
+			labelIDs, labelErr = s.st.MessageLabelIDsContext(ctx, r.msg.archiveID)
+			if labelErr != nil {
+				storeErr = fmt.Errorf("read labels for message %s: %w", r.msg.ID, labelErr)
+				cancel()
+				continue
+			}
+		}
+		var nativeScopes *store.NativeMessageScopeMembership
+		snapshotLabel := folderLabel
+		if s.nativePermission != nil && s.nativePermission.MessageRead {
+			current, lookupErr := s.c.LookupMessage(ctx, r.msg.ID)
+			if errors.Is(lookupErr, msgraph.ErrNotFound) {
+				delete(s.cursors, retryPrefix+r.msg.ID)
+				if r.msg.archiveID != 0 {
+					vanished[r.msg.ID] = r.msg.archiveID
+				}
+				continue
+			}
+			if lookupErr != nil {
+				storeErr = lookupErr
+				cancel()
+				continue
+			}
+			label, observed := s.labels[current.ParentFolderID]
+			if !observed {
+				s.saveRetry(r.msg.ID, current.ParentFolderID)
+				continue
+			}
+			snapshotLabel = label
+			identity, pinned := s.nativeFolderScopes[current.ParentFolderID]
+			if !pinned {
+				s.saveRetry(r.msg.ID, current.ParentFolderID)
+				continue
+			}
+			if r.msg.archiveID != 0 {
+				if err := s.setFolder(ctx, r.msg.archiveID, label, r.msg.Categories); err != nil {
+					storeErr = err
+					cancel()
+					continue
+				}
+				var labelErr error
+				labelIDs, labelErr = s.st.MessageLabelIDsContext(ctx, r.msg.archiveID)
+				if labelErr != nil {
+					storeErr = fmt.Errorf("read labels for message %s: %w", r.msg.ID, labelErr)
+					cancel()
+					continue
+				}
+			}
+			nativeScopes = &store.NativeMessageScopeMembership{SourceReference: s.nativePermission.SourceReference, Scopes: []store.NativeMessageScopeIdentity{identity}}
+		}
+		if err := recheckNativeMailPermission(ctx, s.st, s.nativePermission, s.c); err != nil {
+			storeErr = err
+			cancel()
+			continue
+		}
+		if s.nativePermission == nil || !s.nativePermission.MessageRead {
+			nativeScopes = nil
+		}
+		if r.msg.archiveID == 0 {
+			labelIDs = []int64{snapshotLabel}
+		}
 		if err := importer.IngestRawMessageSnapshot(ctx, messageStore, s.sourceID, s.opts.Email, s.opts.AttachmentsDir,
-			labelIDs, r.msg.ID, hex.EncodeToString(sum[:]), r.raw, r.msg.ReceivedDateTime, s.log); err != nil {
+			labelIDs, r.msg.ID, hex.EncodeToString(sum[:]), r.raw, r.msg.ReceivedDateTime, s.log, nativeScopes); err != nil {
 			s.saveRetry(r.msg.ID, folderID)
 			s.sum.Errors++
 			if errors.Is(err, importer.ErrMIMEAttachmentPreparation) {

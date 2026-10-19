@@ -26,6 +26,7 @@ func TestOpenSQLiteRecordsEventsCaptureGap(t *testing.T) {
 	require.NoError(err)
 	source, err := st.GetOrCreateSource("gmail", "library-gap@example.test")
 	require.NoError(err)
+	grantArchiveTestMessageRead(t, st, source)
 	conversation, err := st.EnsureConversation(source.ID, "library-gap-thread", "Library gap")
 	require.NoError(err)
 	clock, err := st.ConfigureMCPEvents(t.Context(), store.MCPEventsConfig{
@@ -87,6 +88,7 @@ func TestRunningDaemonRefusesActivationAfterLibraryGap(t *testing.T) {
 	t.Cleanup(func() { assert.NoError(daemon.Close()) })
 	source, err := daemon.GetOrCreateSource("gmail", "running-daemon@example.test")
 	require.NoError(err)
+	grantArchiveTestMessageRead(t, daemon, source)
 	conversation, err := daemon.EnsureConversation(source.ID, "running-daemon-thread", "Running daemon")
 	require.NoError(err)
 	_, err = daemon.ConfigureMCPEvents(t.Context(), store.MCPEventsConfig{

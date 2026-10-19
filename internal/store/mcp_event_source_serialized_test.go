@@ -14,14 +14,14 @@ func TestMCPEventsSerializedSourceRemovalEndsPendingAfterMessageDeletion(t *test
 	assert := Assert.New(t)
 	require := Require.New(t)
 	f := storetest.New(t)
+	grantSyntheticSourceFixture(t, f)
 	now := time.Now().UTC()
 	clock, err := f.Store.ConfigureMCPEvents(t.Context(), mcpStoreConfig())
 	require.NoError(err)
 	input := newMCPStoreSubscription(t, f, 1, now)
 	active, _, err := f.Store.ActivateMCPSubscription(t.Context(), store.MCPActivation{Subscription: input, Now: now})
 	require.NoError(err)
-	messageID := f.CreateMessage("synthetic-serialized-source-target")
-	appendMCPSubscriptionFixture(t, f, clock.Epoch, now)
+	messageID := appendMCPSubscriptionFixture(t, f, clock.Epoch, now)
 	pending, err := f.Store.PrepareMCPDelivery(t.Context(), active.ID, active.Generation, now, func(store.MCPSubscription, store.MCPEvent) ([]byte, error) {
 		return []byte(`{"eventId":"synthetic-pending"}`), nil
 	})
