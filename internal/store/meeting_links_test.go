@@ -578,6 +578,26 @@ func TestMeetingLinksOrphanSplitAfterMasterArrives(t *testing.T) {
 	}
 }
 
+func TestMeetingLinksOrphanExceptionSplitSupersedesSavedLink(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, orphan := calendarFixture(t, st, "orphan", `{"id":"series_20270314T100000Z","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`)
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"weekly@example.org","startsAt":"2027-03-14T10:00:00Z"}}`)
+	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: orphan}))
+	requirements.Equal(fmt.Sprintf("evt:%d", orphan), linkedMeetingRefs(t, st, note)[note])
+
+	_, master := calendarFixture(t, st, "master", linkSeriesRaw)
+	key := "20270314T100000Z"
+	requirements.Equal(fmt.Sprintf("evt:%d@%s", master, key), linkedMeetingRefs(t, st, note)[note], "the UID-less exception resolves through its arriving master")
+	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: master, Key: key}))
+	requirements.Empty(linkedMeetingRefs(t, st, note)[note])
+
+	// When the master stops recurring, the exception becomes an orphan again.
+	// The old message-based link must already have been superseded by the split.
+	requirements.NoError(st.UpsertMessageRawWithFormat(master, []byte(singleLinkRaw("series", "weekly@example.org")), "gcal_json"))
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note], "removing the master recurrence must not reactivate the orphan's saved link")
+}
+
 func TestMeetingLinksSplitSurvivesSourceRemoval(t *testing.T) {
 	for _, recurring := range []bool{false, true} {
 		t.Run(fmt.Sprintf("recurring=%t", recurring), func(t *testing.T) {
