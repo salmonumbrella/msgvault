@@ -61,7 +61,7 @@ func (s *Store) writeMeetingLinkDecision(ctx context.Context, memberID int64, oc
 			return fmt.Errorf("resolve meeting decision target: %w", err)
 		}
 		createdAt := time.Now().UTC()
-		if decision == "split" && target.Identity.ICalUID != "" {
+		if decision == "split" {
 			if err := s.supersedeMessageMeetingLinks(ctx, tx, memberID, target.Identity, savedIdentity, createdAt); err != nil {
 				return err
 			}
@@ -175,6 +175,57 @@ func (s *Store) resolveMeetingDecisionTarget(ctx context.Context, r reboundReade
 		}
 	}
 	return linkOccurrence{}, nil, sql.ErrNoRows
+}
+
+// When a calendar event gains an iCalendar UID, retain any decisions that
+// were saved against its temporary message identity under the now-stable UID
+// identity. Keep the original rows so their message lifetime remains intact.
+func (s *Store) upgradeUIDlessMeetingDecisions(ctx context.Context, tx *loggedTx, messageID int64) error {
+	var uid sql.NullString
+	query := `SELECT ` + calendarUIDExpression(s.dialect, "m.metadata") + ` FROM messages m WHERE m.id = ? AND m.message_type = 'calendar_event'`
+	if err := tx.QueryRowContext(ctx, query, messageID).Scan(&uid); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("read calendar UID for meeting decision upgrade: %w", err)
+	}
+	if !uid.Valid || uid.String == "" {
+		return nil
+	}
+
+	rows, err := tx.QueryContext(ctx, `SELECT member_message_id,occurrence_key,decision,created_at FROM meeting_link_decisions WHERE target_message_id = ? AND target_ical_uid = ''`, messageID)
+	if err != nil {
+		return fmt.Errorf("read UID-less meeting decisions: %w", err)
+	}
+	type decision struct {
+		member    int64
+		key       string
+		kind      string
+		createdAt time.Time
+	}
+	var decisions []decision
+	for rows.Next() {
+		var d decision
+		if err := rows.Scan(&d.member, &d.key, &d.kind, &d.createdAt); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan UID-less meeting decision: %w", err)
+		}
+		decisions = append(decisions, d)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return fmt.Errorf("read UID-less meeting decisions: %w", err)
+	}
+
+	upsert := meetingDecisionUpsert + ` WHERE meeting_link_decisions.created_at < excluded.created_at OR (meeting_link_decisions.created_at = excluded.created_at AND excluded.decision = 'split')`
+	for _, d := range decisions {
+		if _, err := tx.ExecContext(ctx, upsert, d.member, uid.String, sql.NullInt64{}, d.key, d.kind, d.createdAt); err != nil {
+			return fmt.Errorf("upgrade meeting decision to calendar UID: %w", err)
+		}
+		if err := s.journalMeetingLinks(ctx, tx, d.member); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Retain the original decisions for undo; purge removes only that hidden copy.

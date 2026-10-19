@@ -83,7 +83,7 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 	sum := sha256.Sum256(canonical)
 	hash := hex.EncodeToString(sum[:])
 	if exists && oldVersion == calendarEventProjectionVersion && oldHash == hash {
-		return nil
+		return s.upgradeUIDlessMeetingDecisions(ctx, tx, messageID)
 	}
 	recurrenceEnd := calendarRecurrenceEnd(ctx, event)
 	if err := ctx.Err(); err != nil {
@@ -113,6 +113,9 @@ func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *logg
 		return fmt.Errorf("write calendar projection: %w", err)
 	}
 	if err := replaceCalendarAttendees(ctx, tx, messageID, event.Attendees); err != nil {
+		return err
+	}
+	if err := s.upgradeUIDlessMeetingDecisions(ctx, tx, messageID); err != nil {
 		return err
 	}
 	return s.journalCalendarMeetingLinks(ctx, tx)

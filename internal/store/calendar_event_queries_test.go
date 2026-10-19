@@ -152,6 +152,23 @@ func TestCalendarExceptionsOriginalAndEffectiveWindows(t *testing.T) {
 	assertions.Equal(master, page.Occurrences[0].SeriesMessageID)
 }
 
+func TestCalendarExceptionsAllDayOriginalDurationOverlapsWindow(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, master := calendarFixture(t, st, "all-day-master", `{"id":"all-day-series","iCalUID":"all-day-series@example.org","start":{"date":"2027-03-01"},"end":{"date":"2027-03-05"},"recurrence":["RRULE:FREQ=DAILY;COUNT=3"]}`)
+	calendarFixture(t, st, "all-day-exception", `{"id":"moved-all-day","iCalUID":"all-day-series@example.org","recurringEventId":"all-day-series","originalStartTime":{"date":"2027-03-01"},"start":{"date":"2027-03-10"},"end":{"date":"2027-03-14"}}`)
+
+	from := time.Date(2027, 3, 4, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	requirements.NoError(err)
+	refs := make([]string, 0, len(page.Occurrences))
+	for _, occurrence := range page.Occurrences {
+		refs = append(refs, occurrence.Ref)
+	}
+	assertions.NotContains(refs, fmt.Sprintf("evt:%d@20270301", master), "the moved exception must suppress its original all-day interval")
+	assertions.Contains(refs, fmt.Sprintf("evt:%d@20270302", master))
+}
+
 func TestCalendarExceptionsPartialBounds(t *testing.T) {
 	for _, tc := range []struct {
 		name, original, bounds, start, end string
