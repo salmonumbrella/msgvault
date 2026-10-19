@@ -465,6 +465,23 @@ func (s *Store) meetingSplitIdentities(ctx context.Context, r reboundReader, ide
 		return nil, err
 	}
 	identities := []meetingIdentity{identity}
+	if identity.ICalUID != "" && identity.OccurrenceKey != "" {
+		_, instance, ok := calrecur.ParseInstanceID("event_" + identity.OccurrenceKey)
+		if ok {
+			column, value := "e.start_at", any(instance.Instant)
+			if instance.AllDay {
+				column, value = "e.start_date", instance.Date
+			}
+			predicate := s.calendarUIDPredicate() + ` AND e.kind = 'single' AND ` + column + ` = ?`
+			copies, err := meetingEventRows(ctx, r, predicate, []any{identity.ICalUID, value}, budget)
+			if err != nil {
+				return nil, err
+			}
+			for _, copy := range copies {
+				identities = append(identities, occurrenceFromRow(copy, "").Identity)
+			}
+		}
+	}
 	for _, row := range rows {
 		// A split saved without a UID follows the event when it gains one.
 		if identity.ICalUID == "" && row.ICalUID != "" {
