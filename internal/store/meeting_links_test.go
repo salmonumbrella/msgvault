@@ -101,19 +101,6 @@ func TestMeetingLinksSplitBeforeOccurrenceRemovalAfterUIDAcquisition(t *testing.
 	assert.Equal(t, fmt.Sprintf("evt:%d", automatic), linkedMeetingRefs(t, st, note)[note], "the superseded manual link must keep allowing unrelated automatic matches")
 }
 
-func TestMeetingLinksSplitFollowsLaterUID(t *testing.T) {
-	requirements := require.New(t)
-	st := newRFC822IDBackfillBackendStore(t)
-	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", ""))
-	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"shared@example.org"}}`)
-	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
-	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: event}))
-	requirements.NoError(st.SetMessageMetadata(event, sql.NullString{String: `{"calendar_id":"calendar@example.com","ical_uid":"shared@example.org"}`, Valid: true}))
-	links, err := st.MeetingLinksContext(t.Context(), note)
-	requirements.NoError(err)
-	requirements.Empty(links, "the saved split follows the target after it gains a logical UID")
-}
-
 func TestMeetingLinksSplitPersistsUIDAcquisition(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
@@ -611,7 +598,7 @@ func TestMeetingLinksSplitStandaloneSupersedesSeriesOccurrence(t *testing.T) {
 	st := newRFC822IDBackfillBackendStore(t)
 	uid := "shared@example.org"
 	_, master := calendarFixture(t, st, "master", strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", uid))
-	_, single := calendarFixture(t, st, "single", singleLinkRaw("single", uid))
+	singleData, single := calendarFixture(t, st, "single", singleLinkRaw("single", uid), "copy-calendar@example.com")
 	_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
 	key := "20270314T100000Z"
 	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: master, Key: key}))
@@ -619,6 +606,88 @@ func TestMeetingLinksSplitStandaloneSupersedesSeriesOccurrence(t *testing.T) {
 
 	requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: single}))
 	assertions.Empty(linkedMeetingRefs(t, st, note)[note], "a standalone split supersedes the same UID occurrence in its series")
+	var aliasDecision string
+	requirements.NoError(st.db.QueryRow(`SELECT decision FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND COALESCE(target_message_id, 0) = 0 AND occurrence_key = ?`, note, uid, key).Scan(&aliasDecision))
+	assertions.Equal("split", aliasDecision, "the series identity is saved alongside the standalone split")
+	requirements.NoError(st.RemoveSource(singleData.Message.SourceID))
+	assertions.Empty(linkedMeetingRefs(t, st, note)[note], "the split remains after its standalone alias is removed")
+}
+
+func TestMeetingLinksSplitAliasesMovedSeriesOccurrenceInBothDirections(t *testing.T) {
+	for _, unlinkViaSeries := range []bool{false, true} {
+		name := "standalone split supersedes a moved series link"
+		if unlinkViaSeries {
+			name = "series split supersedes a moved standalone link"
+		}
+		t.Run(name, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			uid := "moved-copy@example.org"
+			seriesRaw := strings.ReplaceAll(linkSeriesRaw, "weekly@example.org", uid)
+			seriesData, master := calendarFixture(t, st, "master", seriesRaw, "series-calendar@example.com")
+			calendarFixture(t, st, "exception", fmt.Sprintf(`{"id":"moved","iCalUID":%q,"recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`, uid), "series-calendar@example.com")
+			singleData, single := calendarFixture(t, st, "single", fmt.Sprintf(`{"id":"single","iCalUID":%q,"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`, uid), "copy-calendar@example.com")
+			_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
+			seriesRef := OccurrenceRef{MessageID: master, Key: "20270314T100000Z"}
+			singleRef := OccurrenceRef{MessageID: single}
+			linkRef, unlinkRef, aliasKey := seriesRef, singleRef, seriesRef.Key
+			removeSource := singleData.Message.SourceID
+			if unlinkViaSeries {
+				linkRef, unlinkRef, aliasKey = singleRef, seriesRef, ""
+				removeSource = seriesData.Message.SourceID
+			}
+			requirements.NoError(st.LinkMeetingContext(t.Context(), note, linkRef))
+			requirements.NoError(st.UnlinkMeetingContext(t.Context(), note, unlinkRef))
+			assertions.Empty(linkedMeetingRefs(t, st, note)[note], "the split hides the linked copy at the moved occurrence's effective bounds")
+			var aliasDecision string
+			requirements.NoError(st.db.QueryRow(`SELECT decision FROM meeting_link_decisions WHERE member_message_id = ? AND target_ical_uid = ? AND COALESCE(target_message_id, 0) = 0 AND occurrence_key = ?`, note, uid, aliasKey).Scan(&aliasDecision))
+			assertions.Equal("split", aliasDecision, "the equivalent identity is persisted")
+			requirements.NoError(st.RemoveSource(removeSource))
+			assertions.Empty(linkedMeetingRefs(t, st, note)[note], "the split survives source removal of the identity used for matching")
+		})
+	}
+}
+
+func TestMeetingLinksAllDayExceptionUsesInheritedZone(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	uid := "all-day-zone@example.org"
+	masterRaw := fmt.Sprintf(`{"id":"series","iCalUID":%q,"start":{"date":"2027-03-01","timeZone":"America/Los_Angeles"},"end":{"date":"2027-03-02"},"recurrence":["RRULE:FREQ=DAILY;COUNT=1"]}`, uid)
+	_, master := calendarFixture(t, st, "master", masterRaw, "series-calendar@example.com")
+	_, exception := calendarFixture(t, st, "exception", fmt.Sprintf(`{"id":"moved","iCalUID":%q,"recurringEventId":"series","originalStartTime":{"date":"2027-03-01"},"start":{"date":"2027-03-10"},"end":{"date":"2027-03-11"}}`, uid), "series-calendar@example.com")
+	_, expectedNote := projectionFixture(t, st, "expected-zone-note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"startsAt":"2027-03-10T08:30:00Z"}}`)
+	_, sourceZoneNote := projectionFixture(t, st, "source-zone-note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"startsAt":"2027-03-10T00:30:00Z"}}`)
+
+	from := time.Date(2027, 3, 10, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 2))
+	requirements.NoError(err)
+	requirements.Len(page.Occurrences, 1)
+	listed := page.Occurrences[0]
+	assertions.Equal(fmt.Sprintf("evt:%d@20270301", master), listed.Ref)
+	assertions.Equal("2027-03-10T08:00:00Z", listed.Start.UTC().Format(time.RFC3339))
+	assertions.Equal("2027-03-11T08:00:00Z", listed.End.UTC().Format(time.RFC3339))
+
+	requirements.NoError(st.LinkMeetingContext(t.Context(), expectedNote, OccurrenceRef{MessageID: exception}))
+	links, err := st.MeetingLinksContext(t.Context(), expectedNote)
+	requirements.NoError(err)
+	requirements.Len(links, 1)
+	assertions.Equal(listed.Ref, links[0].Ref)
+	assertions.True(listed.Start.Equal(links[0].Start), "meeting links and calendar listings use the same inherited-zone start")
+	assertions.True(listed.End.Equal(links[0].End), "meeting links and calendar listings use the same inherited-zone end")
+
+	suggestions, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{OccurrenceRef: OccurrenceRef{MessageID: master, Key: "20270301"}, Kind: "evt"}, 10)
+	requirements.NoError(err)
+	requirements.Len(suggestions, 1)
+	assertions.Equal(expectedNote, suggestions[0].MemberMessageID)
+	assertions.Equal(30, suggestions[0].OverlapMinutes)
+	reverse, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{OccurrenceRef: OccurrenceRef{MessageID: expectedNote}, Kind: "msg"}, 10)
+	requirements.NoError(err)
+	requirements.Len(reverse, 1)
+	assertions.Equal(listed.Ref, reverse[0].Ref)
+	assertions.Equal(30, reverse[0].OverlapMinutes)
+	wrongZone, err := st.SuggestMeetingLinksContext(t.Context(), MeetingLinkRef{OccurrenceRef: OccurrenceRef{MessageID: sourceZoneNote}, Kind: "msg"}, 10)
+	requirements.NoError(err)
+	assertions.Empty(wrongZone, "a transcript at the calendar source zone's midnight does not overlap the inherited-zone exception")
 }
 
 func TestMeetingLinksOrphanSplitAfterMasterArrives(t *testing.T) {

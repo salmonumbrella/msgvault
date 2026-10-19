@@ -62,13 +62,31 @@ func (s *Store) writeMeetingLinkDecision(ctx context.Context, memberID int64, oc
 		}
 		createdAt := time.Now().UTC()
 		if decision == "split" {
+			reader := reboundReader{reader: tx.Tx, rebind: s.dialect.Rebind, dialect: s.dialect}
+			budget := calrecur.RequestReadBudget
+			identities, err := s.meetingSplitIdentities(ctx, reader, target.Identity, &budget)
+			if err != nil {
+				return fmt.Errorf("resolve meeting split identities: %w", err)
+			}
 			if err := s.supersedeMessageMeetingLinks(ctx, tx, memberID, target.Identity, savedIdentity, createdAt); err != nil {
 				return err
 			}
-		}
-		_, err = tx.ExecContext(ctx, meetingDecisionUpsert, memberID, target.Identity.ICalUID, sql.NullInt64{Int64: target.Identity.EventMessageID, Valid: target.Identity.ICalUID == ""}, target.Identity.OccurrenceKey, decision, createdAt)
-		if err != nil {
-			return err
+			seen := make(map[meetingIdentity]struct{}, len(identities))
+			for _, identity := range identities {
+				if _, ok := seen[identity]; ok {
+					continue
+				}
+				seen[identity] = struct{}{}
+				_, err := tx.ExecContext(ctx, meetingDecisionUpsert, memberID, identity.ICalUID, sql.NullInt64{Int64: identity.EventMessageID, Valid: identity.ICalUID == ""}, identity.OccurrenceKey, decision, createdAt)
+				if err != nil {
+					return err
+				}
+			}
+		} else {
+			_, err = tx.ExecContext(ctx, meetingDecisionUpsert, memberID, target.Identity.ICalUID, sql.NullInt64{Int64: target.Identity.EventMessageID, Valid: target.Identity.ICalUID == ""}, target.Identity.OccurrenceKey, decision, createdAt)
+			if err != nil {
+				return err
+			}
 		}
 		return s.journalMeetingLinks(ctx, tx, memberID)
 	})

@@ -33,7 +33,12 @@ func TestMeetingLinksClient(t *testing.T) {
 			assertions.Equal(int64(42), body.MessageID)
 			assertions.Equal("evt:81@20270314T100000Z", body.Event)
 			decisions = append(decisions, body.Decision)
-			assertions.NoError(json.MarshalWrite(w, body))
+			assertions.NoError(json.MarshalWrite(w, struct {
+				MessageID  int64  `json:"message_id"`
+				Event      string `json:"event"`
+				Decision   string `json:"decision"`
+				CacheState string `json:"cache_state"`
+			}{body.MessageID, body.Event, body.Decision, "ready"}))
 			return
 		}
 		if r.URL.Path == "/api/v1/meetings/links" {

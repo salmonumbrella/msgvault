@@ -130,8 +130,12 @@ func resolveMeetingOccurrence(ctx context.Context, r reboundReader, ref Occurren
 		}
 		if len(masters) == 1 {
 			if row.Event.Start != nil && row.Event.End != nil {
+				effective, err := resolveCompleteCalendarException(masters[0], row)
+				if err != nil {
+					return linkOccurrence{}, err
+				}
 				o := occurrenceFromRow(masters[0], row.Event.Original.Key())
-				o.Row, o.Start, o.End = row, *row.Event.Start, *row.Event.End
+				o.Row, o.Start, o.End = row, effective.Start, effective.End
 				if masters[0].Event.Status == meetingCancelledStatus {
 					o.Row.Event.Status = meetingCancelledStatus
 				}
@@ -185,8 +189,12 @@ func resolveMeetingOccurrence(ctx context.Context, r reboundReader, ref Occurren
 	}
 	for _, x := range moved {
 		if x.Event.Start != nil && x.Event.End != nil {
+			effective, err := resolveCompleteCalendarException(row, x)
+			if err != nil {
+				return linkOccurrence{}, err
+			}
 			o := occurrenceFromRow(row, ref.Key)
-			o.Row, o.Start, o.End = x, *x.Event.Start, *x.Event.End
+			o.Row, o.Start, o.End = x, effective.Start, effective.End
 			if row.Event.Status == meetingCancelledStatus {
 				o.Row.Event.Status = meetingCancelledStatus
 			}
@@ -468,7 +476,7 @@ func (s *Store) meetingSplitIdentities(ctx context.Context, r reboundReader, ide
 	if identity.ICalUID != "" && identity.OccurrenceKey == "" {
 		var singles []CalendarEventRow
 		for _, row := range rows {
-			if row.Event.Kind == "single" && row.Event.Start != nil {
+			if row.Event.Kind == "single" {
 				singles = append(singles, row)
 			}
 		}
@@ -478,26 +486,61 @@ func (s *Store) meetingSplitIdentities(ctx context.Context, r reboundReader, ide
 				return nil, err
 			}
 			for _, single := range singles {
-				startIdentity := calrecur.Identity{Instant: *single.Event.Start}
+				singleOccurrence, err := resolveMeetingOccurrence(ctx, r, OccurrenceRef{MessageID: single.MessageID}, budget)
+				if errors.Is(err, sql.ErrNoRows) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+				var startIdentity calrecur.Identity
 				if single.Event.AllDay {
 					if single.Event.StartDate == "" {
 						continue
 					}
 					startIdentity = calrecur.Identity{Date: single.Event.StartDate, AllDay: true}
+				} else if single.Event.Start != nil {
+					startIdentity = calrecur.Identity{Instant: *single.Event.Start}
 				}
 				key := startIdentity.Key()
-				if key == "" {
+				if key != "" {
+					for _, master := range series {
+						occurrence, err := resolveMeetingOccurrence(ctx, r, OccurrenceRef{MessageID: master.MessageID, Key: key}, budget)
+						if errors.Is(err, sql.ErrNoRows) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
+							continue
+						}
+						if err != nil {
+							return nil, err
+						}
+						if occurrence.Start.Equal(singleOccurrence.Start) {
+							identities = append(identities, occurrence.Identity)
+						}
+					}
+				}
+				exceptionPredicate := s.calendarUIDPredicate() + ` AND e.kind = 'exception'`
+				exceptionArgs := []any{identity.ICalUID}
+				if single.Event.AllDay && single.Event.StartDate != "" {
+					exceptionPredicate += ` AND e.start_date = ?`
+					exceptionArgs = append(exceptionArgs, single.Event.StartDate)
+				} else if single.Event.Start != nil {
+					exceptionPredicate += ` AND e.start_at = ?`
+					exceptionArgs = append(exceptionArgs, *single.Event.Start)
+				} else {
 					continue
 				}
-				for _, master := range series {
-					occurrence, err := resolveMeetingOccurrence(ctx, r, OccurrenceRef{MessageID: master.MessageID, Key: key}, budget)
+				exceptions, err := meetingEventRows(ctx, r, exceptionPredicate, exceptionArgs, budget)
+				if err != nil {
+					return nil, err
+				}
+				for _, exception := range exceptions {
+					occurrence, err := resolveMeetingOccurrence(ctx, r, OccurrenceRef{MessageID: exception.MessageID}, budget)
 					if errors.Is(err, sql.ErrNoRows) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
 						continue
 					}
 					if err != nil {
 						return nil, err
 					}
-					if occurrence.Start.Equal(*single.Event.Start) {
+					if occurrence.Start.Equal(singleOccurrence.Start) {
 						identities = append(identities, occurrence.Identity)
 					}
 				}
@@ -507,17 +550,60 @@ func (s *Store) meetingSplitIdentities(ctx context.Context, r reboundReader, ide
 	if identity.ICalUID != "" && identity.OccurrenceKey != "" {
 		_, instance, ok := calrecur.ParseInstanceID("event_" + identity.OccurrenceKey)
 		if ok {
-			column, value := "e.start_at", any(instance.Instant)
-			if instance.AllDay {
-				column, value = "e.start_date", instance.Date
+			exceptionRows := make([]CalendarEventRow, 0, len(rows))
+			predicate := s.calendarUIDPredicate() + ` AND e.kind = 'single' AND (`
+			args := []any{identity.ICalUID}
+			appendStartPredicate := func(column string, value any) {
+				if len(args) > 1 {
+					predicate += ` OR `
+				}
+				predicate += column + ` = ?`
+				args = append(args, value)
 			}
-			predicate := s.calendarUIDPredicate() + ` AND e.kind = 'single' AND ` + column + ` = ?`
-			copies, err := meetingEventRows(ctx, r, predicate, []any{identity.ICalUID, value}, budget)
+			if instance.AllDay {
+				appendStartPredicate("e.start_date", instance.Date)
+			} else {
+				appendStartPredicate("e.start_at", instance.Instant)
+			}
+			for _, row := range rows {
+				if row.Event.Kind != "exception" || row.Event.Original == nil || row.Event.Original.Key() != identity.OccurrenceKey {
+					continue
+				}
+				exceptionRows = append(exceptionRows, row)
+				if row.Event.AllDay && row.Event.StartDate != "" {
+					appendStartPredicate("e.start_date", row.Event.StartDate)
+				} else if row.Event.Start != nil {
+					appendStartPredicate("e.start_at", *row.Event.Start)
+				}
+			}
+			predicate += `)`
+			singles, err := meetingEventRows(ctx, r, predicate, args, budget)
 			if err != nil {
 				return nil, err
 			}
-			for _, copy := range copies {
-				identities = append(identities, occurrenceFromRow(copy, "").Identity)
+			for _, copy := range singles {
+				matches := copy.Event.AllDay && instance.AllDay && copy.Event.StartDate == instance.Date
+				if !matches && copy.Event.Start != nil {
+					matches = !instance.AllDay && copy.Event.Start.Equal(instance.Instant)
+					if !matches {
+						for _, exception := range exceptionRows {
+							if exception.Event.AllDay && copy.Event.AllDay && exception.Event.StartDate != "" {
+								if exception.Event.StartDate == copy.Event.StartDate {
+									matches = true
+									break
+								}
+								continue
+							}
+							if exception.Event.Start != nil && exception.Event.Start.Equal(*copy.Event.Start) {
+								matches = true
+								break
+							}
+						}
+					}
+				}
+				if matches {
+					identities = append(identities, occurrenceFromRow(copy, "").Identity)
+				}
 			}
 		}
 	}
@@ -538,7 +624,16 @@ func (s *Store) meetingSplitIdentities(ctx context.Context, r reboundReader, ide
 		}
 		identities = append(identities, target.Identity)
 	}
-	return identities, nil
+	unique := make([]meetingIdentity, 0, len(identities))
+	seen := make(map[meetingIdentity]struct{}, len(identities))
+	for _, candidate := range identities {
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		unique = append(unique, candidate)
+	}
+	return unique, nil
 }
 
 func (s *Store) resolveMeetingIdentity(ctx context.Context, r reboundReader, identity meetingIdentity, budget *int) ([]linkOccurrence, error) {

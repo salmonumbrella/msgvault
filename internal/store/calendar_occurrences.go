@@ -242,6 +242,21 @@ func calendarRecurrenceExceptions(rows []CalendarEventRow) ([]calrecur.Exception
 	return exceptions, nil
 }
 
+// Resolve a complete exception with the same date and inherited-zone rules as
+// calendar listings, without expanding its recurrence set.
+func resolveCompleteCalendarException(master, exception CalendarEventRow) (calrecur.Occurrence, error) {
+	exceptions, err := calendarRecurrenceExceptions([]CalendarEventRow{exception})
+	if err != nil {
+		return calrecur.Occurrence{}, err
+	}
+	zone, err := calendarEventZone(master.Event)
+	if err != nil {
+		return calrecur.Occurrence{}, err
+	}
+	set := calrecur.Set{AllDay: master.Event.AllDay, Zone: zone}
+	return calrecur.EffectiveException(set, exceptions[0], 0, 0)
+}
+
 func calendarEventZone(e calevent.Event) (*time.Location, error) {
 	name := e.EventTimeZone
 	if name == "" {
