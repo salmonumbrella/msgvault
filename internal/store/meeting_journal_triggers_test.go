@@ -42,7 +42,7 @@ func TestMeetingJournalTriggers(t *testing.T) {
 			var ids []int64
 			rows, err := st.db.Query(`SELECT message_id FROM cache_related_change_journal WHERE dataset='meeting_links'`)
 			requirements.NoError(err)
-			defer rows.Close()
+			defer func() { requirements.NoError(rows.Close()) }()
 			for rows.Next() {
 				var id int64
 				requirements.NoError(rows.Scan(&id))

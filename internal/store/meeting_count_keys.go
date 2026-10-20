@@ -39,11 +39,11 @@ func (s *Store) MeetingCountKeysContext(ctx context.Context) (keys map[int64]str
 	if err != nil {
 		return nil, 0, fmt.Errorf("read meeting count members: %w", err)
 	}
+	defer func() { _ = rows.Close() }()
 	var members []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
 			return nil, 0, err
 		}
 		members = append(members, id)

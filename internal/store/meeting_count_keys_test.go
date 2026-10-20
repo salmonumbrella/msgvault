@@ -46,7 +46,7 @@ func TestMeetingCountKeys(t *testing.T) {
 			assertions.Positive(seq)
 			reader, err := OpenReadOnlyContext(t.Context(), st.dbPath)
 			requirements.NoError(err)
-			defer reader.Close()
+			defer func() { requirements.NoError(reader.Close()) }()
 			readKeys, readSeq, err := reader.MeetingCountKeysContext(t.Context())
 			requirements.NoError(err)
 			assertions.Equal(keys, readKeys)
