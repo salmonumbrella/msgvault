@@ -377,7 +377,8 @@ import (
 // 3.24.0 adds archived calendar occurrence listing.
 // 3.25.0 adds archive calendar paging, detail, and source-scoped agent reads.
 // 3.26.0 adds owner meeting link decisions and suggestions.
-const APISchemaVersion = "3.26.0"
+// 3.27.0 adds cache_state to meeting link decision responses.
+const APISchemaVersion = "3.27.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.

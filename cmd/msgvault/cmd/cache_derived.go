@@ -243,7 +243,7 @@ func refreshDerivedDatasetsOnly(
 		// it active pagination cursors — for no analytical difference.
 		return &buildResult{OutputDir: analyticsDir, IdentityOnly: true, Skipped: true}, nil
 	}
-	if repairRelated && !relatedKinds.recipients &&
+	if repairRelated && !relatedKinds.recipients && !relatedKinds.meetings &&
 		identityRevision == state.IdentityRevision &&
 		participantIdentifierRevision == state.ParticipantIdentifierRevision &&
 		participantDisplayNameRevision == state.ParticipantDisplayNameRevision &&
@@ -283,6 +283,16 @@ func refreshDerivedDatasetsOnly(
 	if err := derivedCopy(tableOwnerParticipants, ownerParticipantsSelectSQL(
 		sourceSnapshot.identityPresenceSQL("email_address", "primary_email_present"))); err != nil {
 		return nil, fmt.Errorf("export derived owner participants: %w", err)
+	}
+	meetingKeys, err := readMeetingCountKeys(ctx, dbPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := stageMeetingKeys(ctx, exportDB, meetingKeys, state.LastMessageID); err != nil {
+		return nil, err
+	}
+	if err := derivedCopy(tableMeetingKeys, meetingKeysSelectSQL); err != nil {
+		return nil, err
 	}
 	if err := stageParticipantClusters(ctx, exportDB, clusters); err != nil {
 		return nil, err
@@ -522,6 +532,7 @@ func derivedCachePublishPlan(
 	for _, dataset := range []string{
 		tableOwnerParticipants,
 		tableParticipantClusters,
+		tableMeetingKeys,
 		identityindex.DatasetActivity,
 		identityindex.DatasetPeople,
 		identityindex.DatasetDomains,

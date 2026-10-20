@@ -571,7 +571,7 @@ func buildCacheDerivedOnly(
 		dbPath,
 		analyticsDir,
 		acquirePublishLock,
-		false,
+		cacheNeedsBuildLocked(context.Background(), dbPath, analyticsDir).HasRelatedRowDrift,
 		builderOverrides...,
 	)
 }
@@ -1284,7 +1284,7 @@ func buildCacheLockedAttempt(
 		// Export their complete population alongside the new message shards.
 		relatedKinds.recipients = true
 	}
-	repairRelated := relatedKinds.recipients || relatedKinds.labels || relatedKinds.attachments
+	repairRelated := relatedKinds.recipients || relatedKinds.labels || relatedKinds.attachments || relatedKinds.meetings
 	if hasPreviousState && !fullRebuild && hasSyncRunsTable > 0 &&
 		syncCounters.additions != previousState.LastCacheAdditionCount &&
 		maxID <= previousState.LastMessageID && !repairRelated {
@@ -1328,6 +1328,10 @@ func buildCacheLockedAttempt(
 	}
 	if buildCacheAfterSnapshotHook != nil {
 		buildCacheAfterSnapshotHook()
+	}
+	meetingKeys, err := readMeetingCountKeys(context.Background(), dbPath)
+	if err != nil {
+		return nil, err
 	}
 	var attachmentMIMEColumnCount int
 	if err := sourceSnapshot.QueryRow(`
@@ -1458,6 +1462,13 @@ func buildCacheLockedAttempt(
 	primaryEmailPresence := sourceSnapshot.identityPresenceSQL("email_address", "primary_email_present")
 	if err := runExport(tableOwnerParticipants, copyDataset(tableOwnerParticipants, ownerParticipantsSelectSQL(primaryEmailPresence))); err != nil {
 		return nil, fmt.Errorf("export owner participants: %w", err)
+	}
+
+	if err := stageMeetingKeys(ctx, exportDB, meetingKeys, maxID); err != nil {
+		return nil, err
+	}
+	if err := runExport(tableMeetingKeys, copyDataset(tableMeetingKeys, meetingKeysSelectSQL)); err != nil {
+		return nil, err
 	}
 
 	// Participant clusters: participant_id -> canonical (smallest member)
