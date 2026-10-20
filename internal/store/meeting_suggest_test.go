@@ -67,6 +67,24 @@ func TestMeetingLinksSuggestionsRankingAndReadOnly(t *testing.T) {
 	assertions.Zero(count)
 }
 
+func TestMeetingSuggestionsIdentitylessExceptionInheritsMasterCancellation(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, master := calendarFixture(t, st, "series", `{"id":"series","iCalUID":"weekly@example.test","status":"cancelled","start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=2"]}`)
+	_, exception := calendarFixture(t, st, "exception", `{"id":"exception","iCalUID":"weekly@example.test","recurringEventId":"series","status":"confirmed","start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`)
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"weekly@example.test","startsAt":"2027-03-14T12:00:00Z"}}`)
+	assertions.NotZero(master)
+
+	for _, target := range []MeetingLinkRef{
+		{Kind: "evt", OccurrenceRef: OccurrenceRef{MessageID: exception}},
+		{Kind: "msg", OccurrenceRef: OccurrenceRef{MessageID: note}},
+	} {
+		suggestions, err := st.SuggestMeetingLinksContext(t.Context(), target, 10)
+		requirements.NoError(err)
+		assertions.Empty(suggestions, "cancelled meetings are excluded in both directions: %+v", target)
+	}
+}
+
 func TestMeetingLinksSuggestionsTimeWindow(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)

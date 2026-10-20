@@ -94,8 +94,45 @@ func (s *Store) meetingCountCopies(ctx context.Context, r reboundReader, identit
 	if err != nil {
 		return nil, err
 	}
-	var copies []int64
+	byID := make(map[int64]bool, len(rows))
+	related := make([]CalendarEventRow, 0, len(rows))
 	for _, row := range rows {
+		byID[row.MessageID] = true
+		related = append(related, row)
+	}
+	if identity.OccurrenceKey != "" {
+		_, occurrenceID, ok := calrecur.ParseInstanceID("event_" + identity.OccurrenceKey)
+		if ok {
+			column, value := "e.original_start_at", any(occurrenceID.Instant)
+			if occurrenceID.AllDay {
+				column, value = "e.original_start_date", occurrenceID.Date
+			}
+			seenSeries := make(map[string]bool)
+			for _, row := range rows {
+				if row.Event.Kind != meetingSeriesKind && row.Event.Kind != "single" {
+					continue
+				}
+				seriesKey := fmt.Sprintf("%d\x00%s", row.SourceID, row.Event.ProviderEventID)
+				if seenSeries[seriesKey] {
+					continue
+				}
+				seenSeries[seriesKey] = true
+				exceptions, err := meetingEventRows(ctx, r, `e.kind = 'exception' AND m.source_id = ? AND e.series_provider_id = ? AND `+column+` = ?`, []any{row.SourceID, row.Event.ProviderEventID, value}, &budget)
+				if err != nil {
+					return nil, err
+				}
+				for _, exception := range exceptions {
+					if byID[exception.MessageID] {
+						continue
+					}
+					byID[exception.MessageID] = true
+					related = append(related, exception)
+				}
+			}
+		}
+	}
+	var copies []int64
+	for _, row := range related {
 		if row.Event.Kind == meetingSeriesKind {
 			continue
 		}

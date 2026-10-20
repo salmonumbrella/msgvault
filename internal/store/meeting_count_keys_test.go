@@ -100,6 +100,38 @@ func TestMeetingCountKeys(t *testing.T) {
 	})
 }
 
+func TestMeetingCountKeysIncludeExceptionsWithoutOwnUID(t *testing.T) {
+	for _, tc := range []struct {
+		name, uid string
+	}{
+		{"UID-less series", ""},
+		{"UID-bearing series", "series@example.test"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			st := newRFC822IDBackfillBackendStore(t)
+			uidField := ""
+			if tc.uid != "" {
+				uidField = fmt.Sprintf(`,"iCalUID":%q`, tc.uid)
+			}
+			_, master := calendarFixture(t, st, "series", fmt.Sprintf(`{"id":"series"%s,"start":{"dateTime":"2027-03-07T10:00:00Z"},"end":{"dateTime":"2027-03-07T11:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=3"]}`, uidField))
+			_, exception := calendarFixture(t, st, "exception", `{"id":"exception","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`)
+			_, note := projectionFixture(t, st, "note", "plaud_json", `{}`)
+			requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: exception}))
+
+			keys, err := st.MeetingCountKeysContext(t.Context())
+			requirements.NoError(err)
+			want := fmt.Sprintf("evt:%d/20270314T100000Z", master)
+			if tc.uid != "" {
+				want = "uid:" + tc.uid + "/20270314T100000Z"
+			}
+			assertions.Equal(want, keys[note])
+			assertions.Equal(want, keys[exception], "the archived exception carries the note's meeting identity")
+			assertions.NotContains(keys, master, "the series master is not a separate meeting")
+		})
+	}
+}
+
 func TestMeetingCountKeysIncompleteCopies(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
