@@ -30,7 +30,7 @@ func TestMeetingJournalTriggers(t *testing.T) {
 		{"key insert", `INSERT INTO meeting_link_key(message_id,kind,value) VALUES (?, 'ical_uid','meeting@example.test')`, note},
 		{"key update", `UPDATE meeting_link_key SET value='other@example.test' WHERE message_id=?`, note},
 		{"key delete", `DELETE FROM meeting_link_key WHERE message_id=?`, note},
-		{"projection update", `UPDATE calendar_events SET content_hash='changed' WHERE message_id=?`, event},
+		{"projection bounds", `UPDATE calendar_events SET end_at='2027-03-14T12:00:00Z' WHERE message_id=?`, event},
 		{"UID update", `UPDATE messages SET metadata='{"ical_uid":"other@example.test"}' WHERE id=?`, event},
 		{"UID removed", `UPDATE messages SET metadata='{}' WHERE id=?`, event},
 		{"projection delete", `DELETE FROM calendar_events WHERE message_id=?`, event},
@@ -70,4 +70,33 @@ func TestMeetingJournalTriggers(t *testing.T) {
 		requirements.NoError(st.db.QueryRow(`SELECT count(*) FROM cache_related_change_journal WHERE dataset='meeting_links'`).Scan(&count))
 		assertions.Zero(count)
 	})
+}
+
+func TestMeetingJournalIgnoresContentOnlyUpdates(t *testing.T) {
+	st := newRFC822IDBackfillBackendStore(t)
+	if st.IsPostgreSQL() {
+		t.Skip("SQLite cache journal")
+	}
+	_, event := calendarFixture(t, st, "event", `{"id":"event","start":{"dateTime":"2026-08-01T10:00:00Z"},"end":{"dateTime":"2026-08-01T11:00:00Z"},"attendees":[{"email":"person@example.test","responseStatus":"needsAction"}]}`)
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"meeting@example.test"}}`)
+	for _, tc := range []struct {
+		name, raw, format string
+		id                int64
+		want              int
+	}{
+		{"RSVP only", `{"id":"event","start":{"dateTime":"2026-08-01T10:00:00Z"},"end":{"dateTime":"2026-08-01T11:00:00Z"},"attendees":[{"email":"person@example.test","responseStatus":"accepted"}]}`, "gcal_json", event, 0},
+		{"bounds", `{"id":"event","start":{"dateTime":"2026-08-01T10:00:00Z"},"end":{"dateTime":"2026-08-01T12:00:00Z"}}`, "gcal_json", event, 1},
+		{"transcript content", `{"schema_version":1,"recording":{"summary":{"markdown":"New notes"}},"calendar_event":{"iCalUid":"meeting@example.test"}}`, "twenty_json", note, 0},
+		{"transcript key", `{"schema_version":1,"recording":{"title":"New title"},"calendar_event":{"iCalUid":"other@example.test"}}`, "twenty_json", note, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require := require.New(t)
+			_, err := st.db.Exec(`DELETE FROM cache_related_change_journal`)
+			require.NoError(err)
+			require.NoError(st.UpsertMessageRawWithFormat(tc.id, []byte(tc.raw), tc.format))
+			var count int
+			require.NoError(st.db.QueryRow(`SELECT count(*) FROM cache_related_change_journal WHERE dataset='meeting_links'`).Scan(&count))
+			assert.Equal(t, tc.want, count)
+		})
+	}
 }

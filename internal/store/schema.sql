@@ -4754,7 +4754,12 @@ AFTER INSERT ON meeting_link_key FOR EACH ROW BEGIN
     INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', NEW.message_id);
 END;
 CREATE TRIGGER IF NOT EXISTS trg_cache_meeting_key_update
-AFTER UPDATE ON meeting_link_key FOR EACH ROW BEGIN
+AFTER UPDATE ON meeting_link_key FOR EACH ROW
+WHEN OLD.message_id IS NOT NEW.message_id
+OR OLD.kind IS NOT NEW.kind
+OR OLD.value IS NOT NEW.value
+OR OLD.calendar_id IS NOT NEW.calendar_id
+OR OLD.scheduled_at IS NOT NEW.scheduled_at BEGIN
     INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', OLD.message_id);
     INSERT INTO cache_related_change_journal (dataset, message_id)
     SELECT 'meeting_links', NEW.message_id WHERE NEW.message_id <> OLD.message_id;
@@ -4769,7 +4774,23 @@ AFTER INSERT ON calendar_events FOR EACH ROW BEGIN
     INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', NEW.message_id);
 END;
 CREATE TRIGGER IF NOT EXISTS trg_cache_meeting_events_update
-AFTER UPDATE ON calendar_events FOR EACH ROW WHEN OLD.content_hash IS NOT NEW.content_hash BEGIN
+AFTER UPDATE ON calendar_events FOR EACH ROW
+WHEN OLD.message_id IS NOT NEW.message_id
+OR OLD.provider_event_id IS NOT NEW.provider_event_id
+OR OLD.series_provider_id IS NOT NEW.series_provider_id
+OR OLD.kind IS NOT NEW.kind
+OR OLD.original_start_at IS NOT NEW.original_start_at
+OR OLD.original_start_date IS NOT NEW.original_start_date
+OR OLD.status IS NOT NEW.status
+OR OLD.all_day IS NOT NEW.all_day
+OR OLD.start_at IS NOT NEW.start_at
+OR OLD.end_at IS NOT NEW.end_at
+OR OLD.start_date IS NOT NEW.start_date
+OR OLD.end_date IS NOT NEW.end_date
+OR OLD.event_time_zone IS NOT NEW.event_time_zone
+OR OLD.calendar_time_zone IS NOT NEW.calendar_time_zone
+OR OLD.recurrence_json IS NOT NEW.recurrence_json
+OR OLD.recurrence_end_at IS NOT NEW.recurrence_end_at BEGIN
     INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', OLD.message_id);
     INSERT INTO cache_related_change_journal (dataset, message_id)
     SELECT 'meeting_links', NEW.message_id WHERE NEW.message_id <> OLD.message_id;
