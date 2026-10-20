@@ -28,6 +28,7 @@ func TestPersonMergeRelatedDriftKeepsDerivedRefresh(t *testing.T) {
 		name             string
 		newMail, updated bool
 	}{
+		{name: "labels only"},
 		{name: "new mail", newMail: true},
 		{name: "updated mail", updated: true},
 	} {
@@ -413,12 +414,13 @@ func TestMeetingCountsCalendarEdits(t *testing.T) {
 
 func TestMeetingLinkDecisionRefreshesCounts(t *testing.T) {
 	for _, tc := range []struct {
-		name                                   string
-		movedCounters, newTranscript, newEmail bool
-		wantState                              string
-		wantCount                              int64
+		name                                                string
+		movedCounters, newTranscript, newEmail, labelChange bool
+		wantState                                           string
+		wantCount                                           int64
 	}{
 		{name: "older only", wantState: "ready", wantCount: 1},
+		{name: "label change and link", labelChange: true, wantState: "stale", wantCount: 2},
 		{name: "changed population", movedCounters: true, wantState: "stale", wantCount: 2},
 		{name: "transcript above boundary", newTranscript: true, wantState: "stale", wantCount: 1},
 		{name: "related drift and new rows", movedCounters: true, newEmail: true, wantState: "stale", wantCount: 2},
@@ -455,6 +457,11 @@ func TestMeetingLinkDecisionRefreshesCounts(t *testing.T) {
 			cache := filepath.Join(t.TempDir(), "analytics")
 			_, err = buildCache(path, cache, true)
 			require.NoError(err)
+			if tc.labelChange {
+				labelID, err := st.EnsureLabel(source.ID, "reviewed", "Reviewed", "user")
+				require.NoError(err)
+				require.NoError(st.ReplaceMessageLabels(first, []int64{labelID}))
+			}
 			if tc.newTranscript {
 				second = persist("second", "meeting_transcript", `{}`, "plaud_json")
 			}
@@ -499,7 +506,7 @@ func TestMeetingLinkDecisionRefreshesCounts(t *testing.T) {
 				wantModes = append(wantModes, buildCacheModeFull)
 			}
 			assert.Equal(wantModes, modes)
-			if tc.newEmail {
+			if tc.newEmail || tc.labelChange {
 				require.ErrorIs(derivedErr, ErrDerivedRefreshNeedsAppend)
 			}
 			links, err := st.MeetingLinksContext(t.Context(), second)

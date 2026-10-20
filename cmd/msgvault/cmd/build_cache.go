@@ -573,19 +573,14 @@ func buildCacheDerivedOnly(
 		if err != nil {
 			return nil, fmt.Errorf("read meeting refresh boundary: %w", err)
 		}
-		st, err := store.OpenReadOnlyContext(context.Background(), dbPath)
+		meetings, other, err := inspectMeetingRelatedDrift(context.Background(), dbPath, state.LastRelatedChangeSeq, state.LastMessageID)
 		if err != nil {
-			return nil, fmt.Errorf("open meeting refresh journal: %w", err)
+			return nil, err
 		}
-		defer func() { _ = st.Close() }()
-		if err := st.DB().QueryRow(`SELECT count(*) > 0 AND count(*) FILTER (WHERE dataset <> 'meeting_links') = 0
-			FROM cache_related_change_journal WHERE seq > ? AND message_id <= ?`,
-			state.LastRelatedChangeSeq, state.LastMessageID).Scan(&repairRelated); err != nil {
-			return nil, fmt.Errorf("inspect meeting refresh journal: %w", err)
+		if meetings && (other || staleness.HasNew) {
+			return nil, ErrDerivedRefreshNeedsAppend
 		}
-	}
-	if repairRelated && staleness.HasNew {
-		return nil, ErrDerivedRefreshNeedsAppend
+		repairRelated = meetings
 	}
 	return refreshDerivedDatasetsOnly(
 		context.Background(),
