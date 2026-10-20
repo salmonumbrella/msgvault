@@ -6,6 +6,8 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.kenn.io/msgvault/internal/identityindex"
@@ -214,11 +216,27 @@ func (e *DuckDBEngine) relationshipCalendarDays(
 	endLocal := startLocal.AddDate(1, 0, 0)
 	startUTC := startLocal.UTC()
 	endUTC := endLocal.UTC()
+	years := make([]string, 0, 2)
+	for year := startUTC.Year(); year <= endUTC.Add(-time.Nanosecond).Year(); year++ {
+		years = append(years, strconv.Itoa(year))
+	}
 	cutoff := effectiveAt.UTC()
 	activity := fmt.Sprintf(`(
 		SELECT * FROM relationship_activity_expanded
-		WHERE canonical_id = %d OR is_owner
+		WHERE entry_kind NOT IN ('event','meeting')
+		  AND occurred_year IN (%s)
+		  AND occurred_at >= TIMESTAMP '%s'
+		  AND occurred_at < TIMESTAMP '%s'
+		  AND (canonical_id = %d OR is_owner)
+		UNION ALL
+		SELECT * FROM relationship_activity_expanded
+		WHERE entry_kind IN ('event','meeting')
+		  AND (canonical_id = %d OR is_owner)
 	)`,
+		strings.Join(years, ","),
+		startUTC.Format("2006-01-02 15:04:05.999999999"),
+		endUTC.Format("2006-01-02 15:04:05.999999999"),
+		request.CanonicalID,
 		request.CanonicalID,
 	)
 	facts := identityindex.RelationshipTemperatureFactsSQL(activity, cutoff, e.parquetPath("meeting_keys"))

@@ -1,7 +1,11 @@
 package query
 
 import (
+	"encoding/json/v2"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,4 +134,59 @@ func TestRelationshipCalendarLinkedMeetingAcrossYears(t *testing.T) {
 	var temperatureMeetings int64
 	requirements.NoError(engine.db.QueryRow(`SELECT sum(meeting_count) FROM read_parquet(?) WHERE canonical_id = ?`, engine.parquetPath(identityindex.DatasetTemperatureContributions), person).Scan(&temperatureMeetings))
 	assertions.Equal(int64(1), temperatureMeetings)
+}
+
+func TestRelationshipCalendarPrunesNonMeetingHistory(t *testing.T) {
+	requirements := require.New(t)
+	b := NewTestDataBuilder(t)
+	source := b.AddSourceWithType("owner@example.test", "gmail")
+	owner := b.AddParticipant("owner@example.test", "example.test", "Owner")
+	person := b.AddParticipant("person@example.test", "example.test", "Person")
+	b.AddOwnerParticipant(source, owner)
+	for year := 2000; year <= 2025; year++ {
+		id := b.AddMessage(MessageOpt{SourceID: source, ConversationID: int64(year), MessageType: "email", IsFromMe: true, SentAt: time.Date(year, 6, 1, 10, 0, 0, 0, time.UTC)})
+		b.AddFrom(id, owner, "Owner")
+		b.AddTo(id, person, "Person")
+	}
+	engine := b.BuildEngine()
+	profile := filepath.Join(t.TempDir(), "calendar.json")
+	_, err := engine.db.Exec(`SET enable_profiling = 'json'`)
+	requirements.NoError(err)
+	_, err = engine.db.Exec(`SET profiling_output = '` + escapePath(profile) + `'`)
+	requirements.NoError(err)
+	days, err := engine.relationshipCalendarDays(t.Context(), RelationshipCalendarRequest{CanonicalID: person, Year: 2024}, time.UTC, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	requirements.NoError(err)
+	_, err = engine.db.Exec(`PRAGMA disable_profiling`)
+	requirements.NoError(err)
+	var total int64
+	for _, day := range days {
+		total += day.Total
+	}
+	assert.Equal(t, int64(1), total)
+	data, err := os.ReadFile(profile)
+	requirements.NoError(err)
+	type operator struct {
+		Name        string         `json:"operator_name"`
+		Cardinality int64          `json:"operator_cardinality"`
+		Extra       map[string]any `json:"extra_info"`
+		Children    []operator     `json:"children"`
+	}
+	var root operator
+	requirements.NoError(json.Unmarshal(data, &root))
+	var returned int64
+	var activityScans int
+	var inspect func(operator)
+	inspect = func(node operator) {
+		projections := fmt.Sprint(node.Extra["Projections"])
+		if strings.Contains(node.Name, "READ_PARQUET") && strings.Contains(projections, "entry_kind") {
+			activityScans++
+			returned += node.Cardinality
+		}
+		for _, child := range node.Children {
+			inspect(child)
+		}
+	}
+	inspect(root)
+	requirements.Positive(activityScans, "profile includes the real activity scan")
+	assert.LessOrEqual(t, returned, int64(2), "only the requested year's owner and person email rows reach the relationship reduction")
 }
