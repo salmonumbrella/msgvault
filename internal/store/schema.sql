@@ -4732,3 +4732,57 @@ CREATE TABLE IF NOT EXISTS meeting_link_decisions (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_link_decisions_identity ON meeting_link_decisions(member_message_id, target_ical_uid, COALESCE(target_message_id, 0), occurrence_key);
 CREATE INDEX IF NOT EXISTS idx_meeting_link_decisions_target ON meeting_link_decisions(target_message_id);
 CREATE INDEX IF NOT EXISTS idx_messages_calendar_ical_uid ON messages(CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.ical_uid') END) WHERE message_type = 'calendar_event';
+
+-- Meeting keys are recomputed after any input changes on a cached message.
+CREATE TRIGGER IF NOT EXISTS trg_cache_meeting_decisions_insert
+AFTER INSERT ON meeting_link_decisions FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', NEW.member_message_id);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cache_meeting_decisions_update
+AFTER UPDATE ON meeting_link_decisions FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', OLD.member_message_id);
+    INSERT INTO cache_related_change_journal (dataset, message_id)
+    SELECT 'meeting_links', NEW.member_message_id WHERE NEW.member_message_id <> OLD.member_message_id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cache_meeting_decisions_delete
+AFTER DELETE ON meeting_link_decisions FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', OLD.member_message_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_cache_meeting_key_insert
+AFTER INSERT ON meeting_link_key FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', NEW.message_id);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cache_meeting_key_update
+AFTER UPDATE ON meeting_link_key FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', OLD.message_id);
+    INSERT INTO cache_related_change_journal (dataset, message_id)
+    SELECT 'meeting_links', NEW.message_id WHERE NEW.message_id <> OLD.message_id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cache_meeting_key_delete
+AFTER DELETE ON meeting_link_key FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', OLD.message_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_cache_meeting_events_insert
+AFTER INSERT ON calendar_events FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', NEW.message_id);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cache_meeting_events_update
+AFTER UPDATE ON calendar_events FOR EACH ROW WHEN OLD.content_hash IS NOT NEW.content_hash BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', OLD.message_id);
+    INSERT INTO cache_related_change_journal (dataset, message_id)
+    SELECT 'meeting_links', NEW.message_id WHERE NEW.message_id <> OLD.message_id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cache_meeting_events_delete
+AFTER DELETE ON calendar_events FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', OLD.message_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_cache_meeting_uid_update
+AFTER UPDATE OF metadata ON messages FOR EACH ROW
+WHEN NEW.message_type = 'calendar_event'
+AND (CASE WHEN json_valid(OLD.metadata) THEN json_extract(OLD.metadata, '$.ical_uid') END)
+ IS NOT (CASE WHEN json_valid(NEW.metadata) THEN json_extract(NEW.metadata, '$.ical_uid') END) BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('meeting_links', NEW.id);
+END;
