@@ -106,6 +106,9 @@ func (s *Store) meetingCountCopies(ctx context.Context, r reboundReader, identit
 			continue
 		}
 		occurrence, err := resolveMeetingOccurrence(ctx, r, OccurrenceRef{MessageID: row.MessageID}, &budget)
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, calrecur.ErrUnsupportedRecurrence) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}

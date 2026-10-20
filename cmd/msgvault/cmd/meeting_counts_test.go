@@ -97,6 +97,15 @@ func TestMeetingCountsLinkedCopies(t *testing.T) {
 	readCount(2)
 	event := persist("calendar_event", "calendar", "gcal_json", `{"id":"event","iCalUID":"planning@example.org","start":{"dateTime":"2026-03-14T10:00:00Z"},"end":{"dateTime":"2026-03-14T11:00:00Z"}}`)
 	requirements.NoError(st.SetMessageMetadata(event, sql.NullString{String: `{"ical_uid":"planning@example.org"}`, Valid: true}))
+	otherCalendar, err := st.GetOrCreateSource("gcal", "other-calendar@example.org")
+	requirements.NoError(err)
+	_, err = st.PersistMessage(&store.MessagePersistData{
+		Message:      &store.Message{SourceID: otherCalendar.ID, SourceMessageID: "sparse", MessageType: "calendar_event"},
+		Conversation: &store.ConversationPersistData{SourceConversationID: "sparse", ConversationType: "calendar"},
+		Metadata:     &sql.NullString{String: `{"ical_uid":"planning@example.org"}`, Valid: true},
+		RawFormat:    "gcal_json", RawMIME: []byte(`{"id":"sparse","iCalUID":"planning@example.org","status":"cancelled"}`),
+	})
+	requirements.NoError(err)
 	assertions.False(cacheNeedsBuild(path, cache).FullRebuild)
 	incremental, err := buildCache(path, cache, false)
 	requirements.NoError(err)

@@ -114,12 +114,10 @@ func TestMeetingCountKeysIncompleteCopies(t *testing.T) {
 	st := newRFC822IDBackfillBackendStore(t)
 	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "meeting@example.test"))
 	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"meeting@example.test"}}`)
-	// This later copy cannot resolve its own bounds. A partial copy map would
-	// leave the earlier event keyed even though this identity's mapping failed.
+	// A sparse cancellation in another calendar must preserve the complete copy's key.
 	_, incomplete := calendarFixture(t, st, "incomplete", `{"id":"incomplete","iCalUID":"meeting@example.test","status":"cancelled"}`, "other@example.test")
 	keys, _, err := st.MeetingCountKeysContext(t.Context())
 	requirements.NoError(err)
-	assertions.Equal(map[int64]string{note: "uid:meeting@example.test/"}, keys)
-	assertions.NotContains(keys, event)
+	assertions.Equal(map[int64]string{note: "uid:meeting@example.test/", event: "uid:meeting@example.test/"}, keys)
 	assertions.NotContains(keys, incomplete)
 }
