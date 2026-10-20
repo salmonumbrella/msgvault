@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -328,8 +329,18 @@ func TestMeetingCountsCalendarEdits(t *testing.T) {
 }
 
 func TestMeetingLinkDecisionRefreshesCounts(t *testing.T) {
-	for _, movedCounters := range []bool{false, true} {
-		t.Run(fmt.Sprintf("sync_counters_moved_%t", movedCounters), func(t *testing.T) {
+	for _, tc := range []struct {
+		name                                   string
+		movedCounters, newTranscript, newEmail bool
+		wantState                              string
+		wantCount                              int64
+	}{
+		{name: "older only", wantState: "ready", wantCount: 1},
+		{name: "changed population", movedCounters: true, wantState: "stale", wantCount: 2},
+		{name: "transcript above boundary", newTranscript: true, wantState: "stale", wantCount: 1},
+		{name: "related drift and new rows", movedCounters: true, newEmail: true, wantState: "stale", wantCount: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			require := require.New(t)
 			path := filepath.Join(t.TempDir(), "archive.db")
 			st, err := store.OpenForTest(path)
@@ -352,21 +363,40 @@ func TestMeetingLinkDecisionRefreshesCounts(t *testing.T) {
 			}
 			event := persist("event", "calendar_event", `{"id":"event","start":{"dateTime":"2026-08-01T10:00:00Z"},"end":{"dateTime":"2026-08-01T11:00:00Z"}}`, "gcal_json")
 			first := persist("first", "meeting_transcript", `{}`, "plaud_json")
-			second := persist("second", "meeting_transcript", `{}`, "plaud_json")
+			var second int64
+			if !tc.newTranscript {
+				second = persist("second", "meeting_transcript", `{}`, "plaud_json")
+			}
 			require.NoError(st.LinkMeetingContext(t.Context(), first, store.OccurrenceRef{MessageID: event}))
 			cache := filepath.Join(t.TempDir(), "analytics")
 			_, err = buildCache(path, cache, true)
 			require.NoError(err)
-			previousRefresh := runDerivedCacheSubprocess
-			runDerivedCacheSubprocess = func(_ context.Context, dir string) error {
-				_, err := buildCacheDerivedOnly(path, dir)
-				return err
+			if tc.newTranscript {
+				second = persist("second", "meeting_transcript", `{}`, "plaud_json")
 			}
-			t.Cleanup(func() { runDerivedCacheSubprocess = previousRefresh })
-			if movedCounters {
+			if tc.newEmail {
+				persist("email", "email", `{}`, "")
+			}
+			previousExecute := executeBuildCacheSubprocessMode
+			var modes []buildCacheMode
+			var derivedErr error
+			executeBuildCacheSubprocessMode = func(_ context.Context, mode buildCacheMode) error {
+				modes = append(modes, mode)
+				if mode != buildCacheModeDerived {
+					return errors.New("unexpected full cache build")
+				}
+				_, derivedErr = buildCacheDerivedOnly(path, cache)
+				return derivedErr
+			}
+			t.Cleanup(func() { executeBuildCacheSubprocessMode = previousExecute })
+			if tc.movedCounters {
 				syncID, err := st.StartSync(source.ID, "incremental")
 				require.NoError(err)
-				require.NoError(st.UpdateSyncCheckpoint(syncID, &store.Checkpoint{MessagesProcessed: 1, MessagesUpdated: 1}))
+				checkpoint := &store.Checkpoint{MessagesProcessed: 1, MessagesUpdated: 1}
+				if tc.newEmail {
+					checkpoint.MessagesAdded, checkpoint.MessagesUpdated = 1, 0
+				}
+				require.NoError(st.UpdateSyncCheckpoint(syncID, checkpoint))
 				require.NoError(st.CompleteSync(syncID, "cursor"))
 			}
 			srv := api.NewServerWithOptions(api.ServerOptions{Config: &config.Config{}, Store: &storeAPIAdapter{store: st, analyticsDir: cache}, Logger: slog.New(slog.DiscardHandler)})
@@ -379,11 +409,15 @@ func TestMeetingLinkDecisionRefreshesCounts(t *testing.T) {
 				CacheState string `json:"cache_state"`
 			}
 			require.NoError(json.Unmarshal(response.Body.Bytes(), &body))
-			wantState, wantCount := "ready", int64(1)
-			if movedCounters {
-				wantState, wantCount = "stale", 2
+			assert.Equal(t, tc.wantState, body.CacheState)
+			wantModes := []buildCacheMode{buildCacheModeDerived}
+			if tc.movedCounters && !tc.newEmail {
+				wantModes = append(wantModes, buildCacheModeFull)
 			}
-			assert.Equal(t, wantState, body.CacheState)
+			assert.Equal(t, wantModes, modes)
+			if tc.newEmail {
+				assert.ErrorIs(t, derivedErr, ErrDerivedRefreshNeedsAppend)
+			}
 			links, err := st.MeetingLinksContext(t.Context(), second)
 			require.NoError(err)
 			require.Len(links, 1, "decision remains saved even when the cache needs a full rebuild")
@@ -393,7 +427,15 @@ func TestMeetingLinkDecisionRefreshesCounts(t *testing.T) {
 			people, err := engine.SearchPeople(t.Context(), query.PersonSearchRequest{})
 			require.NoError(err)
 			require.Len(people.Rows, 1)
-			assert.Equal(t, wantCount, people.Rows[0].MeetingCount)
+			assert.Equal(t, tc.wantCount, people.Rows[0].MeetingCount)
+			if tc.wantState == "ready" {
+				db, err := sql.Open("duckdb", "")
+				require.NoError(err)
+				defer func() { require.NoError(db.Close()) }()
+				var key string
+				require.NoError(db.QueryRow(`SELECT meeting_key FROM read_parquet(?) WHERE message_id = ?`, filepath.Join(cache, "meeting_keys", "*.parquet"), second).Scan(&key))
+				assert.Equal(t, fmt.Sprintf("evt:%d/", event), key)
+			}
 		})
 	}
 }

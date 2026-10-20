@@ -106,6 +106,14 @@ func (s *Server) handleMeetingLinkDecision(w http.ResponseWriter, r *http.Reques
 	// PostgreSQL serves live SQL analytics and has no Parquet cache to refresh.
 	if backend, ok := s.store.(interface{ IsPostgreSQL() bool }); !ok || !backend.IsPostgreSQL() {
 		cacheState = s.refreshIdentityCacheState(r.Context())
+		if boundary, ok := s.store.(interface {
+			CacheMessageBoundary(context.Context) (int64, error)
+		}); ok && cacheState == identityCacheStateReady {
+			lastMessageID, err := boundary.CacheMessageBoundary(r.Context())
+			if err != nil || request.MessageID > lastMessageID {
+				cacheState = identityCacheStateStale
+			}
+		}
 	}
 	writeJSON(w, 200, MeetingLinkDecisionResponse{
 		MessageID: request.MessageID, Event: request.Event, Decision: request.Decision,

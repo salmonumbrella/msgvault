@@ -566,12 +566,16 @@ func buildCacheDerivedOnly(
 		return nil, err
 	}
 	defer func() { _ = buildLock.Unlock() }()
+	staleness := cacheNeedsBuildLocked(context.Background(), dbPath, analyticsDir)
+	if staleness.HasRelatedRowDrift && staleness.HasNew {
+		return nil, ErrDerivedRefreshNeedsAppend
+	}
 	return refreshDerivedDatasetsOnly(
 		context.Background(),
 		dbPath,
 		analyticsDir,
 		acquirePublishLock,
-		cacheNeedsBuildLocked(context.Background(), dbPath, analyticsDir).HasRelatedRowDrift,
+		staleness.HasRelatedRowDrift,
 		builderOverrides...,
 	)
 }

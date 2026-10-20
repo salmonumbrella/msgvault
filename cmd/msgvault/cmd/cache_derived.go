@@ -21,6 +21,10 @@ var ErrDerivedRefreshRequiresFullBuild = errors.New(
 	"derived cache refresh requires a full rebuild",
 )
 
+// ErrDerivedRefreshNeedsAppend defers related-row repairs until the next cache
+// build can publish them together with uncached messages.
+var ErrDerivedRefreshNeedsAppend = errors.New("derived cache refresh deferred to the next cache build")
+
 var derivedPublishBeforeMarkerHook func() error
 
 // derivedRefreshBeforeSnapshotHook is a deterministic test seam for writes
