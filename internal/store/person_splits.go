@@ -85,6 +85,9 @@ func (s *Store) splitPersonMergeOnce(
 		if s.personOperationBeforeIdentityLockHook != nil {
 			s.personOperationBeforeIdentityLockHook()
 		}
+		if err := s.lockPersonEnrichmentAuthorityMutationTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
 			return err
 		}
@@ -2071,6 +2074,36 @@ var personSplitMovedPresenceRowColumns = map[string][]string{
 	"person_brief_enrollments": {"enabled_at"},
 }
 
+// These are the values added to legacy presence rows during the v11 upgrade.
+// Older merge journals do not contain the columns, so split comparison treats
+// an omitted snapshot column as its migration default while still detecting a
+// later change to the live grant.
+var personSplitLegacyPresenceColumnDefaults = map[string]map[string]string{
+	"person_tracking": {
+		"provenance": "manual",
+		"actor":      "",
+	},
+	"person_brief_enrollments": {
+		"provenance": "manual",
+	},
+}
+
+func normalizePersonSplitLegacyPresenceColumns(
+	table string,
+	columns map[string]personMergeSnapshotValue,
+) {
+	for name, defaultValue := range personSplitLegacyPresenceColumnDefaults[table] {
+		if _, exists := columns[name]; exists {
+			continue
+		}
+		value := defaultValue
+		columns[name] = personMergeSnapshotValue{
+			Kind: personMergeSnapshotText,
+			Text: &value,
+		}
+	}
+}
+
 func (s *Store) personSplitPresenceRowReplacedTx(
 	ctx context.Context, tx *loggedTx, journal personSplitJournalRow,
 ) (bool, error) {
@@ -2106,6 +2139,7 @@ func (s *Store) personSplitPresenceRowReplacedTx(
 	}
 	currentColumns := personSplitSnapshotColumnsByName(current[0].Columns)
 	postColumns := personSplitSnapshotColumnsByName(post.Columns)
+	normalizePersonSplitLegacyPresenceColumns(journal.tableName, postColumns)
 	for _, column := range columns {
 		currentValue, hasCurrent := currentColumns[column]
 		postValue, hasPost := postColumns[column]

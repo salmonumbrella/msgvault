@@ -251,6 +251,97 @@ func TestSubsetPersonMergePacketCanSplitAfterNewPersonCreation(t *testing.T) {
 	assert.Contains(split.NewPerson.ParticipantIDs, int64(2))
 }
 
+func TestSubsetPersonTierMergePacketCanSplitAfterExport(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := t.Context()
+	sourcePath := createTestSourceDB(t, t.TempDir(), 4)
+	source, err := Open(sourcePath)
+	require.NoError(err)
+	survivor, _, err := source.CreatePersonFromParticipant(1)
+	require.NoError(err)
+	absorbed, _, err := source.CreatePersonFromParticipant(2)
+	require.NoError(err)
+	at := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	for i, person := range []*Person{survivor, absorbed} {
+		tier, rule := 1, "tier1_intensity"
+		if i == 1 {
+			tier, rule = 2, "tier2_two_way"
+		}
+		_, err = source.DB().ExecContext(ctx, source.Rebind(`INSERT INTO person_tier_state (
+			person_id,tier,tier_since,rule,config_fingerprint,rule_version,
+			enrichment_eligible,lanes_json,as_of_local_date,run_id,run_started_at,applied_at
+		) VALUES (?,?,'2026-10-01',?,'config',1,FALSE,'["tracking"]','2026-10-01','run',?,?)`),
+			person.ID, tier, rule, at, at)
+		require.NoError(err)
+	}
+	_, err = source.DB().ExecContext(ctx, source.Rebind(`INSERT INTO person_tier_opt_outs
+		(person_id,lane,actor) VALUES (?,'briefs','owner')`), absorbed.ID)
+	require.NoError(err)
+	merged, err := source.MergePersonsContext(ctx, PersonMergeRequest{
+		SurvivorID: survivor.ID, AbsorbedID: absorbed.ID,
+		ExpectedSurvivorRevision: survivor.Revision,
+		ExpectedAbsorbedRevision: absorbed.Revision,
+		IdempotencyKey:           "subset-tier-merge-roundtrip", Actor: "test",
+	})
+	require.NoError(err)
+	var tierAfterMerge int
+	require.NoError(source.DB().QueryRowContext(ctx, source.Rebind(`SELECT tier
+		FROM person_tier_state WHERE person_id = ?`), survivor.ID).Scan(&tierAfterMerge),
+		"read survivor tier state after merge")
+	assert.Equal(1, tierAfterMerge)
+	require.NoError(source.Close())
+
+	destinationDir := filepath.Join(t.TempDir(), "subset")
+	copyResult, err := CopySubsetWithOptions(sourcePath, destinationDir, 4, CopySubsetOptions{
+		IncludeIdentity: true, IncludeProfiles: true,
+		IncludeAttributes: true, IncludeVCardResources: true,
+	})
+	require.NoError(err)
+	require.Equal(int64(1), copyResult.PersonMergePackets)
+	require.Zero(copyResult.OmittedPersonMergePackets)
+	destination, err := Open(filepath.Join(destinationDir, "msgvault.db"))
+	require.NoError(err)
+	t.Cleanup(func() { require.NoError(destination.Close()) })
+	var tierAfterExport int
+	require.NoError(destination.DB().QueryRowContext(ctx, destination.Rebind(`SELECT tier
+		FROM person_tier_state WHERE person_id = ?`), merged.Person.ID).Scan(&tierAfterExport),
+		"read survivor tier state after subset export")
+	assert.Equal(1, tierAfterExport)
+
+	current, err := destination.GetPersonContext(ctx, merged.Person.ID)
+	require.NoError(err)
+	split, err := destination.SplitPersonMergeContext(ctx, PersonSplitRequest{
+		SourcePersonID: current.ID, MergeID: merged.Merge.ID,
+		ParticipantIDs:         absorbed.ParticipantIDs,
+		ExpectedSourceRevision: current.Revision,
+		IdempotencyKey:         "subset-tier-split-roundtrip", Actor: "test",
+	})
+	require.NoError(err)
+	assert.True(split.ExactReversal)
+	assert.ElementsMatch([]int64{1}, split.SourcePerson.ParticipantIDs)
+	assert.ElementsMatch([]int64{2}, split.NewPerson.ParticipantIDs)
+	for i, personID := range []int64{split.SourcePerson.ID, split.NewPerson.ID} {
+		var tier int
+		err := destination.DB().QueryRowContext(ctx, destination.Rebind(`SELECT tier
+			FROM person_tier_state WHERE person_id = ?`), personID).Scan(&tier)
+		require.NoError(err, "read tier state for split profile %d (person %d)", i, personID)
+		wantTier := 1
+		if i == 1 {
+			wantTier = 2
+		}
+		assert.Equal(wantTier, tier)
+		var count int
+		require.NoError(destination.DB().QueryRowContext(ctx, destination.Rebind(`SELECT COUNT(*)
+			FROM person_tier_opt_outs WHERE person_id = ? AND lane = 'briefs'`), personID).Scan(&count))
+		want := 0
+		if i == 1 {
+			want = 1
+		}
+		assert.Equal(want, count)
+	}
+}
+
 func TestSubsetPersonMergePacketReservesRestorableRowIDs(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)

@@ -290,6 +290,9 @@ func (s *Store) mergePersonsOnce(
 		if s.personOperationBeforeIdentityLockHook != nil {
 			s.personOperationBeforeIdentityLockHook()
 		}
+		if err := s.lockPersonEnrichmentAuthorityMutationTx(ctx, tx); err != nil {
+			return err
+		}
 		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
 			return err
 		}
@@ -569,6 +572,15 @@ func (s *Store) personMergeByIdempotencyKeyTx(
 func (s *Store) lockMergePeopleTx(
 	ctx context.Context, tx *loggedTx, survivorID, absorbedID int64,
 ) error {
+	// Tracking reconciliation takes the same generation gate as untracking.
+	// Take it before person rows, matching fact writers and manual transitions.
+	personIDs := []int64{survivorID, absorbedID}
+	slices.Sort(personIDs)
+	for _, personID := range personIDs {
+		if err := s.lockProfileIdentityKeyTxContext(ctx, tx, "person-fact-generation", personID); err != nil {
+			return err
+		}
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT id FROM persons
 		WHERE id IN (?, ?) ORDER BY id`+s.dialect.SelectForUpdate(), survivorID, absorbedID)
 	if err != nil {
@@ -898,6 +910,9 @@ func (s *Store) moveCorePersonProfileTx(
 		return err
 	}
 	if err := s.reconcilePersonTierAuthorityTx(ctx, tx, mergeID, survivorID, absorbedID); err != nil {
+		return err
+	}
+	if err := s.reconcilePersonTierOptOutEffectsTx(ctx, tx, survivorID); err != nil {
 		return err
 	}
 	projectionPersonIDs, err := personMergeRowIDsTx(ctx, tx, `SELECT person_id
