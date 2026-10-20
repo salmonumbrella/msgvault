@@ -174,6 +174,8 @@ type CreatePersonBody = CreatePersonRequest
 
 type SearchPeopleBody = PersonSearchRequest
 
+type FindPeopleWhoKnowBody = WhoKnowsRequest
+
 type PatchPersonBody = PatchPersonRequest
 
 type CreatePersonAgendaItemBody = PersonAgendaCreateRequest
