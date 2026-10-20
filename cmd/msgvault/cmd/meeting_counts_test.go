@@ -23,6 +23,89 @@ import (
 	"go.kenn.io/msgvault/internal/store"
 )
 
+func TestPersonMergeRelatedDriftKeepsDerivedRefresh(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		newMail, updated bool
+	}{
+		{name: "new mail", newMail: true},
+		{name: "updated mail", updated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			root := t.TempDir()
+			path, cache := filepath.Join(root, "test.db"), filepath.Join(root, "analytics")
+			st, err := store.OpenForTest(path)
+			require.NoError(err)
+			t.Cleanup(func() { require.NoError(st.Close()) })
+			require.NoError(st.InitSchema())
+			firstID, err := st.EnsureParticipant("first@example.test", "First", "example.test")
+			require.NoError(err)
+			secondID, err := st.EnsureParticipant("second@example.test", "Second", "example.test")
+			require.NoError(err)
+			source, err := st.GetOrCreateSource("gmail", "owner@example.test")
+			require.NoError(err)
+			messageID, err := st.PersistMessage(&store.MessagePersistData{
+				Message:      &store.Message{SourceID: source.ID, SourceMessageID: "mail", MessageType: "email", SentAt: sql.NullTime{Time: time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC), Valid: true}},
+				Conversation: &store.ConversationPersistData{SourceConversationID: "mail", ConversationType: "email"},
+				Recipients:   []store.RecipientSet{{Type: "to", ParticipantIDs: []int64{firstID, secondID}}},
+			})
+			require.NoError(err)
+			_, err = st.DB().Exec(`INSERT INTO labels (source_id, source_label_id, name) VALUES (?, 'unread', 'Unread')`, source.ID)
+			require.NoError(err)
+			_, err = st.DB().Exec(`INSERT INTO message_labels (message_id, label_id) SELECT ?, id FROM labels`, messageID)
+			require.NoError(err)
+			first, _, err := st.CreatePersonFromParticipant(firstID)
+			require.NoError(err)
+			second, _, err := st.CreatePersonFromParticipant(secondID)
+			require.NoError(err)
+			_, err = buildCache(path, cache, true)
+			require.NoError(err)
+			_, err = st.DB().Exec(`DELETE FROM message_labels WHERE message_id = (SELECT min(message_id) FROM message_labels)`)
+			require.NoError(err)
+			if tc.newMail {
+				_, err = st.DB().Exec(`INSERT INTO messages (source_id, source_message_id, conversation_id, message_type, sent_at) SELECT source_id, 'new-mail', conversation_id, 'email', sent_at FROM messages LIMIT 1`)
+				require.NoError(err)
+			}
+			if tc.updated {
+				var sourceID int64
+				require.NoError(st.DB().QueryRow(`SELECT min(id) FROM sources`).Scan(&sourceID))
+				syncID, err := st.StartSync(sourceID, "incremental")
+				require.NoError(err)
+				require.NoError(st.UpdateSyncCheckpoint(syncID, &store.Checkpoint{MessagesProcessed: 1, MessagesUpdated: 1}))
+				require.NoError(st.CompleteSync(syncID, "cursor"))
+			}
+			assert.True(cacheNeedsBuild(path, cache).HasRelatedRowDrift)
+			previous := executeBuildCacheSubprocessMode
+			var modes []buildCacheMode
+			executeBuildCacheSubprocessMode = func(_ context.Context, mode buildCacheMode) error {
+				modes = append(modes, mode)
+				if mode != buildCacheModeDerived {
+					return errors.New("unexpected full cache build")
+				}
+				_, err := buildCacheDerivedOnly(path, cache)
+				return err
+			}
+			t.Cleanup(func() { executeBuildCacheSubprocessMode = previous })
+			srv := api.NewServerWithOptions(api.ServerOptions{Config: &config.Config{}, Store: &storeAPIAdapter{store: st, analyticsDir: cache}, Logger: slog.New(slog.DiscardHandler)})
+			request := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/people/%d/merge", first.ID), strings.NewReader(fmt.Sprintf(`{"absorbed_person_id":%d}`, second.ID)))
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("If-Match", fmt.Sprintf(`"person-%d-r%d", "person-%d-r%d"`, first.ID, first.Revision, second.ID, second.Revision))
+			request.Header.Set("Idempotency-Key", "merge-related-drift")
+			response := httptest.NewRecorder()
+			srv.Router().ServeHTTP(response, request)
+			require.Equal(http.StatusOK, response.Code, response.Body.String())
+			var body struct {
+				CacheState string `json:"cache_state"`
+			}
+			require.NoError(json.Unmarshal(response.Body.Bytes(), &body))
+			assert.Equal("ready", body.CacheState)
+			assert.Equal([]buildCacheMode{buildCacheModeDerived}, modes)
+		})
+	}
+}
+
 func TestMeetingCountsLinkedCopies(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
 	path := filepath.Join(t.TempDir(), "archive.db")

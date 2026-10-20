@@ -567,7 +567,24 @@ func buildCacheDerivedOnly(
 	}
 	defer func() { _ = buildLock.Unlock() }()
 	staleness := cacheNeedsBuildLocked(context.Background(), dbPath, analyticsDir)
-	if staleness.HasRelatedRowDrift && staleness.HasNew {
+	repairRelated := false
+	if staleness.HasRelatedRowDrift {
+		state, err := query.ReadCacheSyncState(analyticsDir)
+		if err != nil {
+			return nil, fmt.Errorf("read meeting refresh boundary: %w", err)
+		}
+		st, err := store.OpenReadOnlyContext(context.Background(), dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("open meeting refresh journal: %w", err)
+		}
+		defer func() { _ = st.Close() }()
+		if err := st.DB().QueryRow(`SELECT count(*) > 0 AND count(*) FILTER (WHERE dataset <> 'meeting_links') = 0
+			FROM cache_related_change_journal WHERE seq > ? AND message_id <= ?`,
+			state.LastRelatedChangeSeq, state.LastMessageID).Scan(&repairRelated); err != nil {
+			return nil, fmt.Errorf("inspect meeting refresh journal: %w", err)
+		}
+	}
+	if repairRelated && staleness.HasNew {
 		return nil, ErrDerivedRefreshNeedsAppend
 	}
 	return refreshDerivedDatasetsOnly(
@@ -575,7 +592,7 @@ func buildCacheDerivedOnly(
 		dbPath,
 		analyticsDir,
 		acquirePublishLock,
-		staleness.HasRelatedRowDrift,
+		repairRelated,
 		builderOverrides...,
 	)
 }
