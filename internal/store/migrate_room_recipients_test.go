@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -119,4 +120,45 @@ func TestRoomRecipientsMigrationKeepsResourceFlagsLocal(t *testing.T) {
 			assertions.Equal(1, roster)
 		}
 	}
+}
+
+func TestRoomRecipientsMigrationCandidatesFollowEdges(t *testing.T) {
+	requirements := require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	source, err := st.GetOrCreateSource("gcal", "calendar@example.test")
+	requirements.NoError(err)
+	for i := range 64 {
+		_, err := st.EnsureParticipant(fmt.Sprintf("room-%d@c.resource.calendar.google.com", i), "Room", "c.resource.calendar.google.com")
+		requirements.NoError(err)
+	}
+	for i := range 128 {
+		_, err := st.PersistMessage(&MessagePersistData{
+			Message:      &Message{SourceID: source.ID, SourceMessageID: fmt.Sprintf("event-%d", i), MessageType: "calendar_event"},
+			Conversation: &ConversationPersistData{SourceConversationID: fmt.Sprintf("event-%d", i), ConversationType: "calendar"},
+		})
+		requirements.NoError(err)
+	}
+	var candidates int
+	requirements.NoError(st.DB().QueryRow(roomRecipientEdgesSQL + `SELECT count(*) FROM room_edges`).Scan(&candidates))
+	assert.Zero(t, candidates, "unrelated rooms and events generate no repair pairs")
+	requirements.NoError(st.repairRoomRecipientsContext(t.Context()))
+}
+
+func TestRoomRecipientsMigrationRemovesRosterOnlyRooms(t *testing.T) {
+	requirements := require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, event := calendarFixture(t, st, "event", singleLinkRaw("event", "roster@example.test"))
+	room, err := st.EnsureParticipant("room@c.resource.calendar.google.com", "Room", "c.resource.calendar.google.com")
+	requirements.NoError(err)
+	resource, err := st.EnsureParticipant("resource@example.test", "Resource", "example.test")
+	requirements.NoError(err)
+	requirements.NoError(st.UpsertMessageRawWithFormat(event, []byte(`{"id":"event","start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"},"attendees":[{"email":"resource@example.test","resource":true}]}`), "gcal_json"))
+	var conversation int64
+	requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_id FROM messages WHERE id = ?`), event).Scan(&conversation))
+	requirements.NoError(st.EnsureConversationParticipant(conversation, room, "member"))
+	requirements.NoError(st.EnsureConversationParticipant(conversation, resource, "member"))
+	requirements.NoError(st.repairRoomRecipientsContext(t.Context()))
+	var rooms int
+	requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT count(*) FROM conversation_participants WHERE conversation_id = ? AND participant_id IN (?, ?)`), conversation, room, resource).Scan(&rooms))
+	assert.Zero(t, rooms)
 }
