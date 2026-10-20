@@ -64,7 +64,7 @@ func (f *editFixture) note(name string, ref store.OccurrenceRef) int64 {
 // distinct meetings it names.
 func (f *editFixture) keys(notes ...int64) (map[int64]string, int) {
 	f.t.Helper()
-	keys, _, err := f.st.MeetingCountKeysContext(f.t.Context())
+	keys, err := f.st.MeetingCountKeysContext(f.t.Context())
 	require.NoError(f.t, err)
 	distinct := map[string]bool{}
 	for _, note := range notes {

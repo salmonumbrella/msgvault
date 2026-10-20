@@ -8,15 +8,15 @@ import (
 	"go.kenn.io/msgvault/internal/store"
 )
 
-// Read after the source snapshot. Its journal boundary alone is acknowledged,
-// so decisions committed between the two reads remain pending for replay.
+// Read keys after the source snapshot. Only the source snapshot's journal
+// boundary is acknowledged, so later decisions remain pending for replay.
 func readMeetingCountKeys(ctx context.Context, dbPath string) (map[int64]string, error) {
 	st, err := store.OpenReadOnlyContext(ctx, dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open meeting count reader: %w", err)
 	}
 	defer func() { _ = st.Close() }()
-	keys, _, err := st.MeetingCountKeysContext(ctx)
+	keys, err := st.MeetingCountKeysContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("read meeting count keys: %w", err)
 	}

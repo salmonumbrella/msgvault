@@ -17,46 +17,40 @@ func (i meetingIdentity) countKey() string {
 }
 
 // MeetingCountKeysContext maps linked transcripts and calendar copies to exact
-// meeting targets. Series masters have no count key. journalSeq is the SQLite
-// journal high-water mark in the same read snapshot, or zero on PostgreSQL.
-func (s *Store) MeetingCountKeysContext(ctx context.Context) (keys map[int64]string, journalSeq int64, err error) {
+// meeting targets in one read snapshot. Series masters have no count key.
+func (s *Store) MeetingCountKeysContext(ctx context.Context) (map[int64]string, error) {
 	ctx, release, err := s.BeginReadSnapshotContext(ctx)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	defer release()
 	r := s.meetingReader(ctx)
-	if !s.IsPostgreSQL() {
-		err = r.QueryRowContext(ctx, `SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='cache_related_change_journal'), 0)`).Scan(&journalSeq)
-		if err != nil {
-			return nil, 0, fmt.Errorf("read meeting journal sequence: %w", err)
-		}
-	}
+
 	rows, err := r.QueryContext(ctx, `SELECT m.id FROM messages m
  WHERE m.message_type='meeting_transcript' AND m.deleted_at IS NULL
  AND (EXISTS (SELECT 1 FROM meeting_link_key k WHERE k.message_id=m.id AND k.value<>'')
  OR EXISTS (SELECT 1 FROM meeting_link_decisions d WHERE d.member_message_id=m.id))`)
 	if err != nil {
-		return nil, 0, fmt.Errorf("read meeting count members: %w", err)
+		return nil, fmt.Errorf("read meeting count members: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var members []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		members = append(members, id)
 	}
 	err = rows.Err()
 	closeErr := rows.Close()
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	if closeErr != nil {
-		return nil, 0, closeErr
+		return nil, closeErr
 	}
-	keys = make(map[int64]string)
+	keys := make(map[int64]string)
 	seen := make(map[meetingIdentity]bool)
 	for _, id := range members {
 		budget := calrecur.RequestReadBudget
@@ -65,7 +59,7 @@ func (s *Store) MeetingCountKeysContext(ctx context.Context) (keys map[int64]str
 			continue
 		}
 		if err != nil {
-			return nil, 0, fmt.Errorf("resolve meeting count member %d: %w", id, err)
+			return nil, fmt.Errorf("resolve meeting count member %d: %w", id, err)
 		}
 		if len(occurrences) != 1 {
 			continue
@@ -81,13 +75,13 @@ func (s *Store) MeetingCountKeysContext(ctx context.Context) (keys map[int64]str
 			continue
 		}
 		if err != nil {
-			return nil, 0, fmt.Errorf("resolve meeting count copies: %w", err)
+			return nil, fmt.Errorf("resolve meeting count copies: %w", err)
 		}
 		for _, copyID := range copies {
 			keys[copyID] = identity.countKey()
 		}
 	}
-	return keys, journalSeq, nil
+	return keys, nil
 }
 
 func unresolvedMeetingCount(err error) bool {
