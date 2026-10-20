@@ -341,6 +341,7 @@ func TestMeetingLinkDecisionRefreshesCounts(t *testing.T) {
 		{name: "related drift and new rows", movedCounters: true, newEmail: true, wantState: "stale", wantCount: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
 			require := require.New(t)
 			path := filepath.Join(t.TempDir(), "archive.db")
 			st, err := store.OpenForTest(path)
@@ -409,14 +410,14 @@ func TestMeetingLinkDecisionRefreshesCounts(t *testing.T) {
 				CacheState string `json:"cache_state"`
 			}
 			require.NoError(json.Unmarshal(response.Body.Bytes(), &body))
-			assert.Equal(t, tc.wantState, body.CacheState)
+			assert.Equal(tc.wantState, body.CacheState)
 			wantModes := []buildCacheMode{buildCacheModeDerived}
 			if tc.movedCounters && !tc.newEmail {
 				wantModes = append(wantModes, buildCacheModeFull)
 			}
-			assert.Equal(t, wantModes, modes)
+			assert.Equal(wantModes, modes)
 			if tc.newEmail {
-				assert.ErrorIs(t, derivedErr, ErrDerivedRefreshNeedsAppend)
+				require.ErrorIs(derivedErr, ErrDerivedRefreshNeedsAppend)
 			}
 			links, err := st.MeetingLinksContext(t.Context(), second)
 			require.NoError(err)
@@ -427,14 +428,14 @@ func TestMeetingLinkDecisionRefreshesCounts(t *testing.T) {
 			people, err := engine.SearchPeople(t.Context(), query.PersonSearchRequest{})
 			require.NoError(err)
 			require.Len(people.Rows, 1)
-			assert.Equal(t, tc.wantCount, people.Rows[0].MeetingCount)
+			assert.Equal(tc.wantCount, people.Rows[0].MeetingCount)
 			if tc.wantState == "ready" {
 				db, err := sql.Open("duckdb", "")
 				require.NoError(err)
 				defer func() { require.NoError(db.Close()) }()
 				var key string
 				require.NoError(db.QueryRow(`SELECT meeting_key FROM read_parquet(?) WHERE message_id = ?`, filepath.Join(cache, "meeting_keys", "*.parquet"), second).Scan(&key))
-				assert.Equal(t, fmt.Sprintf("evt:%d/", event), key)
+				assert.Equal(fmt.Sprintf("evt:%d/", event), key)
 			}
 		})
 	}

@@ -107,7 +107,7 @@ func (s *Server) handleMeetingLinkDecision(w http.ResponseWriter, r *http.Reques
 	if backend, ok := s.store.(interface{ IsPostgreSQL() bool }); !ok || !backend.IsPostgreSQL() {
 		cacheState = s.refreshIdentityCacheState(r.Context())
 		if boundary, ok := s.store.(interface {
-			CacheMessageBoundary(context.Context) (int64, error)
+			CacheMessageBoundary(ctx context.Context) (int64, error)
 		}); ok && cacheState == identityCacheStateReady {
 			lastMessageID, err := boundary.CacheMessageBoundary(r.Context())
 			if err != nil || request.MessageID > lastMessageID {
