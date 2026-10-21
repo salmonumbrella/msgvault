@@ -87,7 +87,8 @@ func (s *Store) refreshCalendarEventProjectionModeWith(ctx context.Context, tx *
 	}
 	var oldVersion int
 	var oldHash string
-	err = q.QueryRow(`SELECT projection_version, content_hash FROM calendar_events WHERE message_id = ?`, messageID).Scan(&oldVersion, &oldHash)
+	var oldSnapshotUpdatedAt time.Time
+	err = q.QueryRow(`SELECT projection_version, content_hash, snapshot_updated_at FROM calendar_events WHERE message_id = ?`, messageID).Scan(&oldVersion, &oldHash, &oldSnapshotUpdatedAt)
 	exists := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("read calendar projection version: %w", err)
@@ -157,12 +158,21 @@ func (s *Store) refreshCalendarEventProjectionModeWith(ctx context.Context, tx *
 			status, providerID, seriesID, original := event.Status, event.ProviderEventID, event.SeriesProviderID, event.Original
 			rawFields := calendarRawFields(stored, compression)
 			rawCancellation := calendarRawCancellation(rawFields)
-			event, err = mergeCancelledCalendarException(latest.Event, event, rawFields, rawCancellation)
+			currentSnapshotUpdatedAt := oldSnapshotUpdatedAt
+			if !exists {
+				currentSnapshotUpdatedAt = lastModified
+			}
+			currentSnapshotIsFreshest := currentSnapshotUpdatedAt.After(latest.SnapshotUpdatedAt) ||
+				currentSnapshotUpdatedAt.Equal(latest.SnapshotUpdatedAt) && messageID >= latest.MessageID
+			// A new provider write is authoritative. During a rebuild, an older
+			// cancelled alias must not replace a fresher alias's complete details.
+			overlayCancellationFields := rawCancellation && (providerEvidence || currentSnapshotIsFreshest)
+			event, err = mergeCancelledCalendarException(latest.Event, event, rawFields, overlayCancellationFields)
 			if err != nil {
 				return err
 			}
 			event.Status, event.ProviderEventID, event.SeriesProviderID, event.Original = status, providerID, seriesID, original
-			if !rawCancellation || rawFields["summary"] == nil {
+			if !overlayCancellationFields || rawFields["summary"] == nil {
 				if _, err := q.Exec(`UPDATE messages SET subject = ? WHERE id = ?`, latest.Subject, messageID); err != nil {
 					return fmt.Errorf("preserve cancellation event subject: %w", err)
 				}

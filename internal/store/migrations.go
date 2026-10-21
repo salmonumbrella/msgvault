@@ -17,8 +17,10 @@ import (
 // last_modified backfill alone is a full messages-table scan — seconds of
 // startup on a large archive).
 const (
-	migrationCalendarEventProjectionV1      = "calendar_event_projection_v1"
-	migrationCalendarEventSnapshotFreshness = "calendar_event_snapshot_freshness_v1"
+	migrationCalendarEventProjectionV1 = "calendar_event_projection_v1"
+	// v2 reruns the backfill for archives that already recorded the original
+	// migration, which compared PostgreSQL timestamps using a session-local epoch.
+	migrationCalendarEventSnapshotFreshness = "calendar_event_snapshot_freshness_v2"
 	migrationMeetingProjectionV1            = "meeting_projection_v1"
 	migrationAttachmentsContentHashUnique   = "attachments_content_hash_unique_index"
 	migrationAttachmentOccurrenceUnique     = "attachment_occurrence_unique_indexes_v1"
@@ -106,9 +108,10 @@ const (
 // provider snapshots receive the database clock when they are imported; a
 // rebuilt projection inherits its archived message timestamp.
 func (s *Store) backfillCalendarEventSnapshotFreshness(ctx context.Context) error {
-	epoch := "'1970-01-01 00:00:00'"
-	if s.IsPostgreSQL() {
-		epoch = "to_timestamp(0)"
+	var epoch any = time.Unix(0, 0).UTC()
+	if !s.IsPostgreSQL() {
+		// SQLite's legacy column default is stored without fractional seconds.
+		epoch = "1970-01-01 00:00:00"
 	}
 	return s.withTxContext(ctx, func(tx *loggedTx) error {
 		if _, err := tx.ExecContext(ctx, `
@@ -116,8 +119,8 @@ func (s *Store) backfillCalendarEventSnapshotFreshness(ctx context.Context) erro
 			SET snapshot_updated_at = (
 				SELECT m.last_modified FROM messages m WHERE m.id = calendar_events.message_id
 			)
-			WHERE snapshot_updated_at = `+epoch+`
-		`); err != nil {
+			WHERE snapshot_updated_at = ?
+		`, epoch); err != nil {
 			return fmt.Errorf("backfill calendar snapshot freshness: %w", err)
 		}
 		return nil
