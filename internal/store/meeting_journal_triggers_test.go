@@ -2,7 +2,9 @@ package store
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -99,4 +101,49 @@ func TestMeetingJournalIgnoresContentOnlyUpdates(t *testing.T) {
 			assert.Equal(t, tc.want, count)
 		})
 	}
+}
+
+func TestMeetingJournalTracksFreshnessChangesWithCompetingExceptionAliases(t *testing.T) {
+	st := newRFC822IDBackfillBackendStore(t)
+	if st.IsPostgreSQL() {
+		t.Skip("SQLite cache journal")
+	}
+	firstRaw := `{"id":"instance","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"},"attendees":[{"email":"person@example.test","responseStatus":"needsAction"}]}`
+	secondRaw := `{"id":"instance","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T14:00:00Z"},"end":{"dateTime":"2027-03-14T15:00:00Z"}}`
+	_, first := calendarFixture(t, st, "instance", firstRaw)
+	_, second := calendarFixture(t, st, "series|2027-03-14T10:00:00Z", secondRaw)
+	older := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Minute)
+	for _, update := range []struct {
+		id        int64
+		freshness time.Time
+	}{
+		{id: first, freshness: older},
+		{id: second, freshness: newer},
+	} {
+		_, err := st.db.Exec(`UPDATE messages SET content_changed_at = ? WHERE id = ?`, update.freshness, update.id)
+		require.NoError(t, err)
+		_, err = st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, update.freshness, update.id)
+		require.NoError(t, err)
+	}
+	from := time.Date(2027, 3, 14, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	require.NoError(t, err)
+	require.Len(t, page.Occurrences, 1)
+	assert.Equal(t, second, page.Occurrences[0].MessageID)
+	assert.Equal(t, from.Add(14*time.Hour), page.Occurrences[0].Start)
+
+	_, err = st.db.Exec(`DELETE FROM cache_related_change_journal`)
+	require.NoError(t, err)
+	updatedRaw := strings.Replace(firstRaw, `"needsAction"`, `"accepted"`, 1)
+	require.NoError(t, st.UpsertMessageRawWithFormat(first, []byte(updatedRaw), "gcal_json"))
+	var journaled int
+	require.NoError(t, st.db.QueryRow(`SELECT count(*) FROM cache_related_change_journal WHERE dataset='meeting_links' AND message_id=?`, first).Scan(&journaled))
+	assert.Equal(t, 1, journaled, "freshness can change the winning alias when a sibling exists")
+
+	page, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	require.NoError(t, err)
+	require.Len(t, page.Occurrences, 1)
+	assert.Equal(t, first, page.Occurrences[0].MessageID)
+	assert.Equal(t, from.Add(12*time.Hour), page.Occurrences[0].Start)
 }

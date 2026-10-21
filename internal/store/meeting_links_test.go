@@ -119,6 +119,192 @@ func TestMeetingExceptionFreshnessBeforeWindowFiltering(t *testing.T) {
 	assertions.Empty(suggestions, "note suggestions must not use stale aliases")
 }
 
+func TestMeetingExceptionRawEvidenceRefreshesFreshnessWithoutProjectionChange(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, master := calendarFixture(t, st, "series", linkSeriesRaw)
+	firstRaw := `{"id":"instance","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"},"description":"old description"}`
+	secondRaw := `{"id":"instance","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T14:00:00Z"},"end":{"dateTime":"2027-03-14T15:00:00Z"},"description":"other description"}`
+	_, first := calendarFixture(t, st, "instance", firstRaw)
+	_, second := calendarFixture(t, st, "series|2027-03-14T10:00:00Z", secondRaw)
+
+	older := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Minute)
+	_, err := st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, older, first)
+	requirements.NoError(err)
+	_, err = st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, newer, second)
+	requirements.NoError(err)
+	var beforeHash string
+	requirements.NoError(st.db.QueryRow(`SELECT content_hash FROM calendar_events WHERE message_id = ?`, first).Scan(&beforeHash))
+
+	updatedRaw := strings.Replace(firstRaw, "old description", "fresh description", 1)
+	requirements.NoError(st.UpsertMessageRawWithFormat(first, []byte(updatedRaw), "gcal_json"))
+	var afterHash string
+	var firstFreshness, secondFreshness time.Time
+	requirements.NoError(st.db.QueryRow(`SELECT content_hash, snapshot_updated_at FROM calendar_events WHERE message_id = ?`, first).Scan(&afterHash, &firstFreshness))
+	requirements.NoError(st.db.QueryRow(`SELECT snapshot_updated_at FROM calendar_events WHERE message_id = ?`, second).Scan(&secondFreshness))
+	assertions.Equal(beforeHash, afterHash, "the changed provider field is not part of the parsed projection")
+	assertions.True(firstFreshness.After(secondFreshness), "the new raw snapshot must win even when projection fields are unchanged")
+
+	from := time.Date(2027, 3, 14, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	requirements.NoError(err)
+	requirements.Len(page.Occurrences, 1)
+	assertions.Equal(first, page.Occurrences[0].MessageID)
+	assertions.Equal(master, page.Occurrences[0].SeriesMessageID)
+	assertions.Equal(from.Add(12*time.Hour), page.Occurrences[0].Start)
+}
+
+func TestCalendarAliasFreshnessSurvivesSourceRefreshAndProjectionRebuild(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	firstRaw := `{"id":"instance","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`
+	secondRaw := `{"id":"instance","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T14:00:00Z"},"end":{"dateTime":"2027-03-14T15:00:00Z"}}`
+	firstData, first := calendarFixture(t, st, "instance", firstRaw)
+	_, second := calendarFixture(t, st, "series|2027-03-14T10:00:00Z", secondRaw)
+
+	older := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Minute)
+	for _, update := range []struct {
+		id        int64
+		freshness time.Time
+	}{
+		{id: first, freshness: newer},
+		{id: second, freshness: older},
+	} {
+		_, err := st.db.Exec(`UPDATE messages SET content_changed_at = ? WHERE id = ?`, update.freshness, update.id)
+		requirements.NoError(err)
+		_, err = st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, update.freshness, update.id)
+		requirements.NoError(err)
+	}
+
+	from := time.Date(2027, 3, 14, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	requirements.NoError(err)
+	requirements.Len(page.Occurrences, 1)
+	assertions.Equal(first, page.Occurrences[0].MessageID)
+
+	// Reprojecting after a source time-zone change must keep the provider order.
+	requirements.NoError(st.UpdateSourceSyncConfig(firstData.Message.SourceID, `{"calendar_id":"calendar@example.com","time_zone":"Asia/Tokyo"}`))
+	page, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	requirements.NoError(err)
+	requirements.Len(page.Occurrences, 1)
+	assertions.Equal(first, page.Occurrences[0].MessageID)
+	assertions.Equal("Asia/Tokyo", calendarRows(t, st, first)[0].Event.CalendarTimeZone)
+
+	// A full projection reconstruction must use the same persisted evidence order.
+	_, err = st.db.Exec(`DELETE FROM calendar_events WHERE message_id IN (?, ?)`, first, second)
+	requirements.NoError(err)
+	_, err = st.db.Exec(`DELETE FROM applied_migrations WHERE name = 'calendar_event_projection_v1'`)
+	requirements.NoError(err)
+	requirements.NoError(st.InitSchemaContext(t.Context()))
+	page, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	requirements.NoError(err)
+	requirements.Len(page.Occurrences, 1)
+	assertions.Equal(first, page.Occurrences[0].MessageID)
+}
+
+func TestMeetingLinksUIDScheduledTimeRetainsPerSourceExceptionAliases(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	matchedRaw := `{"id":"instance","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`
+	otherSourceRaw := `{"id":"instance","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T14:00:00Z"},"end":{"dateTime":"2027-03-14T15:00:00Z"}}`
+	_, matched := calendarFixture(t, st, "instance", matchedRaw, "first-calendar@example.test")
+	_, otherSource := calendarFixture(t, st, "instance", otherSourceRaw, "second-calendar@example.test")
+
+	older := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Minute)
+	_, err := st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, older, matched)
+	requirements.NoError(err)
+	_, err = st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, newer, otherSource)
+	requirements.NoError(err)
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"weekly@example.org","startsAt":"2027-03-14T12:00:00Z"}}`)
+
+	links, err := st.MeetingLinksContext(t.Context(), note)
+	requirements.NoError(err)
+	requirements.Len(links, 1)
+	assertions.Equal(formatMeetingOccurrence(OccurrenceRef{MessageID: matched}), links[0].Ref)
+	assertions.Equal(time.Date(2027, 3, 14, 12, 0, 0, 0, time.UTC), links[0].Start)
+}
+
+func TestResolveMeetingOccurrenceCanonicalizesOrphanExceptionAlias(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	olderRaw := `{"id":"instance","iCalUID":"weekly@example.org","recurringEventId":"removed-series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`
+	newerRaw := `{"id":"instance","iCalUID":"weekly@example.org","recurringEventId":"removed-series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T14:00:00Z"},"end":{"dateTime":"2027-03-14T15:00:00Z"}}`
+	_, olderAlias := calendarFixture(t, st, "instance", olderRaw)
+	_, newerAlias := calendarFixture(t, st, "series|2027-03-14T10:00:00Z", newerRaw)
+	oldStamp := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, err := st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, oldStamp, olderAlias)
+	requirements.NoError(err)
+	_, err = st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, oldStamp.Add(time.Minute), newerAlias)
+	requirements.NoError(err)
+
+	func() {
+		ctx, release, err := st.BeginReadSnapshotContext(t.Context())
+		requirements.NoError(err)
+		defer release()
+		budget := calrecur.RequestReadBudget
+		resolved, err := resolveMeetingOccurrence(ctx, st.meetingReader(ctx), OccurrenceRef{MessageID: olderAlias}, &budget)
+		requirements.NoError(err)
+		assertions.Equal(newerAlias, resolved.Row.MessageID)
+		assertions.Equal(time.Date(2027, 3, 14, 14, 0, 0, 0, time.UTC), resolved.Start)
+		assertions.Equal(oldStamp.Add(time.Minute), resolved.Row.SnapshotUpdatedAt)
+	}()
+
+	_, note := projectionFixture(t, st, "note", "twenty_json", `{"schema_version":1,"recording":{},"calendar_event":{"iCalUid":"weekly@example.org"}}`)
+	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: olderAlias}))
+	links, err := st.MeetingLinksContext(t.Context(), note)
+	requirements.NoError(err)
+	requirements.Len(links, 1)
+	assertions.Equal(formatMeetingOccurrence(OccurrenceRef{MessageID: newerAlias}), links[0].Ref)
+	assertions.Equal(time.Date(2027, 3, 14, 14, 0, 0, 0, time.UTC), links[0].Start)
+}
+
+func TestMeetingLinksCancelledEarlierExceptionAliasWinsBySnapshotFreshness(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, master := calendarFixture(t, st, "series", linkSeriesRaw)
+
+	offsetFree := `{"id":"instance","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T06:00:00","timeZone":"America/New_York"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`
+	explicitOffset := `{"id":"instance","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T06:00:00-04:00","timeZone":"America/New_York"},"start":{"dateTime":"2027-03-14T14:00:00Z"},"end":{"dateTime":"2027-03-14T15:00:00Z"}}`
+	cancelledOffsetFree := `{"id":"instance","iCalUID":"weekly@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T06:00:00","timeZone":"America/New_York"},"status":"cancelled"}`
+	_, earlierAlias := calendarFixture(t, st, "instance", offsetFree)
+	_, laterAlias := calendarFixture(t, st, "series|2027-03-14T10:00:00Z", explicitOffset)
+	_, cancelledAlias := calendarFixture(t, st, "instance", cancelledOffsetFree)
+	requirements.Equal(earlierAlias, cancelledAlias)
+	requirements.NotEqual(earlierAlias, laterAlias)
+
+	older := time.Date(2027, 3, 14, 10, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Minute)
+	_, err := st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, newer, earlierAlias)
+	requirements.NoError(err)
+	_, err = st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, older, laterAlias)
+	requirements.NoError(err)
+
+	from := time.Date(2027, 3, 14, 0, 0, 0, 0, time.UTC)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	requirements.NoError(err)
+	requirements.Len(page.Occurrences, 1)
+	assertions.Equal(earlierAlias, page.Occurrences[0].MessageID)
+	assertions.Equal(meetingCancelledStatus, page.Occurrences[0].Status)
+
+	ctx, release, err := st.BeginReadSnapshotContext(t.Context())
+	requirements.NoError(err)
+	defer release()
+	for _, ref := range []OccurrenceRef{
+		{MessageID: master, Key: "20270314T100000Z"},
+		{MessageID: earlierAlias},
+		{MessageID: laterAlias},
+	} {
+		budget := calrecur.RequestReadBudget
+		resolved, err := resolveMeetingOccurrence(ctx, st.meetingReader(ctx), ref, &budget)
+		requirements.NoError(err)
+		assertions.Equal(earlierAlias, resolved.Row.MessageID, "reference %v", ref)
+		assertions.Equal(meetingCancelledStatus, resolved.Row.Event.Status, "reference %v", ref)
+	}
+}
+
 func TestMeetingLinksUnlinkSavedIdentityWhenRecurrenceCannotBeResolved(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
