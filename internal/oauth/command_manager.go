@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"slices"
-	"strings"
 	"sync"
 
 	"go.kenn.io/msgvault/internal/config"

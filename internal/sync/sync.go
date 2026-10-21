@@ -1571,7 +1571,8 @@ func (s *Syncer) listCompleteMessageSnapshot(ctx context.Context) (map[string]st
 	pageToken := ""
 	for {
 		response, err := lister.ListCompleteMessageSnapshot(ctx, pageToken)
-		err = errors.Join(err, s.observeNativeSourceDenial(ctx, err), s.observeNativeSourcePermissionReduction(ctx))
+		err = s.nativeMailPermissionFailure(ctx, err)
+		err = errors.Join(err, s.observeNativeSourcePermissionReduction(ctx))
 		if err != nil {
 			return nil, fmt.Errorf("list complete Gmail message snapshot: %w", err)
 		}

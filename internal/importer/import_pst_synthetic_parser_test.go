@@ -16,6 +16,7 @@ import (
 var syntheticPSTFixture = testutil.PSTFixture()
 var syntheticPSTMediaFixture = testutil.PSTMediaFixture()
 var syntheticPSTBrokenFixture = testutil.PSTBrokenMediaFixture()
+var syntheticPSTReplyChainFixture = testutil.PSTReplyChainFixture()
 
 func TestImportPSTSyntheticFixtureUsesNativeParser(t *testing.T) {
 	assert := Assert.New(t)

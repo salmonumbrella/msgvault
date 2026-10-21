@@ -62,7 +62,7 @@ type rawMessageIngestFunc func(context.Context, *store.Store, int64, string, str
 
 func rawMessageIngester(images *remoteimage.Fetcher, notifyImports bool) rawMessageIngestFunc {
 	return func(ctx context.Context, st *store.Store, sourceID int64, identifier, attachmentsDir string, labelIDs []int64, sourceMsgID, rawHash string, raw []byte, fallbackDate time.Time, log *slog.Logger) error {
-		return ingestRawMessageMode(ctx, st, sourceID, identifier, attachmentsDir, labelIDs, sourceMsgID, rawHash, raw, fallbackDate, log, images, "", notifyImports)
+		return ingestRawMessageMode(ctx, st, sourceID, identifier, attachmentsDir, labelIDs, sourceMsgID, rawHash, raw, fallbackDate, log, images, "", notifyImports, false)
 	}
 }
 

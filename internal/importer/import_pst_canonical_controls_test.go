@@ -196,6 +196,60 @@ func TestNativePSTReplyNotificationsWaitForThreadReconciliation(t *testing.T) {
 	assert.Equal(map[int64]int64{rootID: rootConversation, replyID: replyConversation}, eventConversations)
 }
 
+func TestNativePSTIncompleteReplyChainWithholdsEventsUntilRetry(t *testing.T) {
+	assert := Assert.New(t)
+	require := Require.New(t)
+
+	st := testutil.NewTestStore(t)
+	configureNativePSTImports(t, st, true, true)
+	path := filepath.Join(t.TempDir(), "synthetic-reply-chain.pst")
+	validFixture := syntheticPSTReplyChainFixture
+	require.Greater(len(validFixture), 512)
+	brokenFixture := append([]byte(nil), validFixture[:len(validFixture)-512]...)
+	require.NoError(os.WriteFile(path, brokenFixture, 0o600))
+	firstArchiveID, err := pstArchiveFingerprint(path)
+	require.NoError(err)
+	opts := PstImportOptions{Identifier: "owner@example.net", NotifyImports: true, AttachmentsDir: t.TempDir()}
+	first, err := ImportPst(t.Context(), st, path, opts)
+	require.NoError(err)
+	require.NotNil(first)
+	require.True(first.HardErrors, "truncated attachment preparation must leave the import retryable")
+	assert.Equal(int64(2), first.MessagesAdded, "the root and final reply are readable while the intermediate attachment is truncated")
+	var events int
+	require.NoError(st.DB().QueryRow(`SELECT COUNT(*) FROM mcp_event_log WHERE family='msgvault.import_message_archived'`).Scan(&events))
+	assert.Zero(events, "an incomplete reply chain must not publish a stale conversation assignment")
+
+	require.NoError(os.WriteFile(path, validFixture, 0o600))
+	secondArchiveID, err := pstArchiveFingerprint(path)
+	require.NoError(err)
+	assert.Equal(firstArchiveID, secondArchiveID, "retry restores attachment bytes without changing the archive identity")
+	retry, err := ImportPst(t.Context(), st, path, opts)
+	require.NoError(err)
+	require.NotNil(retry)
+	require.False(retry.HardErrors)
+	assert.Equal(first.ImportRunID, retry.ImportRunID, "the retry finishes the same logical import")
+	assert.Equal(int64(1), retry.MessagesAdded, "only the previously incomplete intermediate message is new")
+
+	message := func(subject string) (int64, int64, int64) {
+		var id, conversationID, parentID int64
+		require.NoError(st.DB().QueryRow(st.Rebind(`SELECT id,conversation_id,COALESCE(reply_to_message_id,0) FROM messages WHERE source_id=? AND subject=?`), retry.SourceID, subject).Scan(&id, &conversationID, &parentID))
+		return id, conversationID, parentID
+	}
+	rootID, rootConversation, rootParent := message("Synthetic PST root")
+	middleID, middleConversation, middleParent := message("Synthetic PST middle")
+	replyID, replyConversation, replyParent := message("Synthetic PST reply")
+	assert.Zero(rootParent)
+	assert.Equal(rootConversation, middleConversation)
+	assert.Equal(rootID, middleParent)
+	assert.Equal(rootConversation, replyConversation)
+	assert.Equal(middleID, replyParent)
+	var published int
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT COUNT(*) FROM mcp_event_log WHERE family='msgvault.import_message_archived' AND source_id=? AND conversation_id=?`), retry.SourceID, rootConversation).Scan(&published))
+	assert.Equal(3, published, "all archived events use the reconciled conversation")
+	assert.NotEqual(rootID, middleID)
+	assert.NotEqual(middleID, replyID)
+}
+
 func TestNativePSTDerivedFTSFailureKeepsReadyImport(t *testing.T) {
 	require := Require.New(t)
 
