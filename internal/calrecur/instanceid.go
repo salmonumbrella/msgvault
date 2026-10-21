@@ -9,6 +9,7 @@ import (
 const dateLayout = "2006-01-02"
 const keyDateLayout = "20060102"
 const keyInstantLayout = "20060102T150405Z"
+const keyInstantFractionLayout = "20060102T150405.999999999Z"
 
 // Identity preserves a civil date for all-day events and a UTC instant otherwise.
 type Identity struct {
@@ -25,7 +26,11 @@ func (i Identity) Key() string {
 		}
 		return d.Format(keyDateLayout)
 	}
-	return i.Instant.UTC().Format(keyInstantLayout)
+	instant := i.Instant.UTC()
+	if instant.Nanosecond() == 0 {
+		return instant.Format(keyInstantLayout)
+	}
+	return instant.Format(keyInstantFractionLayout)
 }
 
 // ParseInstanceID splits a Google instance ID into its base and original identity.
@@ -35,7 +40,7 @@ func ParseInstanceID(value string) (string, Identity, bool) {
 		return "", Identity{}, false
 	}
 	base, key := value[:index], value[index+1:]
-	for _, layout := range []string{keyDateLayout, keyInstantLayout} {
+	for _, layout := range []string{keyDateLayout, keyInstantLayout, keyInstantFractionLayout} {
 		at, err := time.Parse(layout, key)
 		if err != nil || at.Format(layout) != key {
 			continue

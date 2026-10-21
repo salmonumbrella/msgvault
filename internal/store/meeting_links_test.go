@@ -679,6 +679,23 @@ func TestMeetingLinksTwoOccurrenceAliases(t *testing.T) {
 	assertions.Equal("2027-03-14T12:00:00Z", links[0].Start.Format(time.RFC3339))
 }
 
+func TestMeetingLinksOrphanExceptionPreservesFractionalOriginalStart(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, exception := calendarFixture(t, st, "orphan", `{"id":"orphan","iCalUID":"fractional@example.org","recurringEventId":"missing-series","originalStartTime":{"dateTime":"2027-03-14T10:00:00.125Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"}}`)
+	note := granolaLinkFixture(t, st, "fractional meeting")
+
+	requirements.NoError(st.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: exception}))
+	links, err := st.MeetingLinksContext(t.Context(), note)
+	requirements.NoError(err)
+	requirements.Len(links, 1)
+	assertions.Equal(fmt.Sprintf("evt:%d", exception), links[0].Ref)
+	var occurrenceKey string
+	requirements.NoError(st.db.QueryRow(`SELECT occurrence_key FROM meeting_link_decisions WHERE member_message_id = ?`, note).Scan(&occurrenceKey))
+	assertions.Equal("20270314T100000.125Z", occurrenceKey)
+	assertions.Equal(time.Date(2027, 3, 14, 12, 0, 0, 0, time.UTC), links[0].Start)
+}
+
 func TestMeetingLinksOrphanSplitAfterMasterArrives(t *testing.T) {
 	for _, uid := range []string{"", "orphan@example.org"} {
 		t.Run(uid, func(t *testing.T) {
