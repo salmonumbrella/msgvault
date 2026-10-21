@@ -104,6 +104,46 @@ func TestMergeSourcesBlocksActiveDraftsAndRetainsDiscardedReceipts(t *testing.T)
 	}
 }
 
+func TestMergeSourcesBlocksUnresolvedInboxReceipts(t *testing.T) {
+	tests := []struct {
+		name       string
+		dispatching bool
+		wantStatus string
+	}{
+		{name: "prepared", wantStatus: "prepared"},
+		{name: "dispatching", dispatching: true, wantStatus: "dispatching"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require := require.New(t)
+			assertions := assert.New(t)
+			f, receipt := inboxReceiptFixture(t)
+			into, err := f.Store.GetOrCreateSource("gmail", "merge-target@example.test")
+			require.NoError(err)
+			_, claimed, err := f.Store.PrepareInboxReceipt(t.Context(), receipt)
+			require.NoError(err)
+			assertions.True(claimed)
+			if test.dispatching {
+				require.NoError(f.Store.MarkInboxDispatching(t.Context(), receipt.ID))
+			}
+
+			_, err = f.Store.MergeSourcesContext(t.Context(), store.MergeSourcesRequest{
+				FromSourceID: receipt.SourceID, IntoSourceID: into.ID,
+			})
+			require.ErrorIs(err, store.ErrSourceMergeInvalid)
+			var mergedInto int64
+			require.NoError(f.Store.DB().QueryRowContext(t.Context(), f.Store.Rebind(
+				`SELECT COALESCE(merged_into_source_id, 0) FROM sources WHERE id = ?`), receipt.SourceID).Scan(&mergedInto))
+			assertions.Zero(mergedInto)
+
+			stored, err := f.Store.GetInboxReceipt(t.Context(), receipt.ID)
+			require.NoError(err)
+			require.NotNil(stored)
+			assertions.Equal(test.wantStatus, string(stored.Status))
+		})
+	}
+}
+
 func TestMergeSourcesSafety(t *testing.T) {
 	for _, mode := range []string{"same", "missing", "cross-type", "execution", "abandoned", "pending", "cancelled"} {
 		t.Run(mode, func(t *testing.T) {

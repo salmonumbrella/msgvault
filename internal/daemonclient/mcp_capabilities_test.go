@@ -29,7 +29,15 @@ func TestMCPCapabilitiesFailClosed(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			requirements := require.New(t)
 			assertions := assert.New(t)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			descriptorReached := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/health" {
+					_, _ = io.WriteString(w, `{"api_schema_version":"3.16.0"}`)
+					return
+				}
+				if r.URL.Path == "/api/v1/mcp/capabilities" {
+					descriptorReached = true
+				}
 				w.WriteHeader(tt.status)
 				_, _ = io.WriteString(w, tt.body)
 			}))
@@ -39,6 +47,7 @@ func TestMCPCapabilitiesFailClosed(t *testing.T) {
 			capabilities, err := client.MCPCapabilities(context.Background())
 			requirements.Error(err)
 			assertions.Nil(capabilities)
+			assertions.True(descriptorReached, "eligible health response must reach the capability descriptor")
 		})
 	}
 }
@@ -76,13 +85,24 @@ func TestMCPCapabilitiesOwnerRouteIdentities(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			requirements := require.New(t)
 			assertions := assert.New(t)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) }))
+			descriptorReached := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/health" {
+					_, _ = io.WriteString(w, `{"api_schema_version":"3.16.0"}`)
+					return
+				}
+				if r.URL.Path == "/api/v1/mcp/capabilities" {
+					descriptorReached = true
+				}
+				_, _ = io.WriteString(w, body)
+			}))
 			t.Cleanup(server.Close)
 			client, err := New(Config{URL: server.URL, AllowInsecure: true})
 			requirements.NoError(err)
 			capabilities, err := client.MCPCapabilities(context.Background())
 			requirements.Error(err)
 			assertions.Nil(capabilities)
+			assertions.True(descriptorReached, "eligible health response must reach the capability descriptor")
 		})
 	}
 }

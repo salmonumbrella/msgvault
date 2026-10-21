@@ -143,9 +143,9 @@ func (s *Store) MergeSourcesContext(ctx context.Context, req MergeSourcesRequest
 		if from.MergedIntoSourceID != 0 || into.MergedIntoSourceID != 0 {
 			return ErrSourceRetired
 		}
-		// Active provider receipts and local chat drafts remain bound to their
-		// source. Discarded provider receipts are retained as audit evidence and
-		// do not block retirement unless an operation is still unresolved.
+		// Active provider drafts and local chat drafts remain bound to their
+		// source. Prepared and dispatching Inbox receipts must settle before a
+		// source can be merged; terminal receipts remain as audit evidence.
 		for _, draftTable := range []struct {
 			table  string
 			active string
@@ -162,6 +162,15 @@ func (s *Store) MergeSourcesContext(ctx context.Context, req MergeSourcesRequest
 			if count > 0 {
 				return invalidSourceMerge("sources with active drafts or unresolved provider operations cannot be merged")
 			}
+		}
+		var unresolvedInboxReceipts bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+ SELECT 1 FROM inbox_operation_receipts WHERE source_id = ? AND status IN ('prepared', 'dispatching')
+)`, req.FromSourceID).Scan(&unresolvedInboxReceipts); err != nil {
+			return fmt.Errorf("check Inbox receipts before merge: %w", err)
+		}
+		if unresolvedInboxReceipts {
+			return invalidSourceMerge("sources with unresolved Inbox receipts cannot be merged")
 		}
 		plan, err := buildSourceMergePlan(ctx, tx, req.FromSourceID, req.IntoSourceID, &result)
 		if err != nil {
