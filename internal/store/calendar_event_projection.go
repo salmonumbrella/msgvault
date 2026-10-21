@@ -24,7 +24,7 @@ const calendarEventProjectionVersion = 1
 const calendarEventDecodeFailureStatus = "decode_error"
 
 func (s *Store) refreshCalendarEventProjectionWith(ctx context.Context, tx *loggedTx, messageID int64) error {
-	return s.refreshCalendarEventProjectionModeWith(ctx, tx, messageID, false, false, false)
+	return s.refreshCalendarEventProjectionModeWith(ctx, tx, messageID, false, false)
 }
 
 func (s *Store) refreshCalendarEventProjectionMigrationSeedWith(ctx context.Context, tx *loggedTx, messageID int64) error {
@@ -32,7 +32,21 @@ func (s *Store) refreshCalendarEventProjectionMigrationSeedWith(ctx context.Cont
 	if err != nil {
 		return err
 	}
-	if err := s.refreshCalendarEventProjectionModeWith(ctx, tx, messageID, false, false, true); err != nil {
+	if cancelled {
+		var hasCompleteProjection bool
+		err := tx.QueryRowContext(ctx, `SELECT
+			(start_at IS NOT NULL AND end_at IS NOT NULL) OR (start_date <> '' AND end_date <> '')
+			FROM calendar_events WHERE message_id = ?`, messageID).Scan(&hasCompleteProjection)
+		if err == nil && hasCompleteProjection {
+			// Subset copies already carry complete inherited snapshots. Keep them
+			// available as evidence before reconstructing aliases from raw payloads.
+			return nil
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("read complete cancellation projection seed: %w", err)
+		}
+	}
+	if err := s.refreshCalendarEventProjectionModeWith(ctx, tx, messageID, false, true); err != nil {
 		return err
 	}
 	if !cancelled || !complete {
@@ -51,14 +65,14 @@ func (s *Store) refreshCalendarEventProjectionMigrationSeedWith(ctx context.Cont
 // observed provider evidence for this message. Evidence freshness can change
 // even when the normalized event projection is unchanged.
 func (s *Store) refreshCalendarEventProjectionFromProviderWith(ctx context.Context, tx *loggedTx, messageID int64) error {
-	return s.refreshCalendarEventProjectionModeWith(ctx, tx, messageID, true, false, false)
+	return s.refreshCalendarEventProjectionModeWith(ctx, tx, messageID, true, false)
 }
 
 func (s *Store) refreshCalendarEventProjectionFromCancellationMetadataWith(ctx context.Context, tx *loggedTx, messageID int64) error {
-	return s.refreshCalendarEventProjectionModeWith(ctx, tx, messageID, true, true, false)
+	return s.refreshCalendarEventProjectionModeWith(ctx, tx, messageID, true, false)
 }
 
-func (s *Store) refreshCalendarEventProjectionModeWith(ctx context.Context, tx *loggedTx, messageID int64, providerEvidence, cancellationMetadata, skipCancellationInheritance bool) error {
+func (s *Store) refreshCalendarEventProjectionModeWith(ctx context.Context, tx *loggedTx, messageID int64, providerEvidence, skipCancellationInheritance bool) error {
 	q := boundQuerier{ctx: ctx, q: tx}
 	var messageType, metadata sql.NullString
 	var subject sql.NullString
@@ -114,8 +128,9 @@ func (s *Store) refreshCalendarEventProjectionModeWith(ctx context.Context, tx *
 	// A cancellation alias can supply some fields and omit others. During a
 	// rebuild, prefer a complete non-cancelled alias when one exists; a complete
 	// cancelled alias is evidence when no non-cancelled alias is available. Then
-	// overlay only fields present in newly observed provider JSON. Metadata
-	// changes and projection rebuilds have no new provider fields to overlay.
+	// overlay only fields present in genuine provider cancellation JSON. A
+	// metadata-only cancellation retains the previous raw payload, so its fields
+	// are not evidence of changes made by the cancellation.
 	if !skipCancellationInheritance && event.Kind == "exception" && event.Status == meetingCancelledStatus && event.Original != nil {
 		if eventUIDMissing(metadata) {
 			uid, err := s.freshestCalendarExceptionUIDWith(ctx, tx, sourceID, event)
@@ -141,12 +156,13 @@ func (s *Store) refreshCalendarEventProjectionModeWith(ctx context.Context, tx *
 		if found {
 			status, providerID, seriesID, original := event.Status, event.ProviderEventID, event.SeriesProviderID, event.Original
 			rawFields := calendarRawFields(stored, compression)
-			event, err = mergeCancelledCalendarException(latest.Event, event, rawFields, providerEvidence && !cancellationMetadata)
+			rawCancellation := calendarRawCancellation(rawFields)
+			event, err = mergeCancelledCalendarException(latest.Event, event, rawFields, rawCancellation)
 			if err != nil {
 				return err
 			}
 			event.Status, event.ProviderEventID, event.SeriesProviderID, event.Original = status, providerID, seriesID, original
-			if cancellationMetadata || rawFields["summary"] == nil && latest.Subject != "" && (!subject.Valid || subject.String == "") {
+			if !rawCancellation || rawFields["summary"] == nil {
 				if _, err := q.Exec(`UPDATE messages SET subject = ? WHERE id = ?`, latest.Subject, messageID); err != nil {
 					return fmt.Errorf("preserve cancellation event subject: %w", err)
 				}
@@ -330,6 +346,11 @@ func calendarRawFields(stored []byte, compression sql.NullString) map[string]jso
 		return nil
 	}
 	return fields
+}
+
+func calendarRawCancellation(fields map[string]jsontext.Value) bool {
+	var status string
+	return json.Unmarshal(fields["status"], &status) == nil && status == meetingCancelledStatus
 }
 
 func mergeCancelledCalendarException(latest, current calevent.Event, rawFields map[string]jsontext.Value, overlayProviderFields bool) (calevent.Event, error) {

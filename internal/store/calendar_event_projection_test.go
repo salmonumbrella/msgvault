@@ -54,6 +54,19 @@ func calendarFixtureWithSubject(t *testing.T, st *Store, key, raw, subject strin
 	return data, id
 }
 
+func resetCalendarEventProjectionForUpgrade(t *testing.T, st *Store) {
+	t.Helper()
+	for _, query := range []string{
+		`DROP TABLE calendar_event_attendees`,
+		`DROP TABLE calendar_events`,
+		`DELETE FROM applied_migrations WHERE name = 'calendar_event_projection_v1'`,
+		`UPDATE archive_metadata SET value = '10' WHERE key = 'schema_version'`,
+	} {
+		_, err := st.db.Exec(query)
+		require.NoError(t, err)
+	}
+}
+
 func calendarRows(t *testing.T, st *Store, ids ...int64) []CalendarEventRow {
 	t.Helper()
 	ctx, release, err := st.BeginReadSnapshotContext(t.Context())
@@ -237,7 +250,7 @@ func TestCopySubsetPreservesInheritedCancellationSnapshot(t *testing.T) {
 	requirements.NoError(err)
 	requirements.NoError(st.InitSchemaContext(t.Context()))
 	masterRaw := `{"id":"series","iCalUID":"orphan@example.org","start":{"dateTime":"2027-03-07T10:00:00Z"},"end":{"dateTime":"2027-03-07T11:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY;COUNT=3"]}`
-	calendarFixture(t, st, "series", masterRaw)
+	_, master := calendarFixture(t, st, "series", masterRaw)
 	firstRaw := `{"id":"instance","iCalUID":"orphan@example.org","recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"},"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"},"summary":"Old snapshot","attendees":[{"email":"old@example.org"}]}`
 	secondRaw := strings.Replace(firstRaw, `"2027-03-14T12:00:00Z"`, `"2027-03-14T14:00:00Z"`, 1)
 	secondRaw = strings.Replace(secondRaw, `"2027-03-14T13:00:00Z"`, `"2027-03-14T15:00:00Z"`, 1)
@@ -262,10 +275,19 @@ func TestCopySubsetPreservesInheritedCancellationSnapshot(t *testing.T) {
 	encoded, err := json.Marshal(fields, json.Deterministic(true))
 	requirements.NoError(err)
 	requirements.NoError(st.SetMessageMetadata(first, sql.NullString{String: string(encoded), Valid: true}))
+	note := granolaLinkFixture(t, st, "unmatched")
+	base := time.Date(2027, 3, 20, 0, 0, 0, 0, time.UTC)
+	for _, row := range []struct {
+		id int64
+		at time.Time
+	}{{master, base.Add(-48 * time.Hour)}, {first, base}, {second, base.Add(-24 * time.Hour)}, {note, base.Add(time.Hour)}} {
+		_, err = st.db.Exec(`UPDATE messages SET received_at = ? WHERE id = ?`, row.at, row.id)
+		requirements.NoError(err)
+	}
 	requirements.NoError(st.Close())
 
 	destination := filepath.Join(t.TempDir(), "subset")
-	_, err = CopySubset(sourcePath, destination, 100, false)
+	_, err = CopySubset(sourcePath, destination, 2, false)
 	requirements.NoError(err)
 	copied, err := OpenForTest(filepath.Join(destination, "msgvault.db"))
 	requirements.NoError(err)
@@ -279,6 +301,67 @@ func TestCopySubsetPreservesInheritedCancellationSnapshot(t *testing.T) {
 	assertions.Equal("Fresh snapshot", page.Occurrences[0].Subject)
 	requirements.Len(page.Occurrences[0].Attendees, 1)
 	assertions.Equal("fresh@example.org", page.Occurrences[0].Attendees[0].Email)
+	assertions.Empty(calendarRows(t, copied, second), "the alias that supplied the inherited snapshot is excluded")
+	requirements.NoError(copied.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: first}))
+	links, err := copied.MeetingLinksContext(t.Context(), note)
+	requirements.NoError(err)
+	requirements.Len(links, 1)
+	assertions.Equal("Fresh snapshot", links[0].Subject)
+	assertions.Equal(from.Add(14*time.Hour), links[0].Start)
+}
+
+func TestCopySubsetPreservesFreshestDetailsAcrossCancelledAliases(t *testing.T) {
+	if IsPostgresURL(os.Getenv("MSGVAULT_TEST_DB")) {
+		t.Skip("SQLite subset copy")
+	}
+	assertions, requirements := assert.New(t), require.New(t)
+	sourcePath := filepath.Join(t.TempDir(), "source.db")
+	st, err := OpenForTest(sourcePath)
+	requirements.NoError(err)
+	requirements.NoError(st.InitSchemaContext(t.Context()))
+	original := `"recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"}`
+	staleRaw := `{"id":"instance","iCalUID":"orphan@example.org",` + original + `,"start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"},"summary":"Stale snapshot","attendees":[{"email":"stale@example.org"}]}`
+	freshRaw := `{"id":"instance","iCalUID":"orphan@example.org",` + original + `,"start":{"dateTime":"2027-03-14T14:00:00Z"},"end":{"dateTime":"2027-03-14T15:00:00Z"},"summary":"Fresh snapshot","attendees":[{"email":"fresh@example.org"}]}`
+	_, stale := calendarFixtureWithSubject(t, st, "instance", staleRaw, "Stale snapshot")
+	_, fresh := calendarFixtureWithSubject(t, st, "series|2027-03-14T10:00:00Z", freshRaw, "Fresh snapshot")
+	older := time.Now().UTC().Add(-2 * time.Minute)
+	_, err = st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, older, stale)
+	requirements.NoError(err)
+	_, err = st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, older.Add(time.Minute), fresh)
+	requirements.NoError(err)
+	for _, id := range []int64{stale, fresh} {
+		metadata, err := st.GetMessageMetadata(id)
+		requirements.NoError(err)
+		var fields map[string]any
+		requirements.NoError(json.Unmarshal([]byte(metadata.String), &fields))
+		fields["status"] = "cancelled"
+		encoded, err := json.Marshal(fields, json.Deterministic(true))
+		requirements.NoError(err)
+		requirements.NoError(st.SetMessageMetadata(id, sql.NullString{String: string(encoded), Valid: true}))
+	}
+	note := granolaLinkFixture(t, st, "unmatched")
+	requirements.NoError(st.Close())
+
+	destination := filepath.Join(t.TempDir(), "subset")
+	_, err = CopySubset(sourcePath, destination, 3, false)
+	requirements.NoError(err)
+	copied, err := OpenForTest(filepath.Join(destination, "msgvault.db"))
+	requirements.NoError(err)
+	defer func() { requirements.NoError(copied.Close()) }()
+	from := time.Date(2027, 3, 14, 0, 0, 0, 0, time.UTC)
+	page, err := copied.ListCalendarOccurrencesContext(t.Context(), from, from.AddDate(0, 0, 1))
+	requirements.NoError(err)
+	requirements.Len(page.Occurrences, 1)
+	assertions.Equal(from.Add(14*time.Hour), page.Occurrences[0].Start)
+	assertions.Equal("Fresh snapshot", page.Occurrences[0].Subject)
+	requirements.Len(page.Occurrences[0].Attendees, 1)
+	assertions.Equal("fresh@example.org", page.Occurrences[0].Attendees[0].Email)
+	requirements.NoError(copied.LinkMeetingContext(t.Context(), note, OccurrenceRef{MessageID: stale}))
+	links, err := copied.MeetingLinksContext(t.Context(), note)
+	requirements.NoError(err)
+	requirements.Len(links, 1)
+	assertions.Equal("Fresh snapshot", links[0].Subject)
+	assertions.Equal(from.Add(14*time.Hour), links[0].Start)
 }
 
 func TestCancellationUsesExplicitlyClearedFreshAliasTitle(t *testing.T) {
@@ -697,6 +780,65 @@ func TestCalendarEventUpgradeSeedsCancelledAliasesBeforeReconstruction(t *testin
 	assertions.Equal(time.Date(2027, 3, 14, 15, 0, 0, 0, time.UTC), *rows[0].Event.End)
 	requirements.Len(rows[0].Event.Attendees, 1)
 	assertions.Equal("fresh@example.org", rows[0].Event.Attendees[0].Email)
+}
+
+func TestCalendarEventUpgradePreservesExplicitCancellationAttendeeRemoval(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	original := `"recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"}`
+	activeRaw := `{"id":"instance","iCalUID":"weekly@example.org",` + original + `,"start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"},"attendees":[{"email":"old@example.org"}]}`
+	cancelledRaw := `{"id":"instance","iCalUID":"weekly@example.org",` + original + `,"status":"cancelled","start":{"dateTime":"2027-03-14T10:00:00Z"},"end":{"dateTime":"2027-03-14T11:00:00Z"},"attendees":[]}`
+	calendarFixture(t, st, "active-alias", activeRaw)
+	_, cancelled := calendarFixture(t, st, "cancelled-alias", cancelledRaw)
+	resetCalendarEventProjectionForUpgrade(t, st)
+	requirements.NoError(st.Close())
+	reopened, err := OpenForTest(st.dbPath)
+	requirements.NoError(err)
+	t.Cleanup(func() { assertions.NoError(reopened.Close()) })
+	requirements.NoError(reopened.InitSchemaContext(t.Context()))
+	rows := calendarRows(t, reopened, cancelled)
+	requirements.Len(rows, 1)
+	assertions.Equal("cancelled", rows[0].Event.Status)
+	assertions.Empty(rows[0].Event.Attendees, "an explicitly empty attendee list in cancellation JSON clears inherited attendees")
+}
+
+func TestCalendarEventUpgradeInheritsEmptySubjectForMetadataCancellation(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	original := `"recurringEventId":"series","originalStartTime":{"dateTime":"2027-03-14T10:00:00Z"}`
+	metadataCancelledRaw := `{"id":"instance","iCalUID":"weekly@example.org",` + original + `,"status":"confirmed","start":{"dateTime":"2027-03-14T12:00:00Z"},"end":{"dateTime":"2027-03-14T13:00:00Z"},"summary":"Retained old title"}`
+	clearedTitleRaw := `{"id":"instance","iCalUID":"weekly@example.org",` + original + `,"start":{"dateTime":"2027-03-14T14:00:00Z"},"end":{"dateTime":"2027-03-14T15:00:00Z"},"summary":""}`
+	_, cancelled := calendarFixtureWithSubject(t, st, "cancelled-alias", metadataCancelledRaw, "Retained old title")
+	_, current := calendarFixtureWithSubject(t, st, "current-alias", clearedTitleRaw, "")
+	older := time.Now().UTC().Add(-2 * time.Minute)
+	_, err := st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, older, cancelled)
+	requirements.NoError(err)
+	_, err = st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = ? WHERE message_id = ?`, older.Add(time.Minute), current)
+	requirements.NoError(err)
+	metadata, err := st.GetMessageMetadata(cancelled)
+	requirements.NoError(err)
+	var fields map[string]any
+	requirements.NoError(json.Unmarshal([]byte(metadata.String), &fields))
+	fields["status"] = "cancelled"
+	encoded, err := json.Marshal(fields, json.Deterministic(true))
+	requirements.NoError(err)
+	requirements.NoError(st.SetMessageMetadata(cancelled, sql.NullString{String: string(encoded), Valid: true}))
+	// Model an older archive whose retained row subject predates the metadata
+	// cancellation and whose projection still needs first-upgrade reconstruction.
+	_, err = st.db.Exec(`UPDATE messages SET subject = ? WHERE id = ?`, "Retained old title", cancelled)
+	requirements.NoError(err)
+	resetCalendarEventProjectionForUpgrade(t, st)
+	requirements.NoError(st.Close())
+	reopened, err := OpenForTest(st.dbPath)
+	requirements.NoError(err)
+	t.Cleanup(func() { assertions.NoError(reopened.Close()) })
+	requirements.NoError(reopened.InitSchemaContext(t.Context()))
+	var subject string
+	requirements.NoError(reopened.db.QueryRow(`SELECT subject FROM messages WHERE id = ?`, cancelled).Scan(&subject))
+	assertions.Empty(subject, "a metadata-only cancellation inherits the freshest explicitly cleared title")
+	rows := calendarRows(t, reopened, cancelled)
+	requirements.Len(rows, 1)
+	assertions.Equal("cancelled", rows[0].Event.Status)
 }
 
 func TestCopySubsetRebuildsCalendarEvents(t *testing.T) {

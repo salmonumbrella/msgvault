@@ -1,9 +1,11 @@
 package calrecur
 
 import (
+	"testing"
+	"time"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 func TestParseInstanceID(t *testing.T) {
@@ -21,4 +23,18 @@ func TestParseInstanceID(t *testing.T) {
 	for _, input := range []string{"series", "_20270314", "series_20270230", "series_20270314T100000+00:00"} {
 		t.Run(input, func(t *testing.T) { _, _, ok := ParseInstanceID(input); assert.False(t, ok) })
 	}
+}
+
+func TestInstanceIDKeyPreservesFractionalSeconds(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	instant := time.Date(2027, 3, 14, 10, 0, 0, 125000000, time.UTC)
+	identity := Identity{Instant: instant}
+	key := identity.Key()
+	assertions.Equal("20270314T100000.125Z", key)
+
+	base, parsed, ok := ParseInstanceID("series_" + key)
+	requirements.True(ok)
+	assertions.Equal("series", base)
+	assertions.True(instant.Equal(parsed.Instant))
+	assertions.Equal(key, parsed.Key())
 }
