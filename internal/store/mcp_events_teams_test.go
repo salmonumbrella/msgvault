@@ -119,7 +119,8 @@ func TestMCPTeamsCaptureDisabledRetainsChatReceipts(t *testing.T) {
 	})
 	require.NoError(err)
 	require.NotNil(delivery)
-	require.NoError(f.Store.FinishMCPDelivery(t.Context(), sub.ID, sub.Generation, delivery.Event.Seq, now, 200, time.Time{}))
+	_, err = f.Store.FinishMCPDelivery(t.Context(), sub.ID, sub.Generation, delivery.Event.Seq, now, 200, time.Time{})
+	require.NoError(err)
 	cfg.Enabled = false
 	cfg.Capabilities = nil
 	_, err = f.Store.ConfigureMCPEvents(t.Context(), cfg)
