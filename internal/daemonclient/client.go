@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/doordash-oss/oapi-codegen-dd/v3/pkg/runtime"
@@ -53,6 +54,9 @@ type Client struct {
 	rootContext      context.Context
 	requestMode      RequestMode
 	localDaemonToken string
+	mcpSchemaMu      sync.Mutex
+	mcpSchemaVersion string
+	mcpSchemaKnown   bool
 }
 
 // SetBusyNotifier registers a callback invoked when the daemon reports that

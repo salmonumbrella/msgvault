@@ -497,6 +497,10 @@ func TestDaemonInboxIMAPMoveRechecksGrantAndReplaysOriginalTarget(t *testing.T) 
 		}
 	}
 	requirements.NotZero(destination.UIDValidity)
+	_, err = a.store.DB().Exec(a.store.Rebind(`INSERT INTO imap_message_memberships
+		(source_id, mailbox, uidvalidity, uid, message_id, flags) VALUES (?, ?, ?, ?, ?, ?)`),
+		target.SourceID, destination.ID, destination.UIDValidity, uint32(777), target.ItemID, `[]`)
+	requirements.NoError(err)
 	request := inboxcontrol.Request{Operation: inboxcontrol.OpMove, Target: &target, Destination: &destination, DryRun: true}
 	readOnly := inboxIMAPDelegatedClient(t, server.URL, a.config.Server.APIKey, target.SourceID)
 	_, err = readOnly.ControlInbox(t.Context(), request)
@@ -534,9 +538,12 @@ func TestDaemonInboxIMAPMoveRechecksGrantAndReplaysOriginalTarget(t *testing.T) 
 	assertions.Equal("Archive", result.After.Target.Mailbox)
 	assertions.Equal(destination.UIDValidity, result.After.Target.UIDValidity)
 	assertions.Equal(target.ItemID, result.After.Target.ItemID)
-	local, err := a.store.EmailTagTargetContext(t.Context(), target.ItemID, "Archive")
-	requirements.NoError(err)
-	assertions.Equal(result.After.Target.UID, local.UID)
+	movedTarget := result.After.Target
+	requirements.NoError(a.store.ValidateInboxTargetContext(t.Context(), movedTarget))
+	state, err := a.ControlInbox(t.Context(), inboxcontrol.Request{Operation: inboxcontrol.OpGetState, Target: &movedTarget}, inboxcontrol.Principal{ID: "owner", Owner: true}, func(context.Context, inboxcontrol.Principal, inboxcontrol.Request) error { return nil }, nil)
+	requirements.NoError(err, "the returned MOVE target remains addressable when Archive already contains another copy")
+	requirements.NotNil(state.Before)
+	assertions.Equal(movedTarget, state.Before.Target)
 	_, err = a.store.EmailTagTargetContext(t.Context(), target.ItemID, "INBOX")
 	requirements.Error(err)
 	replay, err := client.ControlInbox(t.Context(), request)
@@ -572,13 +579,12 @@ func TestDaemonInboxIMAPReadReceiptSurvivesLaterMove(t *testing.T) {
 	server := httptest.NewServer(api.NewServerWithOptions(api.ServerOptions{Config: a.config, Store: a, Logger: slog.New(slog.DiscardHandler), OperationGate: api.NewSerialOperationGate()}).Router())
 	t.Cleanup(server.Close)
 	client := inboxIMAPDelegatedClient(t, server.URL, a.config.Server.APIKey, target.SourceID, "inbox.read", "inbox.read-state", "inbox.move")
-	source := inboxcontrol.SourceIdentity{SourceID: target.SourceID, SourceType: target.SourceType, SourceIdentifier: target.SourceIdentifier, AccountID: target.AccountID}
-	folders, err := client.ControlInbox(t.Context(), inboxcontrol.Request{Operation: inboxcontrol.OpListFolders, Source: &source})
+	folderStates, err := a.store.GetIMAPFolderStates(target.SourceID)
 	requirements.NoError(err)
 	var destination inboxcontrol.Folder
-	for _, folder := range folders.Folders {
-		if folder.ID == "Archive" {
-			destination = folder
+	for _, folder := range folderStates {
+		if folder.Mailbox == "Archive" {
+			destination = inboxcontrol.Folder{ID: folder.Mailbox, UIDValidity: folder.UIDValidity}
 		}
 	}
 	requirements.NotZero(destination.UIDValidity)

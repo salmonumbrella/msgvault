@@ -395,7 +395,7 @@ func TestMCPDraftCapabilityGate(t *testing.T) {
 					}
 				}
 				assert.Len(drafts, want)
-				require.Equal(int64(2), healthCalls.Load(), "startup compatibility and capability probes")
+				require.Equal(int64(2), healthCalls.Load(), "startup compatibility and capability probes reuse one schema response")
 			})
 		}
 	}

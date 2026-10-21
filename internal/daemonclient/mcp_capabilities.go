@@ -19,8 +19,20 @@ var ErrMCPCapabilitiesUnavailable = errors.New("MCP operation discovery unavaila
 // MCPCapabilities reads current caller admission without following redirects or
 // observing a provider. Version eligibility alone never admits a control call.
 func (c *Client) MCPCapabilities(ctx context.Context) (*apiprotocol.MCPCapabilities, error) {
-	version, err := c.APISchemaVersion(ctx)
-	if err != nil || !strings.HasPrefix(version, "3.") || !APISchemaVersionAtLeast(version, MCPDiscoveryMinAPISchemaVersion) {
+	version, err := c.mcpSchemaVersionForAdmission(ctx)
+	if err != nil {
+		return nil, ErrMCPCapabilitiesUnavailable
+	}
+	return c.MCPCapabilitiesForSchemaVersion(ctx, version)
+}
+
+// MCPCapabilitiesForSchemaVersion reads the caller's MCP capabilities using a
+// schema version already obtained from authenticated health. The version is
+// stable for this client and seeds later admission checks, while each call
+// still reads the live caller capability descriptor.
+func (c *Client) MCPCapabilitiesForSchemaVersion(ctx context.Context, version string) (*apiprotocol.MCPCapabilities, error) {
+	version = c.rememberMCPSchemaVersion(version)
+	if !strings.HasPrefix(version, "3.") || !APISchemaVersionAtLeast(version, MCPDiscoveryMinAPISchemaVersion) {
 		return nil, ErrMCPCapabilitiesUnavailable
 	}
 	transport := *c.httpClient
@@ -34,47 +46,78 @@ func (c *Client) MCPCapabilities(ctx context.Context) (*apiprotocol.MCPCapabilit
 		return nil, ErrMCPCapabilitiesUnavailable
 	}
 	const wireLimit = 1 << 20
-	data, err := io.ReadAll(io.LimitReader(response.Body, wireLimit+1))
-	if err != nil || len(data) > wireLimit {
+	body, err := io.ReadAll(io.LimitReader(response.Body, wireLimit+1))
+	if err != nil || len(body) > wireLimit {
 		return nil, ErrMCPCapabilitiesUnavailable
 	}
-	var capabilities apiprotocol.MCPCapabilities
-	if json.Unmarshal(data, &capabilities) != nil || capabilities.Version != 1 || capabilities.Routes == nil || len(capabilities.Routes) > 256 || len(capabilities.InboxOperations) > 64 {
+	var descriptor apiprotocol.MCPCapabilities
+	if json.Unmarshal(body, &descriptor) != nil || descriptor.Version != 1 || descriptor.Routes == nil ||
+		len(descriptor.Routes) > 256 || len(descriptor.InboxOperations) > 64 {
 		return nil, ErrMCPCapabilitiesUnavailable
 	}
-	if !validMCPCapabilities(&capabilities) {
+	if !validMCPCapabilities(&descriptor) {
 		return nil, ErrMCPCapabilitiesUnavailable
 	}
-	return &capabilities, nil
+	return &descriptor, nil
+}
+
+// mcpSchemaVersionForAdmission serializes the initial health probe so parallel
+// control requests share one stable schema version for the lifetime of the
+// client. Failed probes are retried by the next caller.
+func (c *Client) mcpSchemaVersionForAdmission(ctx context.Context) (string, error) {
+	c.mcpSchemaMu.Lock()
+	defer c.mcpSchemaMu.Unlock()
+	if c.mcpSchemaKnown {
+		return c.mcpSchemaVersion, nil
+	}
+	version, err := c.APISchemaVersion(ctx)
+	if err != nil {
+		return "", err
+	}
+	c.mcpSchemaVersion = version
+	c.mcpSchemaKnown = true
+	return version, nil
+}
+
+func (c *Client) rememberMCPSchemaVersion(version string) string {
+	c.mcpSchemaMu.Lock()
+	defer c.mcpSchemaMu.Unlock()
+	if c.mcpSchemaKnown {
+		return c.mcpSchemaVersion
+	}
+	c.mcpSchemaVersion = version
+	c.mcpSchemaKnown = true
+	return version
 }
 
 var mcpDescriptorIdentity = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 
 func validMCPCapabilities(capabilities *apiprotocol.MCPCapabilities) bool {
-	routes := make(map[string]bool, len(capabilities.Routes))
+	seen := make(map[string]bool, len(capabilities.Routes))
 	for _, route := range capabilities.Routes {
-		if route.OperationID == "" || len(route.OperationID) > 256 || !mcpDescriptorIdentity.MatchString(route.OperationID) || routes[route.OperationID] || len(route.Path) > 2048 || len(route.QueryParameters)+len(route.RequestProperties) > 256 {
+		if !mcpDescriptorIdentity.MatchString(route.OperationID) || len(route.OperationID) > 256 ||
+			seen[route.OperationID] || len(route.Path) > 2048 ||
+			!strings.HasPrefix(route.Path, "/api/v1/") ||
+			strings.ContainsAny(route.Path, "?#\\ ") || strings.Contains(route.Path, "/../") ||
+			len(route.QueryParameters)+len(route.RequestProperties) > 256 {
 			return false
 		}
-		routes[route.OperationID] = true
 		switch route.Method {
-		case http.MethodGet, http.MethodPost, http.MethodPatch, http.MethodPut, http.MethodDelete:
+		case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 		default:
 			return false
 		}
-		if !strings.HasPrefix(route.Path, "/api/v1/") || strings.ContainsAny(route.Path, "?#\\ ") || strings.Contains(route.Path, "/../") {
-			return false
-		}
+		seen[route.OperationID] = true
 		if !validMCPDescriptorNames(route.QueryParameters) || !validMCPDescriptorNames(route.RequestProperties) {
 			return false
 		}
 	}
-	operations := make(map[string]bool, len(capabilities.InboxOperations))
+	seen = make(map[string]bool, len(capabilities.InboxOperations))
 	for _, operation := range capabilities.InboxOperations {
-		if operation == "" || len(operation) > 256 || operations[operation] {
+		if !mcpDescriptorIdentity.MatchString(operation) || len(operation) > 256 || seen[operation] {
 			return false
 		}
-		operations[operation] = true
+		seen[operation] = true
 	}
 	return true
 }
@@ -82,7 +125,7 @@ func validMCPCapabilities(capabilities *apiprotocol.MCPCapabilities) bool {
 func validMCPDescriptorNames(names []string) bool {
 	seen := make(map[string]bool, len(names))
 	for _, name := range names {
-		if name == "" || len(name) > 256 || !mcpDescriptorIdentity.MatchString(name) || seen[name] {
+		if !mcpDescriptorIdentity.MatchString(name) || len(name) > 256 || seen[name] {
 			return false
 		}
 		seen[name] = true

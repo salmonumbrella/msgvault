@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -63,6 +64,44 @@ func TestMCPCapabilitiesRetainsRouteParameters(t *testing.T) {
 	requirements.Len(capabilities.Routes, 1)
 	assertions.Equal("synthetic-key", <-seen)
 	assertions.Equal([]string{"source_type"}, capabilities.Routes[0].QueryParameters)
+}
+
+func TestMCPCapabilitiesReusesSchemaProbe(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	var healthRequests, capabilityRequests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/health":
+			healthRequests.Add(1)
+			_, _ = io.WriteString(w, `{"status":"ok","api_schema_version":"3.15.0"}`)
+		case "/api/v1/mcp/capabilities":
+			capabilityRequest := capabilityRequests.Add(1)
+			operations := `"get_state"`
+			if capabilityRequest > 1 {
+				operations = ""
+			}
+			_, _ = io.WriteString(w, `{"version":1,"routes":[],"inbox_operations":[`+operations+`]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client, err := New(Config{URL: server.URL, APIKey: "synthetic-key", AllowInsecure: true})
+	requirements.NoError(err)
+
+	for i := range 3 {
+		capabilities, err := client.MCPCapabilities(t.Context())
+		requirements.NoError(err)
+		requirements.NotNil(capabilities)
+		if i == 0 {
+			assertions.Equal([]string{"get_state"}, capabilities.InboxOperations)
+		} else {
+			assertions.Empty(capabilities.InboxOperations, "live caller admission is refreshed")
+		}
+	}
+	assertions.Equal(int64(1), healthRequests.Load(), "compatible schema is stable for this client")
+	assertions.Equal(int64(3), capabilityRequests.Load(), "caller admission is refreshed for every operation")
 }
 
 func TestMCPCapabilitiesOwnerRouteIdentities(t *testing.T) {
