@@ -2147,9 +2147,6 @@ func (s *Store) personSplitPresenceRowReplacedTx(
 			return true, nil
 		}
 		if !hasPost {
-			if personSplitLegacyPresenceColumnDefaultMatches(journal.tableName, column, currentValue) {
-				continue
-			}
 			return true, nil
 		}
 		if !reflect.DeepEqual(currentValue, postValue) {
@@ -2157,28 +2154,6 @@ func (s *Store) personSplitPresenceRowReplacedTx(
 		}
 	}
 	return false, nil
-}
-
-func personSplitLegacyPresenceColumnDefaultMatches(
-	table, column string, value personMergeSnapshotValue,
-) bool {
-	if value.Kind != personMergeSnapshotText || value.Text == nil {
-		return false
-	}
-	switch table {
-	case "person_tracking":
-		switch column {
-		case "provenance":
-			return *value.Text == "manual"
-		case "actor":
-			return *value.Text == ""
-		}
-	case "person_brief_enrollments":
-		if column == "provenance" {
-			return *value.Text == "manual"
-		}
-	}
-	return false
 }
 
 func (s *Store) personSplitRestoredRowLocatorTx(

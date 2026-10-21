@@ -91,6 +91,76 @@ func TestPostgreSQLManualPersonAttributeWritesLockBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestPostgreSQLPersonMergeTakesFactGenerationBeforeIdentityLock(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	st, survivorID, _ := newPersonFactProjectionStore(t)
+	if !st.IsPostgreSQL() {
+		t.Skip("PostgreSQL merge/person-fact lock-order regression")
+	}
+	absorbed := inferencePerson(t, st, "merge-fact-lock-absorbed@example.com")
+	survivor, err := st.GetPersonContext(t.Context(), survivorID)
+	require.NoError(err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	t.Cleanup(cancel)
+	blocker, err := st.db.BeginTx(ctx, nil)
+	require.NoError(err)
+	t.Cleanup(func() { _ = blocker.Rollback() })
+	_, err = blocker.ExecContext(ctx, `SET LOCAL deadlock_timeout = '1h'`)
+	require.NoError(err)
+	var blockerPID int
+	require.NoError(blocker.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&blockerPID))
+	require.NoError(st.lockProfileIdentityKeyTxContext(
+		ctx, blocker, "person-fact-generation", survivor.ID,
+	))
+
+	mergeAttempts := 0
+	restoreHook := st.SetPersonOperationBeforeIdentityLockHookForTest(func() {
+		mergeAttempts++
+	})
+	t.Cleanup(restoreHook)
+	mergeDone := make(chan error, 1)
+	go func() {
+		_, mergeErr := st.MergePersonsContext(ctx, PersonMergeRequest{
+			SurvivorID: survivor.ID, AbsorbedID: absorbed.ID,
+			ExpectedSurvivorRevision: survivor.Revision,
+			ExpectedAbsorbedRevision: absorbed.Revision,
+			IdempotencyKey:           "person-fact-lock-order-merge", Actor: "test",
+		})
+		mergeDone <- mergeErr
+	}()
+
+	var mergePID int
+	require.Eventually(func() bool {
+		mergePID = personAttributePostgreSQLBlockedWriterPID(t, st, blockerPID)
+		return mergePID > 0
+	}, postgresLockQueueBudget, postgresLockQueuePoll,
+		"merge did not wait for the held person-fact-generation lock")
+
+	identityDone := make(chan error, 1)
+	go func() {
+		if lockErr := st.lockIdentityMutationTxContext(ctx, blocker); lockErr != nil {
+			identityDone <- lockErr
+			return
+		}
+		identityDone <- blocker.Commit()
+	}()
+	select {
+	case lockErr := <-identityDone:
+		require.NoError(lockErr)
+	case <-ctx.Done():
+		require.FailNow("fact writer could not acquire the identity lock", ctx.Err())
+	}
+	select {
+	case mergeErr := <-mergeDone:
+		require.NoError(mergeErr)
+	case <-ctx.Done():
+		require.FailNow("person merge did not finish after the fact writer released its lock", ctx.Err())
+	}
+	assert.Equal(1, mergeAttempts, "merge must not retry after a lock-order deadlock")
+}
+
 func TestPostgreSQLSystemPersonAttributeWriteWaitsForFactResolution(t *testing.T) {
 	requirements := require.New(t)
 	assertions := assert.New(t)

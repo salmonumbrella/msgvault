@@ -293,6 +293,11 @@ func (s *Store) mergePersonsOnce(
 		if err := s.lockPersonEnrichmentAuthorityMutationTx(ctx, tx); err != nil {
 			return err
 		}
+		if err := s.lockMergePeopleFactGenerationsTx(
+			ctx, tx, request.SurvivorID, request.AbsorbedID,
+		); err != nil {
+			return err
+		}
 		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
 			return err
 		}
@@ -572,15 +577,8 @@ func (s *Store) personMergeByIdempotencyKeyTx(
 func (s *Store) lockMergePeopleTx(
 	ctx context.Context, tx *loggedTx, survivorID, absorbedID int64,
 ) error {
-	// Tracking reconciliation takes the same generation gate as untracking.
-	// Take it before person rows, matching fact writers and manual transitions.
-	personIDs := []int64{survivorID, absorbedID}
-	slices.Sort(personIDs)
-	for _, personID := range personIDs {
-		if err := s.lockProfileIdentityKeyTxContext(ctx, tx, "person-fact-generation", personID); err != nil {
-			return err
-		}
-	}
+	// The caller holds both person-fact-generation keys before the global
+	// identity lock, matching fact writers and manual transitions.
 	rows, err := tx.QueryContext(ctx, `SELECT id FROM persons
 		WHERE id IN (?, ?) ORDER BY id`+s.dialect.SelectForUpdate(), survivorID, absorbedID)
 	if err != nil {
@@ -600,6 +598,21 @@ func (s *Store) lockMergePeopleTx(
 	}
 	if count != 2 {
 		return ErrPersonNotFound
+	}
+	return nil
+}
+
+func (s *Store) lockMergePeopleFactGenerationsTx(
+	ctx context.Context, tx *loggedTx, survivorID, absorbedID int64,
+) error {
+	// Person-fact writers and manual reference updates take these gates before
+	// the identity lock. Keep merges in the same order to prevent deadlocks.
+	personIDs := []int64{survivorID, absorbedID}
+	slices.Sort(personIDs)
+	for _, personID := range personIDs {
+		if err := s.lockProfileIdentityKeyTxContext(ctx, tx, "person-fact-generation", personID); err != nil {
+			return err
+		}
 	}
 	return nil
 }

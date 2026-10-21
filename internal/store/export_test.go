@@ -231,7 +231,7 @@ func (s *Store) SetIdentityMatchReviewAfterDecisionHookForTest(fn func()) func()
 }
 
 // SetPersonOperationBeforeIdentityLockHookForTest installs a per-Store barrier
-// immediately before merge and split transactions acquire the identity lock.
+// before merge and split transactions begin acquiring mutation locks.
 // Concurrency tests use it to prove every competing transaction is open and at
 // the lock boundary before either is released.
 func (s *Store) SetPersonOperationBeforeIdentityLockHookForTest(fn func()) func() {
