@@ -1637,6 +1637,17 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 			lastModifiedColumnAdded = true
 		}
 	}
+	// The alias index depends on snapshot_updated_at, which legacy calendar
+	// tables gain in the migration loop above. Build it afterward so schema
+	// setup can reopen archives created before the watermark column existed.
+	if err := s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
+		_, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_calendar_events_exception_alias
+			ON calendar_events(series_provider_id, original_start_date, original_start_at, snapshot_updated_at, message_id)
+			WHERE kind = 'exception'`)
+		return err
+	}); err != nil {
+		return fmt.Errorf("create calendar event exception alias index: %w", err)
+	}
 	// The SQLite meeting index needs deleted_at, which old archives gain above.
 	// PostgreSQL builds it concurrently below.
 	if !s.IsPostgreSQL() {

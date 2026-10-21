@@ -163,6 +163,64 @@ func TestCalendarEventProjectionRebuildPreservesSnapshotFreshness(t *testing.T) 
 	assertions.True(after.Equal(before), "projection rebuilds must not replace provider freshness")
 }
 
+func TestInitSchemaAddsCalendarEventAliasIndexAfterLegacyColumns(t *testing.T) {
+	requirements := require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	_, err := st.db.Exec(`DROP INDEX idx_calendar_events_exception_alias`)
+	requirements.NoError(err)
+	_, err = st.db.Exec(`ALTER TABLE calendar_events DROP COLUMN snapshot_updated_at`)
+	requirements.NoError(err)
+
+	requirements.NoError(st.InitSchemaContext(t.Context()))
+	var indexes int
+	if st.IsPostgreSQL() {
+		requirements.NoError(st.db.QueryRow(`
+			SELECT COUNT(*) FROM pg_indexes
+			WHERE schemaname = current_schema()
+			  AND tablename = 'calendar_events'
+			  AND indexname = 'idx_calendar_events_exception_alias'
+		`).Scan(&indexes))
+	} else {
+		requirements.NoError(st.db.QueryRow(`
+			SELECT COUNT(*) FROM sqlite_master
+			WHERE type = 'index' AND name = 'idx_calendar_events_exception_alias'
+		`).Scan(&indexes))
+	}
+	requirements.Equal(1, indexes)
+}
+
+func TestCalendarEventSnapshotFreshnessBackfillUsesUTCEpoch(t *testing.T) {
+	st := newRFC822IDBackfillBackendStore(t)
+	if !st.IsPostgreSQL() {
+		t.Skip("PostgreSQL session time zone regression")
+	}
+	st.DB().SetMaxOpenConns(1)
+	_, err := st.DB().ExecContext(t.Context(), `SET TIME ZONE 'America/Los_Angeles'`)
+	require.NoError(t, err)
+	_, id := calendarFixture(t, st, "snapshot-freshness-timezone", calendarRaw)
+	want := time.Date(2024, 6, 7, 8, 9, 10, 0, time.UTC)
+	_, err = st.db.Exec(`UPDATE messages SET last_modified = ? WHERE id = ?`, want, id)
+	require.NoError(t, err)
+	_, err = st.db.Exec(`UPDATE calendar_events SET snapshot_updated_at = to_timestamp(0) WHERE message_id = ?`, id)
+	require.NoError(t, err)
+	_, err = st.db.Exec(`INSERT INTO applied_migrations (name, version) VALUES ('calendar_event_snapshot_freshness_v1', 1)
+		ON CONFLICT (name) DO UPDATE SET version = excluded.version`)
+	require.NoError(t, err)
+	var oldMigrationVersion int
+	require.NoError(t, st.db.QueryRow(`SELECT version FROM applied_migrations WHERE name = 'calendar_event_snapshot_freshness_v1'`).Scan(&oldMigrationVersion))
+	assert.Equal(t, 1, oldMigrationVersion, "the original migration must remain marked complete")
+	_, err = st.db.Exec(`DELETE FROM applied_migrations WHERE name = ?`, migrationCalendarEventSnapshotFreshness)
+	require.NoError(t, err)
+
+	require.NoError(t, st.InitSchemaContext(t.Context()))
+	var got time.Time
+	require.NoError(t, st.db.QueryRow(`SELECT snapshot_updated_at FROM calendar_events WHERE message_id = ?`, id).Scan(&got))
+	assert.Equal(t, want, got.UTC())
+	var newMigrationVersion int
+	require.NoError(t, st.db.QueryRow(`SELECT version FROM applied_migrations WHERE name = ?`, migrationCalendarEventSnapshotFreshness).Scan(&newMigrationVersion))
+	assert.Equal(t, 1, newMigrationVersion, "the corrected migration must be recorded")
+}
+
 func TestSparseCancellationUsesFreshestExceptionAliasDetails(t *testing.T) {
 	assertions, requirements := assert.New(t), require.New(t)
 	st := newRFC822IDBackfillBackendStore(t)
