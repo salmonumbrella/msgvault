@@ -8,13 +8,14 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
-- CLI search JSON, MCP `search_message_bodies`, message details, MCP `get_message` and `search_in_message`, and CLI `show-message --json` and `show-thread --json` report the best-effort flag `hidden_text_present`. True means the stored HTML likely hides readable text. False does not guarantee that text is visible. The check uses inline-style heuristics, `hidden`, and legacy color attributes. Non-blank HTML that fails to parse also sets the flag. Text output from `show-message` and `show-thread` warns on stderr, once per thread page. Archive schema 12 flags older mail during a one-time backfill; new HTML writes refresh the stored flag. API schema 3.25.0 includes the flag in message details and search rows. Daemons older than API schema 3.25.0 report false. Message bodies stay unchanged. The check excludes stylesheets and browser layout.
+- CLI search JSON, MCP `search_message_bodies`, message details, MCP `get_message` and `search_in_message`, and CLI `show-message --json` and `show-thread --json` report the best-effort flag `hidden_text_present`. True means the stored HTML likely hides readable text. False does not guarantee that text is visible. The check uses inline-style heuristics, `hidden`, and legacy color attributes. Non-blank HTML that fails to parse also sets the flag. Text output from `show-message` and `show-thread` warns on stderr, once per thread page. Archive schema 13 flags older mail during a one-time backfill; new HTML writes refresh the stored flag. API schema 3.26.0 includes the flag in message details and search rows. Daemons older than API schema 3.26.0 report false. Message bodies stay unchanged. The check excludes stylesheets and browser layout.
 - Vector search, daemon status, and Explore coverage now say to restart when a rebuild activated settings changed after the daemon started.
 - Builds use Go 1.27.3, so IMAP connections reject the compromised intermediate certificates listed in [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809).
 - On Windows, a keyed daemon's first start no longer fails with `provider credential DACL permits inherited access` when a client is polling at the same moment.
 - On Windows, private folders such as token, export and spool folders are created owner-only from the start. If Windows rejects those permissions, the folder is restricted right after creation, with a warning logged if that also fails. If creating one fails, the error names the folder's absolute path.
 - Invalid PDF diagnostics now report `PDF structure could not be validated`.
 - Anonymous telemetry now honors `DO_NOT_TRACK` and stays off in CI and non-release builds. The CLI and terminal UI also honor opt-outs in their own environment.
+- A bad value in a setting only the daemon reads, such as `[integrations.kata] endpoint` or `MSGVAULT_API_PORT`, no longer stops other commands. They print a warning and reach the running daemon, including an older compatible one. `serve`, `daemon start`, `daemon restart`, and saving configuration still reject the file; see [Validation](configuration.md#validation).
 - Anonymous telemetry omits the SDK's operating system, distribution, and Go version properties. msgvault's own OS and architecture fields remain.
 - Anonymous telemetry now counts submitted empty searches, displayed workflow errors, and sources entering failure during scheduled sync or Sync now, using fixed values without error text or source identifiers. Everything omits empty-search counts while recording search is unknown or set up.
 - msgvault's [anonymous telemetry](configuration.md#telemetry) now counts searches, message opens and manual syncs from the web, TUI and CLI, with no query text, IDs or archive content. The CLI and TUI wait at most 50 ms for pending reports at exit.
@@ -83,6 +84,11 @@ All notable changes to msgvault, grouped by release.
   take several minutes to build a one-time From-address index. See
   [startup progress](guides/daemon-migration.md#what-you-will-see).
 
+- On Linux, saving or editing `config.toml` works on filesystems that do not
+  record file birth time, such as ext4 created with 128-byte inodes. Before,
+  every save, settings change, and CardDAV account test or save there failed
+  with a config conflict.
+
 - msgvault sends anonymous usage telemetry: a daemon ping at startup and once
   each later UTC day, and an `app_opened` event the web UI reports through the
   daemon when it opens and on its first focus on a later UTC day. Events carry
@@ -141,7 +147,7 @@ All notable changes to msgvault, grouped by release.
   guest notifications default to `none`. The daemon verifies calendar access
   and archives successful changes immediately.
 - [Twilio calls](usage/meetings.md#twilio) archive as searchable meetings with
-  their recordings saved locally.
+  their recordings saved locally, up to 1 GiB each by default (`max_media_mb`).
 - [Kata issues](usage/kata-issues.md) can quote an exact passage from a
   message, transcript, or file, from the Web UI, `msgvault kata`, HTTP, or MCP
   (`--allow-kata-writes`). Retrying a create returns the original issue, and
