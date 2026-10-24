@@ -10,8 +10,10 @@ import (
 
 const ignoredWords = " a an the and or of in on for to with about vs versus who knows "
 
-// tokens splits text into case-folded words. A trailing run of "+" or "#"
-// stays part of its word, so "C++" and "C#" differ from "C".
+// tokens splits text into case-folded words. Combining marks stay inside
+// their word, so Devanagari or Thai words that differ only by a vowel sign
+// stay distinct. A trailing run of "+" or "#" stays part of its word, so
+// "C++" and "C#" differ from "C".
 func tokens(s string) map[string]bool {
 	runes := []rune(cases.Fold().String(norm.NFC.String(s)))
 	isWord := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsNumber(r) }
@@ -22,7 +24,7 @@ func tokens(s string) map[string]bool {
 			continue
 		}
 		start := i
-		for i < len(runes) && isWord(runes[i]) {
+		for i < len(runes) && (isWord(runes[i]) || unicode.IsMark(runes[i])) {
 			i++
 		}
 		for i < len(runes) && (runes[i] == '+' || runes[i] == '#') {

@@ -137,6 +137,8 @@ func TestMatchesComparesWholeWords(t *testing.T) {
 	assert.True(Matches("C++ templates", "c++ templates"))
 	assert.False(Matches("C++ templates", "C templates"))
 	assert.False(Matches("go", "google"))
+	assert.False(Matches("कला", "कली"), "a vowel sign makes a different word")
+	assert.True(Matches("कला", "कला संग्रह"))
 	assert.True(Matches("strasse", "Straße"), "case folding matches ss to ß")
 	assert.False(Matches("the of", "the"), "stop words alone never match")
 }
