@@ -157,7 +157,7 @@ recurrence limits, notification behavior, and reconciliation instructions.
 
 On unreleased `main`, `GET /api/v1/people/who-knows` ranks the people who wrote
 about a topic. The route is owner-only and returns `Cache-Control: no-store`.
-Restricted agent tokens cannot use it.
+Restricted agent tokens cannot use it. API schema 3.26.0 adds the route.
 
 Query parameters are `topic` (required) and optional `limit` (1-50),
 `evidence` (1-10), `min_score` (above 0, at most 1; the 0.5 default is not
@@ -190,7 +190,7 @@ failures keep their usual `503` errors. See
 The API publishes its generated OpenAPI contract at `/openapi.json`.
 `msgvault openapi` prints the checked-in contract without starting a daemon or
 opening an archive. OpenAPI `info.version` is the **API schema version**;
-it is separate from the binary release version. The current schema is **3.25.0**.
+it is separate from the binary release version. The current schema is **3.26.0**.
 
 Schema 3.19.0 adds pipe-separated OR in full-text message search queries.
 Upgrade clients and daemon together across incompatible schema versions,

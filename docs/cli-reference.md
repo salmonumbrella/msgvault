@@ -2348,7 +2348,7 @@ the archive host or pass `--local` there to select that host's local archive.
 ## find-chat
 
 Find archived chats when a person's name differs across networks. Available on
-unreleased `main` with daemon API schema 3.25.0 or newer.
+unreleased `main` with daemon API schema 3.26.0 or newer.
 
 ```bash
 msgvault find-chat "Jordan Lee Chen"
@@ -2968,7 +2968,7 @@ and the [API contract](api-server.md#filename-suggestions).
 
 ### person who-knows
 
-On unreleased `main`, find the people who wrote about a topic. Search operators in the topic are refused. Matched declared topics print as `declared: ...`. Needs a daemon with API schema 3.25.0 or newer.
+On unreleased `main`, find the people who wrote about a topic. Search operators in the topic are refused. Matched declared topics print as `declared: ...`. Needs a daemon with API schema 3.26.0 or newer.
 
 ```bash
 msgvault person who-knows <topic words...> [flags]
