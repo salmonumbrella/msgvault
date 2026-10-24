@@ -347,7 +347,8 @@ func topicFamilyCTEs(seed string) string {
 
 // topicContactsContext maps each sender to its identity family. Owner
 // families are left out. A reply counts when marked from me or when its
-// sender's family includes an owner participant.
+// sender's family includes an owner participant. A draft that was never
+// sent is not a reply.
 func (s *Store) topicContactsContext(ctx context.Context, bySender map[int64]int64, owner []int64) (map[int64]TopicContact, error) {
 	out := map[int64]TopicContact{}
 	senders := slices.Compact(slices.Sorted(maps.Values(bySender)))
@@ -363,8 +364,10 @@ func (s *Store) topicContactsContext(ctx context.Context, bySender map[int64]int
 		         SELECT 1 FROM family f
 		         JOIN message_recipients mr ON mr.participant_id = f.id
 		         JOIN messages m ON m.id = mr.message_id
+		         LEFT JOIN sources src ON src.id = m.source_id
 		         WHERE f.seed = k.seed AND LOWER(mr.recipient_type) IN ('to', 'cc', 'bcc')
 		           AND m.deleted_at IS NULL AND m.deleted_from_source_at IS NULL
+		           AND NOT ` + s.activityUnsentSQL() + `
 		           AND (m.is_from_me OR EXISTS (
 		             WITH RECURSIVE ` + topicFamilyCTEs("p.id = "+messageSender("m")) + `
 		             SELECT 1 FROM family reply_family WHERE ` + ownerParticipant("reply_family.id", len(owner)) + `)))

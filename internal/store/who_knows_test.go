@@ -428,6 +428,7 @@ func TestTopicContactsReportWhomTheOwnerWroteTo(t *testing.T) {
 	anaOther := f.EnsureParticipant("ana.work@example.net", "Ana Work", "example.net")
 	cc := f.EnsureParticipant("cc@example.net", "Copied", "example.net")
 	vendor := f.EnsureParticipant("vendor@example.net", "Vendor", "example.net")
+	drafted := f.EnsureParticipant("drafted@example.net", "Drafted", "example.net")
 	_, err := f.Store.LinkParticipants(ana, anaOther)
 	require.NoError(err)
 
@@ -438,10 +439,17 @@ func TestTopicContactsReportWhomTheOwnerWroteTo(t *testing.T) {
 	inbound := send(f, "from-vendor", vendor)
 	require.NoError(f.Store.ReplaceMessageRecipients(inbound, "to", []int64{owner}, []string{"Owner"}))
 
-	got := contactsOf(f, ana, cc, vendor)
+	// A draft to the drafted contact was never sent.
+	draft := send(f, "draft-to-drafted", owner)
+	require.NoError(f.Store.ReplaceMessageRecipients(draft, "to", []int64{drafted}, []string{"Drafted"}))
+	_, err = f.Store.DB().Exec(f.Store.Rebind(`UPDATE messages SET is_sent = FALSE WHERE id = ?`), draft)
+	require.NoError(err, "mark the draft unsent")
+
+	got := contactsOf(f, ana, cc, vendor, drafted)
 	assert.False(got[ana].OneWay, "the owner wrote to Ana's linked address")
 	assert.False(got[cc].OneWay)
 	assert.True(got[vendor].OneWay, "the vendor was never written to")
+	assert.True(got[drafted].OneWay, "an unsent draft is not a reply")
 }
 
 func TestTopicContactsRecognizeOwnerReplies(t *testing.T) {
