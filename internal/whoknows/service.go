@@ -178,9 +178,6 @@ func (s *Service) unembedded(ctx context.Context, gen vector.GenerationID, types
 	if err != nil || live > stamped {
 		return true
 	}
-	if !slices.Contains(types, store.MessageTypeEmail) {
-		return false
-	}
 	legacy, err := s.Data.CountUnembeddedLegacyEmail(ctx, int64(gen))
 	return err != nil || legacy > 0
 }
