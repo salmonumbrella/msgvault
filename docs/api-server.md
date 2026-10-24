@@ -209,8 +209,6 @@ Schema 3.22.0 adds account aliases and lifecycle fields, account merging, and
 owner source-maintenance requests. Existing source identifiers and account
 requests remain valid.
 
-Schema 3.24.0 adds [`GET /api/v1/people/who-knows`](#find-who-knows-about-a-topic).
-
 Schema 3.23.0 adds the [Docbank attachment mirror](#docbank-attachment-mirror)
 routes, delivery receipts and status states.
 

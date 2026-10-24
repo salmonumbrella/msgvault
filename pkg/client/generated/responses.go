@@ -2609,6 +2609,8 @@ type FindPeopleWhoKnowErrorResponse = ErrorResponse
 
 type FindPeopleWhoKnowErrorResponseJSON = ErrorResponse
 
+type FindPeopleWhoKnowErrorResponseJSONDefault = ErrorResponse
+
 type DeletePersonErrorResponse = ErrorResponse
 
 type DeletePersonErrorResponseJSON = ErrorResponse
@@ -6315,6 +6317,7 @@ type FindPeopleWhoKnowResp struct {
 	JSON200      *FindPeopleWhoKnowResponse
 	JSON400      *FindPeopleWhoKnowErrorResponse
 	JSON503      *FindPeopleWhoKnowErrorResponseJSON
+	JSONDefault  *FindPeopleWhoKnowErrorResponseJSONDefault
 }
 
 type DeletePersonResp struct {

@@ -16339,6 +16339,9 @@ type WhoKnowsEntry struct {
 
 func (w WhoKnowsEntry) Validate() error {
 	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(w.Citations, "required"); err != nil {
+		errors = errors.Append("Citations", err)
+	}
 	for i, item := range w.Citations {
 		if v, ok := any(item).(runtime.Validator); ok {
 			if err := v.Validate(); err != nil {
@@ -16361,12 +16364,18 @@ type WhoKnowsResponse struct {
 
 func (w WhoKnowsResponse) Validate() error {
 	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(w.Limits, "required"); err != nil {
+		errors = errors.Append("Limits", err)
+	}
 	for i, item := range w.Limits {
 		if v, ok := any(item).(runtime.Validator); ok {
 			if err := v.Validate(); err != nil {
 				errors = errors.Append(fmt.Sprintf("Limits[%d]", i), err)
 			}
 		}
+	}
+	if err := typesValidator.Var(w.People, "required"); err != nil {
+		errors = errors.Append("People", err)
 	}
 	for i, item := range w.People {
 		if v, ok := any(item).(runtime.Validator); ok {
@@ -16377,6 +16386,9 @@ func (w WhoKnowsResponse) Validate() error {
 	}
 	if err := typesValidator.Var(w.Topic, "required"); err != nil {
 		errors = errors.Append("Topic", err)
+	}
+	if err := typesValidator.Var(w.UnsavedContacts, "required"); err != nil {
+		errors = errors.Append("UnsavedContacts", err)
 	}
 	for i, item := range w.UnsavedContacts {
 		if v, ok := any(item).(runtime.Validator); ok {
