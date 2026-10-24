@@ -35,6 +35,7 @@ type DataReader interface {
 	TopicAuthorsContext(ctx context.Context, messageIDs, owner []int64) (map[int64]store.TopicAuthor, error)
 	AskMeAboutValuesContext(ctx context.Context, owner []int64) ([]store.PersonAskMeAbout, bool, error)
 	CoverageCountsScoped(ctx context.Context, activeGen int64, messageTypes []string, sourceIDs []int64) (live, stamped, blank, missing int64, err error)
+	CountUnembeddedLegacyEmail(ctx context.Context, activeGen int64) (int64, error)
 }
 
 type Service struct {
@@ -174,7 +175,14 @@ func (s *Service) searchAuthors(ctx context.Context, p Params, types []string, o
 // empty answer can't say that nobody wrote about the topic.
 func (s *Service) unembedded(ctx context.Context, gen vector.GenerationID, types []string) bool {
 	live, stamped, _, _, err := s.Data.CoverageCountsScoped(ctx, int64(gen), types, nil)
-	return err != nil || live > stamped
+	if err != nil || live > stamped {
+		return true
+	}
+	if !slices.Contains(types, store.MessageTypeEmail) {
+		return false
+	}
+	legacy, err := s.Data.CountUnembeddedLegacyEmail(ctx, int64(gen))
+	return err != nil || legacy > 0
 }
 
 type scoredHit struct {

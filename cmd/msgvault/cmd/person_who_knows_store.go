@@ -24,3 +24,7 @@ func (a *storeAPIAdapter) AskMeAboutValuesContext(ctx context.Context, owner []i
 func (a *storeAPIAdapter) CoverageCountsScoped(ctx context.Context, activeGen int64, messageTypes []string, sourceIDs []int64) (live, stamped, blank, missing int64, err error) {
 	return a.store.CoverageCountsScoped(ctx, activeGen, messageTypes, sourceIDs)
 }
+
+func (a *storeAPIAdapter) CountUnembeddedLegacyEmail(ctx context.Context, activeGen int64) (int64, error) {
+	return a.store.CountUnembeddedLegacyEmail(ctx, activeGen)
+}

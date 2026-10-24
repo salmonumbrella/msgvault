@@ -125,6 +125,39 @@ func TestTopicAuthorsReadLegacyEmailWithNullType(t *testing.T) {
 	assert.True(store.IsEmailMessageType(a.MessageType), "a legacy row with no type is email")
 }
 
+func TestCountUnembeddedLegacyEmailCountsLiveUnstampedUntypedRows(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	st, sourceID, conversationID := newLegacyNullableMessageTypeStore(t)
+	add := func(name, messageType string) int64 {
+		id, err := st.UpsertMessage(&store.Message{
+			SourceID: sourceID, ConversationID: conversationID,
+			SourceMessageID: name, MessageType: store.MessageTypeEmail,
+		})
+		require.NoError(err, name)
+		_, err = st.DB().Exec(st.Rebind(`UPDATE messages SET message_type = ? WHERE id = ?`),
+			sql.NullString{String: messageType, Valid: messageType != "null"}, id)
+		require.NoError(err, name)
+		return id
+	}
+	add("null-type", "null")
+	add("empty-type", "")
+	stamped := add("stamped", "")
+	deleted := add("deleted", "")
+	add("typed", store.MessageTypeEmail)
+	_, err := st.DB().Exec(st.Rebind(`UPDATE messages SET embed_gen = 7 WHERE id = ?`), stamped)
+	require.NoError(err, "stamp one legacy row")
+	_, err = st.DB().Exec(st.Rebind(`UPDATE messages SET deleted_at = ? WHERE id = ?`), whoKnowsSentAt, deleted)
+	require.NoError(err, "delete one legacy row")
+
+	got, err := st.CountUnembeddedLegacyEmail(t.Context(), 7)
+	require.NoError(err)
+	assert.Equal(int64(2), got, "the null and empty rows wait for generation 7")
+	got, err = st.CountUnembeddedLegacyEmail(t.Context(), 0)
+	require.NoError(err)
+	assert.Equal(int64(3), got, "generation zero stamps nothing")
+}
+
 func TestTopicAuthorsLeaveOutAutomatedSenders(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)

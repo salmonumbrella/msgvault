@@ -506,3 +506,19 @@ func (s *Store) personsWithAutomatedAddressContext(ctx context.Context, values [
 	}
 	return out, nil
 }
+
+// CountUnembeddedLegacyEmail counts live messages with no message type, which
+// search treats as email, that generation activeGen has not stamped. Scoped
+// coverage counts leave them out, because an email-scoped build never embeds
+// them. Generation zero stamps nothing.
+func (s *Store) CountUnembeddedLegacyEmail(ctx context.Context, activeGen int64) (int64, error) {
+	query := `SELECT COUNT(*) FROM messages
+		WHERE ` + LiveMessagesWhere("", true) + `
+		AND (message_type IS NULL OR message_type = '')
+		AND (? = 0 OR embed_gen IS NULL OR embed_gen <> ?)`
+	var n int64
+	if err := s.db.QueryRowContext(ctx, s.dialect.Rebind(query), activeGen, activeGen).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count unembedded legacy email: %w", err)
+	}
+	return n, nil
+}
