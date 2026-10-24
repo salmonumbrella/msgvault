@@ -118,6 +118,55 @@ func TestPocketImportEditsAndProjects(t *testing.T) {
 	}
 }
 
+func TestPocketImportLastSyncAt(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		previousSync  bool
+		failRecording bool
+	}{
+		{name: "first successful sync"},
+		{name: "successful refresh", previousSync: true},
+		{name: "first failed sync", failRecording: true},
+		{name: "failed refresh", previousSync: true, failRecording: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assertions := assert.New(t)
+			requirements := require.New(t)
+			imp, st, src := testArchive(t, testRecording(t, recordingFixture), testRecording(t, `{"id":"rec-b","created_at":"2026-08-01T10:00:00Z","transcript":[]}`))
+			registered, err := st.GetSourceByTypeAndIdentifier(SourceType, "personal")
+			requirements.NoError(err)
+			if tt.previousSync {
+				// Backdate the fixture so an incorrect update cannot hide in the same clock tick.
+				_, err = st.DB().Exec(`UPDATE sources SET last_sync_at = ? WHERE id = ?`, time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), registered.ID)
+				requirements.NoError(err)
+			}
+			before, err := st.GetSourceByID(registered.ID)
+			requirements.NoError(err)
+			if tt.failRecording {
+				src.fail["rec-b"] = errors.New("synthetic recording failure")
+			}
+
+			summary, err := imp.Import(t.Context(), archiveOptions())
+			if tt.failRecording {
+				requirements.ErrorContains(err, "synthetic recording failure")
+				assertions.Equal(int64(1), summary.MeetingsAdded)
+			} else {
+				requirements.NoError(err)
+				assertions.Equal(int64(2), summary.MeetingsAdded)
+			}
+			after, err := st.GetSourceByID(registered.ID)
+			requirements.NoError(err)
+			assertions.Equal(before.SyncCursor, after.SyncCursor)
+			if tt.failRecording {
+				assertions.Equal(before.LastSyncAt, after.LastSyncAt)
+			} else {
+				requirements.True(after.LastSyncAt.Valid)
+				assertions.True(after.LastSyncAt.Time.After(before.LastSyncAt.Time))
+			}
+		})
+	}
+}
+
 func TestPocketImportPreservesUnavailableAndClearsAuthoritativeEmpty(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)

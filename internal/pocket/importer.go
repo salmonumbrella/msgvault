@@ -342,7 +342,7 @@ func (i *Importer) Import(ctx context.Context, opts ImportOptions) (summary *Imp
 	if err = checkpoint(); err != nil {
 		return summary, err
 	}
-	err = scoped.CompleteSyncContext(ctx, runID, cp.PageToken)
+	err = scoped.CompleteSyncAndPreserveSourceCursorContext(ctx, runID, src.ID, cp.PageToken)
 	return summary, err
 }
 
