@@ -4471,7 +4471,7 @@ Many newsletters hide a preview line, called a preheader, and those set the flag
 too. The flag marks hidden text rather than malicious intent.
 MCP `get_message` and `search_in_message`
 return the same stored flag. CLI `search --json` and MCP `search_message_bodies`
-also include it on every result row. Archive schema 13 flags older mail during
+also include it on every result row. Archive schema 14 flags older mail during
 a one-time backfill at archive initialization; new HTML writes refresh the flag.
 
 ## show-thread
