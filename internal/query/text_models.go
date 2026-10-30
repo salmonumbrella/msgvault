@@ -181,4 +181,11 @@ var KnownMessageTypes = []string{
 	"matrix",
 	"telegram",
 	"x_dm",
+	"threads",
+}
+
+// IsKnownMessageType reports whether mt is a message_type value that msgvault
+// can produce.
+func IsKnownMessageType(mt string) bool {
+	return slices.Contains(KnownMessageTypes, mt)
 }

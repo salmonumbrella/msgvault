@@ -43,7 +43,7 @@ func manualSyncCLICommand(args []string) bool {
 		return len(args) >= 3 && (args[1] == "facebook-comments" || args[1] == "instagram-comments") && args[2] == "sync"
 	}
 	switch args[0] {
-	case "sync-slack", "sync-teams", "sync-beeper", "sync-chatwoot", "sync-discord", "sync-matrix", "sync-inline", "backfill-inline-media", "sync-circleback", "sync-plaud",
+	case "sync-slack", "sync-teams", "sync-beeper", "sync-chatwoot", "sync-discord", "sync-threads", "sync-matrix", "sync-inline", "backfill-inline-media", "sync-circleback", "sync-plaud",
 		"sync-pocket", "sync-notion-meetings", "sync-twenty", "sync-muesli", "sync-granola", "sync-omi", "sync-calendar", "sync-synctech-sms", "sync-twilio":
 		if args[0] == "sync-circleback" || args[0] == "sync-plaud" || args[0] == "sync-pocket" || args[0] == "sync-notion-meetings" || args[0] == "sync-twilio" || args[0] == "sync-twenty" || args[0] == "sync-inline" {
 			for _, arg := range args[1:] {

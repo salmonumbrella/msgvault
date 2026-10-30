@@ -38,6 +38,7 @@ nav = [
     {"Microsoft Teams" = "usage/teams.md"},
     {"Discord" = "usage/discord.md"},
     {"Beeper" = "usage/beeper.md"},
+    {"Threads" = "usage/threads.md"},
     {"Inline" = "usage/inline.md"},
     {"Chatwoot" = "guides/chatwoot.md"},
     {"Facebook Page Comments" = "usage/facebook-comments.md"},

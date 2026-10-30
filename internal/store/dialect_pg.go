@@ -2334,7 +2334,7 @@ var exclusiveLockTables = []string{
 	"source_merge_attachments", "source_merge_preserved_attachments",
 	"sync_operations",
 	"source_import_items", "sync_run_items", "sync_checkpoints",
-	"imap_folder_state", "imap_message_memberships", "imap_drafts", "gmail_drafts", "chat_drafts", "beeper_drafts",
+	"imap_folder_state", "imap_message_memberships", "imap_drafts", "gmail_drafts", "chat_drafts", "threads_reply_sends", "beeper_drafts",
 	"loop_decisions", "loop_message_evidence",
 }
 

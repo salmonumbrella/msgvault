@@ -186,6 +186,9 @@ var topLevelCommandGroups = map[string]string{
 	"update-account":          helpGroupSources,
 	"verify":                  helpGroupSources,
 	"version":                 helpGroupOperations,
+	"add-threads": helpGroupSources,
+	"sync-threads": helpGroupSources,
+	"send-reply": helpGroupWrite,
 }
 
 func ensureHelpLayout(root *cobra.Command) {

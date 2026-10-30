@@ -173,6 +173,7 @@ const personCardDAVMinAPISchemaVersion = "2.32.0"
 const identityReviewMinAPISchemaVersion = "3.0.0"
 const identityScoringMinAPISchemaVersion = "3.0.0"
 const draftsMinAPISchemaVersion = "3.0.0"
+const sendReplyMinAPISchemaVersion = "3.28.0"
 
 // delegatedMCPServeOptions offers only the tools an agent grant can use.
 // Source inventory is required to select tools within the grant.
@@ -197,7 +198,7 @@ func delegatedMCPServeOptions(ctx context.Context, st *daemonclient.Client) (mcp
 		addMCPSourceFamilies(families, source.Type)
 	}
 	opts := mcpserver.ServeOptions{
-		Drafts: daemonMCPDraftRunner{client: st}, DraftCommands: mcpDraftCommands(true), DelegatedOnly: true,
+		Drafts: daemonMCPDraftRunner{client: st}, DraftCommands: mcpDraftCommandsForSchema(true, schemaVersion), DelegatedOnly: true,
 		Engine: daemonclient.NewEngineAdapter(st), AttachmentReader: st,
 		Calendar: st, GrantPermissions: grant.Permissions, Families: families,
 	}
@@ -350,7 +351,7 @@ func daemonMCPServeOptions(ctx context.Context, st *daemonclient.Client, state *
 		opts.IdentityScoring = st
 	}
 	if capabilityErr == nil && daemonclient.APISchemaVersionAtLeast(schemaVersion, draftsMinAPISchemaVersion) {
-		opts.DraftCommands = mcpDraftCommands(false)
+		opts.DraftCommands = mcpDraftCommandsForSchema(false, schemaVersion)
 	}
 
 	return opts

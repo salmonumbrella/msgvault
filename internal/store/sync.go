@@ -1998,7 +1998,7 @@ func (s *Store) UpdateSourceDisplayNameContext(
 	})
 }
 
-// UpdateSourceSyncConfig updates the JSON sync configuration for an IMAP source.
+// UpdateSourceSyncConfig updates the JSON sync configuration for a source.
 // The sync_config column is JSONB on PG; the dialect supplies the
 // appropriate placeholder cast (?::JSONB on PG, bare ? on SQLite).
 //
