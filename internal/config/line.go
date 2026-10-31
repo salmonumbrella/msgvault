@@ -13,6 +13,7 @@ type LineSource struct {
 	ChannelID string `toml:"channel_id"`
 	SecretEnv string `toml:"secret_env"`
 	Enabled   bool   `toml:"enabled"`
+	AllowSend bool   `toml:"allow_send"`
 }
 
 func (c *Config) GetLineSource(channelID string) *LineSource {

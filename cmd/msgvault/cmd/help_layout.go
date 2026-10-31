@@ -83,6 +83,7 @@ var topLevelCommandGroups = map[string]string{
 	"draft-recover":          helpGroupWrite,
 	"draft-reply":            helpGroupWrite,
 	"draft-send-as":          helpGroupWrite,
+	"send-line-reply":        helpGroupWrite,
 	"embeddings":             helpGroupIndex,
 	"employment":             helpGroupPeople,
 	"eval":                   helpGroupIndex,

@@ -8,6 +8,7 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
+- The owner can [reply to LINE chats](usage/line.md#reply-from-a-reviewed-draft) from reviewed local drafts through the CLI, daemon API, or MCP. Sending requires a per-channel opt-in, reuses durable retry keys, and archives accepted replies in their original conversation. Replies from Official Account Manager remain unavailable.
 - Message details for calendar events now include a typed `calendar` object (status, sequence, start, end, all-day, time zone, iCal UID) in the HTTP API, CLI message route, and MCP `get_message`, so clients can tell cancelled or rescheduled events apart without parsing the body. API schema 3.28.0.
 - [LINE Official Account](usage/line.md) archives incoming chats through signed webhooks, including available media, quotes, group text edits, membership, and retained flagged unsends. Capture starts at go-live; earlier history and replies sent through Official Account Manager or other tools are unavailable. Setup requires a public HTTPS webhook and environment-only channel credentials.
 - Automatic search-index backfill preserves completed work across restarts and keeps indexed messages searchable while filling gaps. `msgvault rebuild-fts` still discards and rebuilds the full index.

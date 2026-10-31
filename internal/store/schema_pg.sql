@@ -4255,3 +4255,30 @@ CREATE TABLE IF NOT EXISTS line_webhook_events (
 );
 CREATE INDEX IF NOT EXISTS idx_line_webhook_due ON line_webhook_events(source_id,state,next_attempt_at,event_timestamp);
 CREATE INDEX IF NOT EXISTS idx_line_webhook_target ON line_webhook_events(source_id,target_message_id,state);
+
+-- Durable owner-admitted LINE replies; receipts outlive local drafts.
+CREATE TABLE IF NOT EXISTS line_reply_attempts (
+    draft_id TEXT PRIMARY KEY,
+    source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL,
+    bot_user_id TEXT NOT NULL,
+    revision BIGINT NOT NULL CHECK(revision > 0),
+    conversation_id BIGINT NOT NULL,
+    source_conversation_id TEXT NOT NULL,
+    conversation_type TEXT NOT NULL,
+    reply_to_message_id BIGINT NOT NULL,
+    reply_to_source_message_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    quote_token TEXT NOT NULL DEFAULT '',
+    retry_key TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL CHECK(state IN ('admitted','remote_unknown','accepted_unresolved','remote_accepted','sent','provider_rejected','remote_unknown_expired','accepted_unresolved_expired')),
+    admitted_at TIMESTAMPTZ NOT NULL,
+    retry_until TIMESTAMPTZ NOT NULL,
+    next_retry_at TIMESTAMPTZ NOT NULL,
+    status_code INTEGER NOT NULL DEFAULT 0,
+    request_id TEXT NOT NULL DEFAULT '',
+    remote_message_id TEXT NOT NULL DEFAULT '',
+    remote_quote_token TEXT NOT NULL DEFAULT '',
+    message_id BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_line_reply_source_state ON line_reply_attempts(source_id,state);

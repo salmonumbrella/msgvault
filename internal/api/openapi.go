@@ -382,7 +382,8 @@ import (
 // 3.28.0 adds the typed calendar projection to calendar event message details.
 // 3.29.0 adds optional LINE webhook delivery status to source status.
 // 3.30.0 adds the scheduler's last completed run time to source status.
-const APISchemaVersion = "3.30.0"
+// 3.31.0 adds owner-only send-line-reply with durable LINE reply receipts.
+const APISchemaVersion = "3.31.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.
