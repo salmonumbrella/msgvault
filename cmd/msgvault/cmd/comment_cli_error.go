@@ -75,6 +75,9 @@ func classifyCommentCLIError(cmd *cobra.Command, err error) *commentCLIError {
 			result.exit = 7
 			result.hint = "ask the archive owner to check this source's credentials, permissions and provider availability"
 		}
+	} else if _, ok := errors.AsType[*daemonclient.OperationInProgressError](err); ok {
+		result.code, result.exit = "operation_in_progress", 6
+		result.hint = "wait for the active daemon operation to finish, then retry this command"
 	} else if failure, ok := errors.AsType[*daemonclient.APIError](err); ok {
 		result.code = failure.Code
 		switch failure.Status {

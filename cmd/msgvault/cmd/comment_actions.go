@@ -132,7 +132,9 @@ func newCommentCommand(name string, backend commentActionBackend) *cobra.Command
 		case "triage":
 			var got string
 			got, err = client.UpdateCommentTriage(cmd.Context(), id, state, expect)
-			result = api.CommentTriageResponse{State: got}
+			if err == nil {
+				result = api.CommentTriageResponse{State: got}
+			}
 		case "queue":
 			result, err = client.ListCommentQueue(cmd.Context(), filter)
 		case "actions":

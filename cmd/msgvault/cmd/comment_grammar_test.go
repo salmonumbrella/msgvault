@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json/v2"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -157,5 +158,58 @@ func TestCommentJSONModeRespectsFlagValues(t *testing.T) {
 		assert.Empty(out)
 		assert.Contains(stderr, "hint: ")
 		assert.NotContains(stderr, `{"error":`)
+	}
+}
+
+func TestCommentDaemonContentionDiagnostic(t *testing.T) {
+	for _, args := range [][]string{{"moderate", "7", "--hide"}, {"triage", "7", "--state", "handled"}} {
+		for _, jsonMode := range []bool{false, true} {
+			name := strings.Join(args, " ")
+			if jsonMode {
+				name += " json"
+			}
+			t.Run(name, func(t *testing.T) {
+				assert := assert.New(t)
+				require := require.New(t)
+				calls := 0
+				client := newMCPDaemonClient(t, func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/api/v1/health" {
+						assert.NoError(json.MarshalWrite(w, map[string]string{"status": "ok", "api_schema_version": commentActionsMinAPISchemaVersion}))
+						return
+					}
+					calls++
+					w.WriteHeader(http.StatusServiceUnavailable)
+					_, _ = w.Write([]byte(`{"error":"operation_in_progress","message":"Another operation is active"}`))
+				})
+				commandArgs := append([]string(nil), args...)
+				if jsonMode {
+					commandArgs = append(commandArgs, "--json")
+				}
+				out, stderr, err := groupedCommentCLI(t, client, commandArgs...)
+				require.Error(err)
+				assert.Empty(out)
+				var coded interface{ ExitCode() int }
+				require.ErrorAs(err, &coded)
+				assert.Equal(6, coded.ExitCode())
+				assert.Equal(1, calls, "contention must not retry a mutation automatically")
+				if jsonMode {
+					var diagnostic struct {
+						Error struct {
+							Code string `json:"code"`
+							Exit int    `json:"exit_code"`
+							Hint string `json:"hint"`
+						} `json:"error"`
+					}
+					require.NoError(json.Unmarshal([]byte(stderr), &diagnostic))
+					assert.Equal("operation_in_progress", diagnostic.Error.Code)
+					assert.Equal(6, diagnostic.Error.Exit)
+					assert.Contains(diagnostic.Error.Hint, "wait")
+					assert.Contains(diagnostic.Error.Hint, "retry")
+				} else {
+					lines := strings.Split(strings.TrimSpace(stderr), "\n")
+					assert.Contains(lines[len(lines)-1], "hint: wait")
+				}
+			})
+		}
 	}
 }
