@@ -353,8 +353,15 @@ func TestCommentQueueIncludesInstagram(t *testing.T) { //nolint:paralleltest // 
 	requirements.NoError(err)
 	requirements.Len(rows, 1)
 	a.config.InstagramComments[0].InstagramAccountID = "201"
-	_, err = a.RunCommentAction(t.Context(), id, meta.ActionRequest{Action: meta.ActionPublicReply, Body: "reply", Confirm: preview.Confirm}, nil)
+	recovered, err := a.RunCommentAction(t.Context(), id, meta.ActionRequest{Action: meta.ActionPublicReply, Body: "reply", Confirm: preview.Confirm}, nil)
+	requirements.NoError(err, "an existing receipt remains available after the profile changes")
+	requirements.NotNil(recovered.Receipt)
+	assertions.Equal(got.Receipt.ID, recovered.Receipt.ID)
+	assertions.Equal("succeeded", recovered.Receipt.State)
+	fresh, err := a.RunCommentAction(t.Context(), id, meta.ActionRequest{Action: meta.ActionPublicReply, Body: "another reply", DryRun: true}, nil)
+	requirements.NoError(err)
+	_, err = a.RunCommentAction(t.Context(), id, meta.ActionRequest{Action: meta.ActionPublicReply, Body: "another reply", Confirm: fresh.Confirm}, nil)
 	requirements.ErrorAs(err, &failure)
 	assertions.Equal("action_not_enabled", failure.Code)
-	assertions.Equal(6, calls)
+	assertions.Equal(6, calls, "neither local recovery nor a disabled fresh write contacts the provider")
 }
