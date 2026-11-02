@@ -22,6 +22,20 @@ const managedDraftRetainedMessageSQL = `EXISTS (
 		   OR draft_owner.pending_original_message_id = messages.id
 	)`
 
+// An unresolved comment receipt needs its target and ancestor chain for exact
+// local identity checks. UNION also terminates traversal of malformed cycles.
+const archiveGCRetainedMessageSQL = managedDraftRetainedMessageSQL + ` OR messages.id IN (
+	WITH RECURSIVE retained_comment_messages(id) AS (
+		SELECT message_id FROM meta_comment_actions
+		WHERE message_id IS NOT NULL AND state IN ('claimed','dispatched','unknown')
+		UNION
+		SELECT parent.reply_to_message_id FROM messages parent
+		JOIN retained_comment_messages retained ON retained.id = parent.id
+		WHERE parent.reply_to_message_id IS NOT NULL
+	)
+	SELECT id FROM retained_comment_messages
+)`
+
 // ErrGCUnsupported is returned before mutation when archive GC is requested
 // against PostgreSQL. PostgreSQL retention and compaction require an
 // operator-managed backup and VACUUM policy outside this SQLite command.
@@ -49,7 +63,7 @@ func planGCWith(q querier) (GCPlan, error) {
 	var plan GCPlan
 	if err := q.QueryRow(`
 		SELECT
-			COUNT(*) FILTER (WHERE deleted_from_source_at IS NOT NULL AND NOT (`+managedDraftRetainedMessageSQL+`)),
+			COUNT(*) FILTER (WHERE deleted_from_source_at IS NOT NULL AND NOT (`+archiveGCRetainedMessageSQL+`)),
 			COUNT(*) FILTER (
 				WHERE deleted_at IS NOT NULL
 				  AND deleted_from_source_at IS NULL
@@ -63,7 +77,7 @@ func planGCWith(q querier) (GCPlan, error) {
 		FROM (
 			SELECT id FROM messages
 			WHERE deleted_from_source_at IS NOT NULL
-			  AND NOT (`+managedDraftRetainedMessageSQL+`)
+			  AND NOT (`+archiveGCRetainedMessageSQL+`)
 			ORDER BY id
 		)
 	`)
@@ -131,7 +145,7 @@ func (s *Store) ExecuteGCContext(
 				SELECT DISTINCT conversation_id AS id
 				FROM messages
 				WHERE deleted_from_source_at IS NOT NULL
-				  AND NOT (`+managedDraftRetainedMessageSQL+`)
+				  AND NOT (`+archiveGCRetainedMessageSQL+`)
 				  AND conversation_id IS NOT NULL
 				ORDER BY conversation_id
 			)
@@ -146,7 +160,7 @@ func (s *Store) ExecuteGCContext(
 				WHERE rowid IN (
 					SELECT id FROM messages
 					WHERE deleted_from_source_at IS NOT NULL
-					  AND NOT (` + managedDraftRetainedMessageSQL + `)
+					  AND NOT (` + archiveGCRetainedMessageSQL + `)
 				)
 			`); err != nil {
 				return fmt.Errorf("delete source-deleted FTS rows: %w", err)
@@ -159,7 +173,7 @@ func (s *Store) ExecuteGCContext(
 				WHERE reply_to_message_id IN (
 				SELECT id FROM messages
 				WHERE deleted_from_source_at IS NOT NULL
-				  AND NOT (` + managedDraftRetainedMessageSQL + `)
+				  AND NOT (` + archiveGCRetainedMessageSQL + `)
 			)
 		`); err != nil {
 			return fmt.Errorf("clear replies to source-deleted messages: %w", err)
@@ -168,7 +182,7 @@ func (s *Store) ExecuteGCContext(
 		result, err := q.Exec(`
 		DELETE FROM messages
 		WHERE deleted_from_source_at IS NOT NULL
-		  AND NOT (` + managedDraftRetainedMessageSQL + `)
+		  AND NOT (` + archiveGCRetainedMessageSQL + `)
 		`)
 		if err != nil {
 			return fmt.Errorf("delete source-deleted messages: %w", err)
