@@ -12,6 +12,7 @@ import (
 
 const rawFormat = "facebook-comment-json"
 const objectMetadataVersion = 1
+const adObjectMetadataVersion = 2
 
 type objectMetadata struct {
 	Version            int    `json:"version"`
@@ -23,7 +24,18 @@ type objectMetadata struct {
 	ParentID           string `json:"parent_id,omitempty"`
 	Organic            bool   `json:"organic,omitempty"`
 	Visitor            bool   `json:"visitor,omitempty"`
+	AdAccountID        string `json:"ad_account_id,omitempty"`
+	AdCreativeID       string `json:"ad_creative_id,omitempty"`
 	Ad                 bool   `json:"ad,omitempty"`
+}
+
+// Ad-enriched records are a new format so older importers refuse them instead
+// of decoding and then silently dropping the discovery association on replay.
+func (m objectMetadata) supportedVersion() bool {
+	if m.AdAccountID == "" && m.AdCreativeID == "" {
+		return m.Version == objectMetadataVersion
+	}
+	return m.Version == adObjectMetadataVersion && m.InstagramAccountID != "" && m.Ad && m.AdAccountID != "" && m.AdCreativeID != ""
 }
 
 func (m objectMetadata) matches(app, page, account, root string) bool {
@@ -48,6 +60,9 @@ func (r *importRun) persist(ctx context.Context, obj Object, root, parent string
 		if owner := obj.InstagramMedia.Owner.ID; owner != "" && owner != r.imp.instagram {
 			return errors.New("instagram media owner mismatch")
 		}
+	}
+	if edge == adCreativesEdge && obj.InstagramMedia != nil && (obj.InstagramMedia.Owner == nil || obj.InstagramMedia.Owner.ID != r.imp.instagram) {
+		return errors.New("ad media owner is not verified")
 	}
 	if obj.Parent != nil && obj.Parent.ID != "" {
 		parent = obj.Parent.ID
@@ -76,7 +91,7 @@ func (r *importRun) persist(ctx context.Context, obj Object, root, parent string
 		if !saved.Valid || json.Unmarshal([]byte(saved.String), &storedMeta) != nil || !storedMeta.matches(r.app, r.page, r.imp.instagram, root) || storedMeta.ParentID != parent {
 			return errors.New("comment object already belongs to a different root or parent")
 		}
-		if storedMeta.Version != objectMetadataVersion {
+		if !storedMeta.supportedVersion() {
 			return errors.New("unsupported comment object metadata version")
 		}
 		meta = storedMeta
@@ -86,8 +101,11 @@ func (r *importRun) persist(ctx context.Context, obj Object, root, parent string
 		meta.Organic = true
 	case VisitorPosts:
 		meta.Visitor = true
-	case AdsPosts:
+	case AdsPosts, adCreativesEdge:
 		meta.Ad = true
+	}
+	if edge == adCreativesEdge && obj.InstagramMedia != nil && obj.AdCreative != nil && meta.AdCreativeID == "" {
+		meta.AdAccountID, meta.AdCreativeID = r.imp.adAccount, obj.AdCreative.ID
 	}
 	var reply sql.NullInt64
 	if parent != "" {
@@ -110,7 +128,7 @@ func (r *importRun) persist(ctx context.Context, obj Object, root, parent string
 		if !savedRoot.Valid || json.Unmarshal([]byte(savedRoot.String), &rootMeta) != nil || !rootMeta.matches(r.app, r.page, r.imp.instagram, root) || rootMeta.ParentID != "" {
 			return errors.New("comment root belongs to a different context or has a parent")
 		}
-		if rootMeta.Version != objectMetadataVersion {
+		if !rootMeta.supportedVersion() {
 			return errors.New("unsupported comment root metadata version")
 		}
 		if parent != root {
@@ -122,8 +140,14 @@ func (r *importRun) persist(ctx context.Context, obj Object, root, parent string
 			if !saved.Valid || json.Unmarshal([]byte(saved.String), &parentMeta) != nil || !parentMeta.matches(r.app, r.page, r.imp.instagram, root) {
 				return errors.New("comment parent belongs to a different conversation")
 			}
-			if parentMeta.Version != objectMetadataVersion {
+			if !parentMeta.supportedVersion() {
 				return errors.New("unsupported comment parent metadata version")
+			}
+		}
+		if rootMeta.Ad {
+			meta.Ad = true
+			if meta.AdCreativeID == "" {
+				meta.AdAccountID, meta.AdCreativeID = rootMeta.AdAccountID, rootMeta.AdCreativeID
 			}
 		}
 		reply = sql.NullInt64{Int64: parentRow.ID, Valid: true}
@@ -163,6 +187,9 @@ func (r *importRun) persist(ctx context.Context, obj Object, root, parent string
 		sent = sql.NullTime{Time: parsed, Valid: true}
 	} else if exists {
 		sent = prior.SentAt
+	}
+	if meta.AdCreativeID != "" {
+		meta.Version = adObjectMetadataVersion
 	}
 	metadata, err := json.Marshal(meta)
 	if err != nil {
