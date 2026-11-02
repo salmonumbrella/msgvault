@@ -1,4 +1,5 @@
 ---
+last_edited: 2026-11-02
 title: Facebook Page Comments
 description: Archive comments on a selected Facebook Page and link commenters to existing people.
 ---
@@ -67,8 +68,9 @@ The default budget is **1,000 API reads per Page per run**, including identity
 validation and nested reply reads. `--max-requests` must be positive. A budget
 of 1 permits identity validation only; collection needs at least 2. After a
 complete scan, each surface uses fresh cursors to find new comments on old posts.
-Large histories can therefore require many runs and repeated reads. This is
-bounded polling, not a webhook service or a guarantee of immediate capture.
+Large histories can therefore require many runs and repeated reads. Enable
+[Meta webhooks](meta-webhooks.md) for incoming comment changes; keep polling
+for backfill and reconciliation. Neither path guarantees complete capture.
 
 If a saved cursor expires or the checkpoint is incompatible or invalid,
 restart that selected source explicitly. Checkpoints from the earlier private

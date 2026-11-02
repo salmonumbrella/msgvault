@@ -20,21 +20,23 @@ type syncState struct {
 }
 
 type phaseState struct {
-	After     string         `json:"after,omitempty"`
-	Exhausted bool           `json:"exhausted,omitempty"`
-	Done      bool           `json:"done,omitempty"`
-	Rescan    bool           `json:"rescan,omitempty"`
-	Posts     []Object       `json:"posts,omitempty"`
-	Stack     []commentFrame `json:"stack,omitempty"`
+	ReadSyncID int64          `json:"read_sync_id,omitempty"`
+	After      string         `json:"after,omitempty"`
+	Exhausted  bool           `json:"exhausted,omitempty"`
+	Done       bool           `json:"done,omitempty"`
+	Rescan     bool           `json:"rescan,omitempty"`
+	Posts      []Object       `json:"posts,omitempty"`
+	Stack      []commentFrame `json:"stack,omitempty"`
 }
 
 type commentFrame struct {
-	Root    string   `json:"root"`
-	Parent  string   `json:"parent"`
-	After   string   `json:"after,omitempty"`
-	Loaded  bool     `json:"loaded,omitempty"`
-	Next    string   `json:"next,omitempty"`
-	Pending []Object `json:"pending,omitempty"`
+	ReadSyncID int64    `json:"read_sync_id,omitempty"`
+	Root       string   `json:"root"`
+	Parent     string   `json:"parent"`
+	After      string   `json:"after,omitempty"`
+	Loaded     bool     `json:"loaded,omitempty"`
+	Next       string   `json:"next,omitempty"`
+	Pending    []Object `json:"pending,omitempty"`
 }
 
 func freshState(source string) *syncState {

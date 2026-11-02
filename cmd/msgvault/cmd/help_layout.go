@@ -35,6 +35,7 @@ var topLevelCommandGroups = map[string]string{
 	"add-carddav":             helpGroupSources,
 	"add-chatwoot":            helpGroupSources,
 	"add-facebook-comments":   helpGroupSources,
+	"meta-webhooks":           helpGroupSources,
 	"add-instagram-comments":  helpGroupSources,
 	"add-circleback":          helpGroupSources,
 	"add-discord":             helpGroupSources,

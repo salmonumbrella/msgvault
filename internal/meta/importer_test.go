@@ -46,11 +46,39 @@ func newGraphFixture(t *testing.T) (*graphFixture, *Client) {
 		}
 		path := strings.TrimPrefix(r.URL.Path, "/v26.0/")
 		if f.denied[path] {
-			http.Error(w, "synthetic denial", http.StatusForbidden)
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = fmt.Fprint(w, `{"error":{"code":200}}`)
 			return
 		}
 		if path == "me" {
 			_, _ = fmt.Fprint(w, `{"id":"100","name":"Example Page","category":"Community"}`)
+			return
+		}
+		if !strings.Contains(path, "/") {
+			for _, obj := range f.posts {
+				if obj.ID == path {
+					blob, err := json.Marshal(obj)
+					if !assert.NoError(t, err) {
+						return
+					}
+					_, _ = w.Write(blob)
+					return
+				}
+			}
+			for _, objects := range f.comments {
+				for _, obj := range objects {
+					if obj.ID == path {
+						blob, err := json.Marshal(obj)
+						if !assert.NoError(t, err) {
+							return
+						}
+						_, _ = w.Write(blob)
+						return
+					}
+				}
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprint(w, `{"error":{"code":100}}`)
 			return
 		}
 		var data []Object
@@ -899,6 +927,33 @@ func TestImportDeclaredParentPreservesArchivedRelationships(t *testing.T) {
 			afterBody, err := st.GetMessageBodyText(before.ID)
 			require.NoError(err)
 			assert.Equal(body, afterBody)
+		})
+	}
+}
+
+func TestImportUnchangedSnapshotRepairsBodyAndSearch(t *testing.T) {
+	for _, repair := range []string{"body", "search"} {
+		t.Run(repair, func(t *testing.T) {
+			assert, require := assert.New(t), require.New(t)
+			st, fixture, imp, src := setupImport(t)
+			fixture.comments["100_200"] = []Object{*comment("100_201", "100_200", "orchard example")}
+			_, err := imp.Import(t.Context(), "9", "100", ImportOptions{})
+			require.NoError(err)
+			row := message(t, st, src.ID, "100_201")
+			if repair == "body" {
+				require.NoError(st.UpsertMessageBodyContext(t.Context(), row.ID, sql.NullString{String: "stale body", Valid: true}, sql.NullString{}))
+			} else {
+				require.NoError(st.UpsertFTSContext(t.Context(), row.ID, "", "stale body", "", "", ""))
+			}
+			summary, err := imp.Import(t.Context(), "9", "100", ImportOptions{})
+			require.NoError(err)
+			assert.Equal(1, summary.MessagesUpdated)
+			body, err := st.GetMessageBodyText(row.ID)
+			require.NoError(err)
+			assert.Equal("orchard example", body)
+			var hits int
+			require.NoError(st.DB().QueryRow(`SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'orchard'`).Scan(&hits))
+			assert.Equal(1, hits)
 		})
 	}
 }
