@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -51,7 +52,10 @@ func (d *threadsConnectDaemon) RunCLICommand(ctx context.Context, req api.CLIRun
 				return writeErr
 			}
 		}
-		return err
+		if err != nil {
+			return fmt.Errorf("execute synthetic Threads connection: %w", err)
+		}
+		return nil
 	})
 }
 
@@ -102,11 +106,11 @@ type threadsCallbackInput struct {
 
 func (i *threadsCallbackInput) Read(buffer []byte) (int, error) {
 	if i.reader == nil {
-		for _, line := range strings.Split(i.output.String(), "\n") {
+		for line := range strings.SplitSeq(i.output.String(), "\n") {
 			if strings.HasPrefix(line, "https://threads.com/oauth/authorize?") {
 				authorization, err := url.Parse(line)
 				if err != nil {
-					return 0, err
+					return 0, fmt.Errorf("parse synthetic authorization URL: %w", err)
 				}
 				callback := "https://example.com/threads-callback?" + url.Values{"state": {authorization.Query().Get("state")}, "code": {"synthetic-code"}}.Encode()
 				i.reader = strings.NewReader(callback + "\n")
@@ -117,7 +121,14 @@ func (i *threadsCallbackInput) Read(buffer []byte) (int, error) {
 			return 0, errors.New("callback requested before authorization URL")
 		}
 	}
-	return i.reader.Read(buffer)
+	n, err := i.reader.Read(buffer)
+	if errors.Is(err, io.EOF) {
+		return n, io.EOF
+	}
+	if err != nil {
+		return n, fmt.Errorf("read synthetic callback: %w", err)
+	}
+	return n, nil
 }
 
 func TestAddThreadsWorkstationCallbackThroughDaemon(t *testing.T) {

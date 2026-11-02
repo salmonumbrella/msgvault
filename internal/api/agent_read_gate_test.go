@@ -163,6 +163,7 @@ func TestAgentReadSourceReplacementSnapshot(t *testing.T) {
 			response = get()
 			assertions.NotContains(response.Body.String(), "glacier private")
 			assertions.NotContains(response.Body.String(), "outside@example.test")
+			assertions.NotContains(response.Body.String(), "glacier allowed", "a fresh request must not retain the removed grant binding")
 		})
 	}
 }

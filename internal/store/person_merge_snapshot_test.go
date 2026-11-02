@@ -271,3 +271,38 @@ func TestNormalizePersonMergeSnapshotJSONPreservesLargeIntegers(t *testing.T) {
 	require.NotNil(t, value.Text)
 	assert.Equal(t, `{"large":9007199254740993,"small":1}`, *value.Text)
 }
+
+// postgresPersonReferencesQuery reads all components of composite foreign keys.
+const postgresPersonReferencesQuery = `SELECT child.relname, attribute.attname
+ FROM pg_constraint reference
+ JOIN pg_class child ON child.oid=reference.conrelid
+ JOIN pg_class target ON target.oid=reference.confrelid
+ JOIN pg_namespace target_schema ON target_schema.oid=target.relnamespace
+ JOIN pg_attribute attribute ON attribute.attrelid=child.oid AND attribute.attnum=ANY(reference.conkey)
+ WHERE reference.contype='f' AND target.relname='persons'
+ AND target_schema.nspname=current_schema() AND child.relnamespace=target.relnamespace
+ ORDER BY child.relname,attribute.attname`
+
+func TestPostgresPersonReferenceCatalogIncludesCompositeKeys(t *testing.T) {
+	require := require.New(t)
+	st := newPGStoreInternal(t, skipUnlessPostgresInternal(t))
+	_, err := st.db.ExecContext(t.Context(), `CREATE UNIQUE INDEX inventory_person_revision ON persons(id,revision);
+ CREATE TABLE inventory_composite_person(
+ composite_person_id BIGINT, composite_revision BIGINT,
+ FOREIGN KEY(composite_person_id,composite_revision) REFERENCES persons(id,revision))`)
+	require.NoError(err)
+	rows, err := st.db.QueryContext(t.Context(), postgresPersonReferencesQuery)
+	require.NoError(err)
+	defer func() { require.NoError(rows.Close()) }()
+	var composite []string
+	for rows.Next() {
+		var table, column string
+		require.NoError(rows.Scan(&table, &column))
+		if table == "inventory_composite_person" {
+			composite = append(composite, column)
+		}
+	}
+	require.NoError(rows.Err())
+	require.Equal([]string{"composite_person_id", "composite_revision"}, composite,
+		"inventory must include every component of a composite foreign key exactly once")
+}
