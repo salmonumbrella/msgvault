@@ -50,3 +50,36 @@ func TestActionsDeleteSurvivesPausedImportAndGC(t *testing.T) {
 	assert.Zero(matches)
 	assert.Equal(1, graph.count())
 }
+
+func TestActionsDeleteAncestorWhilePausedInsideDescendant(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	st, src, id, actions, _ := actionFixture(t)
+	fixture, client := newGraphFixture(t)
+	fixture.posts = append(fixture.posts, Object{ID: "100_400", Message: "Later post"})
+	fixture.comments["100_200"] = []Object{*comment("100_200_300", "100_200", "Ancestor")}
+	fixture.comments["100_200_300"] = []Object{*comment("100_200_301", "100_200_300", "Descendant")}
+	fixture.comments["100_200_301"] = []Object{*comment("100_200_302", "100_200_301", "Unseen descendant")}
+	fixture.comments["100_400"] = []Object{*comment("100_400_401", "100_400", "Later comment")}
+	importer := NewImporter(st, client)
+	paused, err := importer.Import(t.Context(), "9", "100", ImportOptions{MaxRequests: 4})
+	require.NoError(err)
+	require.True(paused.Partial)
+	checkpoint, err := st.GetLatestCheckpointedSync(src.ID)
+	require.NoError(err)
+	var saved syncState
+	require.NoError(json.Unmarshal([]byte(checkpoint.CursorBefore.String), &saved))
+	require.Len(saved.Phases[Posts].Stack, 3)
+	assert.Equal("100_200_301", saved.Phases[Posts].Stack[2].Parent)
+	_, err = actionRun(t, actions, id, ActionDelete)
+	require.NoError(err)
+	fixture.denied["100_200_300/comments"] = true
+	fixture.denied["100_200_301/comments"] = true
+	resumed, err := importer.Import(t.Context(), "9", "100", ImportOptions{})
+	require.NoError(err, "a deleted ancestor must discard the whole paused subtree before any reads")
+	assert.False(resumed.Partial)
+	ids, err := st.MessageExistsBatch(src.ID, []string{"100_200_302", "100_400_401"})
+	require.NoError(err)
+	assert.Zero(ids["100_200_302"])
+	assert.NotZero(ids["100_400_401"], "later posts must keep progressing")
+}

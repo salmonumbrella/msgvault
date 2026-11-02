@@ -303,18 +303,20 @@ func (r *importRun) phase(ctx context.Context, edge PostEdge) error {
 }
 
 func (r *importRun) comments(ctx context.Context, p *phaseState, edge PostEdge) error {
+	for index, frame := range p.Stack {
+		deleted, err := r.deletedByAction(ctx, frame.Parent)
+		if err != nil {
+			return err
+		}
+		if deleted {
+			// Any paused ancestor may outlive deletion and GC. Drop that
+			// frame and all descendants before reading the active frame.
+			p.Stack = p.Stack[:index]
+			return nil
+		}
+	}
 	index := len(p.Stack) - 1
 	f := &p.Stack[index]
-	deleted, err := r.deletedByAction(ctx, f.Parent)
-	if err != nil {
-		return err
-	}
-	if deleted {
-		// A paused frame may outlive deletion and GC. Discard its buffered
-		// descendants without reading or restoring the deleted subtree.
-		p.Stack = p.Stack[:index]
-		return nil
-	}
 	if !f.Loaded {
 		page, err := r.request(ctx, edge, f.After, func() (ObjectPage, error) { return r.readComments(ctx, *f) })
 		if err != nil {
