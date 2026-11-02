@@ -58,12 +58,14 @@ func (s *Store) GetMetaCommentActionByKeyContext(ctx context.Context, key string
 	return scanMetaAction(s.db.QueryRowContext(ctx, s.Rebind(`SELECT `+metaActionColumns+` FROM meta_comment_actions a WHERE a.action_key=?`), key))
 }
 
+const succeededMetaCommentDeletionQuery = `SELECT EXISTS (SELECT 1 FROM meta_comment_actions
+		WHERE source_id=? AND source_identifier=? AND target_comment_id=? AND action='delete' AND state='succeeded')`
+
 // HasSucceededMetaCommentDeletionContext retains a successful deletion's
 // tombstone after GC removes the archived message and its receipt link.
 func (s *Store) HasSucceededMetaCommentDeletionContext(ctx context.Context, sourceID int64, sourceIdentifier, commentID string) (bool, error) {
 	var deleted bool
-	err := s.db.QueryRowContext(ctx, s.Rebind(`SELECT EXISTS (SELECT 1 FROM meta_comment_actions
-		WHERE source_id=? AND source_identifier=? AND target_comment_id=? AND action='delete' AND state='succeeded')`), sourceID, sourceIdentifier, commentID).Scan(&deleted)
+	err := s.db.QueryRowContext(ctx, s.Rebind(succeededMetaCommentDeletionQuery), sourceID, sourceIdentifier, commentID).Scan(&deleted)
 	if err != nil {
 		return false, fmt.Errorf("read deleted comment tombstone: %w", err)
 	}

@@ -4261,3 +4261,5 @@ CREATE TABLE IF NOT EXISTS meta_comment_actions (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_meta_comment_actions_private
  ON meta_comment_actions(source_id,target_comment_id) WHERE action='private_reply' AND state<>'failed';
 CREATE INDEX IF NOT EXISTS idx_meta_comment_actions_message ON meta_comment_actions(message_id);
+CREATE INDEX IF NOT EXISTS idx_meta_comment_actions_deleted
+ ON meta_comment_actions(source_id,source_identifier,target_comment_id) WHERE action='delete' AND state='succeeded';
