@@ -241,12 +241,14 @@ func (s *Store) HasRecentPrivateCommentReplyToAuthorContext(ctx context.Context,
 	return exists, nil
 }
 
+const succeededMetaCommentReplyQuery = `SELECT EXISTS (SELECT 1 FROM meta_comment_actions
+		WHERE source_id=? AND source_identifier=? AND action='public_reply' AND state='succeeded' AND remote_id=?)`
+
 // HasSucceededMetaCommentReplyContext proves ownership of one remote reply
 // within the exact dispatch source, independently of provider actor ID families.
 func (s *Store) HasSucceededMetaCommentReplyContext(ctx context.Context, sourceID int64, sourceIdentifier, remoteID string) (bool, error) {
 	var sent bool
-	err := s.db.QueryRowContext(ctx, s.Rebind(`SELECT EXISTS (SELECT 1 FROM meta_comment_actions
-		WHERE source_id=? AND source_identifier=? AND action='public_reply' AND state='succeeded' AND remote_id=?)`), sourceID, sourceIdentifier, remoteID).Scan(&sent)
+	err := s.db.QueryRowContext(ctx, s.Rebind(succeededMetaCommentReplyQuery), sourceID, sourceIdentifier, remoteID).Scan(&sent)
 	if err != nil {
 		return false, fmt.Errorf("read sent comment reply ownership: %w", err)
 	}
