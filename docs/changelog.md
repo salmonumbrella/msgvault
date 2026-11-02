@@ -9,6 +9,9 @@ All notable changes to msgvault, grouped by release.
 ## Unreleased
 
 - `msgvault person directory --query` finds saved people by curated names, contact points, or organizations without semantic search. `--address` matches literal address and identifier fragments on their current bound participants or curated contact points. Address filtering requires daemon API schema 3.29.0; the CLI reports an upgrade error for older daemons.
+- [Instagram comment sync](usage/instagram-comments.md) archives linked professional
+  account media comments and replies for search and existing person linking.
+  Sending and ad-only discovery are not included.
 - [Facebook Page comment sync](usage/facebook-comments.md) archives comments and
   nested replies on organic, visitor, and ad posts returned for a selected Page.
   Search the archive and link commenters through existing people tools. This
