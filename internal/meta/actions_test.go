@@ -265,6 +265,8 @@ func TestActionsDeleteRetryRepairsMark(t *testing.T) {
 	assert.Equal("succeeded", got.Receipt.State)
 	_, err = st.DB().Exec("DROP TRIGGER fail_delete_mark")
 	require.NoError(err)
+	a.opts.Allowed = func(int64, ActionKind) (bool, error) { return false, nil }
+	a.opts.OpenAPI = nil
 	_, err = actionRun(t, a, id, ActionDelete)
 	require.NoError(err)
 	assert.Equal(1, g.count())

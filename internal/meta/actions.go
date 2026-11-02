@@ -262,16 +262,6 @@ func (a *Actions) Run(ctx context.Context, req ActionRequest) (*ActionResult, er
 		}
 		return result, nil
 	}
-	if a.opts.Allowed == nil {
-		return result, actionFailure("action_not_enabled", result, nil)
-	}
-	allowed, err := a.opts.Allowed(target.SourceID, req.Action)
-	if err != nil {
-		return result, err
-	}
-	if !allowed {
-		return result, actionFailure("action_not_enabled", result, nil)
-	}
 	if (req.Action == ActionDelete || isReply(req.Action)) && req.Confirm != result.Confirm {
 		return result, actionFailure("confirmation_mismatch", result, nil)
 	}
@@ -329,6 +319,17 @@ func (a *Actions) Run(ctx context.Context, req ActionRequest) (*ActionResult, er
 	}
 	if src.HistoryOnly || src.MergedIntoSourceID != 0 {
 		return result, actionFailure("stale_identity", result, store.ErrSourceRetired)
+	}
+	// Provider opt-ins gate fresh dispatch, not owner-authorized local recovery.
+	if a.opts.Allowed == nil {
+		return result, actionFailure("action_not_enabled", result, nil)
+	}
+	allowed, err := a.opts.Allowed(target.SourceID, req.Action)
+	if err != nil {
+		return result, err
+	}
+	if !allowed {
+		return result, actionFailure("action_not_enabled", result, nil)
 	}
 	if a.opts.OpenAPI == nil {
 		return result, actionFailure("credential_unavailable", result, nil)
