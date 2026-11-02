@@ -239,11 +239,18 @@ func TestImportMissingAuthor(t *testing.T) {
 	require.NoError(err)
 	known := message(t, st, src.ID, c.ID).SenderID
 	require.True(known.Valid)
-	c.From = nil
-	f.comments["100_200"] = []Object{*c}
-	_, err = imp.Import(t.Context(), "9", "100", ImportOptions{})
-	require.NoError(err)
-	assert.Equal(known, message(t, st, src.ID, c.ID).SenderID)
+	for _, author := range []*Actor{nil, {ID: "300"}} {
+		c.From = author
+		f.comments["100_200"] = []Object{*c}
+		_, err = imp.Import(t.Context(), "9", "100", ImportOptions{})
+		require.NoError(err)
+		assert.Equal(known, message(t, st, src.ID, c.ID).SenderID)
+		var displayName, indexedName string
+		require.NoError(st.DB().QueryRow(`SELECT display_name FROM message_recipients WHERE message_id=? AND recipient_type='from'`, message(t, st, src.ID, c.ID).ID).Scan(&displayName))
+		require.NoError(st.DB().QueryRow(`SELECT from_addr FROM messages_fts WHERE rowid=?`, message(t, st, src.ID, c.ID).ID).Scan(&indexedName))
+		assert.Equal("Example Customer", displayName)
+		assert.Equal("Example Customer", indexedName)
+	}
 }
 
 type recordingCommentErrorAPI struct {
