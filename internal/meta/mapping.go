@@ -18,22 +18,23 @@ const objectMetadataVersion = 1
 var errInvalidObject = errors.New("invalid comment object")
 
 type objectMetadata struct {
-	Hidden             *bool  `json:"hidden,omitempty"`
-	BodyOrder          uint64 `json:"body_order,omitempty"`
-	StateOrder         uint64 `json:"state_order,omitempty"`
-	BodyTime           int64  `json:"body_time,omitempty"`
-	BodySyncID         int64  `json:"body_sync_id,omitempty"`
-	StateTime          int64  `json:"state_time,omitempty"`
-	Version            int    `json:"version"`
-	AppID              string `json:"app_id"`
-	PageID             string `json:"page_id"`
-	PostID             string `json:"post_id,omitempty"`
-	InstagramAccountID string `json:"instagram_account_id,omitempty"`
-	MediaID            string `json:"media_id,omitempty"`
-	ParentID           string `json:"parent_id,omitempty"`
-	Organic            bool   `json:"organic,omitempty"`
-	Visitor            bool   `json:"visitor,omitempty"`
-	Ad                 bool   `json:"ad,omitempty"`
+	Hidden             *bool                  `json:"hidden,omitempty"`
+	BodyOrder          uint64                 `json:"body_order,omitempty"`
+	StateOrder         uint64                 `json:"state_order,omitempty"`
+	BodyTime           int64                  `json:"body_time,omitempty"`
+	BodySyncID         int64                  `json:"body_sync_id,omitempty"`
+	StateTime          int64                  `json:"state_time,omitempty"`
+	WebhookMedia       *InstagramWebhookMedia `json:"webhook_media,omitempty"`
+	Version            int                    `json:"version"`
+	AppID              string                 `json:"app_id"`
+	PageID             string                 `json:"page_id"`
+	PostID             string                 `json:"post_id,omitempty"`
+	InstagramAccountID string                 `json:"instagram_account_id,omitempty"`
+	MediaID            string                 `json:"media_id,omitempty"`
+	ParentID           string                 `json:"parent_id,omitempty"`
+	Organic            bool                   `json:"organic,omitempty"`
+	Visitor            bool                   `json:"visitor,omitempty"`
+	Ad                 bool                   `json:"ad,omitempty"`
 }
 
 func (m objectMetadata) matches(app, page, account, root string) bool {
@@ -121,6 +122,24 @@ func (r *importRun) persist(ctx context.Context, obj Object, root, parent string
 	}
 	meta.BodyTime = max(meta.BodyTime, r.bodyTime)
 	meta.StateTime = max(meta.StateTime, r.stateTime)
+	if r.webhookMedia != nil {
+		media := *r.webhookMedia
+		if prior := meta.WebhookMedia; prior != nil {
+			if media.AdID == "" {
+				media.AdID = prior.AdID
+			}
+			if media.AdTitle == "" {
+				media.AdTitle = prior.AdTitle
+			}
+			if media.OriginalMediaID == "" {
+				media.OriginalMediaID = prior.OriginalMediaID
+			}
+			if media.MediaProductType == "" {
+				media.MediaProductType = prior.MediaProductType
+			}
+		}
+		meta.WebhookMedia = &media
+	}
 	switch edge {
 	case Posts, instagramMediaEdge:
 		meta.Organic = true

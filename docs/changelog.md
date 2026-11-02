@@ -9,7 +9,7 @@ All notable changes to msgvault, grouped by release.
 ## Unreleased
 
 - `msgvault person directory --query` finds saved people by curated names, contact points, or organizations without semantic search. `--address` matches literal address and identifier fragments on their current bound participants or curated contact points. Address filtering requires daemon API schema 3.29.0; the CLI reports an upgrade error for older daemons.
-- [Meta webhooks](usage/meta-webhooks.md) durably spool signed deliveries and apply Page feed comments, with owner subscription, status, and replay commands. Other fields are held for a future release.
+- [Meta webhooks](usage/meta-webhooks.md) durably spool signed deliveries and apply Page feed and Instagram comments, with owner subscription, status, and replay commands. Other fields stay held until their handlers are installed and configured.
 - [Instagram comment sync](usage/instagram-comments.md) archives linked professional
   account media comments and replies for search and existing person linking.
   Sending and ad-only discovery are not included.

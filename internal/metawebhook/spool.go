@@ -45,13 +45,15 @@ type DeliveryMeta struct {
 	Attempts       int            `json:"attempts"`
 	LastErrorClass string         `json:"lastErrorClass"`
 	Outcomes       map[string]int `json:"outcomes"`
+	CompletedItems map[int]Class  `json:"completedItems,omitempty"`
 }
 type Settlement struct {
-	Yielded      bool
-	State        State
-	Outcomes     map[string]int
-	ErrorClass   string
-	CountAttempt bool
+	Yielded        bool
+	State          State
+	Outcomes       map[string]int
+	ErrorClass     string
+	CountAttempt   bool
+	CompletedItems map[int]Class
 }
 type RequeueFilter struct {
 	AppID      string
@@ -562,6 +564,7 @@ func (s *Spool) Settle(app, id string, st Settlement) error {
 		return err
 	}
 	m.State, m.Outcomes, m.LastErrorClass = st.State, st.Outcomes, st.ErrorClass
+	m.CompletedItems = st.CompletedItems
 	m.NextAttemptAt = time.Time{}
 	if st.CountAttempt {
 		m.Attempts++
@@ -600,6 +603,7 @@ func (s *Spool) Requeue(f RequeueFilter, dry bool) (int, error) {
 		}
 		m.ReceiptOrder = order
 		m.State, m.Attempts, m.NextAttemptAt, m.LastErrorClass, m.Outcomes = StatePending, 0, time.Time{}, "", nil
+		m.CompletedItems = nil
 		return s.move(path, m)
 	})
 	return n, err

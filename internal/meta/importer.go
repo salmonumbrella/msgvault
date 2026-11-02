@@ -96,6 +96,7 @@ func (imp *Importer) Register(ctx context.Context, app, page string) (*store.Sou
 
 type importRun struct {
 	bodyTime, stateTime   int64
+	webhookMedia          *InstagramWebhookMedia
 	bodyOrder, stateOrder uint64
 	readSyncID            int64
 	freshBody             bool
