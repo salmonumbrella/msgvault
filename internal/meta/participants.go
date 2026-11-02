@@ -62,13 +62,6 @@ func (r *importRun) messageActor(ctx context.Context, obj Object) (int64, string
 			from := obj.InstagramComment.From
 			actor, family = &Actor{ID: from.ID, Name: from.Username}, "ig_comment_from_user"
 		}
-		if obj.InstagramComment != nil {
-			var err error
-			self, err = r.imp.store.HasSucceededMetaCommentReplyContext(ctx, r.source.ID, r.source.Identifier, obj.ID)
-			if err != nil {
-				return 0, "", false, err
-			}
-		}
 	}
 	if !self {
 		sent, err := r.imp.store.HasSucceededMetaCommentReplyContext(ctx, r.source.ID, r.source.Identifier, obj.ID)
