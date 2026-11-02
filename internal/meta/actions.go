@@ -327,6 +327,9 @@ func (a *Actions) Run(ctx context.Context, req ActionRequest) (*ActionResult, er
 	if err != nil {
 		return result, err
 	}
+	if src.HistoryOnly || src.MergedIntoSourceID != 0 {
+		return result, actionFailure("stale_identity", result, store.ErrSourceRetired)
+	}
 	if a.opts.OpenAPI == nil {
 		return result, actionFailure("credential_unavailable", result, nil)
 	}
