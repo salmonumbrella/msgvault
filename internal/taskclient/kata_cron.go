@@ -33,6 +33,7 @@ type KataCronJob struct {
 	TriggerKind, Cron, Timezone, Catchup       string
 	IntervalSeconds, GraceSeconds              int64
 	OccurrenceTitle, OccurrenceBody, Recipient string
+	name                                       string
 	definition                                 jsontext.Value
 }
 
