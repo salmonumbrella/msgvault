@@ -51,6 +51,7 @@ func newDaemonMCPOperations(client *daemonclient.Client, capabilities *apiprotoc
 	}
 	backend.supported = append(backend.supported, loopMCPCapabilities(hasRoute, capabilities)...)
 	backend.supported = append(backend.supported, sourceMCPCapabilities(hasRoute, capabilities)...)
+	backend.supported = append(backend.supported, employmentMCPCapabilities(hasRoute, capabilities)...)
 	return backend
 }
 
@@ -73,6 +74,9 @@ func (b *daemonMCPOperations) ExecuteOperation(ctx context.Context, name string,
 		if result, handled, err := b.executeLoopOperation(ctx, name, args); handled {
 			return result, err
 		}
+		if result, handled, err := b.executeEmploymentOperation(ctx, name, args); handled {
+			return result, err
+		}
 		if result, handled, err := b.executeSourceOperation(ctx, name, args); handled {
 			return result, err
 		}
@@ -83,6 +87,9 @@ func (b *daemonMCPOperations) ExecuteOperation(ctx context.Context, name string,
 func (b *daemonMCPOperations) OperationDisclosure(ctx context.Context, name string, args map[string]any) (string, error) {
 	if slices.Contains(b.supported, name) {
 		if disclosure, handled, err := b.loopOperationDisclosure(name, args); handled {
+			return disclosure, err
+		}
+		if disclosure, handled, err := b.employmentOperationDisclosure(ctx, name, args); handled {
 			return disclosure, err
 		}
 		if disclosure, handled, err := b.sourceOperationDisclosure(ctx, name, args); handled {
@@ -195,6 +202,9 @@ func readMCPOperationJSONWithClassifier[T any](ctx context.Context, client *daem
 		}
 	}
 	var output T
+	if response.StatusCode == http.StatusNoContent {
+		return &mcpserver.OperationResult{Output: output}, nil
+	}
 	if err := json.Unmarshal(data, &output); err != nil {
 		return operationFailure("invalid_operation_response", writes), err
 	}
