@@ -268,7 +268,7 @@ func TestThreadsSubsetSourceInsertionPreservesAllocationFence(t *testing.T) {
 	subset, err := store.OpenForTest(filepath.Join(dst, "msgvault.db"))
 	require.NoError(err)
 	t.Cleanup(func() { assert.NoError(subset.Close()) })
-	copied, err := subset.GetSourceByTypeAndIdentifier("threads", f.source.Identifier)
+	copied, err := subset.GetSourceByTypeAndIdentifier(t.Context(), "threads", f.source.Identifier)
 	require.NoError(err)
 	assert.Equal(f.source.ID, copied.ID)
 	require.NoError(subset.RemoveSource(500))

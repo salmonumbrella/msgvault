@@ -79,7 +79,7 @@ func TestSyncThreadsEndToEnd(t *testing.T) {
 	deps.databaseDSN = cfg.DatabaseDSN
 	deps.rebuildCache = func(string) error {
 		cacheRuns++
-		source, err := st.GetSourceByTypeAndIdentifier(sourceTypeThreads, "threads:123:20")
+		source, err := st.GetSourceByTypeAndIdentifier(t.Context(), sourceTypeThreads, "threads:123:20")
 		require.NoError(err)
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
@@ -167,7 +167,7 @@ func TestSyncThreadsEndToEnd(t *testing.T) {
 	run() // Finish source-wide walks, then sweep roots discovered there.
 	assert.Contains(out.String(), "history_complete")
 	assert.Contains(out.String(), "oldest_observed")
-	source, err := st.GetSourceByTypeAndIdentifier(sourceTypeThreads, "threads:123:20")
+	source, err := st.GetSourceByTypeAndIdentifier(t.Context(), sourceTypeThreads, "threads:123:20")
 	require.NoError(err)
 	records, err := st.SourceMessageMetadata(source.ID)
 	require.NoError(err)

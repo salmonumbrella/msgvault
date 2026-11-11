@@ -23,7 +23,7 @@ func TestThreadsOAuthAdmissionAndRemoval(t *testing.T) {
 	require.NoError(err)
 	_, err = executeAddThreadsFixture(t, deps, "124", false)
 	require.NoError(err)
-	source, err := st.GetSourceByTypeAndIdentifier(sourceTypeThreads, "threads:123:20")
+	source, err := st.GetSourceByTypeAndIdentifier(t.Context(), sourceTypeThreads, "threads:123:20")
 	require.NoError(err)
 	require.NoError(st.Close())
 	root := newTestRootCmd()

@@ -25,7 +25,7 @@ func newSyncThreadsCmd(deps threadsCommandDeps) *cobra.Command {
 func newSyncThreadsLocalCmd(deps threadsCommandDeps) *cobra.Command {
 	var after, post string
 	var full bool
-	cmd := &cobra.Command{Use: "sync-threads <identifier>", Short: "Archive available Threads posts and replies", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "sync-threads <identifier>", Short: "Archive Threads posts and replies", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if invocationFromCommand(cmd) != nil && deps.bind != nil {
 			deps = deps.bind(cmd.Context())
 		}
@@ -48,7 +48,7 @@ func newSyncThreadsLocalCmd(deps threadsCommandDeps) *cobra.Command {
 			return err
 		}
 		defer cleanup()
-		source, err := st.GetSourceByTypeAndIdentifier(sourceTypeThreads, args[0])
+		source, err := st.GetSourceByTypeAndIdentifier(cmd.Context(), sourceTypeThreads, args[0])
 		if err != nil {
 			return err
 		}

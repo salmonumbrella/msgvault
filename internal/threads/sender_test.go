@@ -49,7 +49,7 @@ func newSendFixture(t *testing.T) *sendFixture {
 	t.Helper()
 	w, st := writerFixture(t)
 	root := applyWriter(t, w, writerMedia("100", "Owned post"), ItemOrigin{Kind: "own_posts"})
-	target, err := st.GetMessageRelationTarget(root)
+	target, err := st.GetMessageRelationTarget(t.Context(), root)
 	require.NoError(t, err)
 	draft, err := st.CreateChatDraftContext(t.Context(), target.ConversationID, root, "reviewed reply", func(string, string) error { return nil })
 	require.NoError(t, err)

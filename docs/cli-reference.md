@@ -389,6 +389,18 @@ but local persistence failed; sync the account.
 
 ## draft-reply
 
+For an archived Threads parent, create a managed local reply draft without
+contacting the provider:
+
+```bash
+msgvault draft-reply <message-id> --body 'Thanks for the details.' --json
+msgvault send-reply --draft <chat-draft-id> --revision <n> --json
+```
+
+The archived parent determines the Threads source and conversation. Email
+destination flags (`--from`, `--all`, `--account`, and `--source-id`) are not
+accepted for that source. Drafting requires no send opt-in; publishing does.
+
 Create one reply draft from an archived message to an authorized IMAP
 destination, or reply within its original Gmail account. The daemon requires
 the matching operator grant. Without `--from`, the reply uses the confirmed
@@ -687,6 +699,7 @@ Threads drafts require an archived parent in the same conversation. The shared
 sender after explicit source opt-in.
 
 ```bash
+msgvault draft-reply <threads-message-id> --body <text> --json
 msgvault draft-compose --conversation <conversation-id> --body <text> [--reply-to <message-id>] [--json]
 msgvault draft-get --conversation <conversation-id> [--json]
 ```

@@ -147,7 +147,7 @@ func PrepareSourceSyncConfigContext(ctx context.Context, st *store.Store, source
 		if err != nil {
 			return SourceSyncConfig{}, fmt.Errorf("encode Threads source config: %w", err)
 		}
-		if err := st.UpdateSourceSyncConfigContext(ctx, sourceID, string(encoded)); err != nil {
+		if err := st.UpdateSourceSyncConfig(ctx, sourceID, string(encoded)); err != nil {
 			return SourceSyncConfig{}, fmt.Errorf("save Threads coverage: %w", err)
 		}
 	}

@@ -660,7 +660,7 @@ type Config struct {
 	IMAP               IMAPConfig                `toml:"imap"`
 	Gmail              GmailConfig               `toml:"gmail"`
 	Telemetry          TelemetryConfig           `toml:"telemetry"`
-	Threads ThreadsConfig `toml:"threads"`
+	Threads            ThreadsConfig             `toml:"threads"`
 
 	// Computed paths (not from config file)
 	HomeDir            string `toml:"-"`

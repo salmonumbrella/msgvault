@@ -231,14 +231,14 @@ func TestThreadsSyncStateConfigIntegrity(t *testing.T) {
 	assert.Equal(source.CreatedAt.UTC(), initial.HistoryCeiling, "missing config must use original source creation, not a later reconnect/run")
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	for _, raw := range []string{`{}`, `null`, `{"version":1}`, `{"version":2,"history_floor":"2026-01-01T00:00:00Z","history_ceiling":"2026-10-30T12:00:00Z","coverage_generation":1}`} {
-		require.NoError(st.UpdateSourceSyncConfigContext(t.Context(), source.ID, raw))
+		require.NoError(st.UpdateSourceSyncConfig(t.Context(), source.ID, raw))
 		_, err := PrepareSourceSyncConfigContext(t.Context(), st, source.ID, SyncRequest{}, now)
 		require.Error(err, "invalid config must not fabricate coverage: %s", raw)
 	}
-	require.NoError(st.UpdateSourceSyncConfigContext(t.Context(), source.ID, `{"version":1,"history_floor":"2026-01-01T00:00:00Z","history_ceiling":"2026-10-01T12:00:00Z","coverage_generation":18446744073709551615}`))
+	require.NoError(st.UpdateSourceSyncConfig(t.Context(), source.ID, `{"version":1,"history_floor":"2026-01-01T00:00:00Z","history_ceiling":"2026-10-01T12:00:00Z","coverage_generation":18446744073709551615}`))
 	_, err = PrepareSourceSyncConfigContext(t.Context(), st, source.ID, SyncRequest{After: now.Add(-24 * time.Hour)}, now)
 	require.Error(err)
-	require.NoError(st.UpdateSourceSyncConfigContext(t.Context(), source.ID, `{"version":1,"history_floor":"2026-01-01T00:00:00Z","history_ceiling":"2026-10-01T12:00:00Z","coverage_generation":1,"extra":{"keep":true}}`))
+	require.NoError(st.UpdateSourceSyncConfig(t.Context(), source.ID, `{"version":1,"history_floor":"2026-01-01T00:00:00Z","history_ceiling":"2026-10-01T12:00:00Z","coverage_generation":1,"extra":{"keep":true}}`))
 	conv, err := st.EnsureConversation(source.ID, "800", "Synthetic root")
 	require.NoError(err)
 	message, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: "800", MessageType: "threads"})
@@ -285,7 +285,7 @@ func TestThreadsSyncStateFutureFloorDefersIntervals(t *testing.T) {
 	original := SourceSyncConfig{Version: 1, HistoryFloor: time.Unix(1688540400, 0).UTC(), HistoryCeiling: connected, CoverageGeneration: 1}
 	encoded, err := json.Marshal(original)
 	require.NoError(err)
-	require.NoError(st.UpdateSourceSyncConfigContext(t.Context(), source.ID, string(encoded)))
+	require.NoError(st.UpdateSourceSyncConfig(t.Context(), source.ID, string(encoded)))
 	future := connected.Add(7 * 24 * time.Hour)
 	cfg, err := PrepareSourceSyncConfigContext(t.Context(), st, source.ID, SyncRequest{After: future}, connected.Add(time.Hour))
 	require.NoError(err)

@@ -50,7 +50,7 @@ func TestThreadsExactSourceAndCredentialAdmission(t *testing.T) {
 	deps := provider.deps(st, t.TempDir())
 	_, err := executeAddThreadsFixture(t, deps, "123", false)
 	require.NoError(err)
-	source, err := st.GetSourceByTypeAndIdentifier(sourceTypeThreads, "threads:123:20")
+	source, err := st.GetSourceByTypeAndIdentifier(t.Context(), sourceTypeThreads, "threads:123:20")
 	require.NoError(err)
 	calls := 0
 	deps.newAPI = func(threads.TokenRecord, *threads.RequestBudget) (threads.API, error) {
@@ -80,7 +80,7 @@ func TestThreadsExecutionExclusionBeforeProvider(t *testing.T) {
 	deps := provider.deps(st, t.TempDir())
 	_, err := executeAddThreadsFixture(t, deps, "123", false)
 	require.NoError(err)
-	source, err := st.GetSourceByTypeAndIdentifier(sourceTypeThreads, "threads:123:20")
+	source, err := st.GetSourceByTypeAndIdentifier(t.Context(), sourceTypeThreads, "threads:123:20")
 	require.NoError(err)
 	execution, err := st.AcquireSyncExecutionContext(t.Context(), source.ID)
 	require.NoError(err)
@@ -109,7 +109,7 @@ func TestThreadsWholeRunCapsIncludeCredentialRefresh(t *testing.T) {
 			deps := provider.deps(st, t.TempDir())
 			_, err := executeAddThreadsFixture(t, deps, "123", false)
 			require.NoError(err)
-			source, err := st.GetSourceByTypeAndIdentifier(sourceTypeThreads, "threads:123:20")
+			source, err := st.GetSourceByTypeAndIdentifier(t.Context(), sourceTypeThreads, "threads:123:20")
 			require.NoError(err)
 			provider.mu.Lock()
 			provider.now = provider.now.Add(8 * 24 * time.Hour)
@@ -156,7 +156,7 @@ func TestThreadsReadInvalidationStopsRepeatedProviderCalls(t *testing.T) {
 	deps := provider.deps(st, t.TempDir())
 	_, err := executeAddThreadsFixture(t, deps, "123", false)
 	require.NoError(err)
-	source, err := st.GetSourceByTypeAndIdentifier(sourceTypeThreads, "threads:123:20")
+	source, err := st.GetSourceByTypeAndIdentifier(t.Context(), sourceTypeThreads, "threads:123:20")
 	require.NoError(err)
 	provider.mu.Lock()
 	provider.readHandler = func(w http.ResponseWriter, _ *http.Request) bool {

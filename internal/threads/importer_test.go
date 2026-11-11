@@ -34,7 +34,7 @@ type importFixture struct {
 func newImportFixture(t *testing.T) *importFixture {
 	t.Helper()
 	w, st := writerFixture(t)
-	source, err := st.GetSourceByTypeAndIdentifier("threads", writerSource)
+	source, err := st.GetSourceByTypeAndIdentifier(t.Context(), "threads", writerSource)
 	require.NoError(t, err)
 	cfg := SourceSyncConfig{Version: 1, HistoryFloor: writerTime.Add(-time.Hour), HistoryCeiling: writerTime.Add(time.Hour), CoverageGeneration: 1}
 	raw, err := json.Marshal(cfg)

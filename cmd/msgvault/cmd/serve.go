@@ -331,6 +331,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if err := s.InitSchemaUnlessCurrentContext(cmd.Context()); err != nil {
 		return fmt.Errorf("init schema: %w", err)
 	}
+	if err := reserveThreadsSendSourceIDs(cmd.Context(), s, cfg); err != nil {
+		return fmt.Errorf("reserve Threads send source IDs: %w", err)
+	}
 	failedUnfinishedImports, err := s.FailUnfinishedSyncOperationsContext(cmd.Context())
 	if err != nil {
 		return fmt.Errorf("recover unfinished historical imports: %w", err)

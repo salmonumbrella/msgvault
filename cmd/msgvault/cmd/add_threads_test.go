@@ -92,7 +92,7 @@ func TestAddThreadsReauthorizationCannotRecreateRemovedSource(t *testing.T) {
 	deps := provider.deps(st, t.TempDir())
 	_, err := executeAddThreadsFixture(t, deps, "123", false)
 	require.NoError(err)
-	source, err := st.GetSourceByTypeAndIdentifier(sourceTypeThreads, "threads:123:20")
+	source, err := st.GetSourceByTypeAndIdentifier(t.Context(), sourceTypeThreads, "threads:123:20")
 	require.NoError(err)
 	before, err := deps.tokenManager().Load("123", "20")
 	require.NoError(err)
@@ -129,7 +129,7 @@ func TestAddThreadsReauthorizationCannotRecreateRemovedSource(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		require.FailNow("reauthorization did not finish after removal")
 	}
-	_, err = st.GetSourceByTypeAndIdentifier(sourceTypeThreads, source.Identifier)
+	_, err = st.GetSourceByTypeAndIdentifier(t.Context(), sourceTypeThreads, source.Identifier)
 	require.ErrorIs(err, store.ErrSourceNotFound)
 	after, err := deps.tokenManager().Load("123", "20")
 	require.NoError(err)
@@ -191,7 +191,7 @@ func TestAddThreadsDaemonExchange(t *testing.T) {
 	assert.Contains(out, identifier)
 	assert.NotContains(out, "synthetic-app-secret")
 	assert.NotContains(out, "synthetic-code")
-	source, err := st.GetSourceByTypeAndIdentifier(sourceTypeThreads, identifier)
+	source, err := st.GetSourceByTypeAndIdentifier(t.Context(), sourceTypeThreads, identifier)
 	require.NoError(err)
 	assert.Equal("Archive Owner", source.DisplayName.String)
 	identities, err := st.ListAccountIdentitiesContext(t.Context(), source.ID)
@@ -210,7 +210,7 @@ func TestAddThreadsDaemonExchange(t *testing.T) {
 	assert.Contains(out, identifier)
 	_, err = executeAddThreadsFixture(t, deps, "124", false)
 	require.NoError(err)
-	other, err := st.GetSourceByTypeAndIdentifier(sourceTypeThreads, "threads:124:9007199254740993123")
+	other, err := st.GetSourceByTypeAndIdentifier(t.Context(), sourceTypeThreads, "threads:124:9007199254740993123")
 	require.NoError(err)
 	assert.NotEqual(source.ID, other.ID)
 }

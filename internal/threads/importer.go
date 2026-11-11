@@ -194,7 +194,7 @@ func (i *Importer) Import(ctx context.Context, o ImportOptions) (sum *ImportSumm
 				cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 				defer cancel()
 				sum.Status = store.SyncStatusPaused
-				retErr = scoped.PauseSyncWithCheckpointContext(cleanup, runID, cp)
+				retErr = scoped.PauseSyncWithCheckpoint(cleanup, runID, cp)
 			} else {
 				retErr = errors.Join(retErr, scoped.InterruptSyncWithCheckpoint(ctx, runID, cause, cp))
 			}
@@ -226,7 +226,7 @@ func (i *Importer) Import(ctx context.Context, o ImportOptions) (sum *ImportSumm
 		}
 		if e != nil && processed < 0 {
 			sum.Status = store.SyncStatusPaused
-			if err = scoped.PauseSyncWithCheckpointContext(ctx, runID, cp); err != nil {
+			if err = scoped.PauseSyncWithCheckpoint(ctx, runID, cp); err != nil {
 				return sum, err
 			}
 			finished = true
@@ -260,7 +260,7 @@ func (i *Importer) Import(ctx context.Context, o ImportOptions) (sum *ImportSumm
 		}
 		if e != nil {
 			sum.Status = store.SyncStatusPaused
-			if err = scoped.PauseSyncWithCheckpointContext(ctx, runID, cp); err != nil {
+			if err = scoped.PauseSyncWithCheckpoint(ctx, runID, cp); err != nil {
 				return sum, err
 			}
 			finished = true

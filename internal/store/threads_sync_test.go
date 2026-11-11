@@ -36,7 +36,7 @@ func threadsRun(t *testing.T, st *store.Store, source int64, mode, fingerprint, 
 	case store.SyncStatusCompleted:
 		require.NoError(t, st.CompleteSyncContext(t.Context(), id, state))
 	case store.SyncStatusPaused:
-		require.NoError(t, st.PauseSyncWithCheckpointContext(t.Context(), id, cp))
+		require.NoError(t, st.PauseSyncWithCheckpoint(t.Context(), id, cp))
 	case store.SyncStatusFailed:
 		require.NoError(t, st.FailSyncWithCheckpointContext(t.Context(), id, "synthetic failure", cp))
 	case store.SyncStatusCancelled:
@@ -213,7 +213,7 @@ func TestThreadsRootKeysetAndPause(t *testing.T) {
 	id, err := st.StartSyncContext(ctx, source, store.ThreadsSyncBaseline)
 	require.NoError(err)
 	checkpoint := `{"version":1,"hot_roots":{"through_id":3,"hot_since":"2026-10-23T12:00:00Z","active_root":"802","cursor":"next"}}`
-	require.NoError(st.PauseSyncWithCheckpointContext(ctx, id, &store.Checkpoint{PageToken: checkpoint, MessagesAdded: 3}))
+	require.NoError(st.PauseSyncWithCheckpoint(ctx, id, &store.Checkpoint{PageToken: checkpoint, MessagesAdded: 3}))
 	var status, before string
 	var after sql.NullString
 	var added int64
@@ -233,8 +233,8 @@ func TestThreadsRootKeysetAndPauseCancellation(t *testing.T) {
 	defer func() { require.NoError(st.FailSync(id, "cleanup")) }()
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	require.ErrorIs(st.PauseSyncWithCheckpointContext(ctx, id, &store.Checkpoint{PageToken: "state"}), context.Canceled)
-	require.ErrorIs(st.UpdateSourceSyncConfigContext(ctx, source, `{"version":1}`), context.Canceled)
+	require.ErrorIs(st.PauseSyncWithCheckpoint(ctx, id, &store.Checkpoint{PageToken: "state"}), context.Canceled)
+	require.ErrorIs(st.UpdateSourceSyncConfig(ctx, source, `{"version":1}`), context.Canceled)
 	_, err = st.ThreadsOwnRootUpperKeyContext(ctx, source)
 	require.ErrorIs(err, context.Canceled)
 	_, err = st.ListThreadsOwnRootsContext(ctx, source, 0, 1, time.Time{}, 10)

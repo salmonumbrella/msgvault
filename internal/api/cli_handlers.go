@@ -1438,6 +1438,8 @@ func (s *Server) handleCLIRun(w http.ResponseWriter, r *http.Request) {
 	if err := runner.RunCLICommand(s.WithPublishedVectorConfig(r.Context()), req, writeEvent); err != nil {
 		if coded, ok := errors.AsType[*CLIRunCodedError](err); ok {
 			s.logger.Error("failed to run CLI command", "command", req.Args[0], "error_code", coded.Code, "cause", coded.Err)
+		} else if IsCLIRunSendReply(req.Args) {
+			s.logger.Error("failed to run CLI command", "command", req.Args[0], "error", err)
 		} else {
 			s.logger.Error("failed to run CLI command", "args", req.Args, "error", err)
 		}
