@@ -142,9 +142,11 @@ func TestSendReplyUnsupportedSourceExplainsType(t *testing.T) {
 		SourceMessageID: "message-example", MessageType: "chat",
 	})
 	require.NoError(err)
+	draft, err := st.CreateChatDraftContext(t.Context(), conversationID, messageID, "Thanks!", func(string, string) error { return nil })
+	require.NoError(err)
 	adapter := &storeAPIAdapter{store: st}
 	err = adapter.runCLISendReply(t.Context(), api.CLIRunRequest{
-		Args: []string{"send-reply", strconv.FormatInt(messageID, 10), "--body=Thanks!"},
+		Args: []string{"send-reply", "--draft=" + draft.DraftID, "--revision=1"},
 	}, nil)
 	require.Error(err)
 	assert.ErrorContains(t, err, "replies are not supported for slack sources")
@@ -495,17 +497,15 @@ func TestThreadsSendClientDisconnectPreservesReceipt(t *testing.T) {
 	require.NoError(err)
 	assert.Equal("500", receipt.MediaID)
 	assert.True(receipt.ArchiveComplete)
-	require.NoError(f.deps.tokenManager().Delete("123", "20"))
-	f.cfg.Threads.Sends = nil
-	var out strings.Builder
-	require.NoError(client.RunCLICommand(t.Context(), daemonclient.CLIRunRequest{Args: f.args()}, func(stream, data string) error {
-		if stream == "stdout" {
-			out.WriteString(data)
-		}
-		return nil
-	}))
-	var result threads.SendResult
-	require.NoError(json.Unmarshal([]byte(out.String()), &result))
-	assert.Equal("complete", result.Status)
-	assert.Equal(int32(1), f.publishes.Load())
+}
+
+func TestThreadsSendStaleRevisionStructuredResult(t *testing.T) {
+	f := newThreadsSendDaemonFixture(t)
+	result, _, err := f.run(t.Context(), []string{"send-reply", "--draft=" + f.draft.DraftID, "--revision=2", "--json"})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "revision_mismatch")
+	assert.Equal(t, "revision_mismatch", result.Status)
+	assert.Equal(t, "revision_mismatch", result.ErrorCategory)
+	assert.Equal(t, "unpublished", result.RemoteStatus)
+	assert.Zero(t, f.creates.Load())
 }

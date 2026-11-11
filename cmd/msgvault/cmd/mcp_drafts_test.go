@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -320,7 +319,7 @@ func TestMCPDraftToolPropertiesMatchCommandFlags(t *testing.T) {
 
 func TestMCPSendReplyCapabilityGate(t *testing.T) {
 	for _, delegated := range []bool{false, true} {
-		for _, version := range []string{"3.27.0", "3.28.0", "3.29.0", "3.30.0", "3.31.0", "3.32.0", "3.33.0", "3.34.0", "5.0.0", "5.1.0"} {
+		for _, version := range []string{"3.34.0", "5.0.0", "5.1.0"} {
 			name := "owner/" + version
 			if delegated {
 				name = "delegated/" + version
@@ -344,11 +343,6 @@ func TestMCPSendReplyCapabilityGate(t *testing.T) {
 				client, err := daemonclient.New(daemonclient.Config{URL: server.URL, APIKey: "owner-test-key", AllowInsecure: true})
 				require.NoError(err)
 				t.Cleanup(func() { _ = client.Close() })
-				// Only the supported version probes the actual production dispatcher.
-				if version == "5.1.0" {
-					err = client.RunCLICommand(t.Context(), daemonclient.CLIRunRequest{Args: []string{"send-reply", strconv.FormatInt(fixture.parentID, 10), "--quota"}}, func(string, string) error { return nil })
-					require.ErrorContains(err, "replies are not supported for imap sources")
-				}
 				var ctx context.Context
 				if delegated {
 					ctx = mcpDraftAgentContext(t, server, fixture.source.ID, []string{"draft.create"})

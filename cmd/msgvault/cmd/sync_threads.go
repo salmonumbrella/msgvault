@@ -33,10 +33,16 @@ func newSyncThreadsLocalCmd(deps threadsCommandDeps) *cobra.Command {
 			return usageErr(cmd, err)
 		}
 		request := threads.SyncRequest{Full: full, PostID: post}
-		if after != "" {
+		if cmd.Flags().Changed("post") && post == "" {
+			return usageErr(cmd, errors.New("threads --post must be nonempty"))
+		}
+		if cmd.Flags().Changed("after") {
 			parsed, err := time.Parse(time.RFC3339Nano, after)
 			if err != nil {
 				return usageErr(cmd, errors.New("threads --after must be RFC3339"))
+			}
+			if parsed.IsZero() {
+				return usageErr(cmd, errors.New("threads history floor precedes the earliest supported time"))
 			}
 			request.After = parsed
 		}

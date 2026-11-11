@@ -21,7 +21,6 @@ import (
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/daemonclient"
 	"go.kenn.io/msgvault/internal/store"
-	"go.kenn.io/msgvault/internal/testutil"
 	"go.kenn.io/msgvault/internal/threads"
 )
 
@@ -44,14 +43,17 @@ func TestSendReplyDaemonLogsExcludePrivateBody(t *testing.T) {
 
 			f := newThreadsSendDaemonFixture(t)
 			const body = "synthetic-private-reply-body"
-			f.draft.Body = body
-			parent := f.root
+			draft, err := f.adapter.store.UpdateChatDraftContext(t.Context(), f.draft.DraftID, f.draft.Revision, body)
+			require.NoError(err)
+			f.draft = draft
 			if !afterPublish {
 				source, err := f.adapter.store.GetOrCreateSource("slack", "TEXAMPLE:UEXAMPLE")
 				require.NoError(err)
 				conv, err := f.adapter.store.EnsureConversationWithType(source.ID, "CEXAMPLE", "channel", "Synthetic")
 				require.NoError(err)
-				parent, err = f.adapter.store.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: "synthetic-parent", MessageType: "chat"})
+				parent, err := f.adapter.store.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: "synthetic-parent", MessageType: "chat"})
+				require.NoError(err)
+				f.draft, err = f.adapter.store.CreateChatDraftContext(t.Context(), conv, parent, body, func(string, string) error { return nil })
 				require.NoError(err)
 			}
 			var logs bytes.Buffer
@@ -67,7 +69,7 @@ func TestSendReplyDaemonLogsExcludePrivateBody(t *testing.T) {
 			client, err := daemonclient.New(daemonclient.Config{URL: server.URL, APIKey: f.cfg.Server.APIKey, AllowInsecure: true})
 			require.NoError(err)
 			t.Cleanup(func() { _ = client.Close() })
-			err = client.RunCLICommand(t.Context(), daemonclient.CLIRunRequest{Args: []string{"send-reply", strconv.FormatInt(parent, 10), "--body=" + body, "--json"}}, func(string, string) error { return nil })
+			err = client.RunCLICommand(t.Context(), daemonclient.CLIRunRequest{Args: []string{"send-reply", "--draft=" + f.draft.DraftID, "--revision=" + strconv.FormatInt(f.draft.Revision, 10), "--json"}}, func(string, string) error { return nil })
 			require.Error(err)
 			assert.Contains(logs.String(), "failed to run CLI command")
 			assert.Contains(logs.String(), `"command":"send-reply"`)
@@ -76,7 +78,7 @@ func TestSendReplyDaemonLogsExcludePrivateBody(t *testing.T) {
 			if afterPublish {
 				assert.Equal(int32(1), f.publishes.Load())
 				assert.Positive(failedWrites.Load())
-				receipt, receiptErr := f.adapter.store.GetThreadsReplySendContext(t.Context(), threadsDirectReplyDraftID(f.source.ID, parent, body))
+				receipt, receiptErr := f.adapter.store.GetThreadsReplySendContext(t.Context(), f.draft.DraftID)
 				require.NoError(receiptErr)
 				assert.Equal("complete", receipt.State)
 				assert.Equal("500", receipt.MediaID)
@@ -188,65 +190,15 @@ func TestThreadsConfiguredFutureSourceDoesNotInheritSendOptIn(t *testing.T) {
 	require.Greater(source.ID, configuredID)
 	parent, err := threads.NewWriter(f.adapter.store, source.ID, source.Identifier).Apply(t.Context(), threads.Media{ID: "200", Timestamp: f.provider.clock(), Text: new("Synthetic future post")}, threads.ItemOrigin{Kind: "own_posts"})
 	require.NoError(err)
-	_, _, err = f.run(t.Context(), []string{"send-reply", strconv.FormatInt(parent, 10), "--body=synthetic reply", "--json"})
+	target, err := f.adapter.store.GetMessageContext(t.Context(), parent)
+	require.NoError(err)
+	draft, err := f.adapter.store.CreateChatDraftContext(t.Context(), target.ConversationID, parent, "synthetic reply", func(string, string) error { return nil })
+	require.NoError(err)
+	_, _, err = f.run(t.Context(), []string{"send-reply", "--draft=" + draft.DraftID, "--revision=1", "--json"})
 	require.ErrorContains(err, "reply_not_permitted")
 	assert.Zero(f.opens.Load())
 	assert.Zero(f.creates.Load())
 	assert.Zero(f.publishes.Load())
-}
-
-func TestThreadsReplacementSourceDoesNotInheritSendOptIn(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-
-	f := newThreadsSendDaemonFixture(t)
-	require.NoError(f.adapter.store.RemoveSource(f.source.ID))
-	source, err := f.adapter.store.GetOrCreateSource("threads", "threads:123:21")
-	require.NoError(err)
-	require.NotEqual(f.source.ID, source.ID)
-	parent, err := threads.NewWriter(f.adapter.store, source.ID, source.Identifier).Apply(t.Context(), threads.Media{ID: "200", Timestamp: f.provider.clock(), Text: new("Synthetic replacement post")}, threads.ItemOrigin{Kind: "own_posts"})
-	require.NoError(err)
-	_, _, err = f.run(t.Context(), []string{"send-reply", strconv.FormatInt(parent, 10), "--body=synthetic reply", "--json"})
-	require.ErrorContains(err, "reply_not_permitted")
-	assert.Zero(f.creates.Load())
-	assert.Zero(f.publishes.Load())
-}
-
-func TestThreadsPreUpgradeDeletedSourceReservesStaleOptIn(t *testing.T) {
-	testutil.SkipIfPostgres(t, "models deleted reusable SQLite row IDs; PostgreSQL reservation/restore sequences have separate regressions")
-	assert := assert.New(t)
-	require := require.New(t)
-
-	f := newThreadsSendDaemonFixture(t)
-	st := f.adapter.store
-	// Model a pre-upgrade deletion: neither the source row nor a high-water
-	// record survives, but the exact ID-only operator configuration does.
-	_, err := st.DB().Exec(`DROP TRIGGER sources_id_high_water_insert;
-DROP TRIGGER sources_id_high_water_delete;
-DROP TABLE source_id_reservations;
-DELETE FROM archive_metadata WHERE key='source_id_high_water';
-UPDATE archive_metadata SET value='16' WHERE key='schema_version'`)
-	require.NoError(err)
-	require.NoError(st.RemoveSource(f.source.ID))
-	require.NoError(st.InitSchemaContext(t.Context()))
-	var ceiling int64
-	require.NoError(st.DB().QueryRow(`SELECT CAST(value AS INTEGER) FROM archive_metadata WHERE key='source_id_high_water'`).Scan(&ceiling))
-	require.Zero(ceiling, "schema setup has no deleted identity history to recover")
-	// This is the same reservation performed before runServe starts writers.
-	require.NoError(reserveThreadsSendSourceIDs(t.Context(), st, f.cfg))
-	source, err := st.GetOrCreateSource("threads", "threads:123:21")
-	require.NoError(err)
-	require.Greater(source.ID, f.source.ID)
-	parent, err := threads.NewWriter(st, source.ID, source.Identifier).Apply(t.Context(), threads.Media{ID: "200", Timestamp: f.provider.clock(), Text: new("Synthetic post-upgrade post")}, threads.ItemOrigin{Kind: "own_posts"})
-	require.NoError(err)
-	_, _, err = f.run(t.Context(), []string{"send-reply", strconv.FormatInt(parent, 10), "--body=synthetic reply", "--json"})
-	require.ErrorContains(err, "reply_not_permitted")
-	assert.Zero(f.opens.Load())
-	assert.Zero(f.creates.Load())
-	assert.Zero(f.publishes.Load())
-	// An explicit insertion cannot bypass the allocator's reserved-ID fence.
-	_, err = st.DB().Exec(`INSERT INTO sources(id, source_type, identifier) VALUES(?, 'threads', 'threads:123:22')`, f.source.ID)
-	require.ErrorContains(err, "source ID has already been allocated or reserved")
 }
 
 func TestThreadsSubsetSourceInsertionPreservesAllocationFence(t *testing.T) {

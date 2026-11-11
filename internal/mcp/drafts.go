@@ -43,9 +43,9 @@ var stableDraftOutputSchema = &jsonschema.Schema{Schema: schema202012, Type: "ob
 
 var stableDraftDefinitions = func() map[string]toolDefinition {
 	definitions := map[string]toolDefinition{
-		"send-reply": destructiveWriteDefinition(ToolSendReply, "Send a reply to an archived message or reviewed local chat draft through the source owner's daemon. The archived message or draft determines the source. Sending requires source opt-in and client confirmation. An uncertain publish is never retried.", closedObject(map[string]*jsonschema.Schema{
-			"message_id": safeIDSchema("Archived message ID for a direct reply or quota inspection"), "body": stringSchema("Reply text for a direct send"),
-			"draft_id": stringSchema("Reviewed local chat draft ID"), "revision": safeIDSchema("Reviewed draft revision"), "adopt_media_id": stringSchema("Explicit existing own-reply media ID for recovery"),
+		"send-reply": destructiveWriteDefinition(ToolSendReply, "Publish a reviewed local chat draft through the source owner's daemon, or inspect quota for an archived message source. Sending requires source opt-in and client confirmation. An uncertain publish is never retried.", closedObject(map[string]*jsonschema.Schema{
+			"message_id": safeIDSchema("Archived message ID for quota inspection"),
+			"draft_id":   stringSchema("Reviewed local chat draft ID"), "revision": safeIDSchema("Reviewed draft revision"), "adopt_media_id": stringSchema("Explicit existing own-reply media ID for recovery"),
 			"quota": booleanSchema("Inspect reply quota for the archived message's source"),
 		}), stableDraftOutputSchema, func(h *handlers, ctx context.Context, req toolRequest) (*toolResult, error) {
 			return h.sendReplyToolHandler(ctx, req)

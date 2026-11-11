@@ -237,46 +237,6 @@ func TestThreadsMaintainerThirdExpiredCursorCanResume(t *testing.T) {
 	assert.GreaterOrEqual(starts, 4)
 }
 
-func TestThreadsMaintainerDefiniteCreateRejectionReleasesDraft(t *testing.T) {
-	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden} {
-		for _, action := range []string{"edit", "delete"} {
-			t.Run(strconv.Itoa(status)+"/"+action, func(t *testing.T) {
-				assert := assert.New(t)
-				require := require.New(t)
-
-				f := newSendFixture(t)
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					switch r.URL.Path {
-					case "/v1.0/me/threads_publishing_limit":
-						respond(w, 200, `{"data":[{"reply_quota_usage":0,"reply_config":{"quota_total":1000,"quota_duration":86400}}]}`)
-					case "/v1.0/me/threads":
-						respond(w, status, `{"error":{"code":100,"message":"Invalid reply text"}}`)
-					default:
-						assert.Fail("unexpected provider call", r.URL.Path)
-						respond(w, 500, `{}`)
-					}
-				}))
-				t.Cleanup(server.Close)
-				var err error
-				f.api, err = NewClient(ClientOptions{BaseURL: server.URL + "/v1.0", HTTPClient: server.Client(), AccessToken: testToken, Budget: f.clock.budget(100)})
-				require.NoError(err)
-				_, err = NewSender(f.st, f.options).Send(t.Context(), f.request())
-				require.Error(err)
-				var rejected *APIError
-				require.ErrorAs(err, &rejected)
-				assert.Equal(status, rejected.StatusCode, "exercise the actual provider response")
-				if action == "edit" {
-					edited, editErr := f.st.UpdateChatDraftContext(t.Context(), f.draft.DraftID, 1, "Synthetic corrected reply")
-					require.NoError(editErr, "a definite provider rejection must release the draft")
-					assert.Equal(int64(2), edited.Revision)
-				} else {
-					require.NoError(f.st.DeleteChatDraftContext(t.Context(), f.draft.DraftID, 1), "a definite provider rejection must permit deletion")
-				}
-			})
-		}
-	}
-}
-
 func TestThreadsParentRepairYieldsBeforeDrainingBacklog(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)

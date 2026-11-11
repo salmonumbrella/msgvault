@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json/v2"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -219,4 +220,21 @@ func TestSyncThreadsJSONCoverage(t *testing.T) {
 	assert.True(result.HistoryComplete)
 	assert.Zero(result.PendingWalks)
 	assert.Equal(time.Unix(1688540400, 0).UTC(), result.RequestedFloor)
+}
+
+func TestSyncThreadsRejectsExplicitEmptyOrZeroFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"threads:123:20", "--after="},
+		{"threads:123:20", "--post="},
+		{"threads:123:20", "--after=0001-01-01T00:00:00Z"},
+		{"threads:123:20", "--after=0001-01-01T00:00:00Z", "--post=100"},
+	} {
+		t.Run(strings.Join(args[1:], "_"), func(t *testing.T) {
+			cmd := newSyncThreadsLocalCmd(threadsCommandDeps{})
+			cmd.SetArgs(args)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			require.Error(t, cmd.ExecuteContext(t.Context()))
+		})
+	}
 }

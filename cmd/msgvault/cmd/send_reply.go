@@ -11,7 +11,7 @@ func newSendReplyCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use:   "send-reply [archived-message-id]",
 		Short: "Send a reviewed reply",
-		Long:  "Send a reply using the source of the archived message or reviewed local draft. The source owner must enable sending.",
+		Long:  "Publish a reviewed local draft. Use an archived message ID only to inspect its source quota. The source owner must enable sending.",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			argv, err := daemonCLIArgsFromCobra(cmd, args)
@@ -26,7 +26,6 @@ func newSendReplyCommand() *cobra.Command {
 	}
 	command.Flags().String("draft", "", "Reviewed local chat draft ID")
 	command.Flags().Int64("revision", 0, "Reviewed draft revision")
-	command.Flags().String("body", "", "Reply text for a direct send")
 	command.Flags().String("adopt-media-id", "", "Explicit own-reply ID for unknown-send recovery")
 	command.Flags().Bool("quota", false, "Inspect reply quota for the archived message's source")
 	command.Flags().Bool("json", false, "Emit one structured result")

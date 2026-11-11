@@ -485,25 +485,31 @@ func TestThreadsPollingCooldownCheckpointSurvivesCancellation(t *testing.T) {
 }
 
 func TestThreadsRetryDefinitelyRejectedDraft(t *testing.T) {
-	for _, edit := range []bool{false, true} {
-		t.Run(fmt.Sprint(edit), func(t *testing.T) {
-			f := newSendFixture(t)
-			f.createErrors = []APIError{{StatusCode: http.StatusBadRequest, Code: 100}}
-			sender := NewSender(f.st, f.options)
-			result, err := sender.Send(t.Context(), f.request())
-			require.Error(t, err)
-			assert.Equal(t, "unpublished", result.RemoteStatus)
-			assert.Zero(t, f.publishes.Load())
-			if edit {
-				draft, err := f.st.UpdateChatDraftContext(t.Context(), f.draft.DraftID, f.draft.Revision, "corrected reply")
+	for _, tc := range []struct {
+		status int
+		want   string
+	}{{http.StatusBadRequest, "send_failed"}, {http.StatusForbidden, "reply_not_permitted"}} {
+		for _, edit := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%d/edit=%t", tc.status, edit), func(t *testing.T) {
+				f := newSendFixture(t)
+				f.createErrors = []APIError{{StatusCode: tc.status, Code: 100}}
+				sender := NewSender(f.st, f.options)
+				result, err := sender.Send(t.Context(), f.request())
+				require.Error(t, err)
+				assert.Equal(t, tc.want, result.Status)
+				assert.Equal(t, "unpublished", result.RemoteStatus)
+				assert.Zero(t, f.publishes.Load())
+				if edit {
+					draft, err := f.st.UpdateChatDraftContext(t.Context(), f.draft.DraftID, f.draft.Revision, "corrected reply")
+					require.NoError(t, err)
+					f.draft = draft
+				}
+				result, err = sender.Send(t.Context(), f.request())
 				require.NoError(t, err)
-				f.draft = draft
-			}
-			result, err = sender.Send(t.Context(), f.request())
-			require.NoError(t, err)
-			assert.Equal(t, "sent", result.RemoteStatus)
-			assert.Equal(t, int32(2), f.creates.Load())
-			assert.Equal(t, int32(1), f.publishes.Load())
-		})
+				assert.Equal(t, "sent", result.RemoteStatus)
+				assert.Equal(t, int32(2), f.creates.Load())
+				assert.Equal(t, int32(1), f.publishes.Load())
+			})
+		}
 	}
 }

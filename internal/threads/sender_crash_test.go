@@ -153,9 +153,20 @@ func TestThreadsOnePublishContainerOutcomes(t *testing.T) {
 			}
 			assert.Zero(f.publishes.Load())
 			f.setStatuses("FINISHED")
-			_, _ = NewSender(f.st, f.options).Send(t.Context(), f.request())
-			assert.Equal(int32(1), f.creates.Load())
-			assert.Zero(f.publishes.Load())
+			if status == "PUBLISHED" {
+				_, _ = NewSender(f.st, f.options).Send(t.Context(), f.request())
+				assert.Equal(int32(1), f.creates.Load())
+				assert.Zero(f.publishes.Load())
+			} else {
+				// Editing advanced the revision; retry the revised draft explicitly.
+				draft, err := f.st.GetChatDraftContext(t.Context(), f.draft.DraftID)
+				require.NoError(err)
+				f.draft = draft
+				_, err = NewSender(f.st, f.options).Send(t.Context(), f.request())
+				require.NoError(err)
+				assert.Equal(int32(2), f.creates.Load())
+				assert.Equal(int32(1), f.publishes.Load())
+			}
 		})
 	}
 }
@@ -313,4 +324,47 @@ func TestThreadsOnePublishLimiterTimeBeforeBarrier(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestThreadsPublishedStatusSurvivesCancellation(t *testing.T) {
+	f := newSendFixture(t)
+	f.setStatuses("PUBLISHED")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	openAPI := f.options.OpenAPI
+	f.options.OpenAPI = func(ctx context.Context, sourceID int64) (PublishAPI, []string, error) {
+		api, scopes, err := openAPI(ctx, sourceID)
+		return cancelAfterStatusAPI{PublishAPI: api, cancel: cancel}, scopes, err
+	}
+	result, err := NewSender(f.st, f.options).Send(ctx, f.request())
+	f.options.OpenAPI = openAPI
+	require.Error(t, err)
+	assert.Equal(t, "remote_unknown", result.Status)
+	receipt, err := f.st.GetThreadsReplySendContext(t.Context(), f.draft.DraftID)
+	require.NoError(t, err)
+	assert.Equal(t, "remote_unknown", receipt.State)
+	require.NotNil(t, receipt.PublishDispatchedAt)
+	f.setStatuses("FINISHED")
+	again, err := NewSender(f.st, f.options).Send(t.Context(), f.request())
+	require.NoError(t, err)
+	assert.Equal(t, "remote_unknown", again.Status)
+	assert.Zero(t, f.publishes.Load())
+}
+
+func TestThreadsPublishedStatusWriteFailureNeverBecomesReady(t *testing.T) {
+	f := newSendFixture(t)
+	f.setStatuses("PUBLISHED")
+	installSenderReceiptFault(t, f.st, "NEW.state='remote_unknown'")
+	_, err := NewSender(f.st, f.options).Send(t.Context(), f.request())
+	require.Error(t, err)
+	receipt, err := f.st.GetThreadsReplySendContext(t.Context(), f.draft.DraftID)
+	require.NoError(t, err)
+	assert.Equal(t, "container_saved", receipt.State)
+	assert.Nil(t, receipt.PublishDispatchedAt)
+	assert.Zero(t, f.publishes.Load())
+	dropSenderReceiptFault(t, f.st)
+	result, err := NewSender(f.st, f.options).Send(t.Context(), f.request())
+	require.Error(t, err)
+	assert.Equal(t, "remote_unknown", result.Status)
+	assert.Zero(t, f.publishes.Load())
 }

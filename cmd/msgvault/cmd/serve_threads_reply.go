@@ -2,12 +2,9 @@ package cmd
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json/v2"
 	"errors"
 	"slices"
-	"strconv"
 
 	"go.kenn.io/msgvault/internal/api"
 	"go.kenn.io/msgvault/internal/config"
@@ -94,53 +91,6 @@ func (a *storeAPIAdapter) runCLIThreadsSendReply(
 						return threads.ErrReplyNotPermitted
 					}
 				}
-			} else {
-				if err := threads.ValidateReplyBody(intent.Body); err != nil {
-					failureCode = "invalid_body"
-					return err
-				}
-				draftID = threadsDirectReplyDraftID(source.ID, intent.MessageID, intent.Body)
-				receipt, receiptErr := a.store.GetThreadsReplySendContext(runCtx, draftID)
-				if receiptErr == nil {
-					if receipt.SourceID != source.ID || receipt.SourceIdentifier != source.Identifier ||
-						receipt.Body != intent.Body || receipt.DraftRevision != 1 {
-						failureCode = "not_permitted"
-						return threads.ErrReplyNotPermitted
-					}
-					revision = receipt.DraftRevision
-				} else {
-					if !errors.Is(receiptErr, store.ErrThreadsReplyNotFound) {
-						failureCode = "draft_unavailable"
-						return receiptErr
-					}
-					if !threadsSourceSendEnabled(a.config, source.ID) {
-						failureCode = "reply_not_permitted"
-						return threads.ErrReplyNotPermitted
-					}
-					target, err := a.store.GetMessageContext(runCtx, intent.MessageID)
-					if err != nil {
-						failureCode = "invalid_target"
-						return err
-					}
-					if target.SourceID != source.ID || target.MessageType != "threads" || target.ConversationID <= 0 || target.SourceConversationID == "" || target.SourceMessageID == "" {
-						failureCode = "not_permitted"
-						return threads.ErrReplyNotPermitted
-					}
-					if _, err := a.store.GetThreadsOwnRootContext(runCtx, source.ID, target.SourceConversationID); err != nil {
-						failureCode = "not_permitted"
-						return threads.ErrReplyNotPermitted
-					}
-					if err := a.store.ValidateThreadsReplyTargetContext(runCtx, source.ID, target.ConversationID, target.SourceConversationID, target.SourceMessageID); err != nil {
-						failureCode = "not_permitted"
-						return threads.ErrReplyNotPermitted
-					}
-					draft, err := a.store.CreateChatDraftWithIDContext(runCtx, draftID, target.ConversationID, target.ID, intent.Body, func(string, string) error { return nil })
-					if err != nil {
-						failureCode = "invalid_target"
-						return err
-					}
-					revision = draft.Revision
-				}
 			}
 		}
 		openAPI := func(callCtx context.Context, id int64) (threads.PublishAPI, []string, error) {
@@ -212,6 +162,13 @@ func (a *storeAPIAdapter) runCLIThreadsSendReply(
 		}
 		return emitSendReplyJSON(emit, quota)
 	}
+	if errors.Is(runErr, store.ErrChatDraftRevisionConflict) {
+		failureCode = "revision_mismatch"
+		result.ErrorCategory = "revision_mismatch"
+		if result.RemoteStatus == "unpublished" {
+			result.Status = "revision_mismatch"
+		}
+	}
 	if result.DraftID == "" {
 		return coded(failureCode, runErr)
 	}
@@ -228,7 +185,11 @@ func (a *storeAPIAdapter) runCLIThreadsSendReply(
 	}
 	outputErr := emitSendReplyJSON(emit, result)
 	if runErr != nil {
-		return errors.Join(outputErr, coded(result.Status, runErr))
+		code := result.Status
+		if failureCode == "revision_mismatch" {
+			code = failureCode
+		}
+		return errors.Join(outputErr, coded(code, runErr))
 	}
 	return outputErr
 }
@@ -264,10 +225,4 @@ func threadsSourceSendEnabled(cfg *config.Config, sourceID int64) bool {
 		}
 	}
 	return false
-}
-
-func threadsDirectReplyDraftID(sourceID, messageID int64, body string) string {
-	identity := strconv.FormatInt(sourceID, 10) + "\x00" + strconv.FormatInt(messageID, 10) + "\x00" + body
-	sum := sha256.Sum256([]byte(identity))
-	return store.ChatDraftIDPrefix + "direct-" + hex.EncodeToString(sum[:])
 }

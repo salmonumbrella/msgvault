@@ -57,6 +57,7 @@ func TestMCPArchiveFamilies(t *testing.T) {
 		{"slack", "get_slack_sync_policy"},
 		{"imap", "draft_reply"},
 		{"teams", "draft_compose"}, {"discord", "draft_compose"},
+		{"threads", "draft_compose"}, {"threads", "find_chat"},
 		{"whatsapp", "find_chat"}, {"telegram", "find_chat"}, {"matrix", "find_chat"},
 		{"apple_messages", "find_chat"}, {"synctech_sms", "find_chat"}, {"imazing_csv", "find_chat"},
 		{"facebook_messenger", "find_chat"},

@@ -3413,10 +3413,9 @@ Both routes require owner access. `POST` returns `202` for a new or already-runn
 
 On unreleased `main`, `POST /api/v1/cli/run` admits the shared `send-reply`
 command for owner credentials and executes it inside the daemon's mutation gate.
-The archived message or local draft determines the source, which dispatches to
-the sender registered for that source type. This branch adds Threads. A direct
-reply uses a positional archived message ID and `--body`; a reviewed draft uses
-`--draft` plus `--revision` and optional `--adopt-media-id`. Quota inspection
+The local draft determines the source, which dispatches to the sender registered
+for that source type. This branch adds Threads. A reviewed draft uses `--draft`
+plus `--revision` and optional `--adopt-media-id`. Quota inspection
 uses a positional archived message ID plus `--quota`. Environment overrides,
 working directories and delegated
 credentials are rejected. Current source policy and verified scopes are checked

@@ -43,27 +43,16 @@ func TestSendReplyMCPConfirmation(t *testing.T) {
 	}
 }
 
-func TestSendReplyMCPDirectReply(t *testing.T) {
-	assert := assert.New(t)
-	runner := &draftTestRunner{result: DraftCommandResult{Stdout: `{"draft_id":"chat-draft-created","status":"complete","remote_status":"sent","local_status":"complete"}`}}
-	args := map[string]any{"message_id": 101, "body": "Thanks!"}
-	result := confirmedCallTool(t, ServeOptions{Drafts: runner, DraftCommands: []string{"send-reply"}}, "send_reply", args, true)
-	assert.False(replyToolIsError(t, result))
-	assert.Equal("101", runner.request.Positional)
-	assert.Equal([]string{"Thanks!"}, runner.request.Flags["body"])
-	assert.Empty(runner.request.Flags["source-id"])
-}
-
 func TestSendReplyMCPTruncatedResult(t *testing.T) {
 	runner := &draftTestRunner{result: DraftCommandResult{Stdout: `{"remote_status":"sent"`}, err: errors.New("stream disconnected")}
-	result := confirmedCallTool(t, ServeOptions{Drafts: runner, DraftCommands: []string{"send-reply"}}, "send_reply", map[string]any{"message_id": 101, "body": "Thanks!"}, true)
+	result := confirmedCallTool(t, ServeOptions{Drafts: runner, DraftCommands: []string{"send-reply"}}, "send_reply", map[string]any{"draft_id": "chat-draft-synthetic", "revision": 1}, true)
 	assert.True(t, replyToolIsError(t, result))
 	assert.Contains(t, strings.ToLower(replyToolText(t, result)), "unknown")
 }
 
 func TestSendReplyMCPReturnsReportedPreSendError(t *testing.T) {
 	runner := &draftTestRunner{err: &DraftCommandError{Message: "replies are not supported for slack sources"}}
-	result := confirmedCallTool(t, ServeOptions{Drafts: runner, DraftCommands: []string{"send-reply"}}, "send_reply", map[string]any{"message_id": 101, "body": "Thanks!"}, true)
+	result := confirmedCallTool(t, ServeOptions{Drafts: runner, DraftCommands: []string{"send-reply"}}, "send_reply", map[string]any{"draft_id": "chat-draft-synthetic", "revision": 1}, true)
 	assert.True(t, replyToolIsError(t, result))
 	assert.Contains(t, replyToolText(t, result), "replies are not supported for slack sources")
 }
@@ -104,6 +93,7 @@ func TestSendReplyMCPRejectsInvalidIntent(t *testing.T) {
 		{"message_id": 101, "body": "direct", "adopt_media_id": "500"},
 		{"draft_id": "chat-draft-synthetic", "revision": 1, "adopt_media_id": ""},
 		{"message_id": 101},
+		{"message_id": 101, "body": "Thanks!"},
 	} {
 		result := rawCallTool(t, ServeOptions{Drafts: runner, DraftCommands: []string{"send-reply"}}, "send_reply", args)
 		assert.True(t, replyToolIsError(t, result))
@@ -135,4 +125,14 @@ func replyToolStructured(t *testing.T, result map[string]any) map[string]any {
 	structured, ok := result["structuredContent"].(map[string]any)
 	require.True(t, ok)
 	return structured
+}
+
+func TestSendReplyMCPPreservesRevisionMismatch(t *testing.T) {
+	runner := &draftTestRunner{result: DraftCommandResult{Stdout: `{"draft_id":"chat-draft-synthetic","status":"revision_mismatch","error_category":"revision_mismatch","remote_status":"unpublished","local_status":"draft_kept"}`}, err: &DraftCommandError{Message: "revision_mismatch"}}
+	result := confirmedCallTool(t, ServeOptions{Drafts: runner, DraftCommands: []string{"send-reply"}}, "send_reply", map[string]any{"draft_id": "chat-draft-synthetic", "revision": 2}, true)
+	assert.True(t, replyToolIsError(t, result))
+	outcome := replyToolStructured(t, result)
+	assert.Equal(t, "revision_mismatch", outcome["status"])
+	assert.Equal(t, "revision_mismatch", outcome["error_category"])
+	assert.Equal(t, "unpublished", outcome["remote_status"])
 }

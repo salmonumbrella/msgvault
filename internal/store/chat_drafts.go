@@ -36,7 +36,6 @@ type ChatDraftAuthorizer func(sourceType, identifier string) error
 var (
 	ErrChatDraftNotFound           = errors.New("chat draft not found")
 	ErrChatDraftRevisionConflict   = errors.New("chat draft revision conflict")
-	ErrChatDraftIDConflict         = errors.New("chat draft ID already has different contents")
 	ErrChatDraftInvalidDestination = errors.New("invalid chat draft destination")
 	ErrChatDraftUnsupportedSource  = errors.New("unsupported chat draft source")
 )
@@ -87,32 +86,11 @@ func loadChatDraftDestination(
 func (s *Store) CreateChatDraftContext(
 	ctx context.Context, conversationID, replyToMessageID int64, body string, authorize ChatDraftAuthorizer,
 ) (ChatDraft, error) {
-	return s.createChatDraftContext(ctx, "", conversationID, replyToMessageID, body, authorize)
-}
-
-// CreateChatDraftWithIDContext creates a draft under a caller-supplied stable
-// ID. Repeating the same creation is idempotent; reusing the ID for different
-// draft contents returns ErrChatDraftIDConflict.
-func (s *Store) CreateChatDraftWithIDContext(
-	ctx context.Context, draftID string, conversationID, replyToMessageID int64, body string, authorize ChatDraftAuthorizer,
-) (ChatDraft, error) {
-	if !strings.HasPrefix(draftID, ChatDraftIDPrefix) || len(draftID) == len(ChatDraftIDPrefix) {
-		return ChatDraft{}, ErrChatDraftInvalidDestination
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return ChatDraft{}, fmt.Errorf("generate chat draft ID: %w", err)
 	}
-	return s.createChatDraftContext(ctx, draftID, conversationID, replyToMessageID, body, authorize)
-}
-
-func (s *Store) createChatDraftContext(
-	ctx context.Context, draftID string, conversationID, replyToMessageID int64, body string, authorize ChatDraftAuthorizer,
-) (ChatDraft, error) {
-	stableID := draftID != ""
-	if !stableID {
-		var raw [16]byte
-		if _, err := rand.Read(raw[:]); err != nil {
-			return ChatDraft{}, fmt.Errorf("generate chat draft ID: %w", err)
-		}
-		draftID = ChatDraftIDPrefix + hex.EncodeToString(raw[:])
-	}
+	draftID := ChatDraftIDPrefix + hex.EncodeToString(raw[:])
 	var draft ChatDraft
 	err := s.withTxContext(ctx, func(tx *loggedTx) error {
 		dest, err := loadChatDraftDestination(ctx, tx, conversationID, authorize)
@@ -148,10 +126,7 @@ func (s *Store) createChatDraftContext(
 				created_at, updated_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, 1, %s, %s)
 		`, s.dialect.ContentChangedNow(), s.dialect.Now())
-		if stableID {
-			insert += ` ON CONFLICT (draft_id) DO NOTHING`
-		}
-		result, err := tx.ExecContext(ctx, insert, draftID, dest.sourceID, conversationID,
+		_, err = tx.ExecContext(ctx, insert, draftID, dest.sourceID, conversationID,
 			dest.nativeID.String, dest.conversationType.String, reply, body)
 		if err != nil {
 			return fmt.Errorf("insert chat draft: %w", err)
@@ -159,18 +134,6 @@ func (s *Store) createChatDraftContext(
 		draft, err = loadChatDraft(ctx, tx, draftID)
 		if err != nil {
 			return err
-		}
-		if stableID {
-			rows, err := result.RowsAffected()
-			if err != nil {
-				return fmt.Errorf("check chat draft insert: %w", err)
-			}
-			if rows == 0 && (draft.SourceID != dest.sourceID || draft.SourceType != dest.sourceType ||
-				draft.SourceIdentifier != dest.identifier || draft.ConversationID != conversationID ||
-				draft.SourceConversationID != dest.nativeID.String || draft.ConversationType != dest.conversationType.String ||
-				draft.ReplyToSourceMessageID != reply.String || draft.Body != body || draft.Revision != 1) {
-				return ErrChatDraftIDConflict
-			}
 		}
 		return nil
 	})

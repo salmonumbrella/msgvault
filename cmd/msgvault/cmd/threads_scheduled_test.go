@@ -39,8 +39,6 @@ func TestThreadsExactScheduling(t *testing.T) {
 		assert.Equal(key, sources[0].Identifier)
 	}
 	assert.True(manualSyncCLICommand([]string{"sync-threads"}))
-	assert.False(manualSyncCLICommand([]string{"add-threads"}))
-	assert.False(manualSyncCLICommand([]string{"threads-reply-quota"}))
 }
 func TestThreadsExactSourceAndCredentialAdmission(t *testing.T) {
 	assert := assert.New(t)

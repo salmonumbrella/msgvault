@@ -345,6 +345,34 @@ func threadsReplyCAS(res sql.Result, err error) error {
 	return nil
 }
 
+// MarkThreadsReplyPublishedUnknownContext records an observed published
+// container and its permanent barrier in one transaction. No publish is issued.
+func (s *Store) MarkThreadsReplyPublishedUnknownContext(ctx context.Context, id string, revision int64) (ThreadsReplySend, error) {
+	var result ThreadsReplySend
+	err := s.withTxContext(ctx, func(tx *loggedTx) error {
+		if err := s.lockChatDraftTx(ctx, tx, id); err != nil {
+			return err
+		}
+		r, err := s.loadThreadsReplyTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if err = validateThreadsReplySourceTx(ctx, tx, r); err != nil {
+			return err
+		}
+		if r.RowRevision != revision || r.State != "container_saved" || r.ContainerID == "" || r.PublishDispatchedAt != nil || r.MediaID != "" {
+			return ErrThreadsReplyConflict
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE threads_reply_sends SET state='remote_unknown',publish_dispatched_at=`+s.dialect.Now()+`,row_revision=row_revision+1,updated_at=`+s.dialect.Now()+` WHERE draft_id=? AND row_revision=? AND state='container_saved' AND publish_dispatched_at IS NULL AND media_id IS NULL`, id, revision)
+		if err = threadsReplyCAS(res, err); err != nil {
+			return err
+		}
+		result, err = s.loadThreadsReplyTx(ctx, tx, id)
+		return err
+	})
+	return result, err
+}
+
 // TryDispatchThreadsReplyContext authorizes only a confirmed commit winner to dispatch. A commit error deliberately
 // loses authorization even if the database might have accepted the barrier.
 func (s *Store) TryDispatchThreadsReplyContext(ctx context.Context, id string, revision int64) (bool, error) {

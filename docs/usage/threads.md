@@ -111,9 +111,9 @@ Media is metadata only: the importer does not download Threads CDN files.
 ## Review authors and identities
 
 The verified owner's app-scoped ID identifies the account within its source.
-Third-party reply authors are reviewable occurrences, with observed usernames
-and names as evidence. The API may omit a stable author ID. Msgvault does not
-invent one or automatically merge people by handle. Renames and recycled handles
+Third-party reply authors are reviewable occurrences, with observed usernames as
+evidence. The API may omit a stable author ID. Msgvault does not invent one or
+automatically merge people by handle. Renames and recycled handles
 therefore do not silently join different people. Confirm a person association
 through the existing people workflow when you have independent evidence.
 
@@ -138,7 +138,6 @@ Create a local draft against an archived parent in your own post's conversation:
 msgvault draft-reply 123 --body 'Thanks for the details.' --json
 msgvault draft-get chat-draft-example --json
 msgvault send-reply --draft chat-draft-example --revision 1 --json
-msgvault send-reply 123 --body 'Thanks!' --json
 msgvault send-reply 123 --quota --json
 ```
 
@@ -148,11 +147,7 @@ parent. `draft-compose --conversation <id> --reply-to <message-id> --body <text>
 can also prepare that draft. Draft creation and
 editing never publish. The archived message or local draft determines the
 source for the shared `send-reply` command. This release registers the Threads
-sender. Use a positional archived message ID with `--body` for a direct send,
-or `--draft` with `--revision` to publish a reviewed local draft. A direct send
-is pinned to a local draft before provider work. Repeating the same direct
-message and body retains a known published outcome; to intentionally send the
-same text again, create a separate reviewed draft. A changed draft revision or
+sender. Use `--draft` with `--revision` to publish a reviewed local draft. A changed draft revision or
 destination is rejected. Sending text must be nonblank UTF-8, contain no NUL,
 and fit within **500 UTF-8 bytes**. Draft bodies can be longer and remain
 editable. Results report `body_bytes` without echoing the text.
@@ -162,9 +157,9 @@ It is owner-only and cannot be combined with draft, revision or adoption flags.
 Delegated tokens cannot connect accounts, enable sending, inspect send receipts
 through this command, query quota, or send.
 
-The owner MCP tool `send_reply` takes either `message_id` plus `body`, or
-`draft_id` plus `revision`; `adopt_media_id` is only for draft recovery. The
-archived message or draft determines the source. Each send requires explicit
+The owner MCP tool `send_reply` takes `draft_id` plus `revision`;
+`adopt_media_id` is only for draft recovery. For quota inspection, use
+`message_id` plus `quota`. The draft or archived message determines the source. Each send requires explicit
 client confirmation of that tool and those arguments. A `confirmed` argument
 cannot authorize it. Clients unable to complete confirmation cannot send.
 Delegated sessions do not expose this tool.

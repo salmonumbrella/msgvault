@@ -16,7 +16,7 @@ func (h *handlers) sendReplyToolHandler(ctx context.Context, req toolRequest) (*
 	args := req.GetArguments()
 	for key := range args {
 		switch key {
-		case "message_id", "body", "draft_id", "revision", "adopt_media_id", "quota":
+		case "message_id", "draft_id", "revision", "adopt_media_id", "quota":
 		default:
 			return toolErrorResult("invalid_args: unsupported send argument"), nil
 		}
@@ -46,14 +46,6 @@ func (h *handlers) sendReplyToolHandler(ctx context.Context, req toolRequest) (*
 			return toolErrorResult("invalid_args: draft_id must be a nonempty string"), nil
 		}
 	}
-	_, bodyProvided := args["body"]
-	if bodyProvided {
-		var ok bool
-		intent.Body, ok = args["body"].(string)
-		if !ok {
-			return toolErrorResult("invalid_args: body must be a string"), nil
-		}
-	}
 	_, adoptProvided := args["adopt_media_id"]
 	if adoptProvided {
 		var ok bool
@@ -70,19 +62,11 @@ func (h *handlers) sendReplyToolHandler(ctx context.Context, req toolRequest) (*
 		}
 	}
 	if intent.DraftID != "" {
-		if intent.MessageID != 0 || !revisionProvided || bodyProvided || intent.Quota {
-			return toolErrorResult("invalid_args: a draft send requires only draft_id and revision, with optional adopt_media_id"), nil
+		if intent.MessageID != 0 || !revisionProvided || intent.Quota {
+			return toolErrorResult("invalid_args: a draft send requires draft_id and revision, with optional adopt_media_id"), nil
 		}
-	} else if intent.MessageID <= 0 {
-		return toolErrorResult("invalid_args: message_id is required for a direct reply"), nil
-	} else if revisionProvided || adoptProvided {
-		return toolErrorResult("invalid_args: revision and adoption require draft_id"), nil
-	} else if intent.Quota {
-		if bodyProvided {
-			return toolErrorResult("invalid_args: quota inspection cannot include body"), nil
-		}
-	} else if !bodyProvided || intent.Body == "" {
-		return toolErrorResult("invalid_args: body is required for a direct reply"), nil
+	} else if intent.MessageID <= 0 || !intent.Quota || revisionProvided || adoptProvided {
+		return toolErrorResult("invalid_args: provide draft_id and revision, or message_id with quota"), nil
 	}
 
 	argv := []string{api.CLIRunSendReplyCommand}
@@ -93,11 +77,7 @@ func (h *handlers) sendReplyToolHandler(ctx context.Context, req toolRequest) (*
 		}
 	} else {
 		argv = append(argv, strconv.FormatInt(intent.MessageID, 10))
-		if intent.Quota {
-			argv = append(argv, "--quota")
-		} else {
-			argv = append(argv, "--body="+intent.Body)
-		}
+		argv = append(argv, "--quota")
 	}
 	argv = append(argv, "--json")
 	if _, err := api.ParseCLIRunSendReply(api.CLIRunRequest{Args: argv}); err != nil {
@@ -124,11 +104,7 @@ func (h *handlers) sendReplyToolHandler(ctx context.Context, req toolRequest) (*
 		}
 	} else {
 		positional = strconv.FormatInt(intent.MessageID, 10)
-		if intent.Quota {
-			flags["quota"] = []string{"true"}
-		} else {
-			flags["body"] = []string{intent.Body}
-		}
+		flags["quota"] = []string{"true"}
 	}
 	result, runErr := h.drafts.RunDraftCommand(ctx, DraftCommandRequest{Command: api.CLIRunSendReplyCommand, Positional: positional, Flags: flags})
 	raw := jsontext.Value(strings.TrimSpace(result.Stdout))

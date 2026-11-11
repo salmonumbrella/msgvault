@@ -101,7 +101,7 @@ These tools run the matching CLI commands through your selected daemon. They req
 | `draft_delete` | `draft-delete` | Required `draft_id`, `revision` |
 | `draft_recover` | `draft-recover` | Required `draft_id`, `revision`; recovery can finish an interrupted deletion |
 | `draft_send_as` | `draft-send-as` | Required `account`; lists Gmail sender identities |
-| `send_reply` | `send-reply` | Either `message_id` plus `body`, or `draft_id` plus `revision`; optional `adopt_media_id` for recovery |
+| `send_reply` | `send-reply` | `draft_id` plus `revision`; optional `adopt_media_id` for recovery, or `message_id` plus `quota` to inspect quota |
 
 On unreleased `main`, `send_reply` is available on daemon API schema 5.1.0 or
 newer. The archived message or local draft determines the source; this release

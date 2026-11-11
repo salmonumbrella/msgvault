@@ -16,20 +16,12 @@ func TestSendReplyStrictArguments(t *testing.T) {
 		want SendReplyIntent
 	}{
 		{
-			[]string{"send-reply", "42", "--body", "Thanks!", "--json"},
-			SendReplyIntent{MessageID: 42, Body: "Thanks!", JSON: true},
-		},
-		{
 			[]string{"send-reply", "--draft=chat-draft-synthetic", "--revision=2", "--adopt-media-id=001", "--json"},
 			SendReplyIntent{DraftID: "chat-draft-synthetic", Revision: 2, AdoptMediaID: "001", JSON: true},
 		},
 		{
 			[]string{"send-reply", "42", "--quota", "--json"},
 			SendReplyIntent{MessageID: 42, Quota: true, JSON: true},
-		},
-		{
-			[]string{"send-reply", "--body=--literal", "42", "--verbose", "--log-level=debug"},
-			SendReplyIntent{MessageID: 42, Body: "--literal"},
 		},
 	} {
 		got, err := ParseCLIRunSendReply(CLIRunRequest{Args: tc.args})
@@ -39,6 +31,7 @@ func TestSendReplyStrictArguments(t *testing.T) {
 	}
 	invalid := [][]string{
 		{"send-reply"},
+		{"send-reply", "42", "--body=Thanks!"},
 		{"send-reply", "chat-draft-synthetic", "--revision=1"},
 		{"send-reply", "0", "--body=body"},
 		{"send-reply", "42", "--body="},

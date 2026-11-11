@@ -382,22 +382,22 @@ func (s *Sender) waitForContainer(ctx context.Context, r store.ThreadsReplySend,
 				return r, err
 			}
 			return terminal, errors.New("threads container ended without publication")
-		case "FINISHED", "PUBLISHED":
+		case "FINISHED":
 			ready, err := s.store.AdvanceThreadsReplySendContext(ctx, r.DraftID, r.RowRevision, store.ThreadsReplyTransition{State: "ready"})
 			if err != nil {
 				return r, err
 			}
-			if status == "FINISHED" {
-				return ready, nil
+			return ready, nil
+		case "PUBLISHED":
+			// Persist the observed outcome despite caller cancellation. The single
+			// transaction never leaves this container in a publishable ready state.
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			unknown, saveErr := s.store.MarkThreadsReplyPublishedUnknownContext(cleanup, r.DraftID, r.RowRevision)
+			cancel()
+			if saveErr != nil {
+				return r, errors.Join(errors.New("threads container is published without a media ID"), saveErr)
 			}
-			// A published container without an exact media ID is uncertain. Commit the
-			// permanent barrier but never dispatch another publish request for it.
-			locked, _, err := s.dispatchBarrier(ctx, ready)
-			if err != nil {
-				return locked, err
-			}
-			unknown, saveErr := s.markUnknown(ctx, locked)
-			return unknown, errors.Join(errors.New("threads container is published without a media ID"), saveErr)
+			return unknown, errors.New("threads container is published without a media ID")
 		default:
 			return r, ErrDecodeResponse
 		}

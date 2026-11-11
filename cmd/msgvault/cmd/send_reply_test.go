@@ -162,20 +162,4 @@ func TestThreadsDocumentedWorkflow(t *testing.T) {
 	assert.Equal("complete", result.Status)
 	assert.Equal(int32(2), f.publishes.Load())
 
-	f.mode = "drop"
-	f.draft.Body = "direct daemon reply"
-	f.draft.ReplyToSourceMessageID = "102"
-	output, err = run("send-reply", strconv.FormatInt(nested, 10), "--body="+f.draft.Body, "--json")
-	require.Error(err)
-	require.NoError(json.Unmarshal([]byte(output), &result))
-	assert.Equal("remote_unknown", result.Status)
-	assert.NotEmpty(result.DraftID)
-	assert.Equal(int32(3), f.publishes.Load())
-	directDraftID := result.DraftID
-	output, err = run("send-reply", strconv.FormatInt(nested, 10), "--body="+f.draft.Body, "--json")
-	require.Error(err)
-	require.NoError(json.Unmarshal([]byte(output), &result))
-	assert.Equal(directDraftID, result.DraftID)
-	assert.Equal("remote_unknown", result.Status)
-	assert.Equal(int32(3), f.publishes.Load())
 }

@@ -771,18 +771,14 @@ historical completeness. See [coverage and scheduling](usage/threads.md#read-now
 
 ```bash
 msgvault send-reply --draft <chat-draft-id> --revision <n> [--adopt-media-id <media-id>] [--json]
-msgvault send-reply <archived-message-id> --body <text> [--json]
 msgvault send-reply <archived-message-id> --quota [--json]
 ```
 
 On unreleased `main`, `send-reply` dispatches by source type; this release adds
 the Threads sender. The archived message or local draft determines the source.
 Threads sends require the owner, `[[threads.sends]]` for that source, verified
-scopes, and an archived parent under your own post. Use a positional archived
-message ID with `--body` for a direct send, or `--draft` with `--revision` to
-publish a reviewed local draft. A direct send is pinned to a local draft before
-provider work; repeating the same direct request resumes that durable send.
-Text must be nonblank UTF-8, contain no NUL and use at most 500
+scopes, and an archived parent under your own post. Use `--draft` with
+`--revision` to publish a reviewed local draft. Text must be nonblank UTF-8, contain no NUL and use at most 500
 bytes; draft creation remains uncapped. `--adopt-media-id` is available only for
 a draft with an uncertain prior send. `--quota` reads the source's reply quota.
 Delegated tokens cannot use the Threads sender.
@@ -4654,7 +4650,7 @@ listeners were found in this application's configured data directory.
 
 Start the Model Context Protocol server for AI assistant integration.
 
-Draft tools prepare and manage drafts through the selected daemon, using the same commands and permissions as the CLI. These draft tools never send. A daemon with API schema 3.0.0 or newer exposes eight draft tools to the owner. On unreleased `main`, the owner tool `send_reply` sends a direct reply to an archived message or publishes a reviewed local draft after client confirmation; the archived message or draft determines the source. This release registers the Threads sender; see [Threads](usage/threads.md#publish-a-reviewed-reply).
+Draft tools prepare and manage drafts through the selected daemon, using the same commands and permissions as the CLI. These draft tools never send. A daemon with API schema 3.0.0 or newer exposes eight draft tools to the owner. On unreleased `main`, the owner tool `send_reply` publishes a reviewed local draft after client confirmation; the draft determines the source. This release registers the Threads sender; see [Threads](usage/threads.md#publish-a-reviewed-reply).
 
 With `--agent-url` and `--agent-token-file`, `msgvault mcp` requires a daemon with API schema 3.9.0 or newer and serves scoped read tools, up to six delegated draft tools, and calendar tools over stdio. Tool selection follows the token's permissions and granted sources. The daemon checks the token's permissions and source scope on every call. Delegated sessions refuse `--http`.
 

@@ -40,7 +40,6 @@ func TestThreadsBudgetCountsRetries(t *testing.T) {
 	require.ErrorAs(err, &pause)
 	assert.Equal(3, b.Attempts())
 	assert.Equal(int32(3), calls.Load(), "OAuth and retries share exactly one transport budget")
-	assert.Equal(int32(3), calls.Load())
 }
 
 func TestThreadsBudgetRateAndTime(t *testing.T) {
