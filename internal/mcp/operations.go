@@ -41,6 +41,7 @@ const (
 	OperationFamilyRecords       OperationFamily = "records"
 	OperationFamilyLoops         OperationFamily = "loops"
 	OperationFamilyOrganizations OperationFamily = "organizations"
+	OperationFamilyCurated       OperationFamily = "curated"
 )
 
 type operationalDefinition struct {
@@ -52,7 +53,7 @@ type operationalDefinition struct {
 // Roots are built once, independent of capability combinations. Selecting any
 // subset retains pointer identity for the official SDK's shared schema cache.
 var fixedOperationalDefinitions = sync.OnceValue(func() []operationalDefinition {
-	return append(append(sourceOperationalDefinitions(), loopOperationalDefinitions()...), append(organizationOperationalDefinitions(), organizationWriteDefinitions()...)...)
+	return append(append(append(sourceOperationalDefinitions(), loopOperationalDefinitions()...), personRecordDefinitions()...), append(organizationOperationalDefinitions(), organizationWriteDefinitions()...)...)
 })
 
 func operationalCatalog(opts ServeOptions, allowWrites bool) []operationalDefinition {
