@@ -235,6 +235,21 @@ func (i *Importer) Import(ctx context.Context, o ImportOptions) (sum *ImportSumm
 		if err = writer.ResolveParents(ctx); err != nil {
 			return sum, err
 		}
+		// Include roots discovered by the pinned own-post walks in this epoch.
+		// Keep the pass cursor and only extend its upper bound; the normal
+		// checkpoint and request budget still bound resumable work.
+		if next.Mode != store.ThreadsSyncPost && next.OwnPostsHead.Done && next.OwnPostsHistory.Done {
+			upper, err := scoped.ThreadsOwnRootUpperKeyContext(ctx, o.SourceID)
+			if err != nil {
+				return sum, err
+			}
+			for _, pass := range []*RootPass{&next.HotRoots, &next.AllRoots} {
+				if upper > pass.ThroughID {
+					pass.ThroughID = upper
+					pass.Done = false
+				}
+			}
+		}
 		next.markCompleted()
 		encoded, err := next.Encode()
 		if err != nil {

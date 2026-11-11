@@ -28,7 +28,7 @@ func TestThreadsSyncNowUsesExactScheduledAccount(t *testing.T) {
 	scheduler.triggerFn = func(key string, _ bool) error { calls = append(calls, key); return nil }
 	server := NewServer(&config.Config{}, st, scheduler, testLogger())
 	for n, key := range keys {
-		response := servePOSTTestRequest(server, "/api/v1/sync/"+url.PathEscape(key)+"?source_type=threads")
+		response := servePOSTTestRequest(t.Context(), server, "/api/v1/sync/"+url.PathEscape(key)+"?source_type=threads")
 		if n == 0 {
 			assert.Equal(http.StatusAccepted, response.Code, response.Body.String())
 		} else {

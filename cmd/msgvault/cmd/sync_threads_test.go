@@ -169,7 +169,7 @@ func TestSyncThreadsEndToEnd(t *testing.T) {
 	assert.Contains(out.String(), "oldest_observed")
 	source, err := st.GetSourceByTypeAndIdentifier(t.Context(), sourceTypeThreads, "threads:123:20")
 	require.NoError(err)
-	records, err := st.SourceMessageMetadata(source.ID)
+	records, err := st.SourceMessageMetadata(t.Context(), source.ID)
 	require.NoError(err)
 	assert.Len(records, 4)
 	var linked, observed int

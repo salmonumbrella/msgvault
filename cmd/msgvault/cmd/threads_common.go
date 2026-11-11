@@ -43,7 +43,7 @@ func defaultThreadsCommandDepsForContext(ctx context.Context) threadsCommandDeps
 			if state == nil || state.cfg == nil {
 				return nil, nil, errors.New("configuration is unavailable")
 			}
-			return openWritableStoreAndInitForIngestInvocation(state)
+			return openWritableStoreAndInitForIngestInvocation(ctx, state)
 		},
 		tokenManager: func() *threads.TokenManager {
 			if state == nil || state.cfg == nil {
@@ -74,6 +74,6 @@ func defaultThreadsCommandDepsForContext(ctx context.Context) threadsCommandDeps
 			return limiter
 		},
 		registerSource:       registerThreadsSource,
-		postSourceMigrations: func(st *store.Store) error { return runPostSourceCreateMigrationsForInvocation(st, state) },
+		postSourceMigrations: func(st *store.Store) error { return runPostSourceCreateMigrationsForInvocation(ctx, st, state) },
 	}
 }

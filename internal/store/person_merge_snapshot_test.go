@@ -285,7 +285,7 @@ const postgresPersonReferencesQuery = `SELECT child.relname, attribute.attname
 
 func TestPostgresPersonReferenceCatalogIncludesCompositeKeys(t *testing.T) {
 	require := require.New(t)
-	st := newPGStoreInternal(t, skipUnlessPostgresInternal(t))
+	st := newPGStoreInternal(t)
 	_, err := st.db.ExecContext(t.Context(), `CREATE UNIQUE INDEX inventory_person_revision ON persons(id,revision);
  CREATE TABLE inventory_composite_person(
  composite_person_id BIGINT, composite_revision BIGINT,

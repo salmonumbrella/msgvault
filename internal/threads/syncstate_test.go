@@ -239,7 +239,7 @@ func TestThreadsSyncStateConfigIntegrity(t *testing.T) {
 	_, err = PrepareSourceSyncConfigContext(t.Context(), st, source.ID, SyncRequest{After: now.Add(-24 * time.Hour)}, now)
 	require.Error(err)
 	require.NoError(st.UpdateSourceSyncConfig(t.Context(), source.ID, `{"version":1,"history_floor":"2026-01-01T00:00:00Z","history_ceiling":"2026-10-01T12:00:00Z","coverage_generation":1,"extra":{"keep":true}}`))
-	conv, err := st.EnsureConversation(source.ID, "800", "Synthetic root")
+	conv, err := st.EnsureConversation(t.Context(), source.ID, "800", "Synthetic root")
 	require.NoError(err)
 	message, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: "800", MessageType: "threads"})
 	require.NoError(err)

@@ -31,7 +31,7 @@ type importFixture struct {
 	pageSize       int
 }
 
-func newImportFixture(t *testing.T) *importFixture {
+func newImportFixture(t *testing.T, empty ...bool) *importFixture {
 	t.Helper()
 	w, st := writerFixture(t)
 	source, err := st.GetSourceByTypeAndIdentifier(t.Context(), "threads", writerSource)
@@ -39,12 +39,14 @@ func newImportFixture(t *testing.T) *importFixture {
 	cfg := SourceSyncConfig{Version: 1, HistoryFloor: writerTime.Add(-time.Hour), HistoryCeiling: writerTime.Add(time.Hour), CoverageGeneration: 1}
 	raw, err := json.Marshal(cfg)
 	require.NoError(t, err)
-	require.NoError(t, st.UpdateSourceSyncConfig(source.ID, string(raw)))
+	require.NoError(t, st.UpdateSourceSyncConfig(t.Context(), source.ID, string(raw)))
 	f := &importFixture{st: st, sourceID: source.ID, clock: newTestClock(), conversations: map[string][]Media{}, pageSize: 1}
 	// An old own root with no cached replies must still enter a full sweep.
-	root := writerMedia("300", "Old root")
-	root.HasReplies = new(false)
-	applyWriter(t, w, root, ItemOrigin{Kind: "own_posts"})
+	if len(empty) == 0 || !empty[0] {
+		root := writerMedia("300", "Old root")
+		root.HasReplies = new(false)
+		applyWriter(t, w, root, ItemOrigin{Kind: "own_posts"})
+	}
 	f.server = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.server.Close)
 	return f
@@ -137,7 +139,7 @@ func TestThreadsImportCapAndReplay(t *testing.T) {
 		assert.Equal(store.SyncStatusPaused, sum.Status)
 	}
 	require.True(completed, "finite pages must complete across capped runs")
-	rows, err := f.st.SourceMessageMetadata(f.sourceID)
+	rows, err := f.st.SourceMessageMetadata(t.Context(), f.sourceID)
 	require.NoError(err)
 	ids := []string{}
 	for _, row := range rows {
@@ -390,4 +392,17 @@ func TestThreadsEmptyContinuationRetainsRepeatedPageProtection(t *testing.T) {
 	opts.Request.PostID = "300"
 	_, err := imp.Import(t.Context(), opts)
 	require.ErrorIs(err, ErrPagination, "an empty continuation cannot erase repeated-page evidence")
+}
+
+func TestThreadsSyncVisitsNewlyDiscoveredRoot(t *testing.T) {
+	f := newImportFixture(t, true)
+	f.posts = []Media{writerMedia("100", "new root")}
+	f.conversations["100"] = []Media{writerReply("101", "100", "100")}
+	imp, opts := f.importer(t, 100)
+	sum, err := imp.Import(t.Context(), opts)
+	require.NoError(t, err)
+	require.Equal(t, store.SyncStatusCompleted, sum.Status)
+	_, found, err := f.st.ThreadsArchiveMessageMetadataContext(t.Context(), f.sourceID, "101")
+	require.NoError(t, err)
+	assert.True(t, found, "the same completed epoch must visit a newly discovered root")
 }

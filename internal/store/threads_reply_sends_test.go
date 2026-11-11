@@ -209,3 +209,17 @@ func TestThreadsReceiptPreservesLeadingZeroMediaIDs(t *testing.T) {
 	require.NoError(err)
 	assert.Equal("003", receipt.MediaID)
 }
+
+func TestThreadsReceiptReleasePreservesPublishBarrier(t *testing.T) {
+	st, _, conv, parent := threadsDraftDestination(t)
+	receipt := threadsReadyReceipt(t, st, conv, parent)
+	won, err := st.TryDispatchThreadsReplyContext(t.Context(), receipt.DraftID, receipt.RowRevision)
+	require.NoError(t, err)
+	require.True(t, won)
+	receipt, err = st.GetThreadsReplySendContext(t.Context(), receipt.DraftID)
+	require.NoError(t, err)
+	require.ErrorIs(t, st.ReleaseThreadsUnpublishedReplyContext(t.Context(), receipt.DraftID, receipt.RowRevision, receipt.DraftRevision), store.ErrThreadsReplyConflict)
+	retained, err := st.GetThreadsReplySendContext(t.Context(), receipt.DraftID)
+	require.NoError(t, err)
+	assert.NotNil(t, retained.PublishDispatchedAt)
+}

@@ -148,7 +148,7 @@ func TestThreadsRootKeysetAndPause(t *testing.T) {
 	roots, err := st.ListThreadsOwnRootsContext(ctx, source, 0, upper, time.Time{}, 2)
 	require.NoError(err)
 	assert.Empty(roots)
-	conv, err := st.EnsureConversation(source, "800", "Synthetic root")
+	conv, err := st.EnsureConversation(t.Context(), source, "800", "Synthetic root")
 	require.NoError(err)
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	hotSince := now.Add(-7 * 24 * time.Hour)
@@ -248,7 +248,7 @@ func TestThreadsRootKeysetAndPauseCancellation(t *testing.T) {
 func TestThreadsRootKeysetExactHotBoundary(t *testing.T) {
 	require := require.New(t)
 	st, source := threadsStore(t)
-	conv, err := st.EnsureConversation(source, "800", "Synthetic root")
+	conv, err := st.EnsureConversation(t.Context(), source, "800", "Synthetic root")
 	require.NoError(err)
 	floor := time.Date(2026, 10, 23, 12, 0, 0, 123456000, time.UTC)
 	want := []int64{}
@@ -282,11 +282,11 @@ func TestThreadsRootKeysetRejectsOtherTypes(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
 	st, source := threadsStore(t)
-	conv, err := st.EnsureConversation(source, "800", "Synthetic root")
+	conv, err := st.EnsureConversation(t.Context(), source, "800", "Synthetic root")
 	require.NoError(err)
 	other, err := st.GetOrCreateSource("gmail", "synthetic@example.com")
 	require.NoError(err)
-	otherConv, err := st.EnsureConversation(other.ID, "802", "Synthetic other source")
+	otherConv, err := st.EnsureConversation(t.Context(), other.ID, "802", "Synthetic other source")
 	require.NoError(err)
 	add := func(sourceID, conversationID int64, media, kind string) int64 {
 		t.Helper()

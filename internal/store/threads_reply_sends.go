@@ -120,6 +120,34 @@ func (s *Store) guardChatDraftMutationTx(ctx context.Context, tx *loggedTx, id s
 	}
 	return nil
 }
+
+// ReleaseThreadsUnpublishedReplyContext permits an explicit retry only when the
+// previous attempt is definitively unpublished and the current draft revision
+// matches the caller. The draft lock serializes this with edits and dispatch.
+func (s *Store) ReleaseThreadsUnpublishedReplyContext(ctx context.Context, id string, rowRevision, draftRevision int64) error {
+	return s.withTxContext(ctx, func(tx *loggedTx) error {
+		if err := s.lockChatDraftTx(ctx, tx, id); err != nil {
+			return err
+		}
+		r, err := s.loadThreadsReplyTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if r.RowRevision != rowRevision || !threadsUnpublishedTerminal(r) {
+			return ErrThreadsReplyConflict
+		}
+		draft, err := loadChatDraft(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if draft.Revision != draftRevision {
+			return ErrChatDraftRevisionConflict
+		}
+		res, err := tx.ExecContext(ctx, `DELETE FROM threads_reply_sends WHERE draft_id=? AND row_revision=? AND publish_dispatched_at IS NULL AND media_id IS NULL`, id, rowRevision)
+		return threadsReplyCAS(res, err)
+	})
+}
+
 func threadsReplyDecimalID(id string) bool {
 	if len(id) == 0 || len(id) > 128 {
 		return false

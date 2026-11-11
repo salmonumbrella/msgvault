@@ -19,7 +19,7 @@ func TestSendReplyMCPConfirmation(t *testing.T) {
 		if adopt {
 			args["adopt_media_id"] = "900719925474099312345"
 		}
-		session := draftConfirmationSession(t, runner, "send-reply")
+		session := draftConfirmationSession(t, ServeOptions{Drafts: runner, DraftCommands: []string{"send-reply"}})
 		pending, err := session.CallTool(t.Context(), &sdkmcp.CallToolParams{Name: "send_reply", Arguments: args})
 		require.NoError(err)
 		require.True(pending.NeedsInput())

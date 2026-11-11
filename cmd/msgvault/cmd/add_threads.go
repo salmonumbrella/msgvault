@@ -57,7 +57,7 @@ func newAddThreadsCmd(deps threadsCommandDeps) *cobra.Command {
 			if !terminal || !isatty.IsTerminal(file.Fd()) {
 				return errors.New("set MSGVAULT_THREADS_APP_SECRET or use a terminal for the masked prompt")
 			}
-			secret, err = readPasswordInteractive("Threads app secret:", cmd.ErrOrStderr())
+			secret, err = readPasswordInteractive("Threads app secret:", cmd.ErrOrStderr(), false)
 			if err != nil {
 				return errors.New("read Threads app secret")
 			}
@@ -256,7 +256,7 @@ func registerThreadsSource(ctx context.Context, st *store.Store, record threads.
 		if err != nil {
 			return nil, err
 		}
-		if err := st.UpdateSourceSyncConfig(source.ID, string(configuration)); err != nil {
+		if err := st.UpdateSourceSyncConfig(ctx, source.ID, string(configuration)); err != nil {
 			return nil, err
 		}
 	}

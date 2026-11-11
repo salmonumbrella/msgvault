@@ -57,7 +57,7 @@ func threadsSecondStore(t *testing.T, st *store.Store, application string) *stor
 		u.RawQuery = q.Encode()
 		dsn = u.String()
 	}
-	other, err := store.OpenForTest(dsn)
+	other, err := store.OpenForTest(t.Context(), dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, other.Close()) })
 	return other

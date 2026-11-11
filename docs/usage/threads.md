@@ -89,7 +89,10 @@ JSON reports `status`, `mode`, `requested_floor`, `oldest_observed`,
 run may already have saved messages. Reaching the end of available pagination
 is a statement about that read epoch, not proof that every historical reply
 was visible. Backlog and provider limits determine how soon old or late replies
-appear.
+appear. Parent links are repaired in bounded batches as syncs run;
+completion reports provider walks, not a guarantee that every deferred parent
+link has been repaired. Later syncs continue the scan, including links whose
+parents arrive after their children.
 
 Use the source with existing archive commands:
 
@@ -147,7 +150,9 @@ editing never publish. The archived message or local draft determines the
 source for the shared `send-reply` command. This release registers the Threads
 sender. Use a positional archived message ID with `--body` for a direct send,
 or `--draft` with `--revision` to publish a reviewed local draft. A direct send
-is pinned to a local draft before provider work. A changed draft revision or
+is pinned to a local draft before provider work. Repeating the same direct
+message and body retains a known published outcome; to intentionally send the
+same text again, create a separate reviewed draft. A changed draft revision or
 destination is rejected. Sending text must be nonblank UTF-8, contain no NUL,
 and fit within **500 UTF-8 bytes**. Draft bodies can be longer and remain
 editable. Results report `body_bytes` without echoing the text.
@@ -173,7 +178,7 @@ read the owner key can use owner access. Keep those host capabilities outside
 the delegated agent's reach when relying on these restrictions.
 
 See [MCP draft and send
-tools](chat.md#draft-and-send-tools).
+tools](chat.md#draft-tools).
 
 ## Inspect and recover an interrupted send
 
@@ -188,6 +193,8 @@ exit does not mean the provider failed to publish.
 | `send_failed` | A definite creation rejection or unpublished terminal container outcome; the draft can be edited or deleted. |
 | `remote_unknown` | A publish may have happened. Repeating inspects the receipt and never republishes it. |
 | `sent_archive_pending` | The remote ID is known; local archive or cache completion needs repair. Repeat the same ID and revision. |
+
+After a definite unpublished terminal result, explicitly send the same draft and revision again to retry, or edit it and send the new revision. A dispatched or uncertain publish cannot be reset this way.
 
 A container is saved before polling. Polling begins no earlier than 30 seconds
 after creation, then at most once per minute, with at most five minutes of

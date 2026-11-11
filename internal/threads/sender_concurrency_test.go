@@ -41,7 +41,7 @@ func concurrentSenderStore(t *testing.T, st *store.Store) *store.Store {
 		require.NoError(t, rows.Err())
 	}
 	require.NotEmpty(t, dsn)
-	other, err := store.OpenForTest(dsn)
+	other, err := store.OpenForTest(t.Context(), dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, other.Close()) })
 	return other

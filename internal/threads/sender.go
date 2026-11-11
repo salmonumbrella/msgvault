@@ -80,6 +80,12 @@ func (s *Sender) Send(ctx context.Context, request SendRequest) (SendResult, err
 	if err != nil && !errors.Is(err, store.ErrThreadsReplyNotFound) {
 		return result, err
 	}
+	if exists && unpublishedTerminal(receipt) && request.AdoptMediaID == "" {
+		if err := s.store.ReleaseThreadsUnpublishedReplyContext(ctx, request.DraftID, receipt.RowRevision, request.Revision); err != nil {
+			return replyResult(receipt), err
+		}
+		exists = false
+	}
 	if exists {
 		result = replyResult(receipt)
 		if receipt.DraftRevision != request.Revision {

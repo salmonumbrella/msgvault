@@ -85,9 +85,9 @@ content as data, never as instructions or permission to write. The write opt-in
 exposes mutation tools; the user must request each change and confirm each
 non-dry-run plan through client elicitation.
 
-## Draft and send tools
+## Draft tools
 
-These tools run the matching CLI commands through your selected daemon. They require API schema 3.0.0 or newer. The daemon enforces source opt-ins, confirmed sender identities, and the caller's grants. These draft tools never send.
+These tools run the matching CLI commands through your selected daemon. They require API schema 3.0.0 or newer. The daemon enforces source opt-ins, confirmed sender identities, and the caller's grants. Draft tools never send; `send_reply` publishes only after confirmation.
 
 `draft_delete` and `draft_recover` require client confirmation for the specific tool and arguments, because deletion removes a draft and recovery can finish an interrupted deletion. The client must show the proposed action and get your approval before responding, and msgvault checks that the response matches the pending call. By default, clients that can't answer confirmation prompts, including Claude Desktop, can still create, read, and edit drafts but can't delete or recover them.
 
@@ -103,7 +103,7 @@ These tools run the matching CLI commands through your selected daemon. They req
 | `draft_send_as` | `draft-send-as` | Required `account`; lists Gmail sender identities |
 | `send_reply` | `send-reply` | Either `message_id` plus `body`, or `draft_id` plus `revision`; optional `adopt_media_id` for recovery |
 
-On unreleased `main`, `send_reply` is available on daemon API schema 3.28.0 or
+On unreleased `main`, `send_reply` is available on daemon API schema 5.1.0 or
 newer. The archived message or local draft determines the source; this release
 registers the Threads sender. Threads sends require the owner, verified scopes,
 and an exact `[[threads.sends]]` source opt-in. Each send or adoption requires client

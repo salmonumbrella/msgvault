@@ -28,12 +28,12 @@ func TestThreadsExactScheduling(t *testing.T) {
 		require.NoError(st.UpdateSourceDisplayName(source.ID, "shared account"))
 	}
 	for _, selector := range []string{"20", "200", "shared account"} {
-		sources, _, err := findScheduledSyncSources(st, selector)
+		sources, _, err := findScheduledSyncSources(t.Context(), st, selector)
 		require.NoError(err)
 		assert.Empty(sources)
 	}
 	for _, key := range []string{"threads:123:20", "threads:123:200", "threads:456:20"} {
-		sources, _, err := findScheduledSyncSources(st, key)
+		sources, _, err := findScheduledSyncSources(t.Context(), st, key)
 		require.NoError(err)
 		require.Len(sources, 1)
 		assert.Equal(key, sources[0].Identifier)

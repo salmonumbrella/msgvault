@@ -210,7 +210,7 @@ func runRemoveAccountLocalWithMatrixLock(cmd *cobra.Command, args []string, matr
 		return manager.WithSourceLock(cmd.Context(), source.Identifier, func() error {
 			// The source may have been removed or replaced while this request
 			// waited. Bind removal to the original row, before taking cache locks.
-			check, closeCheck, err := openWritableStoreAndInitForInvocation(state)
+			check, closeCheck, err := openWritableStoreAndInitForInvocation(cmd.Context(), state)
 			if err != nil {
 				return err
 			}
