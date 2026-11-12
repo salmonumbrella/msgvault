@@ -148,3 +148,28 @@ func (w *introductionBoundaryRecorder) WriteHeader(status int) {
 	w.firstSlotCount = len(w.slots)
 	w.ResponseRecorder.WriteHeader(status)
 }
+
+func TestIntroductionMutationErrorCodes(t *testing.T) {
+	srv, _ := newTestServerWithAgentGrants(t)
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{store.ErrPersonNotFound, 400, "invalid_args"},
+		{store.ErrIntroductionSamePerson, 400, "same_person"},
+		{store.ErrIntroductionSource, 400, "unsupported_source"},
+		{store.ErrSourceNotFound, 400, "unsupported_source"},
+		{store.ErrSourceRetired, 409, "source_retired"},
+		{store.ErrIntroductionRevision, 409, "revision_mismatch"},
+		{store.ErrIntroductionState, 409, "state_conflict"},
+		{store.ErrIntroductionNotFound, 404, "intro_not_found"},
+		{errors.New("secret"), 503, "local_store_failed"},
+	} {
+		response := httptest.NewRecorder()
+		srv.writeIntroductionError(response, tc.err)
+		assert.Equal(t, tc.status, response.Code)
+		assert.Contains(t, response.Body.String(), tc.code)
+		assert.NotContains(t, response.Body.String(), "secret")
+	}
+}

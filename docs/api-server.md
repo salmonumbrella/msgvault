@@ -41,6 +41,17 @@ or the record is missing or ineligible. Invalid list filters or cursor return
 400 `invalid_args`. A store without introduction reads returns 503
 `feature_unavailable`; an actual storage failure returns 503 `local_store_failed`.
 
+Owners can prepare an introduction with `POST /api/v1/intros` using
+`source_id`, `person_a_id`, `person_b_id`, `title`, and `body`. Edit it with
+`PATCH /api/v1/intros/{id}` using `revision` and at least one of `title` or
+`body`; cancel it with `POST /api/v1/intros/{id}/cancel` using `revision`.
+Prepare returns 201; edit and cancel return 200. Cancellation clears the body.
+A stale revision, cancelled record, or retired source returns 409; a missing
+record returns 404 and invalid input or an unsupported source returns 400.
+These typed mutations require owner access. Delegated prepare and cancel remain
+available through the CLI runner with the existing grants. No route creates a
+provider group or sends a message.
+
 ### Filename suggestions
 
 Newer than the latest release, API schema 3.15 adds
@@ -182,7 +193,7 @@ The API publishes its generated OpenAPI contract at `/openapi.json`.
 opening an archive. OpenAPI `info.version` is the **API schema version**;
 it is separate from the binary release version. The current schema is **5.2.0**.
 
-Schema 5.2.0 adds typed introduction list and detail reads.
+Schema 5.2.0 adds typed introduction reads and local mutations.
 
 Schema 5.1.0 adds time-zone-aware Month and Year grouping, group overviews, and item totals for time groups.
 

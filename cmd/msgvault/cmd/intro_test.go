@@ -26,6 +26,8 @@ import (
 	"go.kenn.io/msgvault/internal/introops"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
+	clientpkg "go.kenn.io/msgvault/pkg/client"
+	"go.kenn.io/msgvault/pkg/client/generated"
 )
 
 func TestIntroThroughDaemonCLI(t *testing.T) {
@@ -291,6 +293,19 @@ func TestIntroDelegatedThroughRunner(t *testing.T) {
 	check.Equal(http.StatusForbidden, read(outsider, "/api/v1/intros/"+row.IntroID).code)
 	edit, _ := issue([]string{"draft.create", "draft.edit"}, src.ID)
 	check.Contains(read(edit, "/api/v1/intros/"+row.IntroID).body, "secret")
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodPost, "/api/v1/intros", `{}`},
+		{http.MethodPatch, "/api/v1/intros/" + row.IntroID, `{"revision":1,"title":"no"}`},
+		{http.MethodPost, "/api/v1/intros/" + row.IntroID + "/cancel", `{"revision":1}`},
+	} {
+		request, err := http.NewRequestWithContext(ctx, tc.method, server.URL+tc.path, bytes.NewBufferString(tc.body))
+		req.NoError(err)
+		request.Header.Set("X-Msgvault-Agent-Token", edit)
+		response, err := http.DefaultClient.Do(request)
+		req.NoError(err)
+		check.Equal(http.StatusForbidden, response.StatusCode)
+		req.NoError(response.Body.Close())
+	}
 	denied := run(outsider, "intro", "show", row.IntroID, "--json")
 	req.Len(denied, 1)
 	check.Equal("not_permitted", denied[0].Error)
@@ -353,4 +368,100 @@ func TestIntroStoreFailureDoesNotLogText(t *testing.T) {
 	check.Contains(resp.Body.String(), "local_store_failed")
 	check.NotContains(logs.String(), "secret-title")
 	check.NotContains(logs.String(), "secret-body")
+}
+
+// This exercises the real router and adapter; client types are generated from the registered schema.
+func TestIntroHTTPMutationsMatchCLI(t *testing.T) {
+	req := require.New(t)
+	check := assert.New(t)
+	ctx := t.Context()
+	st := testutil.NewTestStore(t)
+	src, err := st.GetOrCreateSource("beeper", "synthetic-account")
+	req.NoError(err)
+	pa, err := st.EnsureParticipant("a@example.test", "A", "example.test")
+	req.NoError(err)
+	pb, err := st.EnsureParticipant("b@example.test", "B", "example.test")
+	req.NoError(err)
+	a, _, err := st.CreatePersonFromParticipantContext(ctx, pa)
+	req.NoError(err)
+	b, _, err := st.CreatePersonFromParticipantContext(ctx, pb)
+	req.NoError(err)
+	cfg := config.NewDefaultConfig()
+	cfg.HomeDir, cfg.Data.DataDir = t.TempDir(), t.TempDir()
+	server := httptest.NewServer(api.NewServerWithOptions(api.ServerOptions{Config: cfg, Store: &storeAPIAdapter{store: st, config: cfg}, Logger: slog.New(slog.DiscardHandler)}).Router())
+	t.Cleanup(server.Close)
+	remote := configureRemoteDaemonForTest(t, server.URL)
+	client, err := clientpkg.New(server.URL)
+	req.NoError(err)
+	var prepare generated.PrepareIntroductionBody
+	body := fmt.Sprintf(`{"source_id":%d,"person_a_id":%d,"person_b_id":%d,"title":"Hello","body":"Private"}`, src.ID, a.ID, b.ID)
+	req.NoError(json.Unmarshal([]byte(body), &prepare))
+	created, err := client.PrepareIntroductionWithResponse(ctx, &generated.PrepareIntroductionRequestOptions{Body: &prepare})
+	req.NoError(err)
+	req.Equal(http.StatusCreated, created.StatusCode)
+	req.NotNil(created.JSON201)
+	id := created.JSON201.IntroID
+	compareCLI := func(value any) {
+		t.Helper()
+		root := &cobra.Command{Use: "msgvault"}
+		clirun.AddLoggingFlags(root.PersistentFlags())
+		root.AddCommand(newIntroCommand(runDaemonCLICommandHTTPFromCobra))
+		silenceUsageInRunE(root)
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetArgs([]string{"intro", "show", id, "--json"})
+		req.NoError(root.ExecuteContext(remote))
+		var want, got any
+		req.NoError(json.Unmarshal(out.Bytes(), &want))
+		encoded, err := json.Marshal(value)
+		req.NoError(err)
+		req.NoError(json.Unmarshal(encoded, &got))
+		check.Equal(want, got)
+	}
+	compareCLI(created.JSON201)
+	var edit generated.EditIntroductionBody
+	req.NoError(json.Unmarshal([]byte(`{"revision":1,"title":"Updated","body":"Revised"}`), &edit))
+	edited, err := client.EditIntroductionWithResponse(ctx, &generated.EditIntroductionRequestOptions{PathParams: &generated.EditIntroductionPath{ID: id}, Body: &edit})
+	req.NoError(err)
+	req.Equal(http.StatusOK, edited.StatusCode)
+	req.NotNil(edited.JSON200)
+	check.Equal(int64(2), edited.JSON200.Revision)
+	check.Equal("Revised", edited.JSON200.Body)
+	compareCLI(edited.JSON200)
+	var cancel generated.CancelIntroductionBody
+	req.NoError(json.Unmarshal([]byte(`{"revision":2}`), &cancel))
+	cancelled, err := client.CancelIntroductionWithResponse(ctx, &generated.CancelIntroductionRequestOptions{PathParams: &generated.CancelIntroductionPath{ID: id}, Body: &cancel})
+	req.NoError(err)
+	req.Equal(http.StatusOK, cancelled.StatusCode)
+	req.NotNil(cancelled.JSON200)
+	check.Equal("cancelled", cancelled.JSON200.Status)
+	check.Equal(int64(3), cancelled.JSON200.Revision)
+	check.Empty(cancelled.JSON200.Body)
+	compareCLI(cancelled.JSON200)
+
+	for _, tc := range []struct {
+		method, path, body string
+		status             int
+		code               string
+	}{
+		{http.MethodPatch, "/api/v1/intros/" + id, `{"revision":1,"title":"stale"}`, 409, "revision_mismatch"},
+		{http.MethodPost, "/api/v1/intros/" + id + "/cancel", `{"revision":3}`, 409, "state_conflict"},
+		{http.MethodPatch, "/api/v1/intros/missing", `{"revision":1,"title":"x"}`, 404, "intro_not_found"},
+		{http.MethodPost, "/api/v1/intros", fmt.Sprintf(`{"source_id":%d,"person_a_id":%d,"person_b_id":%d}`, src.ID, a.ID, a.ID), 400, "same_person"},
+		{http.MethodPost, "/api/v1/intros", fmt.Sprintf(`{"source_id":999999,"person_a_id":%d,"person_b_id":%d}`, a.ID, b.ID), 400, "unsupported_source"},
+		{http.MethodPost, "/api/v1/intros", `null`, 400, "bad_request"},
+		{http.MethodPost, "/api/v1/intros", `{ } { }`, 400, "bad_request"},
+		{http.MethodPost, "/api/v1/intros", `{"created_by":"forged"}`, 400, "bad_request"},
+		{http.MethodPost, "/api/v1/intros/" + id + "/cancel", `{"revision":3,"revision":3}`, 400, "bad_request"},
+	} {
+		request, err := http.NewRequestWithContext(ctx, tc.method, server.URL+tc.path, bytes.NewBufferString(tc.body))
+		req.NoError(err)
+		response, err := http.DefaultClient.Do(request)
+		req.NoError(err)
+		data, err := io.ReadAll(response.Body)
+		req.NoError(err)
+		req.NoError(response.Body.Close())
+		check.Equal(tc.status, response.StatusCode, tc.body)
+		check.Contains(string(data), tc.code)
+	}
 }

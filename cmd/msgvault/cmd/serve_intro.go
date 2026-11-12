@@ -27,6 +27,18 @@ func (a *storeAPIAdapter) GetIntroductionContext(ctx context.Context, grant *age
 	return (introops.Service{Store: a.store}).Get(ctx, grant, id)
 }
 
+var _ api.IntroductionMutations = (*storeAPIAdapter)(nil)
+
+func (a *storeAPIAdapter) PrepareIntroductionContext(ctx context.Context, grant *agentgrant.Grant, in store.PersonIntroductionPrepare) (introops.Record, error) {
+	return (introops.Service{Store: a.store}).Prepare(ctx, grant, in)
+}
+func (a *storeAPIAdapter) EditIntroductionContext(ctx context.Context, grant *agentgrant.Grant, id string, in store.PersonIntroductionEdit) (introops.Record, error) {
+	return (introops.Service{Store: a.store}).Edit(ctx, grant, id, in)
+}
+func (a *storeAPIAdapter) CancelIntroductionContext(ctx context.Context, grant *agentgrant.Grant, id string, revision int64) (introops.Record, error) {
+	return (introops.Service{Store: a.store}).Cancel(ctx, grant, id, revision)
+}
+
 func introError(err error) error {
 	// Never log an underlying error that could contain caller-supplied text.
 	return &api.CLIRunCodedError{Code: introops.ErrorCode(err)}
