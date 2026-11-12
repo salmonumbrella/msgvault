@@ -12610,11 +12610,11 @@ func (p PersonInboxRow) Validate() error {
 }
 
 type PersonIntroductionPrepare struct {
-	Body      string `json:"body" validate:"required"`
+	Body      string `json:"body" validate:"omitempty"`
 	PersonAId int64  `json:"person_a_id"`
 	PersonBId int64  `json:"person_b_id"`
 	SourceID  int64  `json:"source_id"`
-	Title     string `json:"title" validate:"required"`
+	Title     string `json:"title" validate:"omitempty"`
 }
 
 func (p PersonIntroductionPrepare) Validate() error {

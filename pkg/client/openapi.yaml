@@ -12568,6 +12568,9 @@ components:
       properties:
         body:
           type: string
+          x-oapi-codegen-extra-tags:
+            validate: omitempty
+          x-omitempty: false
         person_a_id:
           format: int64
           type: integer
@@ -12579,6 +12582,9 @@ components:
           type: integer
         title:
           type: string
+          x-oapi-codegen-extra-tags:
+            validate: omitempty
+          x-omitempty: false
       required:
         - source_id
         - person_a_id
