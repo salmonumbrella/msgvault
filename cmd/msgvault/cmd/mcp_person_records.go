@@ -144,12 +144,10 @@ func (b *daemonMCPOperations) personRecordDisclosure(ctx context.Context, name s
 		for _, item := range input.Patch.Media.Add {
 			add := mediaAdd{PersonMediaInputRequest: item}
 			if item.Data != nil {
-				data, err := base64.StdEncoding.DecodeString(*item.Data)
+				size, digest, err := summarizeInlineMedia(*item.Data)
 				if err != nil {
 					return "", true, &mcpserver.OperationRefusalError{Code: mcpInvalidArguments}
 				}
-				sum := sha256.Sum256(data)
-				size, digest := len(data), hex.EncodeToString(sum[:])
 				add.Data, add.DataSize, add.DataSHA256 = nil, &size, &digest
 			}
 			patch.Media.Add = append(patch.Media.Add, add)
@@ -167,4 +165,13 @@ func (b *daemonMCPOperations) personRecordDisclosure(ctx context.Context, name s
 		Effect    string `json:"effect"`
 	}{name, current.Output, changes, "Atomically apply all requested adds and supersedes to this person."}, json.Deterministic(true))
 	return string(data), true, err
+}
+
+func summarizeInlineMedia(encoded string) (int, string, error) {
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return 0, "", err
+	}
+	sum := sha256.Sum256(data)
+	return len(data), hex.EncodeToString(sum[:]), nil
 }
