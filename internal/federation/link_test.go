@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -342,4 +343,89 @@ func TestJoinRejectsInvalidHubUIDBeforeContact(t *testing.T) {
 	assert.False(t, called)
 	_, err = os.Stat(tokens)
 	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestConcurrentJoinsKeepWinningToken(t *testing.T) {
+	hub := testutil.NewTestStore(t)
+	spoke := testutil.NewTestStore(t)
+	require.NoError(t, hub.ConfigureFederationHubContext(t.Context()))
+	spokeUID, err := spoke.ArchiveUIDContext(t.Context())
+	require.NoError(t, err)
+	hubUID, err := hub.ArchiveUIDContext(t.Context())
+	require.NoError(t, err)
+	_, first, err := hub.CreateFederationEnrollmentContext(t.Context(), spokeUID, "alice", "")
+	require.NoError(t, err)
+	_, second, err := hub.CreateFederationEnrollmentContext(t.Context(), spokeUID, "bob", "")
+	require.NoError(t, err)
+	cfg := config.NewDefaultConfig()
+	cfg.Data.DataDir = t.TempDir()
+	cfg.Federation.Role = "hub"
+	cfg.Server.APIKey = "owner-fixture"
+	srv := api.NewServerWithOptions(api.ServerOptions{Config: cfg, Store: hub, FederationStore: hub, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.WithoutCancel(t.Context()))) })
+	var arrivals atomic.Int32
+	both := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if arrivals.Add(1) == 2 {
+			close(both)
+		}
+		<-both
+		srv.Router().ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	tokensDir := filepath.Join(t.TempDir(), "tokens")
+	type result struct {
+		token string
+		err   error
+	}
+	results := make(chan result, 2)
+	for _, token := range []string{first, second} {
+		go func() {
+			results <- result{token, federation.Join(t.Context(), spoke, tokensDir, server.URL, hubUID, token)}
+		}()
+	}
+	a, b := <-results, <-results
+	assert.NotEqual(t, a.err == nil, b.err == nil)
+	winner := a.token
+	if a.err != nil {
+		winner = b.token
+	}
+	links, err := spoke.ListFederationLinksContext(t.Context())
+	require.NoError(t, err)
+	assert.Len(t, links, 1)
+	path := filepath.Join(tokensDir, "federation-"+hubUID+".token")
+	contents, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, winner, string(contents))
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	if runtime.GOOS != "windows" {
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	}
+}
+
+func TestJoinTokenWriteFailureRemovesLink(t *testing.T) {
+	hub := testutil.NewTestStore(t)
+	spoke := testutil.NewTestStore(t)
+	require.NoError(t, hub.ConfigureFederationHubContext(t.Context()))
+	spokeUID, err := spoke.ArchiveUIDContext(t.Context())
+	require.NoError(t, err)
+	hubUID, err := hub.ArchiveUIDContext(t.Context())
+	require.NoError(t, err)
+	_, token, err := hub.CreateFederationEnrollmentContext(t.Context(), spokeUID, "alice", "")
+	require.NoError(t, err)
+	cfg := config.NewDefaultConfig()
+	cfg.Data.DataDir = t.TempDir()
+	cfg.Federation.Role = "hub"
+	cfg.Server.APIKey = "owner-fixture"
+	srv := api.NewServerWithOptions(api.ServerOptions{Config: cfg, Store: hub, FederationStore: hub, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.WithoutCancel(t.Context()))) })
+	server := httptest.NewServer(srv.Router())
+	t.Cleanup(server.Close)
+	blocked := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, os.WriteFile(blocked, []byte("fixture"), 0600))
+	assert.Error(t, federation.Join(t.Context(), spoke, filepath.Join(blocked, "tokens"), server.URL, hubUID, token))
+	links, err := spoke.ListFederationLinksContext(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, links)
 }

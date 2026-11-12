@@ -91,17 +91,21 @@ func Join(ctx context.Context, st *store.Store, tokensDir, rawURL, expectedUID, 
 	if strings.Contains(response.Member, token) || strings.Contains(response.EnrollmentUID, token) || strings.Contains(string(data), token) {
 		return errors.New("hub response contains the enrollment token")
 	}
-	if err := fileutil.SecureMkdirAll(tokensDir, 0700); err != nil {
-		return fmt.Errorf("create token directory: %w", err)
-	}
-	path := tokenPath(tokensDir, expectedUID)
-	if err := fileutil.SecureReplaceFile(path, []byte(token), 0600); err != nil {
-		return fmt.Errorf("save enrollment token: %w", err)
-	}
 	link := store.FederationLink{HubArchiveUID: expectedUID, HubOrigin: origin, EnrollmentUID: response.EnrollmentUID, Member: response.Member, PolicyJSON: string(data), PolicyDigest: digest}
 	if err := st.CreateFederationLinkContext(ctx, link); err != nil {
-		_ = os.Remove(path)
 		return fmt.Errorf("save federation link: %w", err)
+	}
+	if err = fileutil.SecureMkdirAll(tokensDir, 0700); err == nil {
+		err = fileutil.SecureReplaceFile(tokenPath(tokensDir, expectedUID), []byte(token), 0600)
+	} else {
+		err = fmt.Errorf("create token directory: %w", err)
+	}
+	if err != nil {
+		// Cleanup must finish even if the join was canceled.
+		if deleteErr := st.DeleteFederationLinkContext(context.WithoutCancel(ctx), expectedUID); deleteErr != nil {
+			return fmt.Errorf("save enrollment token: %w; remove link: %w", err, deleteErr)
+		}
+		return fmt.Errorf("save enrollment token: %w", err)
 	}
 	return nil
 }
