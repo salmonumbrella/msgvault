@@ -87,7 +87,7 @@ email introduction when the sender is a saved person. Saving the sender fills
 it on the next activity run. For owner outreach, it uses your person only when
 exactly one saved person represents your identities. A value you set is never
 replaced; clearing a value the job wrote keeps it empty. Set a different person
-to override it. While the field is switched off, the job leaves it alone and
+to override it. While the field is inactive, the job leaves it alone and
 keeps the work queued. This field is never offered to a provider.
 
 ## Review identity matches

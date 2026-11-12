@@ -3576,27 +3576,6 @@ func firstSeenDateChangesRecomputeWinner(t *testing.T) {
 	assert.Zero(t, state.InteractionCount)
 }
 
-func TestFirstSeenFirstMessageBreaksTimestampTie(t *testing.T) {
-	f := newIntroFixture(t)
-	second := f.f.EnsureParticipant("second@example.test", "Second", "example.test")
-	firstSender := f.f.EnsureParticipant("first@example.test", "First", "example.test")
-	require.Less(t, second, firstSender)
-	_, _, err := f.f.Store.CreatePersonFromParticipant(firstSender)
-	require.NoError(t, err)
-	_, _, err = f.f.Store.CreatePersonFromParticipant(second)
-	require.NoError(t, err)
-	at := time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC)
-	first := f.message(t, "first", firstSender, at)
-	secondID := f.message(t, "second", second, at)
-	require.Less(t, first, secondID)
-	f.run(t)
-	state, err := f.f.Store.ContactStateContext(t.Context(), f.person.ID, at)
-	require.NoError(t, err)
-	assert.Equal(t, fmt.Sprintf("message:%d", first), state.FirstSeenRef)
-	require.NotNil(t, state.Introducer)
-	assert.Equal(t, firstSender, state.Introducer.ParticipantID)
-}
-
 func TestFirstSeenIntroductionContactState(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)

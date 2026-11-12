@@ -500,7 +500,7 @@ func TestSubsetPreservesFirstContactState(t *testing.T) {
 			}
 			require.NoError(t, st.Close())
 			dir := filepath.Join(t.TempDir(), "subset")
-			_, err = store.CopySubsetWithOptions(ctx, path, dir, 10, store.CopySubsetOptions{IncludeIdentity: true, IncludeProfiles: true, IncludeAttributes: true})
+			_, err = store.CopySubsetWithOptions(ctx, path, dir, 10, store.CopySubsetOptions{IncludeIdentity: true, IncludeProfiles: true, IncludeAttributes: true, IncludeVCardResources: merge})
 			require.NoError(t, err)
 			dst, err := store.OpenContext(ctx, filepath.Join(dir, "msgvault.db"))
 			require.NoError(t, err)

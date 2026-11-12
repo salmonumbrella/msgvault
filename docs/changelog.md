@@ -8,7 +8,7 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
-- The activity job fills the editable Introduced by field from first-contact evidence while preserving your corrections.
+- The activity job fills the editable Introduced by field for saved people from their first archived appearance while preserving your corrections.
 
 - Saved people show their first archived appearance, including copied recipients, and the introducing sender when the evidence identifies one. See [first archived appearance](usage/people.md#see-a-persons-first-archived-appearance).
 
