@@ -880,7 +880,7 @@ func (s *Store) MarkContactStateDirtyContext(
 }
 
 // MarkAllContactStateDirtyContext invalidates every existing contact-state
-// row. It does not create rows for people without computed state.
+// and first-contact row. It does not create rows for people without computed state.
 func (s *Store) MarkAllContactStateDirtyContext(ctx context.Context) error {
 	return s.withTxContext(ctx, func(tx *loggedTx) error {
 		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
@@ -891,6 +891,12 @@ func (s *Store) MarkAllContactStateDirtyContext(ctx context.Context) error {
 			SET dirty_at = COALESCE(dirty_at, %s)
 		`, s.dialect.Now())); err != nil {
 			return fmt.Errorf("mark all contact state dirty: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+			UPDATE person_first_contacts
+			SET dirty_at = COALESCE(dirty_at, %s)
+		`, s.dialect.Now())); err != nil {
+			return fmt.Errorf("mark all first contacts dirty: %w", err)
 		}
 		return nil
 	})

@@ -736,6 +736,17 @@ func copyData(ctx context.Context, tx *sql.Tx, rowCount int, options CopySubsetO
 			return nil, fmt.Errorf("copy person attribute values: %w", err)
 		}
 
+		hasFirstContacts, err := sourceTableExists(ctx, tx, "person_first_contacts")
+		if err != nil {
+			return nil, fmt.Errorf("check person first contact schema: %w", err)
+		}
+		if hasFirstContacts {
+			if _, err := copyByName(ctx, tx, "person_first_contacts",
+				`person_id IN (SELECT id FROM persons)`); err != nil {
+				return nil, fmt.Errorf("copy person first contacts: %w", err)
+			}
+		}
+
 		// Organization attribute values follow the same universal_id mapping and
 		// record-reference boundary. The organizations themselves only cross the
 		// subset boundary through employment references (IncludeProfiles), so

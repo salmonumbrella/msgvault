@@ -205,7 +205,7 @@ func SeededAttributeDefinitions() []AttributeDefinitionInput {
 	)
 }
 
-// howWeMetDefinition is the one relationship-scoped seed: it describes how the
+// howWeMetDefinition is a relationship-scoped seed: it describes how the
 // archive owner and this person first met, not a fact about the person alone.
 func howWeMetDefinition() AttributeDefinitionInput {
 	description := "How you and this person first met"

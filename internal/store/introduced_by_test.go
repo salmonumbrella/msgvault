@@ -427,3 +427,20 @@ func TestFirstContactStaleFenceLeavesDirty(t *testing.T) {
 		})
 	}
 }
+
+func TestIntroducedByBackstopReconcilesRecipientOnlyChange(t *testing.T) {
+	f := newIntroFixture(t)
+	_, _, err := f.f.Store.CreatePersonFromParticipant(f.sender)
+	require.NoError(t, err)
+	recipients := []int64{f.owner, f.target}
+	for i := range 5 {
+		recipients = append(recipients, f.f.EnsureParticipant(fmt.Sprintf("extra%d@example.test", i), "Extra", "example.test"))
+	}
+	id := f.message(t, "intro-audience", f.sender, time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC), recipients[:6]...)
+	f.run(t)
+	require.Len(t, f.values(t, false), 1)
+	require.NoError(t, f.f.Store.ReplaceMessageRecipients(id, "to", recipients, nil))
+	_, err = f.projector.RunBackstop(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, f.values(t, false))
+}
