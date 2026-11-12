@@ -20,9 +20,9 @@ type IntroductionOperations interface {
 
 // IntroductionMutations is an optional owner-only capability.
 type IntroductionMutations interface {
-	PrepareIntroductionContext(context.Context, *agentgrant.Grant, store.PersonIntroductionPrepare) (introops.Record, error)
-	EditIntroductionContext(context.Context, *agentgrant.Grant, string, store.PersonIntroductionEdit) (introops.Record, error)
-	CancelIntroductionContext(context.Context, *agentgrant.Grant, string, int64) (introops.Record, error)
+	PrepareIntroductionContext(ctx context.Context, grant *agentgrant.Grant, prepare store.PersonIntroductionPrepare) (introops.Record, error)
+	EditIntroductionContext(ctx context.Context, grant *agentgrant.Grant, id string, edit store.PersonIntroductionEdit) (introops.Record, error)
+	CancelIntroductionContext(ctx context.Context, grant *agentgrant.Grant, id string, revision int64) (introops.Record, error)
 }
 
 type IntroductionEditRequest struct {
