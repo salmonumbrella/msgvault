@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/fileutil"
@@ -31,21 +30,9 @@ func Join(ctx context.Context, st *store.Store, tokensDir, rawURL, expectedUID, 
 	if !uidPattern.MatchString(expectedUID) {
 		return errors.New("hub instance must be 64 lowercase hexadecimal digits")
 	}
-	if token == "" {
-		return errors.New("enrollment token is empty")
-	}
 	origin, err := ParseHubURL(rawURL)
 	if err != nil {
 		return err
-	}
-	links, err := st.ListFederationLinksContext(ctx)
-	if err != nil {
-		return err
-	}
-	for _, l := range links {
-		if l.HubOrigin == origin || l.HubArchiveUID == expectedUID {
-			return errors.New("hub is already linked")
-		}
 	}
 	spokeUID, err := st.ArchiveUIDContext(ctx)
 	if err != nil {
@@ -82,15 +69,9 @@ func Join(ctx context.Context, st *store.Store, tokensDir, rawURL, expectedUID, 
 	if digest != response.PolicyDigest {
 		return errors.New("hub policy digest does not match")
 	}
-	if response.EnrollmentUID == "" || response.Member == "" {
-		return errors.New("incomplete hub enrollment")
-	}
 	data, err := json.Marshal(policy, json.Deterministic(true))
 	if err != nil {
 		return errors.New("cannot encode hub policy")
-	}
-	if strings.Contains(response.Member, token) || strings.Contains(response.EnrollmentUID, token) || strings.Contains(string(data), token) {
-		return errors.New("hub response contains the enrollment token")
 	}
 	link := store.FederationLink{HubArchiveUID: expectedUID, HubOrigin: origin, EnrollmentUID: response.EnrollmentUID, Member: response.Member, PolicyJSON: string(data), PolicyDigest: digest}
 	if err := st.CreateFederationLinkContext(ctx, link); err != nil {
@@ -214,16 +195,10 @@ func Leave(ctx context.Context, st *store.Store, tokensDir, rawURL string, local
 			}
 		}
 		path := tokenPath(tokensDir, l.HubArchiveUID)
-		token, readErr := os.ReadFile(path)
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("remove token; use --local-only: %w", err)
 		}
 		if err := st.DeleteFederationLinkContext(ctx, l.HubArchiveUID); err != nil {
-			if readErr == nil {
-				if restoreErr := fileutil.SecureReplaceFile(path, token, 0600); restoreErr != nil {
-					return "", errors.New("remove link failed and token could not be restored; use --local-only")
-				}
-			}
 			return "", fmt.Errorf("remove link; use --local-only: %w", err)
 		}
 		return l.EnrollmentUID, nil

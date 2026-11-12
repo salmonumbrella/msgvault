@@ -33,7 +33,7 @@ const EnvRemoteDeleteOptIn = "MSGVAULT_ENABLE_REMOTE_DELETE"
 
 func EnvAllowed(name string) bool {
 	switch name {
-	case EnvIMAPPassword, EnvBeeperToken, EnvMatrixLoginSecret, EnvMatrixRecoverySecret, EnvDiscordToken, EnvSlackToken, EnvInlineOAuth, EnvFederationToken, EnvRemoteDeleteOptIn:
+	case EnvIMAPPassword, EnvBeeperToken, EnvMatrixLoginSecret, EnvMatrixRecoverySecret, EnvDiscordToken, EnvSlackToken, EnvInlineOAuth, EnvRemoteDeleteOptIn:
 		return true
 	default:
 		return false

@@ -15,7 +15,6 @@ func TestEnvAllowed(t *testing.T) {
 		{name: EnvBeeperToken, want: true},
 		{name: EnvDiscordToken, want: true},
 		{name: EnvInlineOAuth, want: true},
-		{name: EnvFederationToken, want: true},
 		{name: EnvMatrixLoginSecret, want: true},
 		{name: EnvMatrixRecoverySecret, want: true},
 		{name: EnvRemoteDeleteOptIn, want: true},

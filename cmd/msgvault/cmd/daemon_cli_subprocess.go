@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"go.kenn.io/kit/consolewindow"
-	"go.kenn.io/msgvault/internal/clirun"
 )
 
 const daemonCLISubprocessEnv = "MSGVAULT_DAEMON_CLI_PARENT_PID"
@@ -161,7 +160,7 @@ func daemonCLIChildEnv(base []string, parentPID int, extra map[string]string) []
 			continue
 		}
 		if key, ok := splitEnvEntry(entry); ok {
-			if strings.EqualFold(key, remoteDeleteEnvVar) || strings.EqualFold(key, clirun.EnvFederationToken) {
+			if strings.EqualFold(key, remoteDeleteEnvVar) {
 				continue
 			}
 			if extraValue, exists := extra[key]; exists {

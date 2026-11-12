@@ -75,10 +75,6 @@ func newDaemonCLIRunnerTestServer(
 		Service: daemonService,
 		Version: Version,
 	}))
-	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"status": "ok", "api_schema_version": api.APISchemaVersion}))
-	})
 	mux.HandleFunc("/api/v1/cli/run", daemonCLIRunTestHandler(t, requests, checkRequest, events...))
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)

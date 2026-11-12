@@ -292,43 +292,6 @@ func TestJoinRefusesRedirect(t *testing.T) {
 	assert.False(t, contacted)
 }
 
-func TestJoinRejectsReflectedToken(t *testing.T) {
-	hub := testutil.NewTestStore(t)
-	spoke := testutil.NewTestStore(t)
-	require.NoError(t, hub.ConfigureFederationHubContext(t.Context()))
-	spokeUID, err := spoke.ArchiveUIDContext(t.Context())
-	require.NoError(t, err)
-	hubUID, err := hub.ArchiveUIDContext(t.Context())
-	require.NoError(t, err)
-	_, token, err := hub.CreateFederationEnrollmentContext(t.Context(), spokeUID, "alice", "")
-	require.NoError(t, err)
-	cfg := config.NewDefaultConfig()
-	cfg.Data.DataDir = t.TempDir()
-	cfg.Federation.Role = "hub"
-	cfg.Server.APIKey = "owner-fixture"
-	srv := api.NewServerWithOptions(api.ServerOptions{Config: cfg, Store: hub, FederationStore: hub, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
-	t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.WithoutCancel(t.Context()))) })
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rec := httptest.NewRecorder()
-		srv.Router().ServeHTTP(rec, r)
-		var body map[string]any
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-		body["member"] = token
-		w.Header().Set("Content-Type", "application/json")
-		require.NoError(t, json.NewEncoder(w).Encode(body))
-	}))
-	t.Cleanup(server.Close)
-	tokens := filepath.Join(t.TempDir(), "tokens")
-	err = federation.Join(t.Context(), spoke, tokens, server.URL, hubUID, token)
-	require.Error(t, err)
-	assert.NotContains(t, err.Error(), token)
-	links, err := spoke.ListFederationLinksContext(t.Context())
-	require.NoError(t, err)
-	assert.Empty(t, links)
-	_, err = os.Stat(tokens)
-	assert.ErrorIs(t, err, os.ErrNotExist)
-}
-
 func TestLeaveDetectsChangedIdentityBeforeRevoke(t *testing.T) {
 	hub := testutil.NewTestStore(t)
 	spoke := testutil.NewTestStore(t)

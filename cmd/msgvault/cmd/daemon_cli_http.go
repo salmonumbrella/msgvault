@@ -65,16 +65,6 @@ func runDaemonCLICommandHTTPWithEnv(
 		return err
 	}
 	defer func() { _ = st.Close() }()
-	if len(args) >= 2 && args[0] == "federation" {
-		supported, err := st.SupportsAPISchemaVersion(cmd.Context(), federationMinAPISchema)
-		if err != nil {
-			return fmt.Errorf("check federation API version: %w", err)
-		}
-		if !supported {
-			return fmt.Errorf("federation commands require daemon API schema %s or newer", federationMinAPISchema)
-		}
-	}
-
 	cwd, err := daemonCLIRunCwd(info, requiresLocalFiles)
 	if err != nil {
 		return err
