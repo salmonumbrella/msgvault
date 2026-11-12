@@ -237,6 +237,49 @@ func TestLeaveRevokesBeforeRemovingLocalState(t *testing.T) {
 	assert.Empty(t, links)
 }
 
+func TestLeaveAfterOperatorRevoke(t *testing.T) {
+	hub := testutil.NewTestStore(t)
+	spoke := testutil.NewTestStore(t)
+	require.NoError(t, hub.ConfigureFederationHubContext(t.Context()))
+	spokeUID, err := spoke.ArchiveUIDContext(t.Context())
+	require.NoError(t, err)
+	hubUID, err := hub.ArchiveUIDContext(t.Context())
+	require.NoError(t, err)
+	enrollment, token, err := hub.CreateFederationEnrollmentContext(t.Context(), spokeUID, "alice", "")
+	require.NoError(t, err)
+	cfg := config.NewDefaultConfig()
+	cfg.Data.DataDir = t.TempDir()
+	cfg.Federation.Role = "hub"
+	cfg.Server.APIKey = "owner-fixture"
+	srv := api.NewServerWithOptions(api.ServerOptions{Config: cfg, Store: hub, FederationStore: hub, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.WithoutCancel(t.Context()))) })
+	server := httptest.NewServer(srv.Router())
+	t.Cleanup(server.Close)
+	tokens := filepath.Join(t.TempDir(), "tokens")
+	require.NoError(t, federation.Join(t.Context(), spoke, tokens, server.URL, hubUID, token))
+	require.NoError(t, hub.RevokeFederationEnrollmentContext(t.Context(), enrollment.EnrollmentUID))
+
+	_, err = federation.Leave(t.Context(), spoke, tokens, server.URL, false)
+	assert.ErrorContains(t, err, "hub rejected enrollment")
+	assert.ErrorContains(t, err, "--local-only")
+	links, err := spoke.ListFederationLinksContext(t.Context())
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+	assert.Equal(t, "active", links[0].State)
+	path := filepath.Join(tokens, "federation-"+hubUID+".token")
+	_, err = os.Stat(path)
+	assert.NoError(t, err)
+
+	uid, err := federation.Leave(t.Context(), spoke, tokens, server.URL, true)
+	require.NoError(t, err)
+	assert.Equal(t, enrollment.EnrollmentUID, uid)
+	links, err = spoke.ListFederationLinksContext(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, links)
+	_, err = os.Stat(path)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestJoinRefusesRedirect(t *testing.T) {
 	contacted := false
 	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { contacted = true }))
