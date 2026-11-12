@@ -434,6 +434,7 @@ func TestIntroHTTPMutationsMatchCLI(t *testing.T) {
 	} {
 		request, err := http.NewRequestWithContext(ctx, tc.method, server.URL+tc.path, bytes.NewBufferString(tc.body))
 		req.NoError(err)
+		request.Header.Set("Content-Type", "application/json")
 		response, err := http.DefaultClient.Do(request)
 		req.NoError(err)
 		data, err := io.ReadAll(response.Body)
