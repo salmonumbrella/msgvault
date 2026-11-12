@@ -5791,10 +5791,14 @@ run `msgvault federation enroll --spoke-instance <uid> --member <handle>`.
 The UID is 64 lowercase hexadecimal digits. The member handle must not be blank
 or contain control characters. Optionally supply `--spoke-name` without control characters.
 The command prints the one-time token to standard output and a token-free join
-command for the upcoming `federation join` to standard error. Save the token
-securely; it cannot be retrieved again.
-The join command carries a `<hub-url>` placeholder that the operator replaces with
-the address spokes use to reach the hub. Joining is not yet available.
+command to standard error. Save the token securely; it cannot be retrieved again.
+Replace `<hub-url>` with the hub address, then run the printed command on the spoke.
+The spoke verifies the hub instance and policy and stores the token in an owner-only
+file. `federation status [--json]` shows each link and its policy.
+`federation leave <hub-url>` revokes the enrollment and removes local state.
+If the hub is unreachable, `federation leave <hub-url> --local-only` removes
+local state and prints the enrollment UID for the hub operator. Nothing is shared
+by joining.
 
 Use `msgvault federation enrollments list` to inspect enrollments and
 `msgvault federation revoke <enrollment-uid>` to revoke one. Record the enrollment

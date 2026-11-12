@@ -32,18 +32,13 @@ func (p FederationHubPolicy) Validate() error {
 	if len(p.AllowedLevels) == 0 {
 		return fmt.Errorf("federation hub allowed_levels must not be empty")
 	}
-	seen := map[string]bool{}
 	for _, level := range p.AllowedLevels {
-		if (level != "envelope" && level != "content") || seen[level] {
+		if level != "envelope" && level != "content" {
 			return fmt.Errorf("invalid federation hub allowed_levels")
 		}
-		seen[level] = true
 	}
-	if p.MinGroupSize < 2 {
-		return fmt.Errorf("federation hub min_group_size must be at least 2")
-	}
-	if strings.TrimSpace(p.Processing) == "" {
-		return fmt.Errorf("federation hub processing must not be blank")
+	if p.MinGroupSize < 1 {
+		return fmt.Errorf("federation hub min_group_size must be at least 1")
 	}
 	return nil
 }

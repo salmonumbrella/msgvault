@@ -18,7 +18,7 @@ type FederationLink struct {
 }
 
 func (s *Store) CreateFederationLinkContext(ctx context.Context, link FederationLink) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO federation_links (hub_archive_uid, hub_origin, enrollment_uid, member_handle, policy_json, policy_digest) VALUES (?, ?, ?, ?, ?, ?)`, link.HubArchiveUID, link.HubOrigin, link.EnrollmentUID, link.Member, link.PolicyJSON, link.PolicyDigest)
+	_, err := s.db.ExecContext(ctx, s.Rebind(`INSERT INTO federation_links (hub_archive_uid, hub_origin, enrollment_uid, member_handle, policy_json, policy_digest) VALUES (?, ?, ?, ?, ?, ?)`), link.HubArchiveUID, link.HubOrigin, link.EnrollmentUID, link.Member, link.PolicyJSON, link.PolicyDigest)
 	if err != nil {
 		return fmt.Errorf("create federation link: %w", err)
 	}
@@ -43,11 +43,11 @@ func (s *Store) ListFederationLinksContext(ctx context.Context) ([]FederationLin
 }
 
 func (s *Store) SetFederationLinkStateContext(ctx context.Context, uid, state string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE federation_links SET state = ? WHERE hub_archive_uid = ?`, state, uid)
+	_, err := s.db.ExecContext(ctx, s.Rebind(`UPDATE federation_links SET state = ? WHERE hub_archive_uid = ?`), state, uid)
 	return err
 }
 
 func (s *Store) DeleteFederationLinkContext(ctx context.Context, uid string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM federation_links WHERE hub_archive_uid = ?`, uid)
+	_, err := s.db.ExecContext(ctx, s.Rebind(`DELETE FROM federation_links WHERE hub_archive_uid = ?`), uid)
 	return err
 }

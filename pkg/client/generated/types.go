@@ -5307,12 +5307,28 @@ func (f FederationEnrollment) Validate() error {
 }
 
 type FederationHandshakeResponse struct {
-	EnrollmentState  string  `json:"enrollment_state" validate:"required"`
-	HubInstance      string  `json:"hub_instance" validate:"required"`
-	ProtocolVersions []int64 `json:"protocol_versions" validate:"required"`
+	EnrollmentState  string              `json:"enrollment_state" validate:"required"`
+	EnrollmentUID    string              `json:"enrollment_uid" validate:"required"`
+	HubInstance      string              `json:"hub_instance" validate:"required"`
+	Member           string              `json:"member" validate:"required"`
+	Policy           FederationHubPolicy `json:"policy" validate:"required"`
+	PolicyDigest     string              `json:"policy_digest" validate:"required"`
+	ProtocolVersions []int64             `json:"protocol_versions" validate:"required"`
 }
 
 func (f FederationHandshakeResponse) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(f))
+}
+
+type FederationHubPolicy struct {
+	AllowAttachments bool     `json:"allow_attachments" validate:"required"`
+	AllowedLevels    []string `json:"allowed_levels" validate:"required"`
+	MinGroupSize     int64    `json:"min_group_size" validate:"required"`
+	Processing       string   `json:"processing" validate:"required"`
+	Retention        string   `json:"retention" validate:"required"`
+}
+
+func (f FederationHubPolicy) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(f))
 }
 

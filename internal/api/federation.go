@@ -65,7 +65,7 @@ func (s *Server) registerFederationRoutes(api huma.API) {
 	registerAPIV1RawHumaJSONRoute[federationListResponse](api, "listFederationEnrollments", http.MethodGet, "/federation/enrollments", "List spoke enrollments", s.handleFederationList)
 	op = rawAPIV1Operation("revokeFederationEnrollment", http.MethodDelete, "/federation/enrollments/{uid}", "Revoke a spoke enrollment")
 	op.Parameters = []*huma.Param{{Name: "uid", In: "path", Required: true, Schema: &huma.Schema{Type: "string"}}}
-	op.Security = []map[string][]string{{"apiKey": {}}, {federationTokenSecurityScheme: {}, federationSpokeSecurityScheme: {}}}
+	op.Security = []map[string][]string{{apiKeySecurityScheme: {}}, {federationTokenSecurityScheme: {}, federationSpokeSecurityScheme: {}}}
 	op.Responses = rawHumaResponses(http.StatusNoContent)
 	registerRawHumaRoute(api, op, s.handleFederationRevoke)
 }
@@ -112,14 +112,19 @@ func (s *Server) handleFederationIdentity(w http.ResponseWriter, r *http.Request
 	}
 }
 
-func (s *Server) handleFederationHandshake(w http.ResponseWriter, r *http.Request) {
-	if !s.federationRole(w, r, false) {
-		return
-	}
+func (s *Server) federationRequestAuthentication(r *http.Request) requestAuthentication {
 	auth := s.requestAuthentication(r)
 	if auth.Mode == AuthModeCaller {
 		auth = s.classifyAPIRequestDirect(r)
 	}
+	return auth
+}
+
+func (s *Server) handleFederationHandshake(w http.ResponseWriter, r *http.Request) {
+	if !s.federationRole(w, r, false) {
+		return
+	}
+	auth := s.federationRequestAuthentication(r)
 	if auth.Mode != AuthModeFederation {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Invalid or missing API key")
 		return
@@ -193,9 +198,10 @@ func (s *Server) handleFederationRevoke(w http.ResponseWriter, r *http.Request) 
 	if !s.federationRole(w, r, false) {
 		return
 	}
-	auth := s.requestAuthentication(r)
-	if auth.Mode == AuthModeCaller {
-		auth = s.classifyAPIRequestDirect(r)
+	auth := s.federationRequestAuthentication(r)
+	if s.federationClaim(r) && auth.Mode != AuthModeFederation {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Invalid or missing API key")
+		return
 	}
 	if auth.Mode == AuthModeFederation {
 		if auth.Enrollment == nil || auth.Enrollment.EnrollmentUID != r.PathValue("uid") {

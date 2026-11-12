@@ -67,15 +67,44 @@ func TestFederationHubPolicy(t *testing.T) {
 	for _, change := range []func(*FederationHubPolicy){
 		func(p *FederationHubPolicy) { p.Retention = "invalid" },
 		func(p *FederationHubPolicy) { p.AllowedLevels = []string{"invalid"} },
-		func(p *FederationHubPolicy) { p.MinGroupSize = 1 },
-		func(p *FederationHubPolicy) { p.Processing = "" },
+		func(p *FederationHubPolicy) { p.MinGroupSize = 0 },
 	} {
 		bad := cfg.Federation.Hub.Policy()
 		change(&bad)
 		assert.Error(t, bad.Validate())
 	}
+	p.MinGroupSize = 1
+	assert.NoError(t, p.Validate())
 	p.AllowAttachments = !p.AllowAttachments
 	changed, err := p.PolicyDigest()
 	require.NoError(t, err)
 	assert.NotEqual(t, digest, changed)
+}
+
+func TestFederationPolicyDigestFields(t *testing.T) {
+	base := NewDefaultConfig().Federation.Hub
+	digest, err := base.PolicyDigest()
+	require.NoError(t, err)
+	for name, change := range map[string]func(*FederationHubPolicy){
+		"retention":   func(p *FederationHubPolicy) { p.Retention = "org-retained" },
+		"levels":      func(p *FederationHubPolicy) { p.AllowedLevels = []string{"envelope"} },
+		"attachments": func(p *FederationHubPolicy) { p.AllowAttachments = false },
+		"group":       func(p *FederationHubPolicy) { p.MinGroupSize++ },
+		"processing":  func(p *FederationHubPolicy) { p.Processing = "fixture" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := base.Policy()
+			change(&p)
+			other, err := p.PolicyDigest()
+			require.NoError(t, err)
+			assert.NotEqual(t, digest, other)
+		})
+	}
+}
+
+func TestFederationPolicyIgnoredOutsideHub(t *testing.T) {
+	for _, role := range []string{"off", "spoke"} {
+		f := FederationConfig{Role: role, Hub: FederationHubPolicy{Retention: "invalid"}}
+		assert.NoError(t, f.Validate())
+	}
 }

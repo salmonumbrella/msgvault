@@ -5506,7 +5506,15 @@ components:
       properties:
         enrollment_state:
           type: string
+        enrollment_uid:
+          type: string
         hub_instance:
+          type: string
+        member:
+          type: string
+        policy:
+          $ref: "#/components/schemas/FederationHubPolicy"
+        policy_digest:
           type: string
         protocol_versions:
           items:
@@ -5517,6 +5525,32 @@ components:
         - protocol_versions
         - hub_instance
         - enrollment_state
+        - policy
+        - policy_digest
+        - member
+        - enrollment_uid
+      type: object
+    FederationHubPolicy:
+      properties:
+        allow_attachments:
+          type: boolean
+        allowed_levels:
+          items:
+            type: string
+          type: array
+        min_group_size:
+          format: int64
+          type: integer
+        processing:
+          type: string
+        retention:
+          type: string
+      required:
+        - retention
+        - allowed_levels
+        - allow_attachments
+        - min_group_size
+        - processing
       type: object
     FederationIdentityResponse:
       properties:
@@ -22609,6 +22643,8 @@ paths:
           description: Error
       security:
         - apiKey: []
+        - federationSpoke: []
+          federationToken: []
       summary: Revoke a spoke enrollment
       tags:
         - API

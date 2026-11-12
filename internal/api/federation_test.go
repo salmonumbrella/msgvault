@@ -454,6 +454,10 @@ func TestFederationHandshakeOpenAPISecurity(t *testing.T) {
 			assertions.Equal("apiKey", spoke.Type)
 			assertions.Equal("header", spoke.In)
 			assertions.Equal("X-Msgvault-Spoke-Instance", spoke.Name)
+			revoke := doc.Paths["/api/v1/federation/enrollments/{uid}"]
+			requirements.NotNil(revoke)
+			requirements.NotNil(revoke.Delete)
+			assertions.Equal([]map[string][]string{{apiKeySecurityScheme: {}}, {federationTokenSecurityScheme: {}, federationSpokeSecurityScheme: {}}}, revoke.Delete.Security)
 		})
 	}
 }
@@ -474,4 +478,31 @@ func TestFederationSelfRevoke(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, do(http.MethodDelete, "/api/v1/federation/enrollments/other"))
 	assert.Equal(t, http.StatusNoContent, do(http.MethodDelete, "/api/v1/federation/enrollments/"+enrollment.EnrollmentUID))
 	assert.Equal(t, http.StatusUnauthorized, do(http.MethodGet, "/api/v1/federation/handshake"))
+}
+
+func TestFederationLibrarySelfRevoke(t *testing.T) {
+	srv, st := federationHubFixture(t)
+	uid := strings.Repeat("a", 64)
+	enrollment, token, err := st.CreateFederationEnrollmentContext(t.Context(), uid, "alice", "")
+	require.NoError(t, err)
+	handler := srv.Handler(func(http.ResponseWriter, *http.Request, Operation) bool { return true })
+	request := func(method, path, credential string) int {
+		r := httptest.NewRequestWithContext(t.Context(), method, path, nil)
+		r.Header.Set("Authorization", "Bearer "+credential)
+		if credential == token {
+			r.Header.Set("X-Msgvault-Spoke-Instance", uid)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w.Code
+	}
+	assert.Equal(t, http.StatusForbidden, request(http.MethodDelete, "/api/v1/federation/enrollments/foreign", token))
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/api/v1/federation/enrollments/"+enrollment.EnrollmentUID, nil)
+	r.Header.Set("Authorization", "Bearer mvf1_invalid")
+	r.Header.Set("X-Msgvault-Spoke-Instance", uid)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Equal(t, http.StatusNoContent, request(http.MethodDelete, "/api/v1/federation/enrollments/"+enrollment.EnrollmentUID, token))
+	assert.Equal(t, http.StatusUnauthorized, request(http.MethodGet, "/api/v1/federation/handshake", token))
 }

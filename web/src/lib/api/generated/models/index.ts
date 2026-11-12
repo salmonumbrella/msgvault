@@ -309,6 +309,7 @@ export * from "./federationCreateRequest";
 export * from "./federationCreateResponse";
 export * from "./federationEnrollment";
 export * from "./federationHandshakeResponse";
+export * from "./federationHubPolicy";
 export * from "./federationIdentityResponse";
 export * from "./federationListResponse";
 export * from "./fieldDescriptor";

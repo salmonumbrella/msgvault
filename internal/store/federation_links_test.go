@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,4 +30,19 @@ func TestFederationLinks(t *testing.T) {
 	links, err = st.ListFederationLinksContext(t.Context())
 	require.NoError(t, err)
 	assert.Empty(t, links)
+}
+
+func TestFederationLinksReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "archive.db")
+	st := testutil.NewSQLiteTestStoreAt(t, path)
+	link := store.FederationLink{HubArchiveUID: "hub", HubOrigin: "https://example.com", EnrollmentUID: "enrollment", Member: "alice", PolicyJSON: `{}`, PolicyDigest: "digest"}
+	require.NoError(t, st.CreateFederationLinkContext(t.Context(), link))
+	reopened, err := store.OpenForTest(t.Context(), path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+	require.NoError(t, reopened.InitSchemaUnlessCurrentContext(t.Context()))
+	links, err := reopened.ListFederationLinksContext(t.Context())
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+	assert.Equal(t, link.HubOrigin, links[0].HubOrigin)
 }

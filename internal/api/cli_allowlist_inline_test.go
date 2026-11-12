@@ -44,3 +44,15 @@ func TestInlineOAuthHandoffIsOnlyAcceptedForAccountSetup(t *testing.T) {
 	assertions.False(srv.cliRunEnvAllowedForCommand([]string{"export-messages"}, clirun.EnvInlineOAuth))
 	assertions.False(srv.cliRunEnvAllowedForCommand(nil, clirun.EnvInlineOAuth))
 }
+
+func TestFederationCLIAdmission(t *testing.T) {
+	srv := &Server{}
+	for _, sub := range []string{"join", "status", "leave"} {
+		assert.True(t, cliRunCommandAllowed([]string{"federation", sub}))
+		assert.Equal(t, sub == "join", srv.cliRunEnvAllowedForCommand([]string{"federation", sub}, clirun.EnvFederationToken))
+	}
+	for _, sub := range []string{"enroll", "identity", "revoke", "enrollments"} {
+		assert.False(t, cliRunCommandAllowed([]string{"federation", sub}))
+		assert.False(t, srv.cliRunEnvAllowedForCommand([]string{"federation", sub}, clirun.EnvFederationToken))
+	}
+}

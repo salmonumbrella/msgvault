@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -12,7 +13,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"go.kenn.io/msgvault/internal/api"
+	"go.kenn.io/msgvault/internal/clirun"
 	"go.kenn.io/msgvault/internal/config"
+	"go.kenn.io/msgvault/internal/federation"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
 
@@ -118,4 +121,48 @@ func TestFederationEnrollOutput(t *testing.T) {
 		command.SetArgs([]string{"--spoke-instance", strings.Repeat("a", 64), "--member", " "})
 		assert.ErrorContains(t, command.ExecuteContext(ctx), "member")
 	})
+}
+
+func TestFederationJoinForwardsTokenInEnvironment(t *testing.T) {
+	const token = "mvf1_synthetic_fixture"
+	server, calls := newDaemonCLIRunnerTestServer(t, func(req daemonCLIRunTestRequest) {
+		assert.Equal(t, token, req.Env[clirun.EnvFederationToken])
+		assert.NotContains(t, strings.Join(req.Args, " "), token)
+		assert.Equal(t, "federation", req.Args[0])
+		assert.Equal(t, "join", req.Args[1])
+	}, `{"type":"complete"}`)
+	ctx := configureRemoteDaemonForTest(t, server.URL)
+	root := &cobra.Command{Use: "msgvault"}
+	group := &cobra.Command{Use: "federation"}
+	group.AddCommand(newFederationJoinCmd())
+	root.AddCommand(group)
+	root.SetIn(strings.NewReader(token))
+	root.SetArgs([]string{"federation", "join", "https://hub.example.com", "--hub-instance", strings.Repeat("a", 64), "--token-file", "-"})
+	require.NoError(t, root.ExecuteContext(ctx))
+	assert.EqualValues(t, 1, calls.Load())
+}
+
+func TestFederationCommandsRequireSpoke(t *testing.T) {
+	markDaemonCLISubprocessForTest(t)
+	cfg := config.NewDefaultConfig()
+	cfg.Data.DataDir = t.TempDir()
+	ctx := withStoreResolverConfig(t, cfg)
+	for _, cmd := range []*cobra.Command{newFederationStatusCmd(), newFederationLeaveCmd()} {
+		if strings.HasPrefix(cmd.Use, "leave") {
+			cmd.SetArgs([]string{"https://hub.example.com"})
+		}
+		assert.ErrorContains(t, cmd.ExecuteContext(ctx), "role must be spoke")
+	}
+}
+
+func TestFederationStatusJSON(t *testing.T) {
+	var out bytes.Buffer
+	links := []federation.LinkStatus{{HubOrigin: "https://example.com", Member: "alice", State: "enrolled", Shares: 0, Policy: config.NewDefaultConfig().Federation.Hub}}
+	require.NoError(t, writeFederationStatus(&out, links, true))
+	var decoded []map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &decoded))
+	require.Len(t, decoded, 1)
+	assert.Equal(t, "enrolled", decoded[0]["state"])
+	assert.Equal(t, float64(0), decoded[0]["shares"])
+	assert.NotContains(t, out.String(), "mvf1_")
 }

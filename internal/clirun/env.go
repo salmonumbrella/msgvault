@@ -25,12 +25,15 @@ const EnvSlackToken = "MSGVAULT_SLACK_TOKEN" // #nosec G101 -- environment varia
 // EnvInlineOAuth passes delegated OAuth credentials to a daemon-owned CLI subprocess.
 const EnvInlineOAuth = "MSGVAULT_INLINE_OAUTH" // #nosec G101 -- environment variable name, not a credential value
 
+// EnvFederationToken carries an enrollment token only to federation join.
+const EnvFederationToken = "MSGVAULT_FEDERATION_TOKEN" // #nosec G101 -- environment variable name, not a credential value
+
 // EnvRemoteDeleteOptIn names the env var that opts into executing staged remote deletions.
 const EnvRemoteDeleteOptIn = "MSGVAULT_ENABLE_REMOTE_DELETE"
 
 func EnvAllowed(name string) bool {
 	switch name {
-	case EnvIMAPPassword, EnvBeeperToken, EnvMatrixLoginSecret, EnvMatrixRecoverySecret, EnvDiscordToken, EnvSlackToken, EnvInlineOAuth, EnvRemoteDeleteOptIn:
+	case EnvIMAPPassword, EnvBeeperToken, EnvMatrixLoginSecret, EnvMatrixRecoverySecret, EnvDiscordToken, EnvSlackToken, EnvInlineOAuth, EnvFederationToken, EnvRemoteDeleteOptIn:
 		return true
 	default:
 		return false

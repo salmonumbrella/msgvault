@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	"go.kenn.io/msgvault/internal/clirun"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -173,4 +175,12 @@ func TestNewDaemonCLISubprocessCommandAppliesWorkingDirectory(t *testing.T) {
 
 	require.NoError(t, err, "newDaemonCLISubprocessCommand")
 	assert.Equal(t, cwd, cmd.Dir, "working directory")
+}
+
+func TestDaemonCLIChildEnvDoesNotInheritFederationToken(t *testing.T) {
+	got := daemonCLIChildEnv([]string{clirun.EnvFederationToken + "=old"}, 123, nil)
+	assert.NotContains(t, got, clirun.EnvFederationToken+"=old")
+	got = daemonCLIChildEnv([]string{clirun.EnvFederationToken + "=old"}, 123, map[string]string{clirun.EnvFederationToken: "new"})
+	assert.Contains(t, got, clirun.EnvFederationToken+"=new")
+	assert.NotContains(t, got, clirun.EnvFederationToken+"=old")
 }

@@ -1,14 +1,22 @@
 package cmd
 
 import (
+	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"go.kenn.io/msgvault/internal/clirun"
+	"go.kenn.io/msgvault/internal/federation"
+	"go.kenn.io/msgvault/internal/providercredentials"
+	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/textutil"
 )
 
-const federationMinAPISchema = "5.1.0"
+const federationMinAPISchema = "5.2.0"
 
 func init() {
 	root := &cobra.Command{Use: "federation", Short: "Manage hub enrollment"}
@@ -44,7 +52,7 @@ func init() {
 		if result.Enrollment.SpokeName != result.Enrollment.Member {
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Spoke: %s\n", result.Enrollment.SpokeName)
 		}
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Join (upcoming, not in this release): msgvault federation join <hub-url> --hub-instance %s --token-file <path>\n", result.HubInstance)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Join: msgvault federation join <hub-url> --hub-instance %s --token-file <path>\n", result.HubInstance)
 		return nil
 	}}
 	enroll.Flags().StringVar(&spoke, "spoke-instance", "", "Spoke archive UID (64 lowercase hexadecimal digits)")
@@ -88,6 +96,127 @@ func init() {
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Enrollment revoked.")
 		return nil
 	}}
-	root.AddCommand(identity, enroll, enrollments, revoke)
+	root.AddCommand(identity, enroll, enrollments, revoke, newFederationJoinCmd(), newFederationStatusCmd(), newFederationLeaveCmd())
 	rootCmd.AddCommand(root)
+}
+
+func federationSpokeStore(cmd *cobra.Command) (*store.Store, func(), error) {
+	state := invocationFromCommand(cmd)
+	if state == nil || state.cfg == nil {
+		return nil, nil, errors.New("configuration is unavailable")
+	}
+	if state.cfg.Federation.Role != "spoke" {
+		return nil, nil, errors.New("federation role must be spoke")
+	}
+	return openWritableStoreAndInitForIngestInvocation(cmd.Context(), state)
+}
+
+func newFederationJoinCmd() *cobra.Command {
+	var instance, tokenFile string
+	cmd := &cobra.Command{Use: "join <hub-url>", Short: "Join a federation hub", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if instance == "" || tokenFile == "" {
+			return errors.New("--hub-instance and --token-file are required")
+		}
+		if !isDaemonCLISubprocess() {
+			var reader io.Reader = cmd.InOrStdin()
+			if tokenFile != "-" {
+				f, err := os.Open(tokenFile)
+				if err != nil {
+					return errors.New("cannot open enrollment token file")
+				}
+				defer func() { _ = f.Close() }()
+				reader = f
+			}
+			token, err := providercredentials.ReadSecret(reader)
+			if err != nil {
+				return err
+			}
+			return runDaemonCLICommandHTTPFromCobraWithEnv(cmd, args, map[string]string{clirun.EnvFederationToken: token})
+		}
+		state := invocationFromCommand(cmd)
+		st, cleanup, err := federationSpokeStore(cmd)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		if err := federation.Join(cmd.Context(), st, state.cfg.TokensDir(), args[0], instance, os.Getenv(clirun.EnvFederationToken)); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), "Joined hub; enrolled, 0 shares.")
+		return err
+	}}
+	cmd.Flags().StringVar(&instance, "hub-instance", "", "Expected hub archive UID")
+	cmd.Flags().StringVar(&tokenFile, "token-file", "", "Enrollment token file, or - for stdin")
+	return cmd
+}
+
+func newFederationStatusCmd() *cobra.Command {
+	var asJSON bool
+	cmd := &cobra.Command{Use: "status", Short: "Show federation links", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		if !isDaemonCLISubprocess() {
+			return runDaemonCLICommandHTTPFromCobra(cmd, args)
+		}
+		state := invocationFromCommand(cmd)
+		st, cleanup, err := federationSpokeStore(cmd)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		links, err := federation.Status(cmd.Context(), st, state.cfg.TokensDir())
+		if err != nil {
+			return err
+		}
+		return writeFederationStatus(cmd.OutOrStdout(), links, asJSON)
+	}}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Output JSON")
+	return cmd
+}
+
+func newFederationLeaveCmd() *cobra.Command {
+	var localOnly bool
+	cmd := &cobra.Command{Use: "leave <hub-url>", Short: "Leave a federation hub", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if !isDaemonCLISubprocess() {
+			return runDaemonCLICommandHTTPFromCobra(cmd, args)
+		}
+		state := invocationFromCommand(cmd)
+		st, cleanup, err := federationSpokeStore(cmd)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		uid, err := federation.Leave(cmd.Context(), st, state.cfg.TokensDir(), args[0], localOnly)
+		if err != nil {
+			return err
+		}
+		if localOnly {
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Local link removed; hub enrollment %s may still be active.\n", textutil.SanitizeTerminal(uid))
+		} else {
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), "Hub enrollment revoked and local link removed.")
+		}
+		return err
+	}}
+	cmd.Flags().BoolVar(&localOnly, "local-only", false, "Remove local state without contacting the hub")
+	return cmd
+}
+
+func writeFederationStatus(out io.Writer, links []federation.LinkStatus, asJSON bool) error {
+	if asJSON {
+		data, err := json.Marshal(links)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(out, string(data))
+		return err
+	}
+	for _, link := range links {
+		policy, err := json.Marshal(link.Policy)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(out, "%s: %s, %s, %d shares\nPolicy: %s\n", textutil.SanitizeTerminal(link.HubOrigin), textutil.SanitizeTerminal(link.Member), textutil.SanitizeTerminal(link.State), link.Shares, textutil.SanitizeTerminal(string(policy)))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

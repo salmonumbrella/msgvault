@@ -2802,6 +2802,21 @@ role = "off" # or "spoke" or "hub"
 ```
 
 The default is `off`.
+
+A hub advertises its policy to spokes. These defaults apply when the role is `hub`:
+
+```toml
+[federation.hub]
+retention = "member-controlled" # or "org-retained"
+allowed_levels = ["envelope", "content"]
+allow_attachments = true
+min_group_size = 3
+processing = "none"
+```
+
+`allowed_levels` must contain at least one of `envelope` or `content` and
+`min_group_size` must be at least 1. `processing` describes the hub's processing
+to members. Spokes validate and store the policy when joining.
 A hub requires an effective owner API key and cannot use
 `[[server.remote_clients]]` keys. It needs a dedicated
 archive with an empty source catalog and refuses new local sources. A spoke can

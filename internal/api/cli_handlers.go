@@ -1457,6 +1457,9 @@ func (s *Server) handleCLIRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cliRunEnvAllowedForCommand(args []string, name string) bool {
+	if name == clirun.EnvFederationToken {
+		return len(args) >= 2 && args[0] == "federation" && args[1] == "join"
+	}
 	if name == clirun.EnvInlineOAuth {
 		return len(args) > 0 && args[0] == "add-inline"
 	}
@@ -1682,6 +1685,9 @@ const cliRunPersonCommand = "person"
 func cliRunCommandAllowed(args []string) bool {
 	if len(args) == 0 {
 		return false
+	}
+	if args[0] == "federation" {
+		return len(args) >= 2 && (args[1] == "join" || args[1] == "status" || args[1] == "leave")
 	}
 	if args[0] == "source" {
 		return len(args) >= 3 && (args[1] == "facebook-comments" || args[1] == "instagram-comments") && (args[2] == "add" || args[2] == "sync")

@@ -3467,6 +3467,8 @@ role; authenticated callers receive 404 when the required role is disabled.
 
 An enrolled spoke presents `Authorization: Bearer mvf1_…` and its pinned
 archive UID in `X-Msgvault-Spoke-Instance` to
-`GET /api/v1/federation/handshake`. This credential cannot access other routes
-or be combined with another credential. Enrollment and handshake do not share
-messages or sources.
+`GET /api/v1/federation/handshake`. The response contains the hub instance, protocol versions, enrollment state and UID,
+member, policy, and policy digest. The credential may also call
+`DELETE /api/v1/federation/enrollments/{uid}` for its own enrollment. It cannot
+access other routes or be combined with another credential. Enrollment and
+handshake do not share messages or sources.
