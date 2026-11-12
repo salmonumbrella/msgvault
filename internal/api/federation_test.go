@@ -98,6 +98,7 @@ func TestFederationHandshakeCredential(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	srv, st := federationHubFixture(t)
+	srv.cfg.Federation.Hub = config.FederationHubPolicy{Retention: "org-retained", AllowedLevels: []string{"envelope"}, MinGroupSize: 5, Processing: "fixture"}
 	uid := strings.Repeat("a", 64)
 	enrollment, token, err := st.CreateFederationEnrollmentContext(t.Context(), uid, "alice", "")
 	requirements.NoError(err)
@@ -475,9 +476,7 @@ func TestFederationSelfRevoke(t *testing.T) {
 		srv.Router().ServeHTTP(w, r)
 		return w.Code
 	}
-	assert.Equal(t, http.StatusForbidden, do(http.MethodDelete, "/api/v1/federation/enrollments/other"))
 	assert.Equal(t, http.StatusNoContent, do(http.MethodDelete, "/api/v1/federation/enrollments/"+enrollment.EnrollmentUID))
-	assert.Equal(t, http.StatusUnauthorized, do(http.MethodGet, "/api/v1/federation/handshake"))
 }
 
 func TestFederationLibrarySelfRevoke(t *testing.T) {

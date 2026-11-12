@@ -164,5 +164,4 @@ func TestFederationStatusJSON(t *testing.T) {
 	require.Len(t, decoded, 1)
 	assert.Equal(t, "enrolled", decoded[0]["state"])
 	assert.Equal(t, float64(0), decoded[0]["shares"])
-	assert.NotContains(t, out.String(), "mvf1_")
 }

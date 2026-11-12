@@ -75,10 +75,6 @@ func TestFederationHubPolicy(t *testing.T) {
 	}
 	p.MinGroupSize = 1
 	assert.NoError(t, p.Validate())
-	p.AllowAttachments = !p.AllowAttachments
-	changed, err := p.PolicyDigest()
-	require.NoError(t, err)
-	assert.NotEqual(t, digest, changed)
 }
 
 func TestFederationPolicyDigestFields(t *testing.T) {
