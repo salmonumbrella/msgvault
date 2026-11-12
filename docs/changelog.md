@@ -8,7 +8,7 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
-- Prepare and manage local introduction records for two people with `msgvault intro`, and read them over HTTP.
+- Prepare and manage local introduction records for two people with `msgvault intro`, and read and change them over HTTP.
 
 - Automatic attachment maintenance no longer queues follow-ups to verify healthy packed blobs without loose copies.
 

@@ -126,11 +126,7 @@ func (s *Server) handleGetIntroduction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, row)
 }
 
-func (s *Server) introductionMutations(w http.ResponseWriter, r *http.Request) (IntroductionMutations, bool) {
-	if s.requestAuthentication(r).Grant != nil {
-		s.writeIntroductionError(w, introops.ErrForbidden)
-		return nil, false
-	}
+func (s *Server) introductionMutations(w http.ResponseWriter) (IntroductionMutations, bool) {
 	ops, ok := s.store.(IntroductionMutations)
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "feature_unavailable", "Introduction mutations are unavailable")
@@ -139,13 +135,20 @@ func (s *Server) introductionMutations(w http.ResponseWriter, r *http.Request) (
 }
 
 func (s *Server) handlePrepareIntroduction(w http.ResponseWriter, r *http.Request) {
-	ops, ok := s.introductionMutations(w, r)
+	ops, ok := s.introductionMutations(w)
 	if !ok {
 		return
 	}
 	var in store.PersonIntroductionPrepare
-	if _, ok := decodeEntityRequestFields(w, r, &in, "introduction"); !ok {
+	fields, ok := decodeEntityRequestFields(w, r, &in, "introduction")
+	if !ok {
 		return
+	}
+	for _, name := range []string{"title", "body"} {
+		if value, present := fields[name]; !present || isJSONNull(value) {
+			writeError(w, http.StatusBadRequest, "bad_request", "Introduction request requires title and body")
+			return
+		}
 	}
 	row, err := ops.PrepareIntroductionContext(r.Context(), nil, in)
 	if err != nil {
@@ -156,7 +159,7 @@ func (s *Server) handlePrepareIntroduction(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleEditIntroduction(w http.ResponseWriter, r *http.Request) {
-	ops, ok := s.introductionMutations(w, r)
+	ops, ok := s.introductionMutations(w)
 	if !ok {
 		return
 	}
@@ -173,7 +176,7 @@ func (s *Server) handleEditIntroduction(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleCancelIntroduction(w http.ResponseWriter, r *http.Request) {
-	ops, ok := s.introductionMutations(w, r)
+	ops, ok := s.introductionMutations(w)
 	if !ok {
 		return
 	}

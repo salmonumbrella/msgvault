@@ -42,13 +42,15 @@ or the record is missing or ineligible. Invalid list filters or cursor return
 `feature_unavailable`; an actual storage failure returns 503 `local_store_failed`.
 
 Owners can prepare an introduction with `POST /api/v1/intros` using
-`source_id`, `person_a_id`, `person_b_id`, `title`, and `body`. Edit it with
-`PATCH /api/v1/intros/{id}` using `revision` and at least one of `title` or
-`body`; cancel it with `POST /api/v1/intros/{id}/cancel` using `revision`.
+`source_id`, `person_a_id`, `person_b_id`, `title`, and `body`; title and body
+are required but may be empty. Edit it with `PATCH /api/v1/intros/{id}` using
+`revision` and at least one non-null `title` or `body`; cancel it with
+`POST /api/v1/intros/{id}/cancel` using `revision`.
 Prepare returns 201; edit and cancel return 200. Cancellation clears the body.
 A stale revision, cancelled record, or retired source returns 409; a missing
 record returns 404 and invalid input or an unsupported source returns 400.
-These typed mutations require owner access. Delegated prepare and cancel remain
+These typed mutations are owner-only; an agent token gets 401 `unauthorized`,
+as on other owner-only routes. Delegated prepare and cancel remain
 available through the CLI runner with the existing grants. No route creates a
 provider group or sends a message.
 
