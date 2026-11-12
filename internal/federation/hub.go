@@ -35,6 +35,8 @@ func ParseHubURL(raw string) (string, error) {
 	return origin, nil
 }
 
+var errHubRejected = errors.New("hub rejected enrollment")
+
 type httpDoer struct{ client *http.Client }
 
 func (d httpDoer) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
@@ -63,6 +65,9 @@ func (h *HubClient) credentials(_ context.Context, r *http.Request) error {
 
 func (h *HubClient) handshake(ctx context.Context) (*generated.FederationHandshakeResponse, error) {
 	resp, err := h.client.GetFederationHandshakeWithResponse(ctx, h.credentials)
+	if err == nil && resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		return nil, errHubRejected
+	}
 	if err != nil || resp == nil || resp.StatusCode != http.StatusOK || resp.JSON200 == nil {
 		return nil, errors.New("hub handshake failed")
 	}

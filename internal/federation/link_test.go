@@ -429,3 +429,58 @@ func TestJoinTokenWriteFailureRemovesLink(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, links)
 }
+
+func TestStatusReportsLinkFailure(t *testing.T) {
+	for _, state := range []string{"rejected", "unreachable", "redirect", "token_missing"} {
+		t.Run(state, func(t *testing.T) {
+			hub := testutil.NewTestStore(t)
+			spoke := testutil.NewTestStore(t)
+			require.NoError(t, hub.ConfigureFederationHubContext(t.Context()))
+			spokeUID, err := spoke.ArchiveUIDContext(t.Context())
+			require.NoError(t, err)
+			hubUID, err := hub.ArchiveUIDContext(t.Context())
+			require.NoError(t, err)
+			enrollment, token, err := hub.CreateFederationEnrollmentContext(t.Context(), spokeUID, "alice", "")
+			require.NoError(t, err)
+			cfg := config.NewDefaultConfig()
+			cfg.Data.DataDir = t.TempDir()
+			cfg.Federation.Role = "hub"
+			cfg.Server.APIKey = "owner-fixture"
+			srv := api.NewServerWithOptions(api.ServerOptions{Config: cfg, Store: hub, FederationStore: hub, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+			t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.WithoutCancel(t.Context()))) })
+			redirect := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if redirect {
+					http.Redirect(w, r, "http://127.0.0.1:1/", http.StatusFound)
+					return
+				}
+				srv.Router().ServeHTTP(w, r)
+			}))
+			t.Cleanup(server.Close)
+			tokens := filepath.Join(t.TempDir(), "tokens")
+			require.NoError(t, federation.Join(t.Context(), spoke, tokens, server.URL, hubUID, token))
+			switch state {
+			case "rejected":
+				require.NoError(t, hub.RevokeFederationEnrollmentContext(t.Context(), enrollment.EnrollmentUID))
+			case "unreachable":
+				server.Close()
+			case "redirect":
+				redirect = true
+			case "token_missing":
+				require.NoError(t, os.Remove(filepath.Join(tokens, "federation-"+hubUID+".token")))
+			}
+			status, err := federation.Status(t.Context(), spoke, tokens)
+			require.NoError(t, err)
+			require.Len(t, status, 1)
+			expected := state
+			if state == "redirect" {
+				expected = "unreachable"
+			}
+			assert.Equal(t, expected, status[0].State)
+			links, err := spoke.ListFederationLinksContext(t.Context())
+			require.NoError(t, err)
+			require.Len(t, links, 1)
+			assert.Equal(t, "active", links[0].State)
+		})
+	}
+}

@@ -17,7 +17,8 @@ import (
 )
 
 var errIdentityChanged = errors.New("hub identity changed")
-var errHubUnavailable = errors.New("hub unavailable or enrollment rejected")
+var errHubUnavailable = errors.New("hub unavailable")
+var errTokenMissing = errors.New("cannot read enrollment token")
 
 var uidPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -121,7 +122,7 @@ type LinkStatus struct {
 func hubForLink(ctx context.Context, st *store.Store, tokensDir string, l store.FederationLink) (*HubClient, error) {
 	token, err := os.ReadFile(tokenPath(tokensDir, l.HubArchiveUID))
 	if err != nil {
-		return nil, errors.New("cannot read enrollment token")
+		return nil, errTokenMissing
 	}
 	spokeUID, err := st.ArchiveUIDContext(ctx)
 	if err != nil {
@@ -132,6 +133,9 @@ func hubForLink(ctx context.Context, st *store.Store, tokensDir string, l store.
 
 func checkIdentity(ctx context.Context, st *store.Store, h *HubClient, l store.FederationLink) error {
 	response, err := h.handshake(ctx)
+	if errors.Is(err, errHubRejected) {
+		return errHubRejected
+	}
 	if err != nil {
 		return errHubUnavailable
 	}
@@ -163,8 +167,12 @@ func Status(ctx context.Context, st *store.Store, tokensDir string) ([]LinkStatu
 			if err != nil {
 				if errors.Is(err, errIdentityChanged) {
 					status.State = "identity_changed"
-				} else if h == nil || errors.Is(err, errHubUnavailable) {
-					status.State = "unreachable_or_rejected"
+				} else if errors.Is(err, errTokenMissing) {
+					status.State = "token_missing"
+				} else if errors.Is(err, errHubRejected) {
+					status.State = "rejected"
+				} else if errors.Is(err, errHubUnavailable) {
+					status.State = "unreachable"
 				} else {
 					return nil, fmt.Errorf("record hub identity: %w", err)
 				}

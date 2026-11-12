@@ -5794,7 +5794,9 @@ The command prints the one-time token to standard output and a token-free join
 command to standard error. Save the token securely; it cannot be retrieved again.
 Replace `<hub-url>` with the hub address, then run the printed command on the spoke.
 The spoke verifies the hub instance and policy and stores the token in an owner-only
-file. `federation status [--json]` shows each link and its policy.
+file. `federation status [--json]` shows each link and its policy, with state
+`enrolled`, `identity_changed`, `rejected`, `unreachable`, or `token_missing`.
+A different hub at the same origin that answers 401 shows `rejected`.
 `federation leave <hub-url>` revokes the enrollment and removes local state.
 If the hub is unreachable, `federation leave <hub-url> --local-only` removes
 local state and prints the enrollment UID for the hub operator. Nothing is shared
