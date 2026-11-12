@@ -157,4 +157,3 @@ func (w *introductionBoundaryRecorder) WriteHeader(status int) {
 	w.firstSlotCount = len(w.slots)
 	w.ResponseRecorder.WriteHeader(status)
 }
-
