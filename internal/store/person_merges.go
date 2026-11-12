@@ -384,12 +384,19 @@ func (s *Store) mergePersonsOnce(
 		if err := recordPersonMergeSnapshotRowsTx(ctx, tx, mergeID, snapshot.Rows); err != nil {
 			return err
 		}
+		var firstContactCleared bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM person_first_contacts state JOIN person_attribute_values v ON v.id = state.written_value_id WHERE state.person_id IN (?, ?) AND v.active_until IS NOT NULL AND v.superseded_at IS NOT NULL)`, survivor.ID, absorbed.ID).Scan(&firstContactCleared); err != nil {
+			return err
+		}
 		if err := s.moveCorePersonProfileTx(
 			ctx, tx, mergeID, survivor.ID, absorbed.ID, survivor.VCardUID,
 		); err != nil {
 			return err
 		}
 		projectionIDs := []int64{}
+		if err := s.transferFirstContactClearTx(ctx, tx, mergeID, survivor.ID, absorbed.ID, firstContactCleared); err != nil {
+			return err
+		}
 		if err := s.reconcilePersonRelationshipsTx(
 			ctx, tx, mergeID, survivor.ID, absorbed.ID, &projectionIDs,
 		); err != nil {
@@ -521,6 +528,61 @@ func (s *Store) mergePersonsOnce(
 		return nil, err
 	}
 	return result, nil
+}
+
+// transferFirstContactClearTx carries a cleared automatic value with its history.
+// The absorbed state is journaled so an exact split restores its clear marker.
+func (s *Store) transferFirstContactClearTx(ctx context.Context, tx *loggedTx, mergeID, survivorID, absorbedID int64, cleared bool) error {
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM person_first_contacts WHERE person_id = ?)`, absorbedID).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		if err := s.setPersonMergeRowDispositionTx(ctx, tx, mergeID, "person_first_contacts", absorbedID, "deleted_snapshot", nil); err != nil {
+			return err
+		}
+	}
+	if !cleared {
+		return nil
+	}
+	values, err := s.listPersonAttributeValuesContext(ctx, tx, survivorID, PersonAttributeQuery{DefinitionSlug: AttributeSlugIntroducedBy, IncludeHistory: true})
+	if err != nil {
+		return err
+	}
+	var current, latest *PersonAttributeValue
+	for i := range values {
+		v := &values[i]
+		if latest == nil || v.ID > latest.ID {
+			latest = v
+		}
+		if v.ActiveUntil == nil && v.SupersededAt == nil {
+			current = v
+		}
+	}
+	ours := func(v *PersonAttributeValue) bool {
+		return v != nil && v.Source == ProvenanceSystem && v.SourceRef != nil && strings.HasPrefix(*v.SourceRef, "first-contact:")
+	}
+	if current != nil {
+		if !ours(current) {
+			return nil
+		}
+		now := time.Now().UTC()
+		if now.Before(current.ActiveFrom) {
+			now = current.ActiveFrom
+		}
+		if _, err := s.closePersonAttributeValueTx(ctx, tx, current.ID, now, now); err != nil {
+			return err
+		}
+	}
+	if !ours(latest) {
+		return nil
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO person_first_contacts (person_id, dirty_at, written_value_id) VALUES (?, CURRENT_TIMESTAMP, ?)
+ ON CONFLICT (person_id) DO UPDATE SET written_value_id = excluded.written_value_id, dirty_at = COALESCE(person_first_contacts.dirty_at, excluded.dirty_at)`, survivorID, latest.ID)
+	if err != nil {
+		return fmt.Errorf("transfer first-contact clear: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) markAbsorbedPersonFactPinEventsDeletedTx(

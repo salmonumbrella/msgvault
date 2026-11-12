@@ -38,7 +38,7 @@ func TestInitSchemaSeedsTheSystemPersonCatalog(t *testing.T) {
 		"location", "birthplace", "membership", "religion", "politics",
 		"personality", "family_pets", "interests_fun_now",
 		"interests_fun_growing_up", "favorites_food", "favorites_place",
-		store.AttributeSlugHowWeMet,
+		store.AttributeSlugHowWeMet, store.AttributeSlugIntroducedBy,
 	}, slugs, "seeding must be minimal and display-ordered")
 
 	organization, err := st.ListAttributeDefinitionsContext(ctx,
@@ -686,4 +686,26 @@ func TestEnsureSeededAttributeDefinitionsRetriesConcurrentFallbackSeed(t *testin
 		}
 	}
 	assert.Equal(1, canonicalCount)
+}
+
+func TestSeededIntroducedByDefinition(t *testing.T) {
+	st := testutil.NewTestStore(t)
+	def, err := st.GetAttributeDefinitionBySlugContext(t.Context(), store.AttributeObjectPerson, store.AttributeSlugIntroducedBy)
+	require.NoError(t, err)
+	assert.Equal(t, store.AttributeUniversalIDIntroducedBy, def.UniversalID)
+	assert.Equal(t, store.AttributeValueRecordReference, def.ValueType)
+	assert.Equal(t, store.AttributeFieldPerson, def.FieldType)
+	require.NotNil(t, def.RecordTarget)
+	assert.Equal(t, "person", *def.RecordTarget)
+	assert.Equal(t, store.AttributeCardinalitySingle, def.Cardinality)
+	assert.Equal(t, int64(156), def.DisplayOrder)
+	assert.True(t, def.IsActive && def.UICreatable && def.UIEditable && def.APIMutable && def.IsAudited)
+	assert.False(t, def.IsSearchable || def.IsSensitive || def.IsDeletable)
+	assert.Nil(t, def.Options)
+	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`DELETE FROM attribute_definitions WHERE id = ?`), def.ID)
+	require.NoError(t, err)
+	require.NoError(t, st.EnsureSeededAttributeDefinitionsContext(t.Context()))
+	repaired, err := st.GetAttributeDefinitionBySlugContext(t.Context(), store.AttributeObjectPerson, store.AttributeSlugIntroducedBy)
+	require.NoError(t, err)
+	assert.Equal(t, def.UniversalID, repaired.UniversalID)
 }

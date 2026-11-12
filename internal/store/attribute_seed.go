@@ -32,6 +32,7 @@ const (
 	AttributeUniversalIDInterestsFunGrowingUp = "7ffd6a23-74cc-4e05-ad6b-7d765d883a94"
 	AttributeUniversalIDFavoritesFood         = "12612daa-90b0-461b-b928-79d4a2bc07ba"
 	AttributeUniversalIDFavoritesPlace        = "be2bccc1-c395-4bb4-8f68-02e745ea7b22"
+	AttributeUniversalIDIntroducedBy          = "04d807ff-8612-46d3-851e-b1b4ca9dd302"
 	AttributeUniversalIDHowWeMet              = "ab373615-6ee4-43e7-9f60-8c1d4dbf46c6"
 )
 
@@ -52,6 +53,7 @@ const (
 	AttributeSlugInterestsFunGrowingUp = "interests_fun_growing_up"
 	AttributeSlugFavoritesFood         = "favorites_food"
 	AttributeSlugFavoritesPlace        = "favorites_place"
+	AttributeSlugIntroducedBy          = "introduced_by"
 	AttributeSlugHowWeMet              = "how_we_met"
 )
 
@@ -199,6 +201,7 @@ func SeededAttributeDefinitions() []AttributeDefinitionInput {
 		profileText(AttributeUniversalIDFavoritesPlace, AttributeSlugFavoritesPlace, "Favorite place",
 			"Places this person especially likes", 150, AttributeCardinalityMulti, false, true),
 		howWeMetDefinition(),
+		introducedByDefinition(),
 	)
 }
 
@@ -228,6 +231,18 @@ func howWeMetDefinition() AttributeDefinitionInput {
 		IsAudited:    true,
 		IsDeletable:  false,
 		Options:      &AttributeOptions{MaxLength: 280},
+	}
+}
+
+func introducedByDefinition() AttributeDefinitionInput {
+	description := "Who introduced you to this person, from their first archived appearance"
+	target := "person"
+	return AttributeDefinitionInput{
+		UniversalID: AttributeUniversalIDIntroducedBy, ObjectType: AttributeObjectPerson,
+		Slug: AttributeSlugIntroducedBy, Label: "Introduced by", Description: &description,
+		ValueType: AttributeValueRecordReference, FieldType: AttributeFieldPerson, RecordTarget: &target,
+		Cardinality: AttributeCardinalitySingle, DisplayOrder: 156, Ownership: AttributeOwnershipSystem,
+		UICreatable: true, UIEditable: true, APIMutable: true, IsAudited: true,
 	}
 }
 

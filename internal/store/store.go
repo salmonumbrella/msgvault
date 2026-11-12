@@ -2091,6 +2091,26 @@ func (s *Store) initSchemaContext(ctx context.Context) error {
 		return fmt.Errorf("ensure activity projection triggers: %w", err)
 	}
 
+	if err := s.runOnceMigration(ctx, migrationPersonFirstContacts, 1, false, func(ctx context.Context) error {
+		return s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
+			if s.IsPostgreSQL() {
+				for _, statement := range []string{
+					`CREATE OR REPLACE FUNCTION dirty_first_contact_link_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN UPDATE person_first_contacts SET dirty_at = COALESCE(dirty_at, CURRENT_TIMESTAMP) WHERE person_id = OLD.person_id; RETURN OLD; END; $$`,
+					`DROP TRIGGER IF EXISTS trg_activity_link_delete_first_contact_dirty ON activity_event_persons`,
+					`CREATE TRIGGER trg_activity_link_delete_first_contact_dirty AFTER DELETE ON activity_event_persons FOR EACH ROW EXECUTE FUNCTION dirty_first_contact_link_delete()`,
+				} {
+					if _, err := tx.ExecContext(ctx, statement); err != nil {
+						return err
+					}
+				}
+			}
+			_, err := tx.ExecContext(ctx, `INSERT INTO person_first_contacts (person_id, dirty_at) SELECT person_id, CURRENT_TIMESTAMP FROM activity_event_persons GROUP BY person_id ON CONFLICT (person_id) DO NOTHING`)
+			return err
+		})
+	}); err != nil {
+		return fmt.Errorf("backfill first contacts: %w", err)
+	}
+
 	if err := s.runOnceMigration(ctx, migrationMessagesHiddenTextBackfill, 1, false, s.backfillMessagesHiddenText); err != nil {
 		return fmt.Errorf("backfill messages hidden text flags: %w", err)
 	}

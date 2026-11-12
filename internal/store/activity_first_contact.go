@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 )
 
 const maxIntroCounterparts = 4
@@ -104,23 +106,18 @@ func earliestFirstContactTx(ctx context.Context, tx *loggedTx, personID int64) (
 }
 
 func (s *Store) populateFirstContactTx(ctx context.Context, tx *loggedTx, state *ContactState) error {
-	event, refKind, err := earliestFirstContactTx(ctx, tx, state.PersonID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
+	event, refKind, kind, introducer, found, err := s.firstContactTx(ctx, tx, state.PersonID)
 	if err != nil {
-		return fmt.Errorf("read first contact: %w", err)
+		return err
+	}
+	if !found {
+		return nil
 	}
 	messageID := event.MessageID
 	occurredAt := sql.NullTime{Time: event.OccurredAt, Valid: true}
 	state.FirstSeenAt = utcNullTimePointer(occurredAt)
 	state.FirstSeenRef = activityStoredRef(refKind, sql.NullInt64{Int64: messageID, Valid: true})
-	candidates, err := s.loadActivityCandidatesByIDQueryerContext(ctx, tx, []int64{messageID})
-	if err != nil {
-		return fmt.Errorf("load first-contact candidate: %w", err)
-	}
-	candidate := candidates[0]
-	state.FirstContactKind, state.Introducer = ClassifyFirstContact(candidate, state.PersonID, candidate.DirectLimitTransition.Target)
+	state.FirstContactKind, state.Introducer = kind, introducer
 	if state.Introducer != nil {
 		err = tx.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(TRIM(person.display_name), ''), NULLIF(TRIM(`+participantSenderNameSQL+`), ''), NULLIF(TRIM(p.email_address), ''), NULLIF(TRIM(p.phone_number), ''), '') FROM participants p
   LEFT JOIN persons person ON person.id = ?
@@ -131,4 +128,202 @@ func (s *Store) populateFirstContactTx(ctx context.Context, tx *loggedTx, state 
 		}
 	}
 	return nil
+}
+
+// firstContactTx shares the same evidence and classifier as the read path.
+func (s *Store) firstContactTx(ctx context.Context, tx *loggedTx, personID int64) (ActivityEvent, sql.NullString, FirstContactKind, *FirstContactIntroducer, bool, error) {
+	event, refKind, err := earliestFirstContactTx(ctx, tx, personID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return event, refKind, "", nil, false, nil
+	}
+	if err != nil {
+		return event, refKind, "", nil, false, fmt.Errorf("read first contact: %w", err)
+	}
+	candidates, err := s.loadActivityCandidatesByIDQueryerContext(ctx, tx, []int64{event.MessageID})
+	if err != nil {
+		return event, refKind, "", nil, false, fmt.Errorf("load first-contact candidate: %w", err)
+	}
+	if len(candidates) == 0 {
+		return event, refKind, "", nil, false, nil
+	}
+	candidate := candidates[0]
+	kind, introducer := ClassifyFirstContact(candidate, personID, candidate.DirectLimitTransition.Target)
+	return event, refKind, kind, introducer, true, nil
+}
+
+// ReconcileFirstContactsContext processes a bounded set from a reconciled activity epoch.
+func (s *Store) ReconcileFirstContactsContext(ctx context.Context, limit int, revisions ContactRevisions) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	owners, err := s.loopOwnerIdentities(ctx)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT person_id FROM person_first_contacts WHERE dirty_at IS NOT NULL ORDER BY person_id LIMIT ?`, limit)
+	if err != nil {
+		return 0, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	_ = rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, id := range ids {
+		cleared, disabled := false, false
+		err := s.withTxContext(ctx, func(tx *loggedTx) error {
+			if err := s.lockPersonFactAttributeTx(ctx, tx, id, AttributeSlugIntroducedBy); err != nil {
+				return err
+			}
+			if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
+				return err
+			}
+			identity, err := s.currentIdentityRevisionTxContext(ctx, tx)
+			if err != nil {
+				return err
+			}
+			account, err := readAccountIdentityRevision(boundQuerier{ctx: ctx, q: tx})
+			if err != nil {
+				return err
+			}
+			if identity != revisions.IdentityRevision || account != revisions.AccountIdentityRevision {
+				return &ErrActivityProjectionStale{Reason: "identity epoch changed"}
+			}
+			reconciled, err := s.activityEpochReconciledTx(ctx, tx, revisions)
+			if err != nil {
+				return err
+			}
+			if !reconciled {
+				return &ErrActivityProjectionStale{Reason: "activity epoch not reconciled"}
+			}
+			if err := s.lockActivityProjectionQueueFreshnessTx(ctx, tx); err != nil {
+				return err
+			}
+			var pending int64
+			if err := tx.QueryRowContext(ctx, activityProjectionPendingQuery).Scan(&pending); err != nil {
+				return err
+			}
+			if pending > 0 {
+				return &ErrActivityProjectionStale{Reason: "activity projection queue is not drained"}
+			}
+			var dirty sql.NullTime
+			var written sql.NullInt64
+			err = tx.QueryRowContext(ctx, `SELECT dirty_at, written_value_id FROM person_first_contacts WHERE person_id = ?`+s.dialect.SelectForUpdate(), id).Scan(&dirty, &written)
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if !dirty.Valid {
+				return nil
+			}
+			def, err := s.getAttributeDefinitionBySlugTx(ctx, tx, AttributeObjectPerson, AttributeSlugIntroducedBy)
+			if err != nil {
+				return err
+			}
+			if !def.IsActive {
+				disabled = true
+				return nil
+			}
+			event, refKind, kind, introducer, found, err := s.firstContactTx(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			var target *int64
+			if found && kind == FirstContactEmailIntro && introducer != nil {
+				target = introducer.PersonID
+			}
+			if found && kind == FirstContactOwnerOutreach && len(owners.persons) == 1 {
+				for owner := range owners.persons {
+					ownerID := owner
+					target = &ownerID
+				}
+			}
+			if target != nil && *target == id {
+				target = nil
+			}
+			ref := "first-contact:" + activityStoredRef(refKind, sql.NullInt64{Int64: event.MessageID, Valid: found})
+			written, err = s.reconcileFirstContactValueTx(ctx, tx, *def, id, target, ref, written)
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `UPDATE person_first_contacts SET dirty_at = NULL, computed_at = CURRENT_TIMESTAMP, written_value_id = ? WHERE person_id = ?`, written, id)
+			if err == nil {
+				cleared = true
+			}
+			return err
+		})
+		if err != nil {
+			return count, err
+		}
+		if disabled {
+			return count, nil
+		}
+		if cleared {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (s *Store) reconcileFirstContactValueTx(ctx context.Context, tx *loggedTx, def AttributeDefinition, personID int64, target *int64, ref string, written sql.NullInt64) (sql.NullInt64, error) {
+	values, err := s.listPersonAttributeValuesContext(ctx, tx, personID, PersonAttributeQuery{DefinitionSlug: AttributeSlugIntroducedBy, IncludeHistory: true})
+	if err != nil {
+		return written, err
+	}
+	ours := func(v *PersonAttributeValue) bool {
+		return v.Source == ProvenanceSystem && v.SourceRef != nil && strings.HasPrefix(*v.SourceRef, "first-contact:")
+	}
+	var current, latest *PersonAttributeValue
+	for i := range values {
+		v := &values[i]
+		if latest == nil || v.ID > latest.ID {
+			latest = v
+		}
+		if v.ActiveUntil == nil && v.SupersededAt == nil {
+			current = v
+		}
+	}
+	if current != nil && !ours(current) {
+		return sql.NullInt64{}, nil
+	}
+	if current == nil && latest != nil && (!ours(latest) || (written.Valid && written.Int64 == latest.ID)) {
+		return written, nil
+	}
+	if current != nil && target != nil && current.Value.RecordID != nil && *current.Value.RecordID == *target && current.SourceRef != nil && *current.SourceRef == ref {
+		return sql.NullInt64{Int64: current.ID, Valid: true}, nil
+	}
+	now := time.Now().UTC()
+	if current != nil && now.Before(current.ActiveFrom) {
+		now = current.ActiveFrom
+	}
+	if target == nil {
+		if current != nil {
+			if _, err := s.closePersonAttributeValueTx(ctx, tx, current.ID, now, now); err != nil {
+				return written, err
+			}
+		}
+		return sql.NullInt64{}, nil
+	}
+	recordType := "person"
+	input := PersonAttributeValueInput{PersonID: personID, DefinitionSlug: AttributeSlugIntroducedBy, Value: AttributeValue{Type: AttributeValueRecordReference, RecordType: &recordType, RecordID: target}, Source: ProvenanceSystem, SourceRef: &ref}
+	if current != nil {
+		input.ExpectedValueID = &current.ID
+	}
+	result, err := s.setPersonAttributeValueTx(ctx, tx, def, input, now, now)
+	if err != nil {
+		return written, err
+	}
+	return sql.NullInt64{Int64: result.Value.ID, Valid: true}, nil
 }

@@ -49,6 +49,7 @@ type projectorStore interface {
 	StaleContactStatePersonsContext(ctx context.Context, limit int) ([]int64, error)
 	MarkAllContactStateDirtyContext(ctx context.Context) error
 	RecomputeContactStateContext(ctx context.Context, personIDs []int64, revisions store.ContactRevisions) error
+	ReconcileFirstContactsContext(ctx context.Context, limit int, revisions store.ContactRevisions) (int, error)
 	ActivityWatermarkContext(ctx context.Context) (int64, error)
 	SetActivityWatermarkContext(ctx context.Context, messageID int64) error
 	ActivityTimezoneTransitionContext(ctx context.Context) (store.ActivityTimezoneTransition, error)
@@ -237,7 +238,7 @@ func (p *Projector) RunOnce(ctx context.Context) (RunResult, error) {
 		p.location, p.maxDirectCounterparts, &result); err != nil {
 		return result, err
 	}
-	return result, nil
+	return p.reconcileFirstContacts(ctx, result)
 }
 
 func (p *Projector) RunBackstop(ctx context.Context) (RunResult, error) {
@@ -277,7 +278,10 @@ func (p *Projector) RunBackstop(ctx context.Context) (RunResult, error) {
 	}
 	recomputed, err := p.RecomputeStale(ctx)
 	result.merge(recomputed)
-	return result, err
+	if err != nil {
+		return result, err
+	}
+	return p.reconcileFirstContacts(ctx, result)
 }
 
 func (p *Projector) ProjectMessages(
@@ -370,6 +374,31 @@ func (p *Projector) RecomputeStale(ctx context.Context) (RunResult, error) {
 			return result, err
 		}
 		result.PersonsRecomputed += len(personIDs)
+		useProjectionBatch(ctx)
+		result.Batches++
+	}
+}
+
+func (p *Projector) reconcileFirstContacts(ctx context.Context, result RunResult) (RunResult, error) {
+	for {
+		revisions, err := p.store.ContactRevisionsContext(ctx)
+		if err != nil {
+			return result, err
+		}
+		if err := projectionCheckpoint(ctx); err != nil {
+			return result, err
+		}
+		count, err := p.store.ReconcileFirstContactsContext(ctx, p.batchSize, revisions)
+		if err != nil {
+			if _, ok := errors.AsType[*store.ErrActivityProjectionStale](err); ok {
+				return result, nil
+			}
+			return result, err
+		}
+		if count == 0 {
+			return result, nil
+		}
+		result.PersonsRecomputed += count
 		useProjectionBatch(ctx)
 		result.Batches++
 	}

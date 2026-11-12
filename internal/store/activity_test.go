@@ -3618,6 +3618,19 @@ func TestFirstSeenIntroductionContactState(t *testing.T) {
 	assert.Equal("Saved Sender", state.Introducer.DisplayName)
 	require.NotNil(state.Introducer.PersonID)
 	assert.Equal(senderPerson.ID, *state.Introducer.PersonID)
+	values, err := f.Store.ListPersonAttributeValuesContext(t.Context(), person.ID, store.PersonAttributeQuery{DefinitionSlug: store.AttributeSlugIntroducedBy, IncludeHistory: true})
+	require.NoError(err)
+	require.Len(values, 1)
+	require.NotNil(values[0].Value.RecordID)
+	assert.Equal(senderPerson.ID, *values[0].Value.RecordID)
+	assert.Equal(store.ProvenanceSystem, values[0].Source)
+	require.NotNil(values[0].SourceRef)
+	assert.Equal(fmt.Sprintf("first-contact:message:%d", id), *values[0].SourceRef)
+	_, err = projector.RunOnce(t.Context())
+	require.NoError(err)
+	values, err = f.Store.ListPersonAttributeValuesContext(t.Context(), person.ID, store.PersonAttributeQuery{DefinitionSlug: store.AttributeSlugIntroducedBy, IncludeHistory: true})
+	require.NoError(err)
+	assert.Len(values, 1)
 }
 
 func TestFirstAppearanceSkipsUntimedGroupMembers(t *testing.T) {

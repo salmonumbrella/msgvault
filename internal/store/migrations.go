@@ -86,6 +86,7 @@ const (
 	// unsent are requeued so the projector retracts them.
 	// v6: membership changes mark one conversation for expansion by the drain.
 	migrationActivityProjectionTriggers = "activity_projection_triggers_v6"
+	migrationPersonFirstContacts        = "person_first_contacts_v1"
 	migrationPersonInferenceProviderV2  = "person_inference_provider_v2"
 	migrationPersonSweepCallsV2         = "person_sweep_calls_v2"
 	migrationProviderConsentsV1         = "provider_consents_v1"

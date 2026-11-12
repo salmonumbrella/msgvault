@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-11-11"
+last_edited: "2026-11-12"
 title: People and Profiles
 description: Find people across your archive, keep their details together, and understand your contact history.
 ---
@@ -81,6 +81,14 @@ When known, `introducer` identifies the sender of an introduction email or
 your sending identity. Group inviter evidence is not yet used. These fields
 reflect archived evidence and currently linked identities, not a claim about
 when you met offline.
+
+The editable **Introduced by** field is filled by the activity job from an
+email introduction when the sender is a saved person. Saving the sender fills
+it on the next activity run. For owner outreach, it uses your person only when
+exactly one saved person represents your identities. A value you set is never
+replaced; clearing a value the job wrote keeps it empty. Set a different person
+to override it. While the field is switched off, the job leaves it alone and
+keeps the work queued. This field is never offered to a provider.
 
 ## Review identity matches
 
@@ -439,7 +447,8 @@ on the next store open.
 | `interests_fun_growing_up` | Fun growing up | text | multiple | no | Activities this person enjoyed growing up |
 | `favorites_food` | Favorite food | text | multiple | no | Foods this person especially likes |
 | `favorites_place` | Favorite place | text | multiple | no | Places this person especially likes |
-| `how_we_met` | How we met | text | single | no | How you and this person first met; the one seeded field about your relationship rather than the person alone. Not searchable, so it stays out of the semantic person document |
+| `how_we_met` | How we met | text | single | no | How you and this person first met. Not searchable, so it stays out of the semantic person document |
+| `introduced_by` | Introduced by | person reference | single | no | Saved introducer from first archived appearance; editable and not sent to providers |
 
 Contact points, addresses, dates such as birthdays, categories, organizations
 and employment, and typed relationships such as partner or child are structured

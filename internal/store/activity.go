@@ -1754,6 +1754,10 @@ func (s *Store) replaceActivityEventTx(
 			return fmt.Errorf("write activity link for message %d person %d: %w",
 				event.MessageID, link.PersonID, err)
 		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO person_first_contacts (person_id, dirty_at) VALUES (?, CURRENT_TIMESTAMP)
+   ON CONFLICT(person_id) DO UPDATE SET dirty_at = COALESCE(person_first_contacts.dirty_at, excluded.dirty_at)`, link.PersonID); err != nil {
+			return fmt.Errorf("dirty first contact: %w", err)
+		}
 	}
 	return nil
 }
