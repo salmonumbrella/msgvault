@@ -47,7 +47,7 @@ are required but may be empty. Edit it with `PATCH /api/v1/intros/{id}` using
 `revision` and at least one non-null `title` or `body`; cancel it with
 `POST /api/v1/intros/{id}/cancel` using `revision`.
 Prepare returns 201; edit and cancel return 200. Cancellation clears the body.
-A stale revision, cancelled record, or retired source returns 409; a missing
+A stale revision or cancelled record returns 409; a missing
 record returns 404 and invalid input or an unsupported source returns 400.
 These typed mutations are owner-only; an agent token gets 401 `unauthorized`,
 as on other owner-only routes. Delegated prepare and cancel remain
