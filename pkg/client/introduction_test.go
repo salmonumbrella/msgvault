@@ -57,6 +57,12 @@ func TestGeneratedIntroductionClientDecodesListAndDetail(t *testing.T) {
 	require.NoError(t, detail.JSON200.Validate())
 }
 
+func TestGeneratedIntroductionPrepareValidation(t *testing.T) {
+	body := generated.PrepareIntroductionBody{SourceID: 7, PersonAId: 11, PersonBId: 12}
+	options := generated.PrepareIntroductionRequestOptions{Body: &body}
+	assert.NoError(t, options.Validate(), "empty title and body are valid")
+}
+
 func assertIntroductionRecord(t *testing.T, record generated.IntroductionRecord) {
 	t.Helper()
 	assert.Equal(t, "intro-0123456789abcdef0123456789abcdef", record.IntroID)

@@ -31,6 +31,9 @@ func TestRewriteGeneratedValidatorsRepairsKnownGeneratorGaps(t *testing.T) {
 	assert.NotContains(t, string(got), `typesValidator.Var(i.NextAfterID, "required")`)
 	assert.NotContains(t, string(got), `typesValidator.Var(i.Body, "required")`)
 	assert.NotContains(t, string(got), `typesValidator.Var(i.Title, "required")`)
+	assertions.Contains(string(got), "Body string `json:\"body\"`\n")
+	assertions.Contains(string(got), "Title string `json:\"title\"`\n")
+	assertions.Contains(string(got), "Other string `json:\"other\" validate:\"required\"`\n")
 	assertions.Contains(string(got), "JSON jsontext.Value")
 	assertions.Contains(string(got), dailyNoteDecoyValidatorBlock())
 	assertions.Contains(string(got), dailyNotePersonIDsValidatorBlock("gte=1"))
@@ -221,6 +224,14 @@ func (i IntroductionRecord) Validate() error {
 		errors = errors.Append("Title", err)
 	}
 	return errors
+}
+type PersonIntroductionPrepare struct {
+	Body string ` + "`json:\"body\" validate:\"required\"`" + `
+	Title string ` + "`json:\"title\" validate:\"required\"`" + `
+	Other string ` + "`json:\"other\" validate:\"required\"`" + `
+}
+func (p PersonIntroductionPrepare) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(p))
 }
 func (e ExploreGroupsHTTPRequest) Validate() error {
 	var errors runtime.ValidationErrors
