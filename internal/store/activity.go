@@ -2111,32 +2111,8 @@ func (s *Store) RecomputeContactStateContext(
 		unique[personID] = struct{}{}
 	}
 	return s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
+		if err := s.lockActivityProjectionFreshnessTx(ctx, tx, revisions); err != nil {
 			return err
-		}
-		identity, err := s.currentIdentityRevisionTxContext(ctx, tx)
-		if err != nil {
-			return err
-		}
-		account, err := readAccountIdentityRevision(boundQuerier{ctx: ctx, q: tx})
-		if err != nil {
-			return err
-		}
-		if identity != revisions.IdentityRevision ||
-			account != revisions.AccountIdentityRevision {
-			return &ErrActivityProjectionStale{Reason: "identity epoch changed"}
-		}
-		if err := s.lockActivityProjectionQueueFreshnessTx(ctx, tx); err != nil {
-			return err
-		}
-		var pending int64
-		if err := tx.QueryRowContext(ctx, activityProjectionPendingQuery).Scan(&pending); err != nil {
-			return fmt.Errorf("count pending activity projections: %w", err)
-		}
-		if pending > 0 {
-			return &ErrActivityProjectionStale{
-				Reason: "activity projection queue is not drained",
-			}
 		}
 		personIDs := sortedInt64Set(unique)
 		if err := s.lockActivityContactPersonsTx(ctx, tx, personIDs); err != nil {
@@ -2154,6 +2130,37 @@ func (s *Store) RecomputeContactStateContext(
 		}
 		return nil
 	})
+}
+
+func (s *Store) lockActivityProjectionFreshnessTx(ctx context.Context, tx *loggedTx, revisions ContactRevisions) error {
+	if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
+		return err
+	}
+	identity, err := s.currentIdentityRevisionTxContext(ctx, tx)
+	if err != nil {
+		return err
+	}
+	account, err := readAccountIdentityRevision(boundQuerier{ctx: ctx, q: tx})
+	if err != nil {
+		return err
+	}
+	if identity != revisions.IdentityRevision ||
+		account != revisions.AccountIdentityRevision {
+		return &ErrActivityProjectionStale{Reason: "identity epoch changed"}
+	}
+	if err := s.lockActivityProjectionQueueFreshnessTx(ctx, tx); err != nil {
+		return err
+	}
+	var pending int64
+	if err := tx.QueryRowContext(ctx, activityProjectionPendingQuery).Scan(&pending); err != nil {
+		return fmt.Errorf("count pending activity projections: %w", err)
+	}
+	if pending > 0 {
+		return &ErrActivityProjectionStale{
+			Reason: "activity projection queue is not drained",
+		}
+	}
+	return nil
 }
 
 // lockActivityProjectionQueueFreshnessTx closes PostgreSQL's READ COMMITTED

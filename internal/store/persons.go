@@ -382,12 +382,36 @@ func (s *Store) deletePersonOnce(ctx context.Context, input DeletePersonEnrichme
 			return err
 		}
 		// Retire only automatic references. Declared references continue to block deletion.
-		const automaticIntroductions = `SELECT v.id FROM person_attribute_values v JOIN attribute_definitions d ON d.id = v.definition_id WHERE d.slug = 'introduced_by' AND d.object_type = 'person' AND v.value_record_type = 'person' AND v.value_record_id = ? AND v.person_id <> ? AND v.source = 'system' AND v.source_ref LIKE 'first-contact:%' AND v.active_until IS NULL AND v.superseded_at IS NULL`
-		if _, err := tx.ExecContext(ctx, `UPDATE person_first_contacts SET written_value_id = NULL WHERE written_value_id IN (`+automaticIntroductions+`)`, id, id); err != nil {
-			return fmt.Errorf("clear automatic introduction state: %w", err)
+		rows, err = tx.QueryContext(ctx, `SELECT v.id, v.source, v.source_ref, v.active_from FROM person_attribute_values v JOIN attribute_definitions d ON d.id = v.definition_id WHERE d.slug = 'introduced_by' AND d.object_type = 'person' AND v.value_record_type = 'person' AND v.value_record_id = ? AND v.person_id <> ? AND v.source = 'system' AND v.active_until IS NULL AND v.superseded_at IS NULL`, id, id)
+		if err != nil {
+			return fmt.Errorf("load automatic introductions: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE person_attribute_values SET active_until = CASE WHEN active_from > CURRENT_TIMESTAMP THEN active_from ELSE CURRENT_TIMESTAMP END, superseded_at = CURRENT_TIMESTAMP WHERE id IN (`+automaticIntroductions+`)`, id, id); err != nil {
-			return fmt.Errorf("retire automatic introductions: %w", err)
+		var automatic []PersonAttributeValue
+		for rows.Next() {
+			var v PersonAttributeValue
+			if err := rows.Scan(&v.ID, &v.Source, &v.SourceRef, &v.ActiveFrom); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if isFirstContactValue(&v) {
+				automatic = append(automatic, v)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for i := range automatic {
+			v := &automatic[i]
+			if _, err := tx.ExecContext(ctx, `UPDATE person_first_contacts SET written_value_id = NULL WHERE written_value_id = ?`, v.ID); err != nil {
+				return fmt.Errorf("clear automatic introduction state: %w", err)
+			}
+			if err := s.retireFirstContactValueTx(ctx, tx, v); err != nil {
+				return fmt.Errorf("retire automatic introduction: %w", err)
+			}
 		}
 
 		var references int

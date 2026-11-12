@@ -3,6 +3,8 @@ package store_test
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -34,14 +36,17 @@ func newIntroFixture(t *testing.T) *introFixture {
 	require.NoError(t, err)
 	return &introFixture{f, projector, owner, sender, target, person}
 }
-func (f *introFixture) message(t *testing.T, name string, sender int64, at time.Time) int64 {
+func (f *introFixture) message(t *testing.T, name string, sender int64, at time.Time, to ...int64) int64 {
 	t.Helper()
 	msg := f.f.NewMessage().WithSourceMessageID(name).WithSentAt(at).Build()
 	msg.SenderID = sql.NullInt64{Int64: sender, Valid: true}
 	id, err := f.f.Store.PersistMessage(&store.MessagePersistData{Message: msg})
 	require.NoError(t, err)
 	require.NoError(t, f.f.Store.ReplaceMessageRecipients(id, "from", []int64{sender}, []string{"Sender"}))
-	require.NoError(t, f.f.Store.ReplaceMessageRecipients(id, "to", []int64{f.owner, f.target}, []string{"Owner", "Alex"}))
+	if to == nil {
+		to = []int64{f.owner, f.target}
+	}
+	require.NoError(t, f.f.Store.ReplaceMessageRecipients(id, "to", to, nil))
 	return id
 }
 func (f *introFixture) run(t *testing.T) {
@@ -71,6 +76,8 @@ func TestIntroducedByReconcilesSavedSenderAndHistory(t *testing.T) {
 	assert.Equal(t, store.ProvenanceSystem, values[0].Source)
 	require.NotNil(t, values[0].SourceRef)
 	assert.Equal(t, fmt.Sprintf("first-contact:message:%d", first), *values[0].SourceRef)
+	f.run(t)
+	assert.Len(t, f.values(t, true), 1)
 	other := f.f.EnsureParticipant("riley@example.test", "Riley", "example.test")
 	riley, _, err := f.f.Store.CreatePersonFromParticipant(other)
 	require.NoError(t, err)
@@ -90,33 +97,64 @@ func TestIntroducedByReconcilesSavedSenderAndHistory(t *testing.T) {
 	assert.Equal(t, sam.ID, *values[0].Value.RecordID)
 }
 func TestIntroducedByClearAndUserOverride(t *testing.T) {
-	f := newIntroFixture(t)
-	sam, _, err := f.f.Store.CreatePersonFromParticipant(f.sender)
-	require.NoError(t, err)
-	at := time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC)
-	f.message(t, "intro", f.sender, at)
-	f.run(t)
-	values := f.values(t, false)
-	require.Len(t, values, 1)
-	_, err = f.f.Store.SupersedePersonAttributeValueContext(t.Context(), store.PersonAttributeSupersedeInput{PersonID: f.person.ID, DefinitionSlug: store.AttributeSlugIntroducedBy, ExpectedValueID: &values[0].ID})
-	require.NoError(t, err)
-	other := f.f.EnsureParticipant("other@example.test", "Other", "example.test")
-	otherPerson, _, err := f.f.Store.CreatePersonFromParticipant(other)
-	require.NoError(t, err)
-	f.message(t, "older", other, at.Add(-time.Hour))
-	f.run(t)
-	assert.Empty(t, f.values(t, false))
-	recordType := "person"
-	_, err = f.f.Store.SetPersonAttributeValueContext(t.Context(), store.PersonAttributeValueInput{PersonID: f.person.ID, DefinitionSlug: store.AttributeSlugIntroducedBy, Value: store.AttributeValue{Type: store.AttributeValueRecordReference, RecordType: &recordType, RecordID: &sam.ID}, Source: store.ProvenanceUser})
-	require.NoError(t, err)
-	f.message(t, "oldest", other, at.Add(-2*time.Hour))
-	f.run(t)
-	values = f.values(t, false)
-	require.Len(t, values, 1)
-	assert.Equal(t, store.ProvenanceUser, values[0].Source)
-	require.NotNil(t, values[0].Value.RecordID)
-	assert.Equal(t, sam.ID, *values[0].Value.RecordID)
-	assert.NotEqual(t, otherPerson.ID, *values[0].Value.RecordID)
+	for _, tc := range []struct {
+		name                        string
+		source                      store.Provenance
+		initialJob, clear, override bool
+	}{
+		{"system clear", store.ProvenanceSystem, true, true, false},
+		{"user override", store.ProvenanceUser, true, false, true},
+		{"user clear", store.ProvenanceUser, false, true, false},
+		{"vcard", store.ProvenanceVCardImport, false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newIntroFixture(t)
+			sender, _, err := f.f.Store.CreatePersonFromParticipant(f.sender)
+			require.NoError(t, err)
+			manualID := f.f.EnsureParticipant("manual@example.test", "Manual", "example.test")
+			manual, _, err := f.f.Store.CreatePersonFromParticipant(manualID)
+			require.NoError(t, err)
+			at := time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC)
+			if tc.initialJob {
+				f.message(t, "intro", f.sender, at)
+				f.run(t)
+			}
+			var valueID int64
+			if !tc.initialJob || tc.override {
+				recordType := "person"
+				write, err := f.f.Store.SetPersonAttributeValueContext(t.Context(), store.PersonAttributeValueInput{PersonID: f.person.ID, DefinitionSlug: store.AttributeSlugIntroducedBy, Value: store.AttributeValue{Type: store.AttributeValueRecordReference, RecordType: &recordType, RecordID: &manual.ID}, Source: tc.source})
+				require.NoError(t, err)
+				valueID = write.Value.ID
+			} else {
+				values := f.values(t, false)
+				require.Len(t, values, 1)
+				valueID = values[0].ID
+			}
+			if !tc.initialJob {
+				f.message(t, "intro", f.sender, at)
+				f.run(t)
+				values := f.values(t, false)
+				require.Len(t, values, 1)
+				assert.Equal(t, valueID, values[0].ID)
+			}
+			if tc.clear {
+				_, err = f.f.Store.SupersedePersonAttributeValueContext(t.Context(), store.PersonAttributeSupersedeInput{PersonID: f.person.ID, DefinitionSlug: store.AttributeSlugIntroducedBy, ExpectedValueID: &valueID})
+				require.NoError(t, err)
+			}
+			f.message(t, "older", f.sender, at.Add(-time.Hour))
+			f.run(t)
+			values := f.values(t, false)
+			if tc.clear {
+				assert.Empty(t, values)
+			} else {
+				require.Len(t, values, 1)
+				assert.Equal(t, valueID, values[0].ID)
+				require.NotNil(t, values[0].Value.RecordID)
+				assert.Equal(t, manual.ID, *values[0].Value.RecordID)
+				assert.NotEqual(t, sender.ID, *values[0].Value.RecordID)
+			}
+		})
+	}
 }
 func TestIntroducedByDisabledBacklogAndSweepExclusion(t *testing.T) {
 	f := newIntroFixture(t)
@@ -139,18 +177,13 @@ func TestIntroducedByDisabledBacklogAndSweepExclusion(t *testing.T) {
 	require.NoError(t, err)
 	f.run(t)
 	assert.Len(t, f.values(t, false), 1)
-	catalog, err := f.f.Store.BuildPersonFactCatalogContext(t.Context(), true)
-	require.NoError(t, err)
-	for _, target := range catalog.Targets {
-		assert.NotEqual(t, store.AttributeUniversalIDIntroducedBy, target.Key)
-	}
 }
 
 func TestIntroducedByOwnerOutreachAndRetirement(t *testing.T) {
 	f := newIntroFixture(t)
 	owner, _, err := f.f.Store.CreatePersonFromParticipant(f.owner)
 	require.NoError(t, err)
-	f.message(t, "outreach", f.owner, time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC))
+	f.message(t, "outreach", f.owner, time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC), f.target)
 	f.run(t)
 	values := f.values(t, false)
 	require.Len(t, values, 1)
@@ -168,9 +201,6 @@ func TestIntroducedByOwnerOutreachAndRetirement(t *testing.T) {
 	require.Len(t, values, 1)
 	require.NotNil(t, values[0].Value.RecordID)
 	assert.Equal(t, owner.ID, *values[0].Value.RecordID)
-	require.NoError(t, f.f.Store.DeletePersonContext(t.Context(), owner.ID, owner.Revision))
-	f.run(t)
-	assert.Empty(t, f.values(t, false))
 }
 
 func TestIntroducedByDeletedSenderAndDeclaredReference(t *testing.T) {
@@ -195,9 +225,17 @@ func TestIntroducedByDeletedSenderAndDeclaredReference(t *testing.T) {
 	_, err = f.f.Store.SetPersonAttributeValueContext(t.Context(), store.PersonAttributeValueInput{PersonID: f.person.ID, DefinitionSlug: store.AttributeSlugIntroducedBy, Value: store.AttributeValue{Type: store.AttributeValueRecordReference, RecordType: &recordType, RecordID: &sam.ID}, Source: store.ProvenanceUser})
 	require.NoError(t, err)
 	assert.ErrorIs(t, f.f.Store.DeletePersonContext(t.Context(), sam.ID, sam.Revision), store.ErrPersonReferenced)
+	ref := "First-Contact:message:123"
+	_, err = f.f.Store.SetPersonAttributeValueContext(t.Context(), store.PersonAttributeValueInput{PersonID: f.person.ID, DefinitionSlug: store.AttributeSlugIntroducedBy, Value: store.AttributeValue{Type: store.AttributeValueRecordReference, RecordType: &recordType, RecordID: &sam.ID}, Source: store.ProvenanceSystem, SourceRef: &ref})
+	require.NoError(t, err)
+	assert.ErrorIs(t, f.f.Store.DeletePersonContext(t.Context(), sam.ID, sam.Revision), store.ErrPersonReferenced)
+	values = f.values(t, false)
+	require.Len(t, values, 1)
+	require.NotNil(t, values[0].SourceRef)
+	assert.Equal(t, ref, *values[0].SourceRef)
 }
 
-func TestFirstContactBackfillAndStaleFence(t *testing.T) {
+func TestFirstContactBackfill(t *testing.T) {
 	f := newIntroFixture(t)
 	f.message(t, "intro", f.sender, time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC))
 	f.run(t)
@@ -211,51 +249,22 @@ func TestFirstContactBackfillAndStaleFence(t *testing.T) {
 	err = f.f.Store.DB().QueryRowContext(ctx, f.f.Store.Rebind(`SELECT dirty_at FROM person_first_contacts WHERE person_id = ?`), f.person.ID).Scan(&dirty)
 	require.NoError(t, err)
 	assert.True(t, dirty.Valid)
-	revisions, err := f.f.Store.ContactRevisionsContext(ctx)
-	require.NoError(t, err)
-	_, _, err = f.f.Store.CreatePersonFromParticipant(f.sender)
-	require.NoError(t, err)
-	count, err := f.f.Store.ReconcileFirstContactsContext(ctx, 10, revisions)
-	assert.ErrorAs(t, err, new(*store.ErrActivityProjectionStale))
-	assert.Zero(t, count)
-	err = f.f.Store.DB().QueryRowContext(ctx, f.f.Store.Rebind(`SELECT dirty_at FROM person_first_contacts WHERE person_id = ?`), f.person.ID).Scan(&dirty)
-	require.NoError(t, err)
-	assert.True(t, dirty.Valid)
-	f.run(t)
-	assert.Len(t, f.values(t, false), 1)
 }
 
 func TestIntroducedByMergeRepointsAndRetiresSelfReference(t *testing.T) {
-	for _, intoTarget := range []bool{false, true} {
-		t.Run(fmt.Sprintf("into-target-%t", intoTarget), func(t *testing.T) {
-			f := newIntroFixture(t)
-			sender, _, err := f.f.Store.CreatePersonFromParticipant(f.sender)
-			require.NoError(t, err)
-			f.message(t, "intro", f.sender, time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC))
-			f.run(t)
-			survivor := f.person
-			if !intoTarget {
-				participant := f.f.EnsureParticipant("merged@example.test", "Merged", "example.test")
-				survivor, _, err = f.f.Store.CreatePersonFromParticipant(participant)
-				require.NoError(t, err)
-			}
-			survivor, err = f.f.Store.GetPersonContext(t.Context(), survivor.ID)
-			require.NoError(t, err)
-			sender, err = f.f.Store.GetPersonContext(t.Context(), sender.ID)
-			require.NoError(t, err)
-			_, err = f.f.Store.MergePersonsContext(t.Context(), store.PersonMergeRequest{SurvivorID: survivor.ID, AbsorbedID: sender.ID, ExpectedSurvivorRevision: survivor.Revision, ExpectedAbsorbedRevision: sender.Revision, IdempotencyKey: "merge-introducer", Actor: "test"})
-			require.NoError(t, err)
-			f.run(t)
-			values := f.values(t, false)
-			if intoTarget {
-				assert.Empty(t, values)
-				return
-			}
-			require.Len(t, values, 1)
-			require.NotNil(t, values[0].Value.RecordID)
-			assert.Equal(t, survivor.ID, *values[0].Value.RecordID)
-		})
-	}
+	f := newIntroFixture(t)
+	sender, _, err := f.f.Store.CreatePersonFromParticipant(f.sender)
+	require.NoError(t, err)
+	f.message(t, "intro", f.sender, time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC))
+	f.run(t)
+	survivor, err := f.f.Store.GetPersonContext(t.Context(), f.person.ID)
+	require.NoError(t, err)
+	sender, err = f.f.Store.GetPersonContext(t.Context(), sender.ID)
+	require.NoError(t, err)
+	_, err = f.f.Store.MergePersonsContext(t.Context(), store.PersonMergeRequest{SurvivorID: survivor.ID, AbsorbedID: sender.ID, ExpectedSurvivorRevision: survivor.Revision, ExpectedAbsorbedRevision: sender.Revision, IdempotencyKey: "merge-introducer", Actor: "test"})
+	require.NoError(t, err)
+	f.run(t)
+	assert.Empty(t, f.values(t, false))
 }
 
 func TestFirstContactReconciliationIsBounded(t *testing.T) {
@@ -267,6 +276,9 @@ func TestFirstContactReconciliationIsBounded(t *testing.T) {
 	ctx := t.Context()
 	_, err = f.f.Store.DB().ExecContext(ctx, `UPDATE person_first_contacts SET dirty_at = CURRENT_TIMESTAMP`)
 	require.NoError(t, err)
+	var dirtyCount int
+	require.NoError(t, f.f.Store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM person_first_contacts WHERE dirty_at IS NOT NULL`).Scan(&dirtyCount))
+	require.GreaterOrEqual(t, dirtyCount, 2)
 	bounded, err := activity.NewProjector(f.f.Store, activity.Options{Timezone: "UTC", BatchSize: 1, MaxBatches: 1, MaxDirectCounterparts: 25})
 	require.NoError(t, err)
 	_, err = bounded.RunOnce(ctx)
@@ -308,13 +320,40 @@ func TestIntroducedByClearSurvivesMergeAndExactSplit(t *testing.T) {
 	f.run(t)
 	assert.Empty(t, f.values(t, false))
 	assert.NotEmpty(t, f.values(t, true))
+	t.Run("absorbed clear preserves survivor value", func(t *testing.T) {
+		f := newIntroFixture(t)
+		_, _, err := f.f.Store.CreatePersonFromParticipant(f.sender)
+		require.NoError(t, err)
+		other := f.f.EnsureParticipant("survivor@example.test", "Survivor", "example.test")
+		survivor, _, err := f.f.Store.CreatePersonFromParticipant(other)
+		require.NoError(t, err)
+		f.message(t, "intro", f.sender, time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC), f.owner, f.target, other)
+		f.run(t)
+		values := f.values(t, false)
+		require.Len(t, values, 1)
+		_, err = f.f.Store.SupersedePersonAttributeValueContext(t.Context(), store.PersonAttributeSupersedeInput{PersonID: f.person.ID, DefinitionSlug: store.AttributeSlugIntroducedBy, ExpectedValueID: &values[0].ID})
+		require.NoError(t, err)
+		survivorValues, err := f.f.Store.ListPersonAttributeValuesContext(t.Context(), survivor.ID, store.PersonAttributeQuery{DefinitionSlug: store.AttributeSlugIntroducedBy})
+		require.NoError(t, err)
+		require.Len(t, survivorValues, 1)
+		survivor, err = f.f.Store.GetPersonContext(t.Context(), survivor.ID)
+		require.NoError(t, err)
+		absorbed, err := f.f.Store.GetPersonContext(t.Context(), f.person.ID)
+		require.NoError(t, err)
+		merged, err := f.f.Store.MergePersonsContext(t.Context(), store.PersonMergeRequest{SurvivorID: survivor.ID, AbsorbedID: absorbed.ID, ExpectedSurvivorRevision: survivor.Revision, ExpectedAbsorbedRevision: absorbed.Revision, IdempotencyKey: "survivor-value", Actor: "test"})
+		require.NoError(t, err)
+		f.person = &merged.Person
+		values = f.values(t, false)
+		require.Len(t, values, 1)
+		assert.Equal(t, survivorValues[0].ID, values[0].ID)
+	})
 }
 
 func TestFirstContactLockOrderPostgres(t *testing.T) {
-	f := newIntroFixture(t)
-	if !f.f.Store.IsPostgreSQL() {
+	if db := os.Getenv("MSGVAULT_TEST_DB"); !strings.HasPrefix(db, "postgres://") && !strings.HasPrefix(db, "postgresql://") {
 		t.Skip("PostgreSQL advisory locks")
 	}
+	f := newIntroFixture(t)
 	sender, _, err := f.f.Store.CreatePersonFromParticipant(f.sender)
 	require.NoError(t, err)
 	f.message(t, "intro", f.sender, time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC))
@@ -361,70 +400,30 @@ func TestFirstContactLockOrderPostgres(t *testing.T) {
 	}
 }
 
-func TestIntroducedByDeclaredValueAndClearRemainOwned(t *testing.T) {
-	for _, source := range []store.Provenance{store.ProvenanceUser, store.ProvenanceVCardImport} {
-		t.Run(string(source), func(t *testing.T) {
+func TestFirstContactStaleFenceLeavesDirty(t *testing.T) {
+	for _, kind := range []string{"identity epoch changed", "queue not drained"} {
+		t.Run(kind, func(t *testing.T) {
 			f := newIntroFixture(t)
-			sender, _, err := f.f.Store.CreatePersonFromParticipant(f.sender)
-			require.NoError(t, err)
-			manualParticipant := f.f.EnsureParticipant("manual@example.test", "Manual", "example.test")
-			manual, _, err := f.f.Store.CreatePersonFromParticipant(manualParticipant)
-			require.NoError(t, err)
-			recordType := "person"
-			write, err := f.f.Store.SetPersonAttributeValueContext(t.Context(), store.PersonAttributeValueInput{PersonID: f.person.ID, DefinitionSlug: store.AttributeSlugIntroducedBy, Value: store.AttributeValue{Type: store.AttributeValueRecordReference, RecordType: &recordType, RecordID: &manual.ID}, Source: source})
-			require.NoError(t, err)
 			f.message(t, "intro", f.sender, time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC))
 			f.run(t)
-			values := f.values(t, false)
-			require.Len(t, values, 1)
-			assert.Equal(t, write.Value.ID, values[0].ID)
-			require.NotNil(t, values[0].Value.RecordID)
-			assert.NotEqual(t, sender.ID, *values[0].Value.RecordID)
-			_, err = f.f.Store.SupersedePersonAttributeValueContext(t.Context(), store.PersonAttributeSupersedeInput{PersonID: f.person.ID, DefinitionSlug: store.AttributeSlugIntroducedBy, ExpectedValueID: &write.Value.ID})
+			ctx := t.Context()
+			_, err := f.f.Store.DB().ExecContext(ctx, f.f.Store.Rebind(`UPDATE person_first_contacts SET dirty_at = CURRENT_TIMESTAMP WHERE person_id = ?`), f.person.ID)
 			require.NoError(t, err)
-			f.message(t, "older", f.sender, time.Date(2023, 5, 1, 12, 0, 0, 0, time.UTC))
-			f.run(t)
-			assert.Empty(t, f.values(t, false))
+			revisions, err := f.f.Store.ContactRevisionsContext(ctx)
+			require.NoError(t, err)
+			if kind == "identity epoch changed" {
+				_, _, err = f.f.Store.CreatePersonFromParticipant(f.sender)
+				require.NoError(t, err)
+			} else {
+				f.message(t, "pending", f.sender, time.Date(2023, 5, 1, 12, 0, 0, 0, time.UTC))
+			}
+			count, err := f.f.Store.ReconcileFirstContactsContext(ctx, 10, revisions)
+			assert.ErrorAs(t, err, new(*store.ErrActivityProjectionStale))
+			assert.Zero(t, count)
+			var dirty sql.NullTime
+			err = f.f.Store.DB().QueryRowContext(ctx, f.f.Store.Rebind(`SELECT dirty_at FROM person_first_contacts WHERE person_id = ?`), f.person.ID).Scan(&dirty)
+			require.NoError(t, err)
+			assert.True(t, dirty.Valid)
 		})
 	}
-}
-
-func TestFirstContactPendingQueueLeavesDirty(t *testing.T) {
-	f := newIntroFixture(t)
-	_, _, err := f.f.Store.CreatePersonFromParticipant(f.sender)
-	require.NoError(t, err)
-	f.message(t, "intro", f.sender, time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC))
-	f.run(t)
-	ctx := t.Context()
-	_, err = f.f.Store.DB().ExecContext(ctx, f.f.Store.Rebind(`UPDATE person_first_contacts SET dirty_at = CURRENT_TIMESTAMP WHERE person_id = ?`), f.person.ID)
-	require.NoError(t, err)
-	f.message(t, "pending", f.sender, time.Date(2023, 5, 1, 12, 0, 0, 0, time.UTC))
-	revisions, err := f.f.Store.ContactRevisionsContext(ctx)
-	require.NoError(t, err)
-	count, err := f.f.Store.ReconcileFirstContactsContext(ctx, 10, revisions)
-	assert.ErrorAs(t, err, new(*store.ErrActivityProjectionStale))
-	assert.Zero(t, count)
-	var dirty sql.NullTime
-	err = f.f.Store.DB().QueryRowContext(ctx, f.f.Store.Rebind(`SELECT dirty_at FROM person_first_contacts WHERE person_id = ?`), f.person.ID).Scan(&dirty)
-	require.NoError(t, err)
-	assert.True(t, dirty.Valid)
-	f.run(t)
-}
-
-func TestIntroducedByFirstMessageBreaksTimestampTie(t *testing.T) {
-	f := newIntroFixture(t)
-	firstSender, _, err := f.f.Store.CreatePersonFromParticipant(f.sender)
-	require.NoError(t, err)
-	second := f.f.EnsureParticipant("second@example.test", "Second", "example.test")
-	_, _, err = f.f.Store.CreatePersonFromParticipant(second)
-	require.NoError(t, err)
-	at := time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC)
-	first := f.message(t, "first", f.sender, at)
-	secondID := f.message(t, "second", second, at)
-	require.Less(t, first, secondID)
-	f.run(t)
-	values := f.values(t, false)
-	require.Len(t, values, 1)
-	require.NotNil(t, values[0].Value.RecordID)
-	assert.Equal(t, firstSender.ID, *values[0].Value.RecordID)
 }

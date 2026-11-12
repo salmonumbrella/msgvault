@@ -3576,6 +3576,27 @@ func firstSeenDateChangesRecomputeWinner(t *testing.T) {
 	assert.Zero(t, state.InteractionCount)
 }
 
+func TestFirstSeenFirstMessageBreaksTimestampTie(t *testing.T) {
+	f := newIntroFixture(t)
+	second := f.f.EnsureParticipant("second@example.test", "Second", "example.test")
+	firstSender := f.f.EnsureParticipant("first@example.test", "First", "example.test")
+	require.Less(t, second, firstSender)
+	_, _, err := f.f.Store.CreatePersonFromParticipant(firstSender)
+	require.NoError(t, err)
+	_, _, err = f.f.Store.CreatePersonFromParticipant(second)
+	require.NoError(t, err)
+	at := time.Date(2024, 5, 1, 12, 0, 0, 0, time.UTC)
+	first := f.message(t, "first", firstSender, at)
+	secondID := f.message(t, "second", second, at)
+	require.Less(t, first, secondID)
+	f.run(t)
+	state, err := f.f.Store.ContactStateContext(t.Context(), f.person.ID, at)
+	require.NoError(t, err)
+	assert.Equal(t, fmt.Sprintf("message:%d", first), state.FirstSeenRef)
+	require.NotNil(t, state.Introducer)
+	assert.Equal(t, firstSender, state.Introducer.ParticipantID)
+}
+
 func TestFirstSeenIntroductionContactState(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
@@ -3618,19 +3639,6 @@ func TestFirstSeenIntroductionContactState(t *testing.T) {
 	assert.Equal("Saved Sender", state.Introducer.DisplayName)
 	require.NotNil(state.Introducer.PersonID)
 	assert.Equal(senderPerson.ID, *state.Introducer.PersonID)
-	values, err := f.Store.ListPersonAttributeValuesContext(t.Context(), person.ID, store.PersonAttributeQuery{DefinitionSlug: store.AttributeSlugIntroducedBy, IncludeHistory: true})
-	require.NoError(err)
-	require.Len(values, 1)
-	require.NotNil(values[0].Value.RecordID)
-	assert.Equal(senderPerson.ID, *values[0].Value.RecordID)
-	assert.Equal(store.ProvenanceSystem, values[0].Source)
-	require.NotNil(values[0].SourceRef)
-	assert.Equal(fmt.Sprintf("first-contact:message:%d", id), *values[0].SourceRef)
-	_, err = projector.RunOnce(t.Context())
-	require.NoError(err)
-	values, err = f.Store.ListPersonAttributeValuesContext(t.Context(), person.ID, store.PersonAttributeQuery{DefinitionSlug: store.AttributeSlugIntroducedBy, IncludeHistory: true})
-	require.NoError(err)
-	assert.Len(values, 1)
 }
 
 func TestFirstAppearanceSkipsUntimedGroupMembers(t *testing.T) {

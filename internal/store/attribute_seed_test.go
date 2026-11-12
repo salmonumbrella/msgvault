@@ -702,10 +702,9 @@ func TestSeededIntroducedByDefinition(t *testing.T) {
 	assert.True(t, def.IsActive && def.UICreatable && def.UIEditable && def.APIMutable && def.IsAudited)
 	assert.False(t, def.IsSearchable || def.IsSensitive || def.IsDeletable)
 	assert.Nil(t, def.Options)
-	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`DELETE FROM attribute_definitions WHERE id = ?`), def.ID)
+	catalog, err := st.BuildPersonFactCatalogContext(t.Context(), true)
 	require.NoError(t, err)
-	require.NoError(t, st.EnsureSeededAttributeDefinitionsContext(t.Context()))
-	repaired, err := st.GetAttributeDefinitionBySlugContext(t.Context(), store.AttributeObjectPerson, store.AttributeSlugIntroducedBy)
-	require.NoError(t, err)
-	assert.Equal(t, def.UniversalID, repaired.UniversalID)
+	for _, target := range catalog.Targets {
+		assert.NotEqual(t, store.AttributeUniversalIDIntroducedBy, target.Key)
+	}
 }

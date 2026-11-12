@@ -384,8 +384,12 @@ func (s *Store) mergePersonsOnce(
 		if err := recordPersonMergeSnapshotRowsTx(ctx, tx, mergeID, snapshot.Rows); err != nil {
 			return err
 		}
-		var firstContactCleared bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM person_first_contacts state JOIN person_attribute_values v ON v.id = state.written_value_id WHERE state.person_id IN (?, ?) AND v.active_until IS NOT NULL AND v.superseded_at IS NOT NULL)`, survivor.ID, absorbed.ID).Scan(&firstContactCleared); err != nil {
+		survivorCleared, err := firstContactClearedTx(ctx, tx, survivor.ID)
+		if err != nil {
+			return err
+		}
+		absorbedCleared, err := firstContactClearedTx(ctx, tx, absorbed.ID)
+		if err != nil {
 			return err
 		}
 		if err := s.moveCorePersonProfileTx(
@@ -394,7 +398,7 @@ func (s *Store) mergePersonsOnce(
 			return err
 		}
 		projectionIDs := []int64{}
-		if err := s.transferFirstContactClearTx(ctx, tx, mergeID, survivor.ID, absorbed.ID, firstContactCleared); err != nil {
+		if err := s.transferFirstContactClearTx(ctx, tx, mergeID, survivor.ID, absorbed.ID, survivorCleared, absorbedCleared); err != nil {
 			return err
 		}
 		if err := s.reconcilePersonRelationshipsTx(
@@ -530,9 +534,15 @@ func (s *Store) mergePersonsOnce(
 	return result, nil
 }
 
+func firstContactClearedTx(ctx context.Context, tx *loggedTx, personID int64) (bool, error) {
+	var cleared bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM person_first_contacts state JOIN person_attribute_values v ON v.id = state.written_value_id WHERE state.person_id = ? AND v.active_until IS NOT NULL AND v.superseded_at IS NOT NULL)`, personID).Scan(&cleared)
+	return cleared, err
+}
+
 // transferFirstContactClearTx carries a cleared automatic value with its history.
 // The absorbed state is journaled so an exact split restores its clear marker.
-func (s *Store) transferFirstContactClearTx(ctx context.Context, tx *loggedTx, mergeID, survivorID, absorbedID int64, cleared bool) error {
+func (s *Store) transferFirstContactClearTx(ctx context.Context, tx *loggedTx, mergeID, survivorID, absorbedID int64, survivorCleared, absorbedCleared bool) error {
 	var exists bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM person_first_contacts WHERE person_id = ?)`, absorbedID).Scan(&exists); err != nil {
 		return err
@@ -542,39 +552,23 @@ func (s *Store) transferFirstContactClearTx(ctx context.Context, tx *loggedTx, m
 			return err
 		}
 	}
-	if !cleared {
+	if !survivorCleared && !absorbedCleared {
 		return nil
 	}
 	values, err := s.listPersonAttributeValuesContext(ctx, tx, survivorID, PersonAttributeQuery{DefinitionSlug: AttributeSlugIntroducedBy, IncludeHistory: true})
 	if err != nil {
 		return err
 	}
-	var current, latest *PersonAttributeValue
-	for i := range values {
-		v := &values[i]
-		if latest == nil || v.ID > latest.ID {
-			latest = v
-		}
-		if v.ActiveUntil == nil && v.SupersededAt == nil {
-			current = v
-		}
-	}
-	ours := func(v *PersonAttributeValue) bool {
-		return v != nil && v.Source == ProvenanceSystem && v.SourceRef != nil && strings.HasPrefix(*v.SourceRef, "first-contact:")
-	}
+	current, latest := firstContactValueState(values)
 	if current != nil {
-		if !ours(current) {
+		if !survivorCleared || !isFirstContactValue(current) {
 			return nil
 		}
-		now := time.Now().UTC()
-		if now.Before(current.ActiveFrom) {
-			now = current.ActiveFrom
-		}
-		if _, err := s.closePersonAttributeValueTx(ctx, tx, current.ID, now, now); err != nil {
+		if err := s.retireFirstContactValueTx(ctx, tx, current); err != nil {
 			return err
 		}
 	}
-	if !ours(latest) {
+	if !isFirstContactValue(latest) {
 		return nil
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO person_first_contacts (person_id, dirty_at, written_value_id) VALUES (?, CURRENT_TIMESTAMP, ?)

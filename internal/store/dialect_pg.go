@@ -1988,6 +1988,12 @@ func personSweepPostgreSQLTriggerStatements() []string {
 	}
 }
 
+var postgresFirstContactDeleteTriggers = []string{
+	`CREATE OR REPLACE FUNCTION dirty_first_contact_link_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN UPDATE person_first_contacts SET dirty_at = COALESCE(dirty_at, CURRENT_TIMESTAMP) WHERE person_id = OLD.person_id; RETURN OLD; END; $$`,
+	`DROP TRIGGER IF EXISTS trg_activity_link_delete_first_contact_dirty ON activity_event_persons`,
+	`CREATE TRIGGER trg_activity_link_delete_first_contact_dirty AFTER DELETE ON activity_event_persons FOR EACH ROW EXECUTE FUNCTION dirty_first_contact_link_delete()`,
+}
+
 // EnsureActivityProjectionTriggers installs the PostgreSQL triggers that keep
 // the dated-activity projection queue current. They live in a separate
 // migration from EnsureTriggers because the message watermark migration is

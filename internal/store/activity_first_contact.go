@@ -185,19 +185,8 @@ func (s *Store) ReconcileFirstContactsContext(ctx context.Context, limit int, re
 			if err := s.lockPersonFactAttributeTx(ctx, tx, id, AttributeSlugIntroducedBy); err != nil {
 				return err
 			}
-			if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
+			if err := s.lockActivityProjectionFreshnessTx(ctx, tx, revisions); err != nil {
 				return err
-			}
-			identity, err := s.currentIdentityRevisionTxContext(ctx, tx)
-			if err != nil {
-				return err
-			}
-			account, err := readAccountIdentityRevision(boundQuerier{ctx: ctx, q: tx})
-			if err != nil {
-				return err
-			}
-			if identity != revisions.IdentityRevision || account != revisions.AccountIdentityRevision {
-				return &ErrActivityProjectionStale{Reason: "identity epoch changed"}
 			}
 			reconciled, err := s.activityEpochReconciledTx(ctx, tx, revisions)
 			if err != nil {
@@ -205,16 +194,6 @@ func (s *Store) ReconcileFirstContactsContext(ctx context.Context, limit int, re
 			}
 			if !reconciled {
 				return &ErrActivityProjectionStale{Reason: "activity epoch not reconciled"}
-			}
-			if err := s.lockActivityProjectionQueueFreshnessTx(ctx, tx); err != nil {
-				return err
-			}
-			var pending int64
-			if err := tx.QueryRowContext(ctx, activityProjectionPendingQuery).Scan(&pending); err != nil {
-				return err
-			}
-			if pending > 0 {
-				return &ErrActivityProjectionStale{Reason: "activity projection queue is not drained"}
 			}
 			var dirty sql.NullTime
 			var written sql.NullInt64
@@ -253,7 +232,7 @@ func (s *Store) ReconcileFirstContactsContext(ctx context.Context, limit int, re
 			if target != nil && *target == id {
 				target = nil
 			}
-			ref := "first-contact:" + activityStoredRef(refKind, sql.NullInt64{Int64: event.MessageID, Valid: found})
+			ref := firstContactRefPrefix + activityStoredRef(refKind, sql.NullInt64{Int64: event.MessageID, Valid: found})
 			written, err = s.reconcileFirstContactValueTx(ctx, tx, *def, id, target, ref, written)
 			if err != nil {
 				return err
@@ -282,23 +261,11 @@ func (s *Store) reconcileFirstContactValueTx(ctx context.Context, tx *loggedTx, 
 	if err != nil {
 		return written, err
 	}
-	ours := func(v *PersonAttributeValue) bool {
-		return v.Source == ProvenanceSystem && v.SourceRef != nil && strings.HasPrefix(*v.SourceRef, "first-contact:")
-	}
-	var current, latest *PersonAttributeValue
-	for i := range values {
-		v := &values[i]
-		if latest == nil || v.ID > latest.ID {
-			latest = v
-		}
-		if v.ActiveUntil == nil && v.SupersededAt == nil {
-			current = v
-		}
-	}
-	if current != nil && !ours(current) {
+	current, latest := firstContactValueState(values)
+	if current != nil && !isFirstContactValue(current) {
 		return sql.NullInt64{}, nil
 	}
-	if current == nil && latest != nil && (!ours(latest) || (written.Valid && written.Int64 == latest.ID)) {
+	if current == nil && latest != nil && (!isFirstContactValue(latest) || (written.Valid && written.Int64 == latest.ID)) {
 		return written, nil
 	}
 	if current != nil && target != nil && current.Value.RecordID != nil && *current.Value.RecordID == *target && current.SourceRef != nil && *current.SourceRef == ref {
@@ -310,7 +277,7 @@ func (s *Store) reconcileFirstContactValueTx(ctx context.Context, tx *loggedTx, 
 	}
 	if target == nil {
 		if current != nil {
-			if _, err := s.closePersonAttributeValueTx(ctx, tx, current.ID, now, now); err != nil {
+			if err := s.retireFirstContactValueTx(ctx, tx, current); err != nil {
 				return written, err
 			}
 		}
@@ -326,4 +293,32 @@ func (s *Store) reconcileFirstContactValueTx(ctx context.Context, tx *loggedTx, 
 		return written, err
 	}
 	return sql.NullInt64{Int64: result.Value.ID, Valid: true}, nil
+}
+
+const firstContactRefPrefix = "first-contact:"
+
+func isFirstContactValue(v *PersonAttributeValue) bool {
+	return v != nil && v.Source == ProvenanceSystem && v.SourceRef != nil && strings.HasPrefix(*v.SourceRef, firstContactRefPrefix)
+}
+
+func firstContactValueState(values []PersonAttributeValue) (current, latest *PersonAttributeValue) {
+	for i := range values {
+		v := &values[i]
+		if latest == nil || v.ID > latest.ID {
+			latest = v
+		}
+		if v.ActiveUntil == nil && v.SupersededAt == nil {
+			current = v
+		}
+	}
+	return current, latest
+}
+
+func (s *Store) retireFirstContactValueTx(ctx context.Context, tx *loggedTx, v *PersonAttributeValue) error {
+	now := time.Now().UTC()
+	if now.Before(v.ActiveFrom) {
+		now = v.ActiveFrom
+	}
+	_, err := s.closePersonAttributeValueTx(ctx, tx, v.ID, now, now)
+	return err
 }
