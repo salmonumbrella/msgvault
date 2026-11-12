@@ -171,7 +171,7 @@ func (b *daemonMCPOperations) employmentOperationDisclosure(ctx context.Context,
 	}
 	effect := map[string]string{
 		"create_employment":      "Create this employment record; it may become the person's primary current employment.",
-		"replace_employment":     "Replace mutable fields; omitted ones clear, except current/primary flags.",
+		"replace_employment":     "Replace mutable fields; omitted ones clear. Omitted is_current is kept only without end_date; omitted is_primary only while the record stays current.",
 		"end_employment":         "End this employment on the given date; it is no longer current or primary.",
 		"set_primary_employment": "Make this employment primary; native demotes whichever other employment is primary when it runs. demotes shows the one read now, if any.",
 		"delete_employment":      "Permanently delete this employment record.",
@@ -188,8 +188,8 @@ func (b *daemonMCPOperations) employmentOperationDisclosure(ctx context.Context,
 
 // employmentDisclosureContext reads the record an operation acts on and, for
 // set_primary_employment, the person's current primary it would demote. Failed
-// reads refuse as a definite read failure. Descriptions stay out of the
-// confirmation.
+// reads refuse as a definite read failure. Only replace_employment and
+// delete_employment show the stored description they erase.
 func (b *daemonMCPOperations) employmentDisclosureContext(ctx context.Context, name string, id int64) (*mcpserver.EmploymentRecord, *generated.Employment, error) {
 	if name == "create_employment" {
 		return nil, nil, nil
@@ -199,14 +199,16 @@ func (b *daemonMCPOperations) employmentDisclosureContext(ctx context.Context, n
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := operationContext(result, result.ETag, "employment_revision_conflict", employmentDefiniteRefusal); err != nil {
+	if err := operationReadFailure(result, employmentDefiniteRefusal); err != nil {
 		return nil, nil, err
 	}
 	current, ok := result.Output.(mcpserver.EmploymentRecord)
 	if !ok {
 		return nil, nil, unavailable
 	}
-	current.Employment.Description = nil
+	if name != "replace_employment" && name != "delete_employment" {
+		current.Employment.Description = nil
+	}
 	if name != "set_primary_employment" {
 		return &current, nil, nil
 	}
@@ -214,7 +216,7 @@ func (b *daemonMCPOperations) employmentDisclosureContext(ctx context.Context, n
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := operationContext(listed, listed.ETag, "employment_revision_conflict", employmentDefiniteRefusal); err != nil {
+	if err := operationReadFailure(listed, employmentDefiniteRefusal); err != nil {
 		return nil, nil, err
 	}
 	rows, ok := listed.Output.(generated.EmploymentsResponse)
