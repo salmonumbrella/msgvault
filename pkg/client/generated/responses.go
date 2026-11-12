@@ -1855,6 +1855,20 @@ type ListIntroductionsErrorResponseJSON503 = ErrorResponse
 
 type ListIntroductionsErrorResponseJSONDefault = ErrorResponse
 
+type PrepareIntroductionResponse = IntroductionRecord
+
+type PrepareIntroductionErrorResponse = ErrorResponse
+
+type PrepareIntroductionErrorResponseJSON = ErrorResponse
+
+type PrepareIntroductionErrorResponseJSON403 = ErrorResponse
+
+type PrepareIntroductionErrorResponseJSON409 = ErrorResponse
+
+type PrepareIntroductionErrorResponseJSON503 = ErrorResponse
+
+type PrepareIntroductionErrorResponseJSONDefault = ErrorResponse
+
 type GetIntroductionResponse = IntroductionRecord
 
 type GetIntroductionErrorResponse = ErrorResponse
@@ -1866,6 +1880,38 @@ type GetIntroductionErrorResponseJSON404 = ErrorResponse
 type GetIntroductionErrorResponseJSON503 = ErrorResponse
 
 type GetIntroductionErrorResponseJSONDefault = ErrorResponse
+
+type EditIntroductionResponse = IntroductionRecord
+
+type EditIntroductionErrorResponse = ErrorResponse
+
+type EditIntroductionErrorResponseJSON = ErrorResponse
+
+type EditIntroductionErrorResponseJSON403 = ErrorResponse
+
+type EditIntroductionErrorResponseJSON404 = ErrorResponse
+
+type EditIntroductionErrorResponseJSON409 = ErrorResponse
+
+type EditIntroductionErrorResponseJSON503 = ErrorResponse
+
+type EditIntroductionErrorResponseJSONDefault = ErrorResponse
+
+type CancelIntroductionResponse = IntroductionRecord
+
+type CancelIntroductionErrorResponse = ErrorResponse
+
+type CancelIntroductionErrorResponseJSON = ErrorResponse
+
+type CancelIntroductionErrorResponseJSON403 = ErrorResponse
+
+type CancelIntroductionErrorResponseJSON404 = ErrorResponse
+
+type CancelIntroductionErrorResponseJSON409 = ErrorResponse
+
+type CancelIntroductionErrorResponseJSON503 = ErrorResponse
+
+type CancelIntroductionErrorResponseJSONDefault = ErrorResponse
 
 type ListLoopsResponse = LoopListResponse
 
@@ -5793,6 +5839,19 @@ type ListIntroductionsResp struct {
 	JSONDefault  *ListIntroductionsErrorResponseJSONDefault
 }
 
+type PrepareIntroductionResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON201      *PrepareIntroductionResponse
+	JSON400      *PrepareIntroductionErrorResponse
+	JSON401      *PrepareIntroductionErrorResponseJSON
+	JSON403      *PrepareIntroductionErrorResponseJSON403
+	JSON409      *PrepareIntroductionErrorResponseJSON409
+	JSON503      *PrepareIntroductionErrorResponseJSON503
+	JSONDefault  *PrepareIntroductionErrorResponseJSONDefault
+}
+
 type GetIntroductionResp struct {
 	HTTPResponse *http.Response
 	Body         []byte
@@ -5803,6 +5862,34 @@ type GetIntroductionResp struct {
 	JSON404      *GetIntroductionErrorResponseJSON404
 	JSON503      *GetIntroductionErrorResponseJSON503
 	JSONDefault  *GetIntroductionErrorResponseJSONDefault
+}
+
+type EditIntroductionResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *EditIntroductionResponse
+	JSON400      *EditIntroductionErrorResponse
+	JSON401      *EditIntroductionErrorResponseJSON
+	JSON403      *EditIntroductionErrorResponseJSON403
+	JSON404      *EditIntroductionErrorResponseJSON404
+	JSON409      *EditIntroductionErrorResponseJSON409
+	JSON503      *EditIntroductionErrorResponseJSON503
+	JSONDefault  *EditIntroductionErrorResponseJSONDefault
+}
+
+type CancelIntroductionResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *CancelIntroductionResponse
+	JSON400      *CancelIntroductionErrorResponse
+	JSON401      *CancelIntroductionErrorResponseJSON
+	JSON403      *CancelIntroductionErrorResponseJSON403
+	JSON404      *CancelIntroductionErrorResponseJSON404
+	JSON409      *CancelIntroductionErrorResponseJSON409
+	JSON503      *CancelIntroductionErrorResponseJSON503
+	JSONDefault  *CancelIntroductionErrorResponseJSONDefault
 }
 
 type ListLoopsResp struct {

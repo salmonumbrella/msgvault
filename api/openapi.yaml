@@ -7059,6 +7059,23 @@ components:
         - code
         - person_id
       type: object
+    IntroductionEditRequest:
+      additionalProperties: false
+      properties:
+        body:
+          type:
+            - string
+            - "null"
+        revision:
+          format: int64
+          type: integer
+        title:
+          type:
+            - string
+            - "null"
+      required:
+        - revision
+      type: object
     IntroductionMember:
       additionalProperties: true
       properties:
@@ -7150,6 +7167,15 @@ components:
         - cancelled_at
         - created_at
         - updated_at
+      type: object
+    IntroductionRevisionRequest:
+      additionalProperties: false
+      properties:
+        revision:
+          format: int64
+          type: integer
+      required:
+        - revision
       type: object
     KataEvidenceLinkRequest:
       additionalProperties: false
@@ -12734,6 +12760,29 @@ components:
         - received_count
         - sent_count
         - latest_at
+      type: object
+    PersonIntroductionPrepare:
+      additionalProperties: false
+      properties:
+        body:
+          type: string
+        person_a_id:
+          format: int64
+          type: integer
+        person_b_id:
+          format: int64
+          type: integer
+        source_id:
+          format: int64
+          type: integer
+        title:
+          type: string
+      required:
+        - source_id
+        - person_a_id
+        - person_b_id
+        - title
+        - body
       type: object
     PersonMatchBatchError:
       additionalProperties: true
@@ -24434,6 +24483,62 @@ paths:
       summary: List local introductions
       tags:
         - API
+    post:
+      operationId: prepareIntroduction
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PersonIntroductionPrepare"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntroductionRecord"
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+      security:
+        - apiKey: []
+      summary: Prepare a local introduction
+      tags:
+        - API
   /api/v1/intros/{id}:
     get:
       operationId: getIntroduction
@@ -24483,6 +24588,143 @@ paths:
       security:
         - apiKey: []
       summary: Get a local introduction
+      tags:
+        - API
+    patch:
+      operationId: editIntroduction
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IntroductionEditRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntroductionRecord"
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+      security:
+        - apiKey: []
+      summary: Edit a local introduction
+      tags:
+        - API
+  /api/v1/intros/{id}/cancel:
+    post:
+      operationId: cancelIntroduction
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IntroductionRevisionRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntroductionRecord"
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+      security:
+        - apiKey: []
+      summary: Cancel a local introduction
       tags:
         - API
   /api/v1/loops:

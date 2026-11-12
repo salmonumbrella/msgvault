@@ -6846,6 +6846,12 @@ func (i IntroductionBlocker) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(i))
 }
 
+type IntroductionEditRequest struct {
+	Body     *string `json:"body,omitzero"`
+	Revision int64   `json:"revision"`
+	Title    *string `json:"title,omitzero"`
+}
+
 type IntroductionMember struct {
 	ParticipantID int64  `json:"participant_id"`
 	PersonID      int64  `json:"person_id"`
@@ -6943,6 +6949,10 @@ func (i IntroductionRecord) Validate() error {
 		return nil
 	}
 	return errors
+}
+
+type IntroductionRevisionRequest struct {
+	Revision int64 `json:"revision"`
 }
 
 type KataEvidenceLinkRequest struct {
@@ -12596,6 +12606,18 @@ type PersonInboxRow struct {
 }
 
 func (p PersonInboxRow) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(p))
+}
+
+type PersonIntroductionPrepare struct {
+	Body      string `json:"body" validate:"required"`
+	PersonAId int64  `json:"person_a_id"`
+	PersonBId int64  `json:"person_b_id"`
+	SourceID  int64  `json:"source_id"`
+	Title     string `json:"title" validate:"required"`
+}
+
+func (p PersonIntroductionPrepare) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(p))
 }
 

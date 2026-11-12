@@ -631,9 +631,21 @@ type ClientInterface interface {
 	ListIntroductions(ctx context.Context, options *ListIntroductionsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListIntroductionsResponse, error)
 	ListIntroductionsWithResponse(ctx context.Context, options *ListIntroductionsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListIntroductionsResp, error)
 
+	// PrepareIntroduction Prepare a local introduction
+	PrepareIntroduction(ctx context.Context, options *PrepareIntroductionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PrepareIntroductionResponse, error)
+	PrepareIntroductionWithResponse(ctx context.Context, options *PrepareIntroductionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PrepareIntroductionResp, error)
+
 	// GetIntroduction Get a local introduction
 	GetIntroduction(ctx context.Context, options *GetIntroductionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetIntroductionResponse, error)
 	GetIntroductionWithResponse(ctx context.Context, options *GetIntroductionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetIntroductionResp, error)
+
+	// EditIntroduction Edit a local introduction
+	EditIntroduction(ctx context.Context, options *EditIntroductionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*EditIntroductionResponse, error)
+	EditIntroductionWithResponse(ctx context.Context, options *EditIntroductionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*EditIntroductionResp, error)
+
+	// CancelIntroduction Cancel a local introduction
+	CancelIntroduction(ctx context.Context, options *CancelIntroductionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CancelIntroductionResponse, error)
+	CancelIntroductionWithResponse(ctx context.Context, options *CancelIntroductionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CancelIntroductionResp, error)
 
 	// ListLoops List conversations waiting on a reply
 	ListLoops(ctx context.Context, options *ListLoopsRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListLoopsResponse, error)
@@ -10476,6 +10488,70 @@ func (c *Client) ListIntroductions(ctx context.Context, options *ListIntroductio
 	return responseParser(ctx, resp)
 }
 
+// PrepareIntroduction Prepare a local introduction
+func (c *Client) PrepareIntroduction(ctx context.Context, options *PrepareIntroductionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PrepareIntroductionResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/intros",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*PrepareIntroductionResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 201 {
+			target := new(PrepareIntroductionErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "PrepareIntroductionErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(PrepareIntroductionResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "PrepareIntroductionResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/intros")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
 // GetIntroduction Get a local introduction
 func (c *Client) GetIntroduction(ctx context.Context, options *GetIntroductionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetIntroductionResponse, error) {
 	var err error
@@ -10533,6 +10609,134 @@ func (c *Client) GetIntroduction(ctx context.Context, options *GetIntroductionRe
 	}
 
 	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/intros/{id}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+// EditIntroduction Edit a local introduction
+func (c *Client) EditIntroduction(ctx context.Context, options *EditIntroductionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*EditIntroductionResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/intros/{id}",
+		Method:      "PATCH",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*EditIntroductionResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(EditIntroductionErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "EditIntroductionErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(EditIntroductionResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "EditIntroductionResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/intros/{id}")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+// CancelIntroduction Cancel a local introduction
+func (c *Client) CancelIntroduction(ctx context.Context, options *CancelIntroductionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*CancelIntroductionResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/intros/{id}/cancel",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*CancelIntroductionResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(CancelIntroductionErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "CancelIntroductionErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(CancelIntroductionResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "CancelIntroductionResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/intros/{id}/cancel")
 	if err != nil {
 		return nil, fmt.Errorf("error executing request: %w", err)
 	}

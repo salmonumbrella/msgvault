@@ -140,6 +140,12 @@ type CreateKataIssueBody = KataIssueCreateRequest
 
 type LinkKataEvidenceBody = KataEvidenceLinkRequest
 
+type PrepareIntroductionBody = PersonIntroductionPrepare
+
+type EditIntroductionBody = IntroductionEditRequest
+
+type CancelIntroductionBody = IntroductionRevisionRequest
+
 type SnoozeLoopBody = SnoozeLoopRequest
 
 type ListMeetingActionItemsBody = MeetingActionsRequest

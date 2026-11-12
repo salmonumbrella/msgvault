@@ -363,6 +363,22 @@ func (g GetIntroductionPath) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(g))
 }
 
+type EditIntroductionPath struct {
+	ID string `json:"id" validate:"required"`
+}
+
+func (e EditIntroductionPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(e))
+}
+
+type CancelIntroductionPath struct {
+	ID string `json:"id" validate:"required"`
+}
+
+func (c CancelIntroductionPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(c))
+}
+
 type MarkLoopDonePath struct {
 	// MessageID ID of the message that anchors the loop
 	MessageID int64 `json:"message_id" validate:"gte=1"`

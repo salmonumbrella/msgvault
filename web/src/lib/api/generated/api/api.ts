@@ -40,6 +40,7 @@ import type {
   CacheStats,
   CancelDeletionPathParameters,
   CancelDeletionResponse,
+  CancelIntroductionPathParameters,
   CancelSettingsPeopleCodexLoginPathParameters,
   CardDAVAccountRequest,
   CardDAVAccountResponse,
@@ -119,6 +120,7 @@ import type {
   DocbankAttachmentBackfillResponse,
   DocbankAttachmentStatus,
   DomainSummary,
+  EditIntroductionPathParameters,
   EmbeddingStatus,
   Employment,
   EmploymentBody,
@@ -212,8 +214,10 @@ import type {
   ImportJobRequest,
   ImportJobResponse,
   ImportMuesliRecordingParams,
+  IntroductionEditRequest,
   IntroductionPage,
   IntroductionRecord,
+  IntroductionRevisionRequest,
   KataEvidenceLinkRequest,
   KataEvidencePrepareRequest,
   KataEvidencePrepareResponse,
@@ -362,6 +366,7 @@ import type {
   PersonFactPinsResponse,
   PersonIdentitiesResponse,
   PersonInboxResponse,
+  PersonIntroductionPrepare,
   PersonMatchConsentDecisionRequest,
   PersonMatchConsentDecisionResponse,
   PersonMatchJudgmentHistoryResponse,
@@ -2222,6 +2227,23 @@ export const listIntroductions = (
   );
 };
 /**
+ * @summary Prepare a local introduction
+ */
+export const prepareIntroduction = (
+  personIntroductionPrepare: PersonIntroductionPrepare,
+  options?: SecondParameter<typeof orvalFetch<IntroductionRecord>>,
+) => {
+  return orvalFetch<IntroductionRecord>(
+    {
+      url: `/api/v1/intros`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: personIntroductionPrepare,
+    },
+    options,
+  );
+};
+/**
  * @summary Get a local introduction
  */
 export const getIntroduction = (
@@ -2230,6 +2252,42 @@ export const getIntroduction = (
 ) => {
   return orvalFetch<IntroductionRecord>(
     { url: `/api/v1/intros/${encodeURIComponent(String(id))}`, method: "GET" },
+    options,
+  );
+};
+/**
+ * @summary Edit a local introduction
+ */
+export const editIntroduction = (
+  { id }: EditIntroductionPathParameters,
+  introductionEditRequest: IntroductionEditRequest,
+  options?: SecondParameter<typeof orvalFetch<IntroductionRecord>>,
+) => {
+  return orvalFetch<IntroductionRecord>(
+    {
+      url: `/api/v1/intros/${encodeURIComponent(String(id))}`,
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      data: introductionEditRequest,
+    },
+    options,
+  );
+};
+/**
+ * @summary Cancel a local introduction
+ */
+export const cancelIntroduction = (
+  { id }: CancelIntroductionPathParameters,
+  introductionRevisionRequest: IntroductionRevisionRequest,
+  options?: SecondParameter<typeof orvalFetch<IntroductionRecord>>,
+) => {
+  return orvalFetch<IntroductionRecord>(
+    {
+      url: `/api/v1/intros/${encodeURIComponent(String(id))}/cancel`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: introductionRevisionRequest,
+    },
     options,
   );
 };
