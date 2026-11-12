@@ -201,6 +201,67 @@ func TestIntroHTTPReads(t *testing.T) {
 	req.NoError(err)
 	check.Equal(http.StatusNotFound, missingResponse.StatusCode)
 	req.NoError(missingResponse.Body.Close())
+
+	// This exercises the real router and adapter; client types are generated from the registered schema.
+	client, err := clientpkg.New(server.URL)
+	req.NoError(err)
+	var prepare generated.PrepareIntroductionBody
+	body := fmt.Sprintf(`{"source_id":%d,"person_a_id":%d,"person_b_id":%d,"title":"Hello","body":"Private"}`, src.ID, a.ID, b.ID)
+	req.NoError(json.Unmarshal([]byte(body), &prepare))
+	created, err := client.PrepareIntroductionWithResponse(ctx, &generated.PrepareIntroductionRequestOptions{Body: &prepare})
+	req.NoError(err)
+	req.Equal(http.StatusCreated, created.StatusCode)
+	req.NotNil(created.JSON201)
+	id := created.JSON201.IntroID
+	compareCLI := func(value any) {
+		t.Helper()
+		data, err := run("intro", "show", id, "--json")
+		req.NoError(err)
+		var want, got any
+		req.NoError(json.Unmarshal([]byte(data), &want))
+		encoded, err := json.Marshal(value)
+		req.NoError(err)
+		req.NoError(json.Unmarshal(encoded, &got))
+		check.Equal(want, got)
+	}
+	compareCLI(created.JSON201)
+	var edit generated.EditIntroductionBody
+	req.NoError(json.Unmarshal([]byte(`{"revision":1,"title":"Updated","body":"Revised"}`), &edit))
+	edited, err := client.EditIntroductionWithResponse(ctx, &generated.EditIntroductionRequestOptions{PathParams: &generated.EditIntroductionPath{ID: id}, Body: &edit})
+	req.NoError(err)
+	req.Equal(http.StatusOK, edited.StatusCode)
+	req.NotNil(edited.JSON200)
+	compareCLI(edited.JSON200)
+	var cancel generated.CancelIntroductionBody
+	req.NoError(json.Unmarshal([]byte(`{"revision":2}`), &cancel))
+	cancelled, err := client.CancelIntroductionWithResponse(ctx, &generated.CancelIntroductionRequestOptions{PathParams: &generated.CancelIntroductionPath{ID: id}, Body: &cancel})
+	req.NoError(err)
+	req.Equal(http.StatusOK, cancelled.StatusCode)
+	req.NotNil(cancelled.JSON200)
+	compareCLI(cancelled.JSON200)
+
+	for _, tc := range []struct {
+		method, path, body string
+		status             int
+		code               string
+	}{
+		{http.MethodPatch, "/api/v1/intros/" + id, `{"revision":1,"title":"stale"}`, 409, "revision_mismatch"},
+		{http.MethodPost, "/api/v1/intros", fmt.Sprintf(`{"source_id":%d,"person_a_id":%d,"person_b_id":%d}`, src.ID, a.ID, b.ID), 400, "bad_request"},
+		{http.MethodPost, "/api/v1/intros", `null`, 400, "bad_request"},
+		{http.MethodPost, "/api/v1/intros", `{ } { }`, 400, "bad_request"},
+		{http.MethodPost, "/api/v1/intros", `{"created_by":"forged"}`, 400, "bad_request"},
+	} {
+		request, err := http.NewRequestWithContext(ctx, tc.method, server.URL+tc.path, bytes.NewBufferString(tc.body))
+		req.NoError(err)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(request)
+		req.NoError(err)
+		data, err := io.ReadAll(response.Body)
+		req.NoError(err)
+		req.NoError(response.Body.Close())
+		check.Equal(tc.status, response.StatusCode, tc.body)
+		check.Contains(string(data), tc.code)
+	}
 }
 
 func TestIntroDelegatedThroughRunner(t *testing.T) {
@@ -355,92 +416,4 @@ func TestIntroStoreFailureDoesNotLogText(t *testing.T) {
 	check.Contains(resp.Body.String(), "local_store_failed")
 	check.NotContains(logs.String(), "secret-title")
 	check.NotContains(logs.String(), "secret-body")
-}
-
-// This exercises the real router and adapter; client types are generated from the registered schema.
-func TestIntroHTTPMutationsMatchCLI(t *testing.T) {
-	req := require.New(t)
-	check := assert.New(t)
-	ctx := t.Context()
-	st := testutil.NewTestStore(t)
-	src, err := st.GetOrCreateSource("beeper", "synthetic-account")
-	req.NoError(err)
-	pa, err := st.EnsureParticipant("a@example.test", "A", "example.test")
-	req.NoError(err)
-	pb, err := st.EnsureParticipant("b@example.test", "B", "example.test")
-	req.NoError(err)
-	a, _, err := st.CreatePersonFromParticipantContext(ctx, pa)
-	req.NoError(err)
-	b, _, err := st.CreatePersonFromParticipantContext(ctx, pb)
-	req.NoError(err)
-	cfg := config.NewDefaultConfig()
-	cfg.HomeDir, cfg.Data.DataDir = t.TempDir(), t.TempDir()
-	server := httptest.NewServer(api.NewServerWithOptions(api.ServerOptions{Config: cfg, Store: &storeAPIAdapter{store: st, config: cfg}, Logger: slog.New(slog.DiscardHandler)}).Router())
-	t.Cleanup(server.Close)
-	remote := configureRemoteDaemonForTest(t, server.URL)
-	client, err := clientpkg.New(server.URL)
-	req.NoError(err)
-	var prepare generated.PrepareIntroductionBody
-	body := fmt.Sprintf(`{"source_id":%d,"person_a_id":%d,"person_b_id":%d,"title":"Hello","body":"Private"}`, src.ID, a.ID, b.ID)
-	req.NoError(json.Unmarshal([]byte(body), &prepare))
-	created, err := client.PrepareIntroductionWithResponse(ctx, &generated.PrepareIntroductionRequestOptions{Body: &prepare})
-	req.NoError(err)
-	req.Equal(http.StatusCreated, created.StatusCode)
-	req.NotNil(created.JSON201)
-	id := created.JSON201.IntroID
-	compareCLI := func(value any) {
-		t.Helper()
-		root := &cobra.Command{Use: "msgvault"}
-		clirun.AddLoggingFlags(root.PersistentFlags())
-		root.AddCommand(newIntroCommand(runDaemonCLICommandHTTPFromCobra))
-		silenceUsageInRunE(root)
-		var out bytes.Buffer
-		root.SetOut(&out)
-		root.SetArgs([]string{"intro", "show", id, "--json"})
-		req.NoError(root.ExecuteContext(remote))
-		var want, got any
-		req.NoError(json.Unmarshal(out.Bytes(), &want))
-		encoded, err := json.Marshal(value)
-		req.NoError(err)
-		req.NoError(json.Unmarshal(encoded, &got))
-		check.Equal(want, got)
-	}
-	compareCLI(created.JSON201)
-	var edit generated.EditIntroductionBody
-	req.NoError(json.Unmarshal([]byte(`{"revision":1,"title":"Updated","body":"Revised"}`), &edit))
-	edited, err := client.EditIntroductionWithResponse(ctx, &generated.EditIntroductionRequestOptions{PathParams: &generated.EditIntroductionPath{ID: id}, Body: &edit})
-	req.NoError(err)
-	req.Equal(http.StatusOK, edited.StatusCode)
-	req.NotNil(edited.JSON200)
-	compareCLI(edited.JSON200)
-	var cancel generated.CancelIntroductionBody
-	req.NoError(json.Unmarshal([]byte(`{"revision":2}`), &cancel))
-	cancelled, err := client.CancelIntroductionWithResponse(ctx, &generated.CancelIntroductionRequestOptions{PathParams: &generated.CancelIntroductionPath{ID: id}, Body: &cancel})
-	req.NoError(err)
-	req.Equal(http.StatusOK, cancelled.StatusCode)
-	req.NotNil(cancelled.JSON200)
-	compareCLI(cancelled.JSON200)
-
-	for _, tc := range []struct {
-		method, path, body string
-		status             int
-		code               string
-	}{
-		{http.MethodPatch, "/api/v1/intros/" + id, `{"revision":1,"title":"stale"}`, 409, "revision_mismatch"},
-		{http.MethodPost, "/api/v1/intros", fmt.Sprintf(`{"source_id":%d,"person_a_id":%d,"person_b_id":%d}`, src.ID, a.ID, b.ID), 400, "bad_request"},
-		{http.MethodPost, "/api/v1/intros", `null`, 400, "bad_request"},
-		{http.MethodPost, "/api/v1/intros", `{ } { }`, 400, "bad_request"},
-		{http.MethodPost, "/api/v1/intros", `{"created_by":"forged"}`, 400, "bad_request"},
-	} {
-		request, err := http.NewRequestWithContext(ctx, tc.method, server.URL+tc.path, bytes.NewBufferString(tc.body))
-		req.NoError(err)
-		request.Header.Set("Content-Type", "application/json")
-		response, err := http.DefaultClient.Do(request)
-		req.NoError(err)
-		data, err := io.ReadAll(response.Body)
-		req.NoError(err)
-		req.NoError(response.Body.Close())
-		check.Equal(tc.status, response.StatusCode, tc.body)
-		check.Contains(string(data), tc.code)
-	}
 }

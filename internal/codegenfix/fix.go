@@ -126,7 +126,7 @@ func RewriteGeneratedValidators(source []byte) ([]byte, error) {
 			return nil, fmt.Errorf("generated %s.%s validator shape changed", typeName, field)
 		}
 	}
-	// Required strings that may be empty lose their non-empty check.
+	// Required strings a response may send empty keep presence but lose their non-empty check.
 	for _, target := range [][3]string{
 		{"Attendee", "Email", "a"},
 		{"Attendee", "DisplayName", "a"},

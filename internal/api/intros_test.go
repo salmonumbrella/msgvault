@@ -62,6 +62,14 @@ func TestIntroductionReadErrorsAndSnapshotCapacity(t *testing.T) {
 		}{
 			{"success", nil, http.StatusOK, ""},
 			{"forbidden", introops.ErrForbidden, http.StatusForbidden, "not_permitted"},
+			{"person not found", store.ErrPersonNotFound, 400, "invalid_args"},
+			{"same person", store.ErrIntroductionSamePerson, 400, "same_person"},
+			{"introduction source", store.ErrIntroductionSource, 400, "unsupported_source"},
+			{"source not found", store.ErrSourceNotFound, 400, "unsupported_source"},
+			{"source retired", store.ErrSourceRetired, 409, "source_retired"},
+			{"revision", store.ErrIntroductionRevision, 409, "revision_mismatch"},
+			{"state", store.ErrIntroductionState, 409, "state_conflict"},
+			{"introduction not found", store.ErrIntroductionNotFound, http.StatusNotFound, "intro_not_found"},
 			{"storage failure", errors.New("storage failure"), http.StatusServiceUnavailable, "local_store_failed"},
 		} {
 			if !t.Run(path+"/"+tc.name, func(t *testing.T) {
@@ -100,6 +108,7 @@ func TestIntroductionReadErrorsAndSnapshotCapacity(t *testing.T) {
 				if tc.code != "" {
 					assert.Contains(t, response.Body.String(), tc.code)
 				}
+				assert.NotContains(t, response.Body.String(), "storage failure")
 				require.Len(t, srv.readSnapshotSlots, 1, "deferred cleanup must not release another read's slot")
 				<-srv.readSnapshotSlots
 			}) {
@@ -149,27 +158,3 @@ func (w *introductionBoundaryRecorder) WriteHeader(status int) {
 	w.ResponseRecorder.WriteHeader(status)
 }
 
-func TestIntroductionMutationErrorCodes(t *testing.T) {
-	srv, _ := newTestServerWithAgentGrants(t)
-	for _, tc := range []struct {
-		err    error
-		status int
-		code   string
-	}{
-		{store.ErrPersonNotFound, 400, "invalid_args"},
-		{store.ErrIntroductionSamePerson, 400, "same_person"},
-		{store.ErrIntroductionSource, 400, "unsupported_source"},
-		{store.ErrSourceNotFound, 400, "unsupported_source"},
-		{store.ErrSourceRetired, 409, "source_retired"},
-		{store.ErrIntroductionRevision, 409, "revision_mismatch"},
-		{store.ErrIntroductionState, 409, "state_conflict"},
-		{store.ErrIntroductionNotFound, 404, "intro_not_found"},
-		{errors.New("secret"), 503, "local_store_failed"},
-	} {
-		response := httptest.NewRecorder()
-		srv.writeIntroductionError(response, tc.err)
-		assert.Equal(t, tc.status, response.Code)
-		assert.Contains(t, response.Body.String(), tc.code)
-		assert.NotContains(t, response.Body.String(), "secret")
-	}
-}
