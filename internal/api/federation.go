@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
+	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -45,9 +46,13 @@ type federationIdentityResponse struct {
 }
 
 type federationHandshakeResponse struct {
-	ProtocolVersions []int  `json:"protocol_versions"`
-	HubInstance      string `json:"hub_instance"`
-	EnrollmentState  string `json:"enrollment_state"`
+	ProtocolVersions []int                      `json:"protocol_versions"`
+	HubInstance      string                     `json:"hub_instance"`
+	EnrollmentState  string                     `json:"enrollment_state"`
+	Policy           config.FederationHubPolicy `json:"policy"`
+	PolicyDigest     string                     `json:"policy_digest"`
+	Member           string                     `json:"member"`
+	EnrollmentUID    string                     `json:"enrollment_uid"`
 }
 
 func (s *Server) registerFederationRoutes(api huma.API) {
@@ -60,6 +65,7 @@ func (s *Server) registerFederationRoutes(api huma.API) {
 	registerAPIV1RawHumaJSONRoute[federationListResponse](api, "listFederationEnrollments", http.MethodGet, "/federation/enrollments", "List spoke enrollments", s.handleFederationList)
 	op = rawAPIV1Operation("revokeFederationEnrollment", http.MethodDelete, "/federation/enrollments/{uid}", "Revoke a spoke enrollment")
 	op.Parameters = []*huma.Param{{Name: "uid", In: "path", Required: true, Schema: &huma.Schema{Type: "string"}}}
+	op.Security = []map[string][]string{{"apiKey": {}}, {federationTokenSecurityScheme: {}, federationSpokeSecurityScheme: {}}}
 	op.Responses = rawHumaResponses(http.StatusNoContent)
 	registerRawHumaRoute(api, op, s.handleFederationRevoke)
 }
@@ -122,7 +128,12 @@ func (s *Server) handleFederationHandshake(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, federationHandshakeResponse{ProtocolVersions: []int{1}, HubInstance: uid, EnrollmentState: "active"})
+	digest, err := s.cfg.Federation.Hub.PolicyDigest()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Policy unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, federationHandshakeResponse{ProtocolVersions: []int{1}, HubInstance: uid, EnrollmentState: "active", Policy: s.cfg.Federation.Hub.Policy(), PolicyDigest: digest, Member: auth.Enrollment.Member, EnrollmentUID: auth.Enrollment.EnrollmentUID})
 }
 
 func (s *Server) federationManagement(w http.ResponseWriter, r *http.Request) bool {
@@ -179,7 +190,19 @@ func (s *Server) handleFederationList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFederationRevoke(w http.ResponseWriter, r *http.Request) {
-	if !s.federationManagement(w, r) {
+	if !s.federationRole(w, r, false) {
+		return
+	}
+	auth := s.requestAuthentication(r)
+	if auth.Mode == AuthModeCaller {
+		auth = s.classifyAPIRequestDirect(r)
+	}
+	if auth.Mode == AuthModeFederation {
+		if auth.Enrollment == nil || auth.Enrollment.EnrollmentUID != r.PathValue("uid") {
+			writeError(w, http.StatusForbidden, "forbidden", "Operation is not available to federation credentials")
+			return
+		}
+	} else if !s.federationManagement(w, r) {
 		return
 	}
 	err := s.federationStore.RevokeFederationEnrollmentContext(r.Context(), r.PathValue("uid"))

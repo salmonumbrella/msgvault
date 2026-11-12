@@ -53,3 +53,29 @@ func TestFederationRoleAndHubKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestFederationHubPolicy(t *testing.T) {
+	cfg := NewDefaultConfig()
+	p := cfg.Federation.Hub.Policy()
+	require.NoError(t, p.Validate())
+	digest, err := p.PolicyDigest()
+	require.NoError(t, err)
+	p.AllowedLevels = []string{"content", "envelope"}
+	reordered, err := p.PolicyDigest()
+	require.NoError(t, err)
+	assert.Equal(t, digest, reordered)
+	for _, change := range []func(*FederationHubPolicy){
+		func(p *FederationHubPolicy) { p.Retention = "invalid" },
+		func(p *FederationHubPolicy) { p.AllowedLevels = []string{"invalid"} },
+		func(p *FederationHubPolicy) { p.MinGroupSize = 1 },
+		func(p *FederationHubPolicy) { p.Processing = "" },
+	} {
+		bad := cfg.Federation.Hub.Policy()
+		change(&bad)
+		assert.Error(t, bad.Validate())
+	}
+	p.AllowAttachments = !p.AllowAttachments
+	changed, err := p.PolicyDigest()
+	require.NoError(t, err)
+	assert.NotEqual(t, digest, changed)
+}

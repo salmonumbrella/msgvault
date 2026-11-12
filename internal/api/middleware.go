@@ -12,6 +12,7 @@ import (
 	"go.kenn.io/msgvault/internal/agentgrant"
 	"go.kenn.io/msgvault/internal/apiprotocol"
 	"go.kenn.io/msgvault/internal/config"
+	"go.kenn.io/msgvault/internal/store"
 	"golang.org/x/time/rate"
 )
 
@@ -234,6 +235,7 @@ type requestAuthentication struct {
 	trustedForCLIDuration bool
 	Grant                 *agentgrant.Grant
 	RemoteClient          *config.RemoteClientConfig
+	Enrollment            *store.FederationEnrollment
 }
 
 func (s *Server) requestAuthentication(r *http.Request) requestAuthentication {
@@ -268,8 +270,8 @@ func (s *Server) classifyAPIRequestDirect(r *http.Request) requestAuthentication
 		instances := r.Header.Values(apiprotocol.SpokeInstanceHeader)
 		_, cookieErr := r.Cookie(sessionCookieName)
 		if bearer && strings.HasPrefix(token, "mvf1_") && len(instances) == 1 && instances[0] != "" && len(r.Header.Values("X-Api-Key")) == 0 && len(r.Header.Values(apiprotocol.DaemonRuntimeTokenHeader)) == 0 && cookieErr != nil && s.federationStore != nil {
-			if _, err := s.federationStore.AuthenticateFederationEnrollmentContext(r.Context(), token, instances[0]); err == nil {
-				return requestAuthentication{Mode: AuthModeFederation}
+			if enrollment, err := s.federationStore.AuthenticateFederationEnrollmentContext(r.Context(), token, instances[0]); err == nil {
+				return requestAuthentication{Mode: AuthModeFederation, Enrollment: enrollment}
 			}
 		}
 		return requestAuthentication{Mode: AuthModeRequired}

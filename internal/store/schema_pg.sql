@@ -16,6 +16,17 @@ CREATE TABLE IF NOT EXISTS federation_enrollments (
     revoked_at TIMESTAMPTZ
 );
 
+CREATE TABLE IF NOT EXISTS federation_links (
+    hub_archive_uid TEXT PRIMARY KEY,
+    hub_origin TEXT NOT NULL UNIQUE,
+    enrollment_uid TEXT NOT NULL,
+    member_handle TEXT NOT NULL,
+    policy_json TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Open catalog of communication services. Seeded slugs are presentation and
 -- normalization metadata, NOT a database enum and not a compatibility
 -- ceiling: an unknown bridge type or a custom service is registered as a new

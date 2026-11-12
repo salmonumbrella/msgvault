@@ -117,7 +117,9 @@ func TestFederationHandshakeCredential(t *testing.T) {
 	requirements.NoError(json.Unmarshal(w.Body.Bytes(), &body))
 	hubUID, err := st.ArchiveUIDContext(t.Context())
 	requirements.NoError(err)
-	assertions.Equal(federationHandshakeResponse{ProtocolVersions: []int{1}, HubInstance: hubUID, EnrollmentState: "active"}, body)
+	digest, err := srv.cfg.Federation.Hub.PolicyDigest()
+	requirements.NoError(err)
+	assertions.Equal(federationHandshakeResponse{ProtocolVersions: []int{1}, HubInstance: hubUID, EnrollmentState: "active", Policy: srv.cfg.Federation.Hub.Policy(), PolicyDigest: digest, Member: enrollment.Member, EnrollmentUID: enrollment.EnrollmentUID}, body)
 	do := func(method, path string, headers http.Header) *httptest.ResponseRecorder {
 		r := httptest.NewRequestWithContext(t.Context(), method, path, nil)
 		r.Header = headers
@@ -454,4 +456,22 @@ func TestFederationHandshakeOpenAPISecurity(t *testing.T) {
 			assertions.Equal("X-Msgvault-Spoke-Instance", spoke.Name)
 		})
 	}
+}
+
+func TestFederationSelfRevoke(t *testing.T) {
+	srv, st := federationHubFixture(t)
+	uid := strings.Repeat("a", 64)
+	enrollment, token, err := st.CreateFederationEnrollmentContext(t.Context(), uid, "alice", "")
+	require.NoError(t, err)
+	do := func(method, path string) int {
+		r := httptest.NewRequestWithContext(t.Context(), method, path, nil)
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("X-Msgvault-Spoke-Instance", uid)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, r)
+		return w.Code
+	}
+	assert.Equal(t, http.StatusForbidden, do(http.MethodDelete, "/api/v1/federation/enrollments/other"))
+	assert.Equal(t, http.StatusNoContent, do(http.MethodDelete, "/api/v1/federation/enrollments/"+enrollment.EnrollmentUID))
+	assert.Equal(t, http.StatusUnauthorized, do(http.MethodGet, "/api/v1/federation/handshake"))
 }

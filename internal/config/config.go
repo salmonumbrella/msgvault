@@ -1004,6 +1004,7 @@ func NewDefaultConfig() *Config {
 		IMessage: IMessageConfig{MediaMaxParticipants: DefaultMediaMaxParticipants},
 	}
 	cfg.Federation.Role = "off"
+	cfg.Federation.Hub = FederationHubPolicy{Retention: "member-controlled", AllowedLevels: []string{"envelope", "content"}, AllowAttachments: true, MinGroupSize: 3, Processing: "none"}
 	cfg.Vector.ApplyDefaults()
 	cfg.resolveCredentialPaths()
 	cfg.Server.ApplyDefaults()
