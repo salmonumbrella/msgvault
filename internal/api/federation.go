@@ -138,7 +138,7 @@ func (s *Server) handleFederationHandshake(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "internal_error", "Policy unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, federationHandshakeResponse{ProtocolVersions: []int{1}, HubInstance: uid, EnrollmentState: "active", Policy: s.cfg.Federation.Hub.Policy(), PolicyDigest: digest, Member: auth.Enrollment.Member, EnrollmentUID: auth.Enrollment.EnrollmentUID})
+	writeJSON(w, http.StatusOK, federationHandshakeResponse{ProtocolVersions: []int{1}, HubInstance: uid, EnrollmentState: "active", Policy: s.cfg.Federation.Hub, PolicyDigest: digest, Member: auth.Enrollment.Member, EnrollmentUID: auth.Enrollment.EnrollmentUID})
 }
 
 func (s *Server) federationManagement(w http.ResponseWriter, r *http.Request) bool {

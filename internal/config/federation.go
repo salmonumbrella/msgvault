@@ -23,7 +23,6 @@ type FederationHubPolicy struct {
 	Processing       string   `toml:"processing" json:"processing"`
 }
 
-func (p FederationHubPolicy) Policy() FederationHubPolicy { return p }
 
 func (p FederationHubPolicy) Validate() error {
 	if p.Retention != "member-controlled" && p.Retention != "org-retained" {

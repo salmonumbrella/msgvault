@@ -56,7 +56,7 @@ func TestFederationRoleAndHubKeys(t *testing.T) {
 
 func TestFederationHubPolicy(t *testing.T) {
 	cfg := NewDefaultConfig()
-	p := cfg.Federation.Hub.Policy()
+	p := cfg.Federation.Hub
 	require.NoError(t, p.Validate())
 	digest, err := p.PolicyDigest()
 	require.NoError(t, err)
@@ -69,7 +69,7 @@ func TestFederationHubPolicy(t *testing.T) {
 		func(p *FederationHubPolicy) { p.AllowedLevels = []string{"invalid"} },
 		func(p *FederationHubPolicy) { p.MinGroupSize = 0 },
 	} {
-		bad := cfg.Federation.Hub.Policy()
+		bad := cfg.Federation.Hub
 		change(&bad)
 		assert.Error(t, bad.Validate())
 	}
@@ -93,7 +93,7 @@ func TestFederationPolicyDigestFields(t *testing.T) {
 		"processing":  func(p *FederationHubPolicy) { p.Processing = "fixture" },
 	} {
 		t.Run(name, func(t *testing.T) {
-			p := base.Policy()
+			p := base
 			change(&p)
 			other, err := p.PolicyDigest()
 			require.NoError(t, err)

@@ -119,7 +119,7 @@ func TestFederationHandshakeCredential(t *testing.T) {
 	requirements.NoError(err)
 	digest, err := srv.cfg.Federation.Hub.PolicyDigest()
 	requirements.NoError(err)
-	assertions.Equal(federationHandshakeResponse{ProtocolVersions: []int{1}, HubInstance: hubUID, EnrollmentState: "active", Policy: srv.cfg.Federation.Hub.Policy(), PolicyDigest: digest, Member: enrollment.Member, EnrollmentUID: enrollment.EnrollmentUID}, body)
+	assertions.Equal(federationHandshakeResponse{ProtocolVersions: []int{1}, HubInstance: hubUID, EnrollmentState: "active", Policy: srv.cfg.Federation.Hub, PolicyDigest: digest, Member: enrollment.Member, EnrollmentUID: enrollment.EnrollmentUID}, body)
 	do := func(method, path string, headers http.Header) *httptest.ResponseRecorder {
 		r := httptest.NewRequestWithContext(t.Context(), method, path, nil)
 		r.Header = headers
