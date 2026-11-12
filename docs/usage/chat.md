@@ -939,6 +939,22 @@ Enable `--allow-organization-writes` for confirmed create, update, delete, merge
 
 Organization history responses are limited to 1 MiB. Active profile reads and replacement receipts have a larger 36 MiB response limit; an even larger response returns a limit error.
 
+## Employment records
+
+On unreleased `main`, `get_employment` reads one record with its revision
+ETag. `list_person_employments` and `list_organization_employments` list
+history in pages of at most 200.
+
+With `--allow-employment-writes`, a client can create, replace, end, set
+primary, or delete a record after confirmation. Replacement supplies the full
+mutable record. Omitted text, dates, and other optional fields are cleared;
+omitted `is_current` is kept only if `end_date` is omitted, and omitted
+`is_primary` is kept only while the resulting record stays current. Dates
+may be a year, year and month, or full date. Changes to an existing record
+require the exact ETag from a fresh read. Setting a primary employment can
+demote another. If a mutation may have completed, list the person's employments
+before retrying.
+
 ## Write controls
 
 On unreleased `main`, owner sessions can read a structured person record with
@@ -964,6 +980,7 @@ Enable only the writes intended for the assistant's session:
 | Native email tag edits, Saved View management, attachment export, deletion staging, and drafts | Available by default | `--http-allow-writes` |
 | Person promotion, display names, and Notes | `--allow-profile-writes` | `--http-allow-writes --allow-profile-writes` |
 | Organization records | `--allow-organization-writes` | `--http-allow-writes --allow-organization-writes` |
+| Employment record writes | `--allow-employment-writes` | `--http-allow-writes --allow-employment-writes` |
 | Structured person profile patches | `--allow-curated-writes` | `--http-allow-writes --allow-curated-writes` |
 | Open-loop done, snooze, and reopen | `--allow-loop-writes` | `--http-allow-writes --allow-loop-writes` |
 | Source sync and Slack selection | `--allow-source-writes` | `--http-allow-writes --allow-source-writes` |
@@ -1054,6 +1071,7 @@ msgvault mcp --http 8080
 | `--http-allow-writes` | `false` | Expose write-class tools over HTTP. Identity review, scoring, person merges, CardDAV writes, profile writes, and other write tools still need their separate flags. |
 | `--allow-profile-writes` | `false` | Expose person promotion, display-name edits, and private Notes writes. HTTP also requires `--http-allow-writes`. |
 | `--allow-organization-writes` | `false` | On unreleased `main`, expose confirmed organization record writes. HTTP also requires `--http-allow-writes` and protocol `2026-07-28` or newer. |
+| `--allow-employment-writes` | `false` | On unreleased `main`, expose confirmed employment record writes. HTTP also requires `--http-allow-writes` and protocol `2026-07-28` or newer. |
 | `--allow-curated-writes` | `false` | On unreleased `main`, expose atomic structured person profile patches. Each call requires explicit client confirmation; the client is responsible for obtaining user approval. HTTP also requires `--http-allow-writes` and protocol `2026-07-28` or newer. |
 | `--allow-loop-writes` | `false` | On unreleased `main`, expose open-loop done, snooze, and reopen decisions. Each call requires approval. HTTP also requires `--http-allow-writes` and protocol `2026-07-28` or newer. |
 | `--allow-source-writes` | `false` | Expose source sync and Slack selection writes. Each call requires confirmation. HTTP also requires `--http-allow-writes` and protocol `2026-07-28` or newer. |

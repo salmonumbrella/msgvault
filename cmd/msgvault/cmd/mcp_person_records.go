@@ -53,19 +53,24 @@ func personRecordRefusal(code string) bool {
 	return false
 }
 func recordProjection(result *mcpserver.OperationResult, writes bool) *mcpserver.OperationResult {
+	return etagProjection(result, writes, func(etag string, profile generated.StructuredPersonProfile) mcpserver.StructuredPersonRecord {
+		return mcpserver.StructuredPersonRecord{ETag: etag, Profile: profile}
+	})
+}
+func etagProjection[T, R any](result *mcpserver.OperationResult, writes bool, wrap func(string, T) R) *mcpserver.OperationResult {
 	if result == nil || result.IsError {
 		return result
 	}
-	profile, ok := result.Output.(generated.StructuredPersonProfile)
+	value, ok := result.Output.(T)
 	if !ok || result.ETag == "" {
 		return operationFailure("invalid_operation_response", writes)
 	}
-	result.Output = mcpserver.StructuredPersonRecord{ETag: result.ETag, Profile: profile}
+	result.Output = wrap(result.ETag, value)
 	return result
 }
 func (b *daemonMCPOperations) executePersonRecord(ctx context.Context, name string, args map[string]any) (*mcpserver.OperationResult, bool, error) {
 	invalid := func() (*mcpserver.OperationResult, bool, error) {
-		return operationFailure("invalid_arguments", false), true, nil
+		return operationFailure(mcpInvalidArguments, false), true, nil
 	}
 	switch name {
 	case "get_person_record", "get_person_record_history":
@@ -110,17 +115,14 @@ func (b *daemonMCPOperations) personRecordDisclosure(ctx context.Context, name s
 	}
 	input, err := decodeMCPOperationArguments[personPatchArgs](args)
 	if err != nil || !validLoopID(input.PersonID) || input.ETag == "" || input.Patch == nil {
-		return "", true, &mcpserver.OperationRefusalError{Code: "invalid_arguments"}
+		return "", true, &mcpserver.OperationRefusalError{Code: mcpInvalidArguments}
 	}
 	current, _, err := b.executePersonRecord(ctx, "get_person_record", map[string]any{"person_id": input.PersonID})
 	if err != nil {
 		return "", true, err
 	}
-	if current == nil || current.IsError {
-		return "", true, &mcpserver.OperationRefusalError{Code: "operation_context_unavailable"}
-	}
-	if current.ETag != input.ETag {
-		return "", true, &mcpserver.OperationRefusalError{Code: "person_revision_conflict"}
+	if err := operationContext(current, input.ETag, "person_revision_conflict", nil); err != nil {
+		return "", true, err
 	}
 	type mediaAdd struct {
 		generated.PersonMediaInputRequest
@@ -144,7 +146,7 @@ func (b *daemonMCPOperations) personRecordDisclosure(ctx context.Context, name s
 			if item.Data != nil {
 				data, err := base64.StdEncoding.DecodeString(*item.Data)
 				if err != nil {
-					return "", true, &mcpserver.OperationRefusalError{Code: "invalid_arguments"}
+					return "", true, &mcpserver.OperationRefusalError{Code: mcpInvalidArguments}
 				}
 				sum := sha256.Sum256(data)
 				size, digest := len(data), hex.EncodeToString(sum[:])

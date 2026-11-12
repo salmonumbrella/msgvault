@@ -59,7 +59,7 @@ func mcpRouteDescriptors(doc *huma.OpenAPI) []apiprotocol.MCPRouteDescriptor {
 	return descriptors
 }
 
-// Advertise only routes consumed by the source, profile, record, search, and loop MCP
+// Advertise only routes consumed by the source, profile, record, search, loop, and employment MCP
 // tools, and only when their real routes are registered.
 func mcpOperationDescribed(operationID string) bool {
 	switch operationID {
@@ -70,6 +70,7 @@ func mcpOperationDescribed(operationID string) bool {
 		"getOrganization", "getOrganizationHistory", "listOrganizationAttributes",
 		"createOrganization", "patchOrganization", "deleteOrganization", "mergeOrganization", "putOrganizationProfile",
 		"setOrganizationAttribute", "clearOrganizationAttribute", "getOrganizationProfileMediaContent",
+		"createEmployment", "getEmployment", "patchEmployment", "deleteEmployment", "endEmployment", "setPrimaryEmployment", "listPersonEmployments", "listOrganizationEmployments",
 		"getPersonStructuredProfile", "patchPersonStructuredProfile", "getPersonProfileHistory", "getPersonProfileMediaContent":
 		return true
 	default:
