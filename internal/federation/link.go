@@ -215,9 +215,6 @@ func Leave(ctx context.Context, st *store.Store, tokensDir, rawURL string, local
 		}
 		path := tokenPath(tokensDir, l.HubArchiveUID)
 		token, readErr := os.ReadFile(path)
-		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-			return "", errors.New("cannot read token; use --local-only")
-		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("remove token; use --local-only: %w", err)
 		}
