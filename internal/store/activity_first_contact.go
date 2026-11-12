@@ -164,16 +164,7 @@ func (s *Store) ReconcileFirstContactsContext(ctx context.Context, limit int, re
 	if err != nil {
 		return 0, err
 	}
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return 0, err
-		}
-		ids = append(ids, id)
-	}
-	err = rows.Err()
+	ids, err := scanInt64Rows(rows)
 	_ = rows.Close()
 	if err != nil {
 		return 0, err
@@ -225,8 +216,7 @@ func (s *Store) ReconcileFirstContactsContext(ctx context.Context, limit int, re
 			}
 			if found && kind == FirstContactOwnerOutreach && len(owners.persons) == 1 {
 				for owner := range owners.persons {
-					ownerID := owner
-					target = &ownerID
+					target = &owner
 				}
 			}
 			if target != nil && *target == id {
@@ -238,9 +228,7 @@ func (s *Store) ReconcileFirstContactsContext(ctx context.Context, limit int, re
 				return err
 			}
 			_, err = tx.ExecContext(ctx, `UPDATE person_first_contacts SET dirty_at = NULL, computed_at = CURRENT_TIMESTAMP, written_value_id = ? WHERE person_id = ?`, written, id)
-			if err == nil {
-				cleared = true
-			}
+			cleared = err == nil
 			return err
 		})
 		if err != nil {
