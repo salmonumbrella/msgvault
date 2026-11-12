@@ -70,7 +70,7 @@ func etagProjection[T, R any](result *mcpserver.OperationResult, writes bool, wr
 }
 func (b *daemonMCPOperations) executePersonRecord(ctx context.Context, name string, args map[string]any) (*mcpserver.OperationResult, bool, error) {
 	invalid := func() (*mcpserver.OperationResult, bool, error) {
-		return operationFailure("invalid_arguments", false), true, nil
+		return operationFailure(mcpInvalidArguments, false), true, nil
 	}
 	switch name {
 	case "get_person_record", "get_person_record_history":
@@ -115,7 +115,7 @@ func (b *daemonMCPOperations) personRecordDisclosure(ctx context.Context, name s
 	}
 	input, err := decodeMCPOperationArguments[personPatchArgs](args)
 	if err != nil || !validLoopID(input.PersonID) || input.ETag == "" || input.Patch == nil {
-		return "", true, &mcpserver.OperationRefusalError{Code: "invalid_arguments"}
+		return "", true, &mcpserver.OperationRefusalError{Code: mcpInvalidArguments}
 	}
 	current, _, err := b.executePersonRecord(ctx, "get_person_record", map[string]any{"person_id": input.PersonID})
 	if err != nil {
@@ -146,7 +146,7 @@ func (b *daemonMCPOperations) personRecordDisclosure(ctx context.Context, name s
 			if item.Data != nil {
 				data, err := base64.StdEncoding.DecodeString(*item.Data)
 				if err != nil {
-					return "", true, &mcpserver.OperationRefusalError{Code: "invalid_arguments"}
+					return "", true, &mcpserver.OperationRefusalError{Code: mcpInvalidArguments}
 				}
 				sum := sha256.Sum256(data)
 				size, digest := len(data), hex.EncodeToString(sum[:])
