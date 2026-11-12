@@ -5798,9 +5798,10 @@ file. `federation status [--json]` shows each link and its policy, with state
 `enrolled`, `identity_changed`, `rejected`, `unreachable`, or `token_missing`.
 A different hub at the same origin that answers 401 shows `rejected`.
 `federation leave <hub-url>` revokes the enrollment and removes local state.
-If the hub is unreachable, `federation leave <hub-url> --local-only` removes
-local state and prints the enrollment UID for the hub operator. Nothing is shared
-by joining.
+If the hub is unreachable, no longer accepts the enrollment (for example, the
+operator revoked it first), or answers with a different identity,
+`federation leave <hub-url> --local-only` removes local state and prints the
+enrollment UID for the hub operator. Nothing is shared by joining.
 
 Use `msgvault federation enrollments list` to inspect enrollments and
 `msgvault federation revoke <enrollment-uid>` to revoke one. Record the enrollment
