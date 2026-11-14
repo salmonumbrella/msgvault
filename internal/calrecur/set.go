@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"cloud.google.com/go/civil"
 	"github.com/teambition/rrule-go"
+	"go.kenn.io/kit/civiltime"
 )
 
 var (
@@ -89,93 +91,12 @@ func (s Set) identityStart(id Identity) (time.Time, error) {
 // targets keep their requested civil dates and use the returned next boundary
 // for their instants, as do exclusive end dates.
 func CivilDateBoundary(date string, loc *time.Location) (time.Time, bool, error) {
-	if loc == nil {
-		loc = time.UTC
-	}
-	civil, err := time.Parse(dateLayout, date)
+	day, err := civil.ParseDate(date)
 	if err != nil {
 		return time.Time{}, false, fmt.Errorf("parse civil date boundary: %w", err)
 	}
-	year, month, day := civil.Date()
-	compare := func(t time.Time) int {
-		gotYear, gotMonth, gotDay := t.In(loc).Date()
-		if gotYear != year {
-			if gotYear < year {
-				return -1
-			}
-			return 1
-		}
-		if gotMonth != month {
-			if gotMonth < month {
-				return -1
-			}
-			return 1
-		}
-		if gotDay < day {
-			return -1
-		}
-		if gotDay > day {
-			return 1
-		}
-		return 0
-	}
-	searchStart, searchEnd := civil.Add(-72*time.Hour).Unix(), civil.Add(72*time.Hour).Unix()
-	if compare(time.Unix(searchStart, 0)) >= 0 || compare(time.Unix(searchEnd, 0)) < 0 {
-		return time.Time{}, false, errors.New("cannot resolve civil date in time zone")
-	}
-
-	// A local date can move backward when an offset change crosses midnight.
-	// Search each constant-offset interval separately, where local dates are
-	// monotone, then choose the earliest qualifying instant across intervals.
-	searchEndExclusive := searchEnd + 1
-	var boundary time.Time
-	foundBoundary, exists := false, false
-	for cursor := searchStart; cursor < searchEndExclusive; {
-		end := zoneEnd(time.Unix(cursor, 0).In(loc))
-		intervalEnd := searchEndExclusive
-		if !end.IsZero() && end.Unix() < intervalEnd {
-			intervalEnd = end.Unix()
-		}
-		if intervalEnd <= cursor {
-			return time.Time{}, false, errors.New("cannot resolve civil date in time zone")
-		}
-
-		intervalLast := intervalEnd - 1
-		intervalStartDate := compare(time.Unix(cursor, 0))
-		intervalEndDate := compare(time.Unix(intervalLast, 0))
-		if intervalStartDate == 0 || intervalEndDate == 0 {
-			exists = true
-		}
-
-		candidate, hasCandidate := int64(0), false
-		switch {
-		case intervalStartDate >= 0:
-			candidate, hasCandidate = cursor, true
-		case intervalEndDate >= 0:
-			low, high := cursor, intervalLast
-			for low+1 < high {
-				mid := low + (high-low)/2
-				if compare(time.Unix(mid, 0)) < 0 {
-					low = mid
-				} else {
-					high = mid
-				}
-			}
-			candidate, hasCandidate = high, true
-			if compare(time.Unix(candidate, 0)) == 0 {
-				exists = true
-			}
-		}
-		if hasCandidate && (!foundBoundary || candidate < boundary.Unix()) {
-			boundary = time.Unix(candidate, 0)
-			foundBoundary = true
-		}
-		cursor = intervalEnd
-	}
-	if !foundBoundary {
-		return time.Time{}, false, errors.New("cannot resolve civil date in time zone")
-	}
-	return boundary.In(loc), exists, nil
+	start, _, exists := civiltime.DayBounds(day, loc)
+	return start, exists, nil
 }
 
 func addCivilDays(date string, days int) (string, error) {

@@ -419,3 +419,19 @@ func TestRelationshipCalendarKeepsSourceNativeOwnerWithoutOwnerParticipants(t *t
 		assert.Equal(int64(1), day.Total)
 	}
 }
+
+func TestRelationshipCalendarDoesNotRepeatDatesAfterSkippedMidnight(t *testing.T) {
+	t.Parallel()
+	engine, canonicalID, _, _ := buildTimelineFixture(t)
+	location, err := time.LoadLocation("America/Santiago")
+	require.NoError(t, err)
+	days, err := engine.relationshipCalendarDays(t.Context(), RelationshipCalendarRequest{
+		CanonicalID: canonicalID, Year: 2026, Timezone: location.String(),
+	}, location, time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.Len(t, days, 251)
+	for index, day := range days {
+		want := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, index).Format(time.DateOnly)
+		assert.Equal(t, want, day.Date)
+	}
+}
