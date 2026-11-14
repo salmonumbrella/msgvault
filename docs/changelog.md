@@ -22,8 +22,7 @@ All notable changes to msgvault, grouped by release.
 - Incomplete open-loop lists continue checking history in the background.
 
 - Saved people show their first archived appearance, including copied recipients, and the introducing sender when the evidence identifies one. See [first archived appearance](usage/people.md#see-a-persons-first-archived-appearance).
-- Open loops can show cited promises owed by or to you, with due dates and owner decisions. Enable the commitment lane and grant separate consent to analyze both sides of direct conversations.
-
+- Open loops can show cited promises owed by or to you, with due dates, evidence freshness, and owner decisions. The list shows the discovery window. Enable the commitment lane and grant separate consent to analyze both sides of direct conversations.
 
 - Account matching recovers after identity changes. Explore refreshes pending counts and lets you retry matching for each source.
 - MCP operation tools report `operation_receipt_unavailable` when a successful write's receipt is too large or unusable. This replaces `operation_response_limit_exceeded`, `operation_response_failed`, and `invalid_operation_response` for those write receipts. Read current state before retrying.
