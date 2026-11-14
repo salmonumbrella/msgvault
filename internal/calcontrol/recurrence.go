@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/teambition/rrule-go"
+	"go.kenn.io/msgvault/internal/calrecur"
 	"go.kenn.io/msgvault/internal/gcal"
 )
 
@@ -446,7 +447,7 @@ func overlapInstant(bound gcal.EventDateTime, calendarTimeZone string) (time.Tim
 	if err != nil || calendarTimeZone == "" {
 		return time.Time{}, invalid("all-day overlap checks require the calendar time zone")
 	}
-	instant, err := time.ParseInLocation("2006-01-02", bound.Date, loc)
+	instant, _, err := calrecur.CivilDateBoundary(bound.Date, loc)
 	if err != nil {
 		return time.Time{}, invalid("cannot determine all-day overlap bounds")
 	}

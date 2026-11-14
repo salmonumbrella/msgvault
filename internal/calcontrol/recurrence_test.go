@@ -735,3 +735,17 @@ func TestFutureSplitChecksChangedRecurrenceTimeZone(t *testing.T) {
 		})
 	}
 }
+
+func TestAllDayOverlapUsesFirstExistingInstant(t *testing.T) {
+	for _, tt := range []struct{ date, zone, want string }{
+		{"2026-09-06", "America/Santiago", "2026-09-06T04:00:00Z"},
+		{"2026-03-08", "America/Havana", "2026-03-08T05:00:00Z"},
+		{"2011-12-30", "Pacific/Apia", "2011-12-30T10:00:00Z"},
+	} {
+		t.Run(tt.date+"/"+tt.zone, func(t *testing.T) {
+			got, err := overlapInstant(gcal.EventDateTime{Date: tt.date}, tt.zone)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got.UTC().Format(time.RFC3339))
+		})
+	}
+}

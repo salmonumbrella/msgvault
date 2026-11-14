@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"cloud.google.com/go/civil"
+	"go.kenn.io/kit/civiltime"
 	"go.kenn.io/msgvault/internal/identityindex"
 )
 
@@ -230,8 +232,10 @@ func (e *DuckDBEngine) relationshipCalendarDays(
 	location *time.Location,
 	effectiveAt time.Time,
 ) ([]RelationshipCalendarDay, error) {
-	startLocal := time.Date(request.Year, time.January, 1, 0, 0, 0, 0, location)
-	endLocal := startLocal.AddDate(1, 0, 0)
+	firstDate := civil.Date{Year: request.Year, Month: time.January, Day: 1}
+	lastDate := civil.Date{Year: request.Year + 1, Month: time.January, Day: 1}
+	startLocal, _, _ := civiltime.DayBounds(firstDate, location)
+	endLocal, _, _ := civiltime.DayBounds(lastDate, location)
 	startUTC := startLocal.UTC()
 	endUTC := endLocal.UTC()
 	years := make([]string, 0, 2)
@@ -302,19 +306,14 @@ func (e *DuckDBEngine) relationshipCalendarDays(
 		return nil, fmt.Errorf("iterate relationship calendar days: %w", err)
 	}
 
-	localEffectiveAt := effectiveAt.In(location)
-	elapsedEnd := endLocal
-	switch {
-	case localEffectiveAt.Before(startLocal):
-		elapsedEnd = startLocal
-	case localEffectiveAt.Before(endLocal):
-		elapsedEnd = time.Date(localEffectiveAt.Year(), localEffectiveAt.Month(), localEffectiveAt.Day(),
-			0, 0, 0, 0, location).AddDate(0, 0, 1)
-	}
-	days := make([]RelationshipCalendarDay, 0, int(elapsedEnd.Sub(startLocal).Hours()/24)+1)
+	days := make([]RelationshipCalendarDay, 0, lastDate.DaysSince(firstDate))
 	signals := make([]identityindex.DailyTemperatureSignals, 0, cap(days))
-	for date := startLocal; date.Before(elapsedEnd); date = date.AddDate(0, 0, 1) {
-		key := date.Format(time.DateOnly)
+	for date := firstDate; date.Before(lastDate); date = date.AddDays(1) {
+		start, _, _ := civiltime.DayBounds(date, location)
+		if start.After(effectiveAt) {
+			break
+		}
+		key := date.String()
 		day := active[key]
 		days = append(days, RelationshipCalendarDay{
 			Date: key, Sent: day.Sent, Received: day.Received,
