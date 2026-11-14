@@ -1887,6 +1887,8 @@ type SetCommitmentDecisionErrorResponseJSON403 = ErrorResponse
 
 type SetCommitmentDecisionErrorResponseJSON404 = ErrorResponse
 
+type SetCommitmentDecisionErrorResponseJSON409 = ErrorResponse
+
 type SetCommitmentDecisionErrorResponseJSON413 = ErrorResponse
 
 type SetCommitmentDecisionErrorResponseJSON415 = ErrorResponse
@@ -5893,6 +5895,7 @@ type SetCommitmentDecisionResp struct {
 	JSON401      *SetCommitmentDecisionErrorResponseJSON
 	JSON403      *SetCommitmentDecisionErrorResponseJSON403
 	JSON404      *SetCommitmentDecisionErrorResponseJSON404
+	JSON409      *SetCommitmentDecisionErrorResponseJSON409
 	JSON413      *SetCommitmentDecisionErrorResponseJSON413
 	JSON415      *SetCommitmentDecisionErrorResponseJSON415
 	JSON500      *SetCommitmentDecisionErrorResponseJSON500
