@@ -17,7 +17,7 @@ All notable changes to msgvault, grouped by release.
 - Incomplete open-loop lists continue checking history in the background.
 
 - Saved people show their first archived appearance, including copied recipients, and the introducing sender when the evidence identifies one. See [first archived appearance](usage/people.md#see-a-persons-first-archived-appearance).
-- Open loops can show cited promises owed by or to you, with due dates, proposed fulfilment, and owner decisions. Enable the commitment lane and grant separate consent to analyze both sides of direct conversations.
+- Open loops can show cited promises owed by or to you, with due dates and owner decisions. Enable the commitment lane and grant separate consent to analyze both sides of direct conversations.
 
 
 - Account matching recovers after identity changes. Explore refreshes pending counts and lets you retry matching for each source.
