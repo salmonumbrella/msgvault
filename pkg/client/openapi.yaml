@@ -7288,9 +7288,6 @@ components:
       type: object
     LoopCommitment:
       properties:
-        claim_id:
-          format: int64
-          type: integer
         direction:
           enum:
             - owed_by
@@ -7331,7 +7328,6 @@ components:
       required:
         - id
         - person_id
-        - claim_id
         - direction
         - summary
         - promise
