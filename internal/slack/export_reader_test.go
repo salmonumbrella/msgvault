@@ -45,6 +45,78 @@ func TestSlackdumpExportReadsUsers(t *testing.T) {
 	}, users)
 }
 
+// These synthetic catalogs exercise filename selection, not complete Enterprise
+// export compatibility. Both names use the existing Slack User parser.
+func TestSlackdumpExportUserCatalogSelection(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		users          string
+		orgUsers       string
+		wantID         string
+		wantError      string
+		usersDirectory bool
+		nestedUsers    bool
+	}{
+		{name: "organization catalog", orgUsers: `[{"id":"UORG","name":"org-user"}]`, wantID: "UORG"},
+		{name: "workspace catalog", users: `[{"id":"UWORKSPACE"}]`, wantID: "UWORKSPACE"},
+		{name: "workspace takes precedence", users: `[{"id":"UWORKSPACE"}]`, orgUsers: `[{"id":"UORG"}]`, wantID: "UWORKSPACE"},
+		{name: "malformed workspace does not fall back", users: `[`, orgUsers: `[{"id":"UORG"}]`, wantError: "users.json"},
+		{name: "malformed organization catalog", orgUsers: `[`, wantError: "org_users.json"},
+		{name: "wrong organization shape", orgUsers: `{}`, wantError: "org_users.json"},
+		{name: "missing catalogs", wantError: "users.json"},
+		{name: "empty workspace does not fall back", users: `[]`, orgUsers: `[{"id":"UORG"}]`},
+		{name: "workspace directory does not fall back", usersDirectory: true, orgUsers: `[{"id":"UORG"}]`, wantError: "users.json"},
+		{name: "root organization precedes nested workspace", orgUsers: `[{"id":"UORG"}]`, nestedUsers: true, wantID: "UORG"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, layout := range []string{"directory", "root ZIP", "wrapped ZIP"} {
+				t.Run(layout, func(t *testing.T) {
+					root := t.TempDir()
+					catalogDir := root
+					if layout == "wrapped ZIP" {
+						catalogDir = filepath.Join(root, "export")
+						require.NoError(t, os.Mkdir(catalogDir, 0o700))
+					}
+					for name, content := range map[string]string{"users.json": tt.users, "org_users.json": tt.orgUsers} {
+						if content != "" {
+							require.NoError(t, os.WriteFile(filepath.Join(catalogDir, name), []byte(content), 0o600))
+						}
+					}
+					if tt.usersDirectory {
+						require.NoError(t, os.Mkdir(filepath.Join(catalogDir, "users.json"), 0o700))
+						require.NoError(t, os.WriteFile(filepath.Join(catalogDir, "users.json", "entry"), []byte("not a catalog"), 0o600))
+					}
+					if tt.nestedUsers {
+						require.NoError(t, os.Mkdir(filepath.Join(catalogDir, "nested"), 0o700))
+						require.NoError(t, os.WriteFile(filepath.Join(catalogDir, "nested", "users.json"), []byte(`[{"id":"UNESTED"}]`), 0o600))
+					}
+					input := root
+					if layout != "directory" {
+						input = zipSlackdumpFixtureReverseOrder(t, root)
+					}
+					export, err := openSlackdumpExport(input)
+					require.NoError(t, err)
+					t.Cleanup(func() { assert.NoError(t, export.Close()) })
+					users, err := export.users()
+					if tt.wantError != "" {
+						require.ErrorContains(t, err, tt.wantError)
+						return
+					}
+					require.NoError(t, err)
+					if tt.wantID == "" {
+						assert.Empty(t, users)
+						return
+					}
+					require.Len(t, users, 1)
+					assert.Equal(t, tt.wantID, users[0].ID)
+				})
+			}
+		})
+	}
+}
+
 func TestSlackdumpExportMergesConversationCatalogAndNormalizesDMs(t *testing.T) {
 	t.Parallel()
 	export, err := openSlackdumpExport(slackdumpFixture)

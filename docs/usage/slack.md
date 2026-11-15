@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-08"
+last_edited: "2026-11-15"
 title: Slack
 description: Archive Slack workspaces through the Web API or a Slackdump export.
 ---
@@ -30,6 +30,15 @@ export. The importer preserves channels, private channels, group DMs, DMs,
 threads, reactions, mentions, raw Slack JSON, and exported files. Standard
 Slackdump attachment directories and Mattermost-style `__uploads` directories
 are both supported.
+
+The user catalog may be named `org_users.json`, the filename documented for
+[Slack Enterprise organization exports](https://slack.com/help/articles/220556107-How-to-read-Slack-data-exports).
+The importer uses `users.json` when present and only falls back to
+`org_users.json` when it is absent, in directories and root or wrapped ZIPs.
+A malformed catalog stops the import rather than switching catalogs. Both
+names use the same user-record parser, and the selected user must still have
+a `team_id`. This filename compatibility does not establish support for every
+official Slack export layout or infer an organization-wide account identity.
 
 Each imported account is stored as a `slackdump` source identified by
 `<team-id>:<user-id>`. Messages still use `message_type = slack`, so live Slack

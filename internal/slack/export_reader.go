@@ -97,13 +97,25 @@ func slackdumpValidPathSegment(value string) bool {
 	return value != "" && value != "." && fs.ValidPath(value) && !strings.Contains(value, "/")
 }
 
+// slackdumpUserCatalog prefers the workspace catalog. Only a missing file
+// permits the Enterprise catalog name; other errors must not select another
+// identity catalog. Both names use the existing User JSON representation.
+func slackdumpUserCatalog(fsys fs.FS) (string, error) {
+	for _, filename := range []string{"users.json", "org_users.json"} {
+		if _, err := fs.Stat(fsys, filename); err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return filename, err
+		}
+	}
+	return "users.json", fs.ErrNotExist
+}
+
 // slackdumpArchiveRoot accepts both Slackdump ZIPs whose indexes are at the
 // archive root and ZIPs wrapped in a single top-level directory.
 func slackdumpArchiveRoot(zr *zip.ReadCloser) (fs.FS, error) {
-	if _, err := fs.Stat(zr, "users.json"); err == nil {
+	if catalog, err := slackdumpUserCatalog(zr); err == nil {
 		return zr, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("stat Slackdump archive users.json: %w", err)
+		return nil, fmt.Errorf("stat Slackdump archive %s: %w", catalog, err)
 	}
 
 	entries, err := fs.ReadDir(zr, ".")
@@ -118,8 +130,10 @@ func slackdumpArchiveRoot(zr *zip.ReadCloser) (fs.FS, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open Slackdump archive directory %s: %w", entry.Name(), err)
 		}
-		if _, err := fs.Stat(candidate, "users.json"); err == nil {
+		if catalog, err := slackdumpUserCatalog(candidate); err == nil {
 			return candidate, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("stat Slackdump archive %s/%s: %w", entry.Name(), catalog, err)
 		}
 	}
 	return zr, nil
@@ -133,8 +147,12 @@ func (e *slackdumpExport) Close() error {
 }
 
 func (e *slackdumpExport) users() ([]User, error) {
+	catalog, err := slackdumpUserCatalog(e.fsys)
+	if err != nil {
+		return nil, e.pathError(catalog, err)
+	}
 	var users []User
-	_, err := e.readJSON("users.json", &users, true)
+	_, err = e.readJSON(catalog, &users, true)
 	return users, err
 }
 
