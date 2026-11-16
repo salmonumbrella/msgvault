@@ -24484,12 +24484,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
           description: Error
-        "409":
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-          description: Error
         "413":
           content:
             application/json:
