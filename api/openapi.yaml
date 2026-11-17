@@ -7418,6 +7418,8 @@ components:
           type: string
         id:
           type: string
+        overdue:
+          type: boolean
         person_id:
           format: int64
           type: integer
@@ -7446,6 +7448,7 @@ components:
         - promised_at
         - freshness
         - state
+        - overdue
       type: object
     LoopCounterparty:
       additionalProperties: true
