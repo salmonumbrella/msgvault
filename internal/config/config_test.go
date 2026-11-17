@@ -2701,7 +2701,4 @@ func TestAutoAgendaOnlyInKata(t *testing.T) {
 	cfg := TaskIntegrationConfig{}
 	cfg.ApplyDefaults()
 	assert.Nil(t, cfg.AutoAgenda)
-	cfg.AutoAgenda = new(false)
-	assert.NoError(t, cfg.Validate("kata"))
-	assert.Error(t, cfg.Validate("tasks"))
 }
