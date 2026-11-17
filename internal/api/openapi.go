@@ -430,8 +430,9 @@ import (
 // 5.14.0 adds each decision's submitted claim value to its history row.
 // 5.15.0 applies media search mode to recordings and reports their actual mode and degradations.
 // 5.16.0 adds person fact kinds and evidence freshness.
-// 5.17.0 adds cited commitments, their decisions, and agenda filing.
-const APISchemaVersion = "5.17.0"
+// 5.17.0 adds cited commitments and their decisions.
+// 5.18.0 adds agenda filing for open obligations.
+const APISchemaVersion = "5.18.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.
