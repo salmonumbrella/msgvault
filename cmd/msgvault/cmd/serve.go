@@ -467,6 +467,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	agendaOrigin := "http://" + net.JoinHostPort(probeHostForDial(bindAddr), strconv.Itoa(boundPort))
+	loopAgenda := api.NewLoopAgenda(cfg.Integrations.Kata, s, agendaOrigin)
+	if err := registerLoopAgendaJob(sched, cfg.Integrations.Kata, loopAgenda); err != nil {
+		return fmt.Errorf("schedule loop agenda: %w", err)
+	}
+
 	// Add all scheduled accounts
 	count, errs := sched.AddAccountsFromConfig(cfg)
 	if len(errs) > 0 {
@@ -1072,6 +1078,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	var apiServer *api.Server
 	apiOpts := api.ServerOptions{
 		Config:         cfg,
+		LoopAgenda:     loopAgenda,
 		Store:          storeAdapter,
 		SavedViewStore: s,
 		Engine:         engine,

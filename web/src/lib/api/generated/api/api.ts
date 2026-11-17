@@ -131,6 +131,8 @@ import type {
   ExplainPersonTierPathParameters,
   FactSummary,
   FastSearchParams,
+  FileCommitmentAgendaPathParameters,
+  FileLoopAgendaPathParameters,
   FileMetadataResponse,
   FilterMessagesParams,
   FilteredMessagesResponse,
@@ -281,6 +283,7 @@ import type {
   ListTextConversationMessagesPathParameters,
   ListTextConversationsParams,
   LocalEmbeddingsStatus,
+  LoopAgendaResponse,
   LoopDecisionResponse,
   LoopListResponse,
   MCPCapabilities,
@@ -2250,6 +2253,21 @@ export const listLoops = (
   );
 };
 /**
+ * @summary File an open obligation in Kata
+ */
+export const fileCommitmentAgenda = (
+  { commitmentId }: FileCommitmentAgendaPathParameters,
+  options?: SecondParameter<typeof orvalFetch<LoopAgendaResponse>>,
+) => {
+  return orvalFetch<LoopAgendaResponse>(
+    {
+      url: `/api/v1/loops/commitments/${encodeURIComponent(String(commitmentId))}/agenda`,
+      method: "POST",
+    },
+    options,
+  );
+};
+/**
  * @summary Set an owner decision on a cited promise
  */
 export const setCommitmentDecision = (
@@ -2263,6 +2281,21 @@ export const setCommitmentDecision = (
       method: "POST",
       headers: { "Content-Type": "application/json" },
       data: commitmentDecisionRequest,
+    },
+    options,
+  );
+};
+/**
+ * @summary File an open obligation in Kata
+ */
+export const fileLoopAgenda = (
+  { messageId }: FileLoopAgendaPathParameters,
+  options?: SecondParameter<typeof orvalFetch<LoopAgendaResponse>>,
+) => {
+  return orvalFetch<LoopAgendaResponse>(
+    {
+      url: `/api/v1/loops/${encodeURIComponent(String(messageId))}/agenda`,
+      method: "POST",
     },
     options,
   );
