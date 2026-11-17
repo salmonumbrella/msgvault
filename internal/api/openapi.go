@@ -426,7 +426,7 @@ import (
 // 5.10.0 adds owner meeting link decisions.
 // 5.11.0 adds meeting link suggestions.
 // 5.12.0 adds person fact kinds and evidence freshness.
-// 5.13.0 adds cited commitments and their decisions.
+// 5.13.0 adds cited commitments, their decisions, and agenda filing.
 const APISchemaVersion = "5.13.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
