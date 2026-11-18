@@ -707,7 +707,7 @@ type ClientInterface interface {
 	GetMessage(ctx context.Context, options *GetMessageRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetMessageResponse, error)
 	GetMessageWithResponse(ctx context.Context, options *GetMessageRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetMessageResp, error)
 
-	// ArchiveMessage Set a Gmail message or Beeper chat archive state
+	// ArchiveMessage Set archive state for a Gmail message, Beeper chat, or Inline dialog
 	ArchiveMessage(ctx context.Context, options *ArchiveMessageRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ArchiveMessageResponse, error)
 	ArchiveMessageWithResponse(ctx context.Context, options *ArchiveMessageRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ArchiveMessageResp, error)
 
@@ -11707,7 +11707,7 @@ func (c *Client) GetMessage(ctx context.Context, options *GetMessageRequestOptio
 	return responseParser(ctx, resp)
 }
 
-// ArchiveMessage Set a Gmail message or Beeper chat archive state
+// ArchiveMessage Set archive state for a Gmail message, Beeper chat, or Inline dialog
 func (c *Client) ArchiveMessage(ctx context.Context, options *ArchiveMessageRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ArchiveMessageResponse, error) {
 	var err error
 	reqParams := runtime.RequestOptionsParameters{

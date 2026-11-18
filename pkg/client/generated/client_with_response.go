@@ -17568,7 +17568,7 @@ func (c *Client) GetMessageWithResponse(ctx context.Context, options *GetMessage
 	}
 }
 
-// ArchiveMessage Set a Gmail message or Beeper chat archive state
+// ArchiveMessage Set archive state for a Gmail message, Beeper chat, or Inline dialog
 func (c *Client) ArchiveMessageWithResponse(ctx context.Context, options *ArchiveMessageRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ArchiveMessageResp, error) {
 	var err error
 	reqParams := runtime.RequestOptionsParameters{

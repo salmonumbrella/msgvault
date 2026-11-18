@@ -470,11 +470,11 @@ returns `409 person_uid_ambiguous`.
 ### Message archiving
 
 `POST /api/v1/messages/{id}/archive` sets a Gmail message's archive state or the
-state of the entire Beeper chat containing a message.
+state of the entire Beeper or Inline chat containing a message.
 Requires API schema 5.17.0 and owner authorization or a `message.archive` grant
-for the message's source. Beeper requires `whole_chat: true`.
+for the message's source. Beeper and Inline require `whole_chat: true`. Inline requires a configured CLI transport and a personal dialog; OAuth connections remain read-only.
 Other providers return 501 `archive_unsupported`.
-Beeper chat archive state changes only in Beeper; the local archive does not change.
+Chat archive state changes in the selected provider; the local archive does not change.
 
 ```json
 {"archived":true,"dry_run":false}
@@ -493,11 +493,11 @@ state are preserved. Source ownership and the daemon work gate follow the
 [native tag write rules](#native-email-tags). For 409 `sync_active`, retry after
 the active sync finishes. The saved snapshot can be stale until the next sync.
 
-For Beeper, send `{"archived":true,"whole_chat":true}` (or `archived:false`
+For Beeper or Inline, send `{"archived":true,"whole_chat":true}` (or `archived:false`
 to restore the chat). This affects the whole chat, including messages newer than
 the local archive. The result also includes `chat_id`. Sender-restricted grants
-cannot archive Beeper chats and receive `404 message_not_found`; use an owner
-or a source-wide `message.archive` grant. Beeper state is read live, checked
+cannot archive these chats and receive `404 message_not_found`; use an owner
+or a source-wide `message.archive` grant. Chat state is read live, checked
 against the source account, and verified after writing. Missing archive state
 returns `archive_unsupported`; an uncertain write or failed readback returns
 `remote_unknown`.

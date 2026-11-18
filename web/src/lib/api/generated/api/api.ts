@@ -2400,7 +2400,7 @@ export const getMessage = (
   );
 };
 /**
- * @summary Set a Gmail message or Beeper chat archive state
+ * @summary Set archive state for a Gmail message, Beeper chat, or Inline dialog
  */
 export const archiveMessage = (
   { id }: ArchiveMessagePathParameters,

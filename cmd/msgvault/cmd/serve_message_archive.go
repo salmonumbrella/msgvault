@@ -23,6 +23,9 @@ func (a *storeAPIAdapter) ArchiveMessage(ctx context.Context, id int64, change e
 			return nil, err
 		}
 	}
+	if target.Provider == sourceTypeInline {
+		return a.archiveInlineChat(ctx, id, change, grant, acquireWrite)
+	}
 	if target.Provider == sourceTypeBeeper {
 		return a.archiveBeeperChat(ctx, id, change, grant, acquireWrite)
 	}
@@ -50,7 +53,7 @@ func (a *storeAPIAdapter) ArchiveMessage(ctx context.Context, id int64, change e
 			return emailtags.Failure("archive_unsupported", "Archiving is supported only for Gmail messages", nil, nil)
 		}
 		if change.WholeChat {
-			return emailtags.Failure("invalid_request", "whole_chat applies only to Beeper", nil, nil)
+			return emailtags.Failure("invalid_request", "whole_chat applies only to supported chats", nil, nil)
 		}
 		return nil
 	}

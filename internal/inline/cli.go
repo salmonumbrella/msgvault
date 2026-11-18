@@ -500,3 +500,93 @@ func cliDecodeMedia(variants map[string]jsontext.Value, chatID, messageID int64)
 	}
 	return nil, nil
 }
+
+// DialogState identifies a personal dialog and its native mutation peer.
+type DialogState struct {
+	Conversation Conversation
+	Archived     bool
+}
+
+// Dialog reads the exact chat and requires its personal dialog to match it.
+func (c *CLIClient) Dialog(ctx context.Context, chatID int64) (DialogState, error) {
+	if !cliValidID(chatID) {
+		return DialogState{}, errors.New("invalid Inline chat ID")
+	}
+	raw, err := c.run(ctx, "chats", "get", "--chat-id", strconv.FormatInt(chatID, 10), "--json", "--compact")
+	if err != nil {
+		return DialogState{}, err
+	}
+	var result struct {
+		Chat   jsontext.Value `json:"chat"`
+		Dialog *struct {
+			Peer struct {
+				Type map[string]jsontext.Value `json:"type"`
+			} `json:"peer"`
+			ChatID   *int64 `json:"chat_id"`
+			Archived *bool  `json:"archived"`
+		} `json:"dialog"`
+	}
+	if jsonv2.Unmarshal(raw, &result) != nil || result.Dialog == nil {
+		return DialogState{}, errors.New("Inline chat has no readable personal dialog")
+	}
+	conv, err := cliDecodeConversation(result.Chat, chatID, c.accountUserID)
+	if err != nil {
+		return DialogState{}, err
+	}
+	if result.Dialog.ChatID != nil && *result.Dialog.ChatID != chatID {
+		return DialogState{}, errors.New("Inline dialog chat identity differs")
+	}
+	peer := result.Dialog.Peer.Type
+	if len(peer) != 1 {
+		return DialogState{}, errors.New("unsupported Inline dialog peer")
+	}
+	if conv.Type == "direct_chat" && conv.ParentChatID == 0 {
+		var v struct {
+			ID *int64 `json:"user_id"`
+		}
+		if jsonv2.Unmarshal(peer["User"], &v) != nil || v.ID == nil || *v.ID != conv.PeerUserID {
+			return DialogState{}, errors.New("Inline dialog user peer differs")
+		}
+	} else {
+		var v struct {
+			ID *int64 `json:"chat_id"`
+		}
+		if jsonv2.Unmarshal(peer["Chat"], &v) != nil || v.ID == nil || *v.ID != chatID {
+			return DialogState{}, errors.New("Inline dialog chat peer differs")
+		}
+	}
+	return DialogState{Conversation: conv, Archived: result.Dialog.Archived != nil && *result.Dialog.Archived}, nil
+}
+
+// ArchiveDialog sends one desired-state mutation to the peer verified by Dialog.
+func (c *CLIClient) ArchiveDialog(ctx context.Context, state DialogState, archived bool) error {
+	command := "unarchive"
+	if archived {
+		command = "archive"
+	}
+	flag, id := "--chat-id", state.Conversation.ID
+	if state.Conversation.Type == "direct_chat" && state.Conversation.ParentChatID == 0 {
+		flag, id = "--user-id", state.Conversation.PeerUserID
+	}
+	_, err := c.run(ctx, "chats", command, flag, strconv.FormatInt(id, 10), "--json", "--compact")
+	return err
+}
+
+// Message verifies the live message belongs to the selected chat.
+func (c *CLIClient) Message(ctx context.Context, chatID, messageID int64) error {
+	if !cliValidID(chatID) || !cliValidID(messageID) {
+		return errors.New("invalid Inline message identity")
+	}
+	raw, err := c.run(ctx, "messages", "get", "--chat-id", strconv.FormatInt(chatID, 10), "--message-id", strconv.FormatInt(messageID, 10), "--json", "--compact")
+	if err != nil {
+		return err
+	}
+	message, err := cliDecodeMessage(raw, chatID)
+	if err != nil {
+		return err
+	}
+	if message.ID != messageID {
+		return errors.New("Inline message identity differs")
+	}
+	return nil
+}
