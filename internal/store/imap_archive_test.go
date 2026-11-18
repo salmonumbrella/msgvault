@@ -12,7 +12,7 @@ import (
 func TestIMAPArchiveMovePersistence(t *testing.T) {
 	st, source, id := tagFixture(t, "imap", "INBOX|7")
 	tagMembership(t, st, source.ID, id, "INBOX", 77, 7)
-	target, err := archiveTargetForTest(t.Context(), st, id)
+	target, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	m := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: target, Destination: "Archiv", DestinationUIDValidity: 88}
 	require.NoError(t, st.BeginIMAPMoveContext(t.Context(), m))
@@ -33,7 +33,7 @@ func TestIMAPArchiveMovePersistence(t *testing.T) {
 	_, err = st.MergeSourcesContext(t.Context(), store.MergeSourcesRequest{FromSourceID: other.ID, IntoSourceID: source.ID})
 	require.ErrorIs(t, err, store.ErrSourceMergeInvalid)
 	require.NoError(t, st.ReconcileIMAPMoveContext(t.Context(), m))
-	target, err = archiveTargetForTest(t.Context(), st, id)
+	target, err = st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	assert.Equal(t, "Archiv", target.Mailbox)
 	assert.Equal(t, uint32(88), target.UIDValidity)
@@ -59,11 +59,11 @@ func pendingValue(p *store.IMAPPendingMove) store.IMAPPendingMove {
 func TestIMAPArchiveRejectsAmbiguousAndChangedEpoch(t *testing.T) {
 	st, source, id := tagFixture(t, "imap", "INBOX|7")
 	tagMembership(t, st, source.ID, id, "INBOX", 77, 7)
-	target, err := archiveTargetForTest(t.Context(), st, id)
+	target, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	m := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: target, Destination: "Archiv", DestinationUIDValidity: 88}
 	tagMembership(t, st, source.ID, id, "Other", 20, 2)
-	_, err = archiveTargetForTest(t.Context(), st, id)
+	_, err = st.CheckIMAPArchiveTargetContext(t.Context(), target)
 	require.Error(t, err)
 	require.Error(t, st.BeginIMAPMoveContext(t.Context(), m))
 	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`DELETE FROM imap_message_memberships WHERE source_id=? AND mailbox=?`), source.ID, "Other")
@@ -88,14 +88,14 @@ func TestIMAPArchiveReconcileConflictKeepsIntent(t *testing.T) {
 	other, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: "Archiv|9", MessageType: "email"})
 	require.NoError(t, err)
 	tagMembership(t, st, source.ID, other, "Archiv", 88, 9)
-	target, err := archiveTargetForTest(t.Context(), st, id)
+	target, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	m := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: target, Destination: "Archiv", DestinationUIDValidity: 88}
 	require.NoError(t, st.BeginIMAPMoveContext(t.Context(), m))
 	m.DestinationUID = 9
 	require.NoError(t, st.SaveIMAPMoveMappingContext(t.Context(), m))
 	require.Error(t, st.ReconcileIMAPMoveContext(t.Context(), m))
-	got, err := archiveTargetForTest(t.Context(), st, id)
+	got, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	assert.Equal(t, target, got)
 	pending, err := st.IMAPPendingMoveContext(t.Context(), source.ID, id)
@@ -109,7 +109,7 @@ func TestIMAPArchiveStaleDestinationRefusedBeforeIntent(t *testing.T) {
 	tagMembership(t, st, source.ID, id, "INBOX", 77, 7)
 	_, err := st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_folder_state(source_id,mailbox,uidvalidity,uidnext) VALUES(?,?,?,?)`), source.ID, "Archiv", 88, 1)
 	require.NoError(t, err)
-	target, err := archiveTargetForTest(t.Context(), st, id)
+	target, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	move := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: target, Destination: "Archiv", DestinationUIDValidity: 89}
 	require.ErrorContains(t, st.BeginIMAPMoveContext(t.Context(), move), "epoch changed")
@@ -130,7 +130,7 @@ func TestIMAPArchivePendingPreservesResetTuple(t *testing.T) {
 	require.NoError(t, err)
 	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_message_memberships(source_id,mailbox,uidvalidity,uid,message_id) VALUES(?,?,?,?,?)`), source.ID, "INBOX", 77, 8, other)
 	require.NoError(t, err)
-	target, err := archiveTargetForTest(t.Context(), st, id)
+	target, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	require.NoError(t, st.BeginIMAPMoveContext(t.Context(), store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: target, Destination: "Archiv", DestinationUIDValidity: 88}))
 	require.NoError(t, st.ApplyIMAPMailboxDeltas(source.ID, []store.IMAPMailboxDelta{{Mailbox: "INBOX", State: store.IMAPFolderState{Mailbox: "INBOX", UIDValidity: 78, UIDNext: 1}, Reset: true}}))

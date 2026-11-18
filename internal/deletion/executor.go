@@ -134,10 +134,10 @@ const (
 func (e *Executor) deleteOne(ctx context.Context, sourceID int64, gmailID string, method Method) (deleteResult, error) {
 	var err error
 	client, exact := e.client.(interface {
-		TrashCopy(ctx context.Context, identity imaplib.ArchiveCopyIdentity) error
-		DeleteCopy(ctx context.Context, identity imaplib.ArchiveCopyIdentity) error
+		TrashCopy(ctx context.Context, identity imaplib.DraftReceipt) error
+		DeleteCopy(ctx context.Context, identity imaplib.DraftReceipt) error
 	})
-	var identity imaplib.ArchiveCopyIdentity
+	var identity imaplib.DraftReceipt
 	if exact {
 		target, hasCopy, pending, resolveErr := e.store.IMAPCurrentCopyContext(ctx, sourceID, gmailID)
 		if resolveErr != nil {
@@ -147,7 +147,7 @@ func (e *Executor) deleteOne(ctx context.Context, sourceID int64, gmailID string
 			return resultFailed, errors.New("IMAP move is pending")
 		}
 		exact = hasCopy
-		identity = imaplib.ArchiveCopyIdentity{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
+		identity = imaplib.DraftReceipt{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
 	}
 	switch {
 	case exact && method == MethodTrash:

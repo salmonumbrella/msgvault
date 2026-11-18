@@ -36,13 +36,11 @@ func newMessageSyncer(client gmail.API, st *store.Store, opts *msgsync.Options, 
 				if move.SourceIdentifier != source.Identifier || native.AccountIdentifier() != source.Identifier || !source.SyncConfig.Valid {
 					return errors.New("pending IMAP move account changed")
 				}
-				account, err := imaplib.ConfigFromJSON(source.SyncConfig.String)
-				if err != nil || account.Identifier() != source.Identifier {
+				if err := imapSourceConfigMatches(source); err != nil {
 					return errors.New("pending IMAP move account configuration changed")
 				}
-				identity := imaplib.ArchiveCopyIdentity{Mailbox: move.Target.Mailbox, UIDValidity: move.Target.UIDValidity, UID: move.Target.UID}
-				recovery := &imaplib.ArchiveMove{Target: identity, Destination: move.Destination, DestinationUIDValidity: move.DestinationUIDValidity, DestinationUID: move.DestinationUID}
-				journal := imapArchiveJournal{store: st, target: move.Target, source: source}
+				journal := imapArchiveJournal{store: st, source: source}
+				identity, recovery := journal.recovery(move)
 				_, verified, err := native.ArchiveCopy(ctx, journal, identity, recovery, true, false)
 				if err == nil {
 					err = st.ReconcileIMAPMoveContext(ctx, journal.move(*verified))

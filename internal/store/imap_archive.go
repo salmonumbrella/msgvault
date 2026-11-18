@@ -31,8 +31,7 @@ func (s *Store) CheckIMAPArchiveTargetContext(ctx context.Context, target EmailT
 	if err != nil {
 		return target, fmt.Errorf("read IMAP memberships: %w", err)
 	}
-	count := len(copies)
-	if count != 1 {
+	if len(copies) != 1 {
 		return target, emailtags.Failure("stale_identity", "IMAP message must have exactly one current mailbox copy", nil, nil)
 	}
 	return target, nil
@@ -44,8 +43,8 @@ func (s *Store) IMAPPendingMoveContext(ctx context.Context, sourceID, messageID 
 		return nil, err
 	}
 	if len(moves) == 0 {
-		return nil, nil
-	} //nolint:nilnil // No row means no pending move.
+		return nil, nil //nolint:nilnil // No row means no pending move.
+	}
 	return &moves[0], nil
 }
 
@@ -68,22 +67,15 @@ func (s *Store) BeginIMAPMoveContext(ctx context.Context, m IMAPPendingMove) err
 		if err := checkIMAPMoveSource(ctx, tx, m); err != nil {
 			return err
 		}
-		var count int
-		err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages msg JOIN sources src ON src.id=msg.source_id JOIN imap_message_memberships mm ON mm.source_id=msg.source_id AND mm.message_id=msg.id JOIN imap_folder_state fs ON fs.source_id=mm.source_id AND fs.mailbox=mm.mailbox AND fs.uidvalidity=mm.uidvalidity WHERE msg.id=? AND msg.source_id=? AND msg.source_message_id=? AND msg.deleted_at IS NULL AND msg.deleted_from_source_at IS NULL AND NOT EXISTS(SELECT 1 FROM source_settings ss WHERE ss.source_id=src.id AND ss.merged_into_source_id IS NOT NULL)`, t.ID, t.SourceID, t.SourceMessageID).Scan(&count)
+		var count, exact int
+		err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(CASE WHEN mm.mailbox=? AND mm.uidvalidity=? AND mm.uid=? THEN 1 END) FROM messages msg JOIN sources src ON src.id=msg.source_id JOIN imap_message_memberships mm ON mm.source_id=msg.source_id AND mm.message_id=msg.id JOIN imap_folder_state fs ON fs.source_id=mm.source_id AND fs.mailbox=mm.mailbox AND fs.uidvalidity=mm.uidvalidity WHERE msg.id=? AND msg.source_id=? AND msg.source_message_id=? AND msg.deleted_at IS NULL AND msg.deleted_from_source_at IS NULL AND NOT EXISTS(SELECT 1 FROM source_settings ss WHERE ss.source_id=src.id AND ss.merged_into_source_id IS NOT NULL)`, t.Mailbox, t.UIDValidity, t.UID, t.ID, t.SourceID, t.SourceMessageID).Scan(&count, &exact)
 		if err != nil {
 			return err
 		}
-		if count != 1 {
+		if count != 1 || exact != 1 {
 			return errors.New("IMAP membership changed")
 		}
-		var exists bool
-		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM imap_message_memberships WHERE source_id=? AND message_id=? AND mailbox=? AND uidvalidity=? AND uid=?)`, t.SourceID, t.ID, t.Mailbox, t.UIDValidity, t.UID).Scan(&exists)
-		if err != nil {
-			return err
-		}
-		if !exists {
-			return errors.New("IMAP membership changed")
-		}
+
 		var epoch uint32
 		err = tx.QueryRowContext(ctx, `SELECT uidvalidity FROM imap_folder_state WHERE source_id=? AND mailbox=?`, t.SourceID, m.Destination).Scan(&epoch)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -104,6 +96,10 @@ func (s *Store) SaveIMAPMoveMappingContext(ctx context.Context, m IMAPPendingMov
 	}
 	t := m.Target
 	result, err := s.db.ExecContext(ctx, `UPDATE imap_pending_moves SET destination_uid=? WHERE source_id=? AND message_id=? AND source_message_id=? AND old_mailbox=? AND old_uidvalidity=? AND old_uid=? AND destination=? AND destination_uidvalidity=? AND destination_uid IS NULL`, m.DestinationUID, t.SourceID, t.ID, t.SourceMessageID, t.Mailbox, t.UIDValidity, t.UID, m.Destination, m.DestinationUIDValidity)
+	return imapMoveRowResult(result, err, "pending IMAP move changed")
+}
+
+func imapMoveRowResult(result sql.Result, err error, message string) error {
 	if err != nil {
 		return err
 	}
@@ -112,7 +108,7 @@ func (s *Store) SaveIMAPMoveMappingContext(ctx context.Context, m IMAPPendingMov
 		return err
 	}
 	if n != 1 {
-		return errors.New("pending IMAP move changed")
+		return errors.New(message)
 	}
 	return nil
 }
@@ -159,15 +155,8 @@ func (s *Store) ReconcileIMAPMoveContext(ctx context.Context, m IMAPPendingMove)
 			return fmt.Errorf("attach destination IMAP membership: %w", err)
 		}
 		result, err := tx.ExecContext(ctx, `DELETE FROM imap_message_memberships WHERE source_id=? AND message_id=? AND mailbox=? AND uidvalidity=? AND uid=?`, t.SourceID, t.ID, t.Mailbox, t.UIDValidity, t.UID)
-		if err != nil {
+		if err := imapMoveRowResult(result, err, "source IMAP membership changed"); err != nil {
 			return err
-		}
-		n, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n != 1 {
-			return errors.New("source IMAP membership changed")
 		}
 		mailboxes, err := s.imapMembershipMailboxes(ctx, tx, t.SourceID, t.ID)
 		if err != nil {
@@ -185,17 +174,7 @@ func (s *Store) ReconcileIMAPMoveContext(ctx context.Context, m IMAPPendingMove)
 			return err
 		}
 		result, err = tx.ExecContext(ctx, `DELETE FROM imap_pending_moves WHERE source_id=? AND message_id=? AND destination_uid=?`, t.SourceID, t.ID, m.DestinationUID)
-		if err != nil {
-			return err
-		}
-		n, err = result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n != 1 {
-			return errors.New("pending IMAP move changed")
-		}
-		return nil
+		return imapMoveRowResult(result, err, "pending IMAP move changed")
 	})
 }
 

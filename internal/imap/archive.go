@@ -11,16 +11,9 @@ import (
 	"go.kenn.io/msgvault/internal/emailtags"
 )
 
-// ArchiveCopyIdentity identifies one exact IMAP mailbox generation and UID.
-type ArchiveCopyIdentity struct {
-	Mailbox     string
-	UIDValidity uint32
-	UID         uint32
-}
-
 // ArchiveMove is the source and destination mapping needed for recovery.
 type ArchiveMove struct {
-	Target                 ArchiveCopyIdentity
+	Target                 DraftReceipt
 	Destination            string
 	DestinationUIDValidity uint32
 	DestinationUID         uint32
@@ -109,7 +102,7 @@ func singletonArchiveUID(set imaplib.NumSet) (uint32, bool) {
 
 // ArchiveCopy uses only native UID MOVE and durably records its exact mapping
 // before readback. The caller holds the source execution lease for writes.
-func (c *Client) ArchiveCopy(ctx context.Context, journal ArchiveJournal, target ArchiveCopyIdentity, pending *ArchiveMove, archived, dry bool) (*emailtags.ArchiveResult, *ArchiveMove, error) {
+func (c *Client) ArchiveCopy(ctx context.Context, journal ArchiveJournal, target DraftReceipt, pending *ArchiveMove, archived, dry bool) (*emailtags.ArchiveResult, *ArchiveMove, error) {
 	result := &emailtags.ArchiveResult{Archived: archived, DryRun: dry}
 	err := c.withDraftConn(ctx, func(conn *imapclient.Client) error {
 		if pending != nil {
@@ -169,29 +162,45 @@ func (c *Client) ArchiveCopy(ctx context.Context, journal ArchiveJournal, target
 				}
 				return err
 			}
-			data, err := conn.Move(imaplib.UIDSetNum(imaplib.UID(target.UID)), destination).Wait()
+			saved, receiptFailed := false, false
+			_, err = conn.MoveWithReceipt(imaplib.UIDSetNum(imaplib.UID(target.UID)), destination, func(data imapclient.MoveData) error {
+				if receiptFailed {
+					return errors.New("earlier COPYUID was unusable")
+				}
+				old, oldOK := singletonArchiveUID(data.SourceUIDs)
+				next, nextOK := singletonArchiveUID(data.DestUIDs)
+				if !oldOK || !nextOK || old != target.UID || data.UIDValidity != dest.UIDValidity {
+					receiptFailed = true
+					return errors.New("unusable COPYUID")
+				}
+				if saved {
+					if m.DestinationUID == next {
+						return nil
+					}
+					receiptFailed = true
+					return errors.New("conflicting COPYUID")
+				}
+				m.DestinationUID = next
+				// Persist the receipt even after caller cancellation.
+				if err := journal.SaveMapping(context.WithoutCancel(ctx), m); err != nil {
+					receiptFailed = true
+					return fmt.Errorf("save COPYUID: %w", err)
+				}
+				saved = true
+				return nil
+			}).Wait()
 			if err != nil {
 				var status *imaplib.Error
-				if errors.As(err, &status) && (status.Type == imaplib.StatusResponseTypeBad || (status.Type == imaplib.StatusResponseTypeNo && status.Code == imaplib.ResponseCodeTryCreate)) {
-					// A definitive rejection cannot have dispatched a MOVE; clear even after cancellation.
+				if !saved && !receiptFailed && errors.As(err, &status) && (status.Type == imaplib.StatusResponseTypeBad || (status.Type == imaplib.StatusResponseTypeNo && status.Code == imaplib.ResponseCodeTryCreate)) {
 					if clearErr := journal.Clear(context.WithoutCancel(ctx), m); clearErr != nil {
 						return archiveFailure("local_failed", "Cannot clear rejected IMAP move intent", clearErr)
 					}
 					return archiveFailure("provider_write_failed", "IMAP MOVE was rejected", err)
 				}
-			}
-			if err != nil || data == nil {
 				return archiveFailure("remote_unknown", "IMAP MOVE may have run; sync and inspect both folders before retrying", err)
 			}
-			old, oldOK := singletonArchiveUID(data.SourceUIDs)
-			next, nextOK := singletonArchiveUID(data.DestUIDs)
-			if !oldOK || !nextOK || old != target.UID || data.UIDValidity != dest.UIDValidity {
-				return archiveFailure("remote_unknown", "IMAP MOVE returned an unusable COPYUID; sync and inspect both folders", nil)
-			}
-			m.DestinationUID = next
-			// Saving the reply must finish even if the caller disconnects.
-			if err := journal.SaveMapping(context.WithoutCancel(ctx), m); err != nil {
-				return archiveFailure("remote_unknown", "IMAP MOVE mapping could not be saved; sync and inspect both folders", err)
+			if !saved {
+				return archiveFailure("remote_unknown", "IMAP MOVE returned no usable COPYUID; sync and inspect both folders", nil)
 			}
 			pending = &m
 		}

@@ -112,10 +112,10 @@ func TestArchiveCopyNativeRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_message_memberships(source_id,mailbox,uidvalidity,uid,message_id) VALUES(?,?,?,?,?)`), source.ID, "INBOX", epoch, 1, id)
 	require.NoError(t, err)
-	target, err := archiveTargetForTest(t.Context(), st, id)
+	target, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	journal := archiveTestJournal{st: st, source: source, target: target}
-	identity := ArchiveCopyIdentity{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
+	identity := DraftReceipt{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
 	preview, _, err := client.ArchiveCopy(t.Context(), journal, identity, nil, true, true)
 	require.NoError(t, err)
 	assert.True(t, preview.Changed)
@@ -145,10 +145,10 @@ func TestArchiveCopyNativeRoundTrip(t *testing.T) {
 	assert.True(t, result.Verified)
 	assert.Empty(t, moves)
 	require.NoError(t, st.ReconcileIMAPMoveContext(t.Context(), journal.convert(*moved)))
-	target, err = archiveTargetForTest(t.Context(), st, id)
+	target, err = st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	journal.target = target
-	identity = ArchiveCopyIdentity{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
+	identity = DraftReceipt{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
 	result, _, err = client.ArchiveCopy(t.Context(), journal, identity, nil, true, false)
 	require.NoError(t, err)
 	assert.False(t, result.Changed)
@@ -162,18 +162,18 @@ func TestArchiveCopyNativeRoundTrip(t *testing.T) {
 	assert.True(t, result.Changed)
 	assert.Equal(t, imaplib.UIDSetNum(imaplib.UID(identity.UID)), <-moves)
 	require.NoError(t, st.ReconcileIMAPMoveContext(t.Context(), journal.convert(*moved)))
-	target, err = archiveTargetForTest(t.Context(), st, id)
+	target, err = st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	assert.Equal(t, "archiv", target.Mailbox)
 	journal.target = target
-	identity = ArchiveCopyIdentity{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
+	identity = DraftReceipt{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
 	result, moved, err = client.ArchiveCopy(t.Context(), journal, identity, nil, false, false)
 	require.NoError(t, err)
 	require.NotNil(t, moved)
 	assert.True(t, result.Verified)
 	assert.Equal(t, imaplib.UIDSetNum(imaplib.UID(identity.UID)), <-moves)
 	require.NoError(t, st.ReconcileIMAPMoveContext(t.Context(), journal.convert(*moved)))
-	target, err = archiveTargetForTest(t.Context(), st, id)
+	target, err = st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	assert.Equal(t, "INBOX", target.Mailbox)
 	assert.Equal(t, id, target.ID)
@@ -318,7 +318,7 @@ func TestArchiveCopyRefusalsDoNotWrite(t *testing.T) {
 				epoch++
 			}
 			journal := &refuseJournal{}
-			_, _, err = client.ArchiveCopy(t.Context(), journal, ArchiveCopyIdentity{Mailbox: "INBOX", UIDValidity: epoch, UID: 1}, nil, true, false)
+			_, _, err = client.ArchiveCopy(t.Context(), journal, DraftReceipt{Mailbox: "INBOX", UIDValidity: epoch, UID: 1}, nil, true, false)
 			require.Error(t, err)
 			assert.False(t, journal.began)
 			assert.Empty(t, writes)
@@ -383,7 +383,7 @@ func TestArchiveCopyUnusableMappingNeverResends(t *testing.T) {
 				return err
 			}))
 			journal := &savedTestIntent{}
-			identity := ArchiveCopyIdentity{Mailbox: "INBOX", UIDValidity: epoch, UID: 1}
+			identity := DraftReceipt{Mailbox: "INBOX", UIDValidity: epoch, UID: 1}
 			_, _, err = client.ArchiveCopy(t.Context(), journal, identity, nil, true, false)
 			require.Error(t, err)
 			assert.Equal(t, "MOVE", <-writes)
@@ -414,22 +414,39 @@ func (s *refusalSession) Move(w *imapserver.MoveWriter, set imaplib.NumSet, dest
 	return s.status
 }
 
-type refusalJournal struct{ move *ArchiveMove }
+type refusalJournal struct {
+	move     *ArchiveMove
+	failSave bool
+	clears   int
+}
 
-func (j *refusalJournal) Begin(_ context.Context, m ArchiveMove) error       { j.move = &m; return nil }
-func (j *refusalJournal) SaveMapping(_ context.Context, m ArchiveMove) error { j.move = &m; return nil }
-func (j *refusalJournal) Clear(_ context.Context, _ ArchiveMove) error       { j.move = nil; return nil }
+func (j *refusalJournal) Begin(_ context.Context, m ArchiveMove) error { j.move = &m; return nil }
+func (j *refusalJournal) SaveMapping(_ context.Context, m ArchiveMove) error {
+	if j.failSave {
+		return errors.New("save failed")
+	}
+	j.move = &m
+	return nil
+}
+func (j *refusalJournal) Clear(_ context.Context, _ ArchiveMove) error {
+	j.clears++
+	j.move = nil
+	return nil
+}
 
 func TestArchiveMoveRefusalKeepsOnlyUncertainIntents(t *testing.T) {
 	for _, tc := range []struct {
-		name              string
-		status            imaplib.Error
-		partial, retained bool
+		name                        string
+		status                      imaplib.Error
+		partial, retained, failSave bool
 	}{
-		{"bad", imaplib.Error{Type: imaplib.StatusResponseTypeBad}, false, false},
-		{"trycreate", imaplib.Error{Type: imaplib.StatusResponseTypeNo, Code: imaplib.ResponseCodeTryCreate}, false, false},
-		{"no", imaplib.Error{Type: imaplib.StatusResponseTypeNo}, false, true},
-		{"partial_no", imaplib.Error{Type: imaplib.StatusResponseTypeNo}, true, true},
+		{"bad", imaplib.Error{Type: imaplib.StatusResponseTypeBad}, false, false, false},
+		{"trycreate", imaplib.Error{Type: imaplib.StatusResponseTypeNo, Code: imaplib.ResponseCodeTryCreate}, false, false, false},
+		{"no", imaplib.Error{Type: imaplib.StatusResponseTypeNo}, false, true, false},
+		{"partial_no", imaplib.Error{Type: imaplib.StatusResponseTypeNo}, true, true, false},
+		{"partial_bad", imaplib.Error{Type: imaplib.StatusResponseTypeBad}, true, true, false},
+		{"partial_trycreate", imaplib.Error{Type: imaplib.StatusResponseTypeNo, Code: imaplib.ResponseCodeTryCreate}, true, true, false},
+		{"save_failure_bad", imaplib.Error{Type: imaplib.StatusResponseTypeBad}, true, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			user := imapmemserver.NewUser(testutil.IMAPTestUsername, testutil.IMAPTestPassword)
@@ -456,16 +473,148 @@ func TestArchiveMoveRefusalKeepsOnlyUncertainIntents(t *testing.T) {
 				}
 				return err
 			}))
-			identity := ArchiveCopyIdentity{Mailbox: "INBOX", UIDValidity: epoch, UID: 1}
-			journal := &refusalJournal{}
+			identity := DraftReceipt{Mailbox: "INBOX", UIDValidity: epoch, UID: 1}
+			journal := &refusalJournal{failSave: tc.failSave}
 			_, _, err = client.ArchiveCopy(t.Context(), journal, identity, nil, true, false)
 			require.Error(t, err)
 			assert.Equal(t, tc.retained, journal.move != nil)
 			if tc.retained {
+				if tc.partial && !tc.failSave {
+					require.NotZero(t, journal.move.DestinationUID)
+				}
 				_, _, err = client.ArchiveCopy(t.Context(), journal, identity, journal.move, true, false)
-				require.Error(t, err)
+				if tc.partial && !tc.failSave {
+					require.NoError(t, err)
+				} else {
+					require.Error(t, err)
+				}
 			}
 			assert.EqualValues(t, 1, calls.Load())
+			if tc.retained {
+				assert.Zero(t, journal.clears)
+			}
+		})
+	}
+}
+
+type taggedReceiptListener struct {
+	net.Listener
+	epoch *atomic.Uint32
+	hits  *atomic.Int32
+}
+
+func (l taggedReceiptListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return taggedReceiptConn{Conn: conn, epoch: l.epoch, hits: l.hits}, nil
+}
+
+type taggedReceiptConn struct {
+	net.Conn
+	epoch *atomic.Uint32
+	hits  *atomic.Int32
+}
+
+func (c taggedReceiptConn) Write(p []byte) (int, error) {
+	original := p
+	for _, marker := range []string{"OK UID MOVE completed", "OK MOVE completed"} {
+		if bytes.Contains(p, []byte(marker)) {
+			p = bytes.Replace(p, []byte(marker), []byte(fmt.Sprintf("OK [COPYUID %d 1 1] %s", c.epoch.Load(), marker[3:])), 1)
+			c.hits.Add(1)
+			break
+		}
+	}
+	_, err := c.Conn.Write(p)
+	if err != nil {
+		return 0, err
+	}
+	return len(original), nil
+}
+
+type repeatedReceiptSession struct {
+	imapserver.Session
+
+	epoch     *atomic.Uint32
+	different bool
+	moves     *atomic.Int32
+}
+
+func (s *repeatedReceiptSession) Move(w *imapserver.MoveWriter, set imaplib.NumSet, dest string) error {
+	s.moves.Add(1)
+	if err := s.Session.(imapserver.SessionMove).Move(w, set, dest); err != nil {
+		return err
+	}
+	if !s.different {
+		return nil
+	}
+	uid := imaplib.UID(2)
+	return w.WriteCopyData(&imaplib.CopyData{UIDValidity: s.epoch.Load(), SourceUIDs: imaplib.UIDSetNum(1), DestUIDs: imaplib.UIDSetNum(uid)})
+}
+
+func TestArchiveRepeatedCopyUID(t *testing.T) {
+	for _, different := range []bool{false, true} {
+		t.Run(fmt.Sprintf("different=%v", different), func(t *testing.T) {
+			user := imapmemserver.NewUser(testutil.IMAPTestUsername, testutil.IMAPTestPassword)
+			require.NoError(t, user.Create("INBOX", nil))
+			require.NoError(t, user.Create("Archiv", nil))
+			testutil.AppendIMAPMessage(t, user, "INBOX")
+			mem := imapmemserver.New()
+			mem.AddUser(user)
+			var epoch atomic.Uint32
+			var moves atomic.Int32
+			srv := imapserver.New(&imapserver.Options{InsecureAuth: true, Caps: imaplib.CapSet{imaplib.CapIMAP4rev1: {}, imaplib.CapMove: {}, imaplib.CapUIDPlus: {}}, NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+				return &repeatedReceiptSession{Session: mem.NewSession(), epoch: &epoch, different: different, moves: &moves}, nil, nil
+			}})
+			listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			var tagged atomic.Int32
+			serving := net.Listener(listener)
+			if !different {
+				serving = taggedReceiptListener{Listener: listener, epoch: &epoch, hits: &tagged}
+			}
+			go func() { _ = srv.Serve(serving) }()
+			t.Cleanup(func() { _ = srv.Close() })
+			client := newTestClient(t, listener.Addr().String())
+			client.config.ArchiveMailbox = "Archiv"
+			var sourceEpoch uint32
+			require.NoError(t, client.withDraftConn(t.Context(), func(conn *imapclient.Client) error {
+				src, err := conn.Select("INBOX", nil).Wait()
+				if err != nil {
+					return err
+				}
+				sourceEpoch = src.UIDValidity
+				dest, err := conn.Select("Archiv", nil).Wait()
+				if err != nil {
+					return err
+				}
+				epoch.Store(dest.UIDValidity)
+				return nil
+			}))
+			identity := DraftReceipt{Mailbox: "INBOX", UIDValidity: sourceEpoch, UID: 1}
+			journal := &savedTestIntent{}
+			result, _, err := client.ArchiveCopy(t.Context(), journal, identity, nil, true, false)
+			if different {
+				require.Error(t, err)
+				assert.False(t, result.Verified)
+			} else {
+				require.NoError(t, err)
+				assert.True(t, result.Verified)
+			}
+			require.NotNil(t, journal.move)
+			assert.EqualValues(t, 1, journal.move.DestinationUID)
+			assert.Equal(t, 1, journal.saves)
+			assert.EqualValues(t, 1, moves.Load())
+			if !different {
+				assert.EqualValues(t, 1, tagged.Load())
+			}
+			if different {
+				result, _, err = client.ArchiveCopy(t.Context(), journal, identity, journal.move, true, false)
+				require.NoError(t, err)
+				assert.True(t, result.Verified)
+				assert.EqualValues(t, 1, moves.Load())
+			}
 		})
 	}
 }

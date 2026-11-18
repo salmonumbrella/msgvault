@@ -33,6 +33,23 @@ func (j imapArchiveJournal) Clear(ctx context.Context, m imaplib.ArchiveMove) er
 	return j.store.ClearIMAPMoveContext(ctx, j.move(m))
 }
 
+func (j *imapArchiveJournal) recovery(p store.IMAPPendingMove) (imaplib.DraftReceipt, *imaplib.ArchiveMove) {
+	j.target = p.Target
+	identity := imaplib.DraftReceipt{Mailbox: p.Target.Mailbox, UIDValidity: p.Target.UIDValidity, UID: p.Target.UID}
+	return identity, &imaplib.ArchiveMove{Target: identity, Destination: p.Destination, DestinationUIDValidity: p.DestinationUIDValidity, DestinationUID: p.DestinationUID}
+}
+
+func imapSourceConfigMatches(source *store.Source) error {
+	account, err := imaplib.ConfigFromJSON(source.SyncConfig.String)
+	if err != nil {
+		return err
+	}
+	if account.Identifier() != source.Identifier {
+		return errors.New("IMAP account identifier changed")
+	}
+	return nil
+}
+
 func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change emailtags.ArchiveChange, acquireWrite func(context.Context) (func(), error), authorize func(context.Context, store.EmailTagTarget) error) (*emailtags.ArchiveResult, error) {
 	ctx = a.invocationContext(ctx)
 	resolve := func() (store.EmailTagTarget, error) {
@@ -107,11 +124,11 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 		return nil, emailtags.Failure("stale_identity", "IMAP account changed while a move was pending; inspect both folders", nil, nil)
 	}
 	if source.SyncConfig.Valid {
-		account, err := imaplib.ConfigFromJSON(source.SyncConfig.String)
-		if err != nil || account.Identifier() != source.Identifier {
+		if err := imapSourceConfigMatches(source); err != nil {
 			return nil, emailtags.Failure("stale_identity", "IMAP account configuration no longer matches the source; inspect both folders", nil, err)
 		}
 	}
+
 	factory := a.emailTagClientFactory
 	if factory == nil {
 		factory = func(ctx context.Context, src *store.Source) (gmail.API, error) {
@@ -128,12 +145,10 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 		return nil, emailtags.Failure("archive_unsupported", "Source does not support IMAP archiving", nil, nil)
 	}
 	journal := imapArchiveJournal{store: a.store, target: target, source: source}
-	identity := imaplib.ArchiveCopyIdentity{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
+	identity := imaplib.DraftReceipt{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
 	var recovery *imaplib.ArchiveMove
 	if pending != nil {
-		identity = imaplib.ArchiveCopyIdentity{Mailbox: pending.Target.Mailbox, UIDValidity: pending.Target.UIDValidity, UID: pending.Target.UID}
-		recovery = &imaplib.ArchiveMove{Target: identity, Destination: pending.Destination, DestinationUIDValidity: pending.DestinationUIDValidity, DestinationUID: pending.DestinationUID}
-		journal.target = pending.Target
+		identity, recovery = journal.recovery(*pending)
 	}
 	result, verified, err := native.ArchiveCopy(ctx, journal, identity, recovery, *change.Archived, change.DryRun)
 	if result != nil {

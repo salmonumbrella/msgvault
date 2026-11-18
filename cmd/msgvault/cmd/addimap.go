@@ -14,6 +14,7 @@ import (
 	"go.kenn.io/msgvault/internal/clirun"
 	imapclient "go.kenn.io/msgvault/internal/imap"
 	"go.kenn.io/msgvault/internal/oauth"
+	"go.kenn.io/msgvault/internal/store"
 )
 
 // passwordMethod describes how to read the password.
@@ -153,17 +154,10 @@ Examples:
 				return fmt.Errorf("create source: %w", err)
 			}
 
-			// Preserve settings that credential refreshes do not explicitly change.
-			if source.SyncConfig.Valid {
-				old, err := imapclient.ConfigFromJSON(source.SyncConfig.String)
-				if err != nil {
-					return fmt.Errorf("parse existing IMAP config: %w", err)
-				}
-				imapCfg.Folders = old.Folders
-				imapCfg.ArchiveMailbox = old.ArchiveMailbox
-			}
-			if cmd.Flags().Changed("archive-mailbox") {
-				imapCfg.ArchiveMailbox = imapArchiveMailbox
+			// Preserve the archive mailbox unless explicitly overridden.
+			imapCfg.ArchiveMailbox, err = refreshedIMAPArchiveMailbox(source, cmd.Flags().Changed("archive-mailbox"), imapArchiveMailbox)
+			if err != nil {
+				return err
 			}
 
 			// Store config JSON
@@ -281,4 +275,21 @@ func readPasswordInteractive(prompt string, output io.Writer, allowBlank bool) (
 
 func init() {
 	rootCmd.AddCommand(newAddIMAPCmd())
+}
+
+// refreshedIMAPArchiveMailbox retains the configured destination on credential refresh.
+func refreshedIMAPArchiveMailbox(source *store.Source, changed bool, value string) (string, error) {
+	if !changed {
+		value = ""
+	}
+	if source != nil && source.SyncConfig.Valid {
+		old, err := imapclient.ConfigFromJSON(source.SyncConfig.String)
+		if err != nil {
+			return "", fmt.Errorf("parse existing IMAP config: %w", err)
+		}
+		if !changed {
+			value = old.ArchiveMailbox
+		}
+	}
+	return value, nil
 }

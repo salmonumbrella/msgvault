@@ -282,10 +282,10 @@ func TestAddIMAPRefreshPreservesArchiveSettings(t *testing.T) {
 	}
 	run()
 	saved := read()
-	assert.Equal(t, []string{"INBOX"}, saved.Folders)
+	assert.Empty(t, saved.Folders)
 	assert.Equal(t, "Archiv", saved.ArchiveMailbox)
 	run("--archive-mailbox", "New Archiv")
 	saved = read()
-	assert.Equal(t, []string{"INBOX"}, saved.Folders)
+	assert.Empty(t, saved.Folders)
 	assert.Equal(t, "New Archiv", saved.ArchiveMailbox)
 }

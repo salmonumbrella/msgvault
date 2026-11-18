@@ -129,7 +129,7 @@ func TestExecutorValidationFailuresFinalizeClaimedManifest(t *testing.T) {
 				})
 				require.NoError(t, err)
 				var archiveID string
-				require.NoError(t, tc.Store.DB().QueryRow(tc.Store.Rebind(
+				require.NoError(t, tc.Store.DB().QueryRowContext(t.Context(), tc.Store.Rebind(
 					`SELECT source_message_id FROM messages WHERE id = ?`), messageID).Scan(&archiveID))
 				return live, archiveID
 			},
@@ -1357,7 +1357,7 @@ func (c *TestContext) SeedMessages(gmailIDs []string) {
 func (c *TestContext) CountDeleted() int {
 	c.t.Helper()
 	var count int
-	err := c.Store.DB().QueryRow(
+	err := c.Store.DB().QueryRowContext(c.t.Context(),
 		`SELECT COUNT(*) FROM messages WHERE deleted_from_source_at IS NOT NULL`,
 	).Scan(&count)
 	require.NoError(c.t, err, "CountDeleted")

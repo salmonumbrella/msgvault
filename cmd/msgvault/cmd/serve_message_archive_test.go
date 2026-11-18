@@ -550,7 +550,7 @@ func TestArchiveIMAPPendingAccountRebindRefusesBeforeProvider(t *testing.T) {
 	assert.Equal(t, beforeAmbiguous, provider.connects.Load())
 	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`DELETE FROM imap_message_memberships WHERE source_id=? AND mailbox=?`), source.ID, "Other")
 	require.NoError(t, err)
-	target, err := archiveTargetForTest(t.Context(), st, id)
+	target, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	lock, err := st.AcquireSyncExecutionContext(t.Context(), source.ID)
 	require.NoError(t, err)

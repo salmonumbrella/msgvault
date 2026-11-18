@@ -127,12 +127,12 @@ func TestProbeDeleteAfterArchiveMustNotFalselyMarkSourceDeleted(t *testing.T) {
 	require.NoError(t, err)
 	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_message_memberships(source_id,mailbox,uidvalidity,uid,message_id) VALUES(?,?,?,?,?)`), source.ID, "INBOX", selected.UIDValidity, 1, id)
 	require.NoError(t, err)
-	target, err := archiveTargetForTest(t.Context(), st, id)
+	target, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	client := imap.NewClient(cfg, testutil.IMAPTestPassword)
 	defer func() { _ = client.Close() }()
 	journal := deletionProbeJournal{st: st, source: source, target: target}
-	identity := imap.ArchiveCopyIdentity{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
+	identity := imap.DraftReceipt{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
 	result, moved, err := client.ArchiveCopy(t.Context(), journal, identity, nil, true, false)
 	require.NoError(t, err)
 	require.True(t, result.Verified)
@@ -144,9 +144,9 @@ func TestProbeDeleteAfterArchiveMustNotFalselyMarkSourceDeleted(t *testing.T) {
 	old, err := observer.Fetch(imapapi.UIDSetNum(imapapi.UID(target.UID)), &imapapi.FetchOptions{UID: true}).Collect()
 	require.NoError(t, err)
 	require.Empty(t, old)
-	archived, err := archiveTargetForTest(t.Context(), st, id)
+	archived, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
-	exact := imap.ArchiveCopyIdentity{Mailbox: archived.Mailbox, UIDValidity: archived.UIDValidity, UID: archived.UID}
+	exact := imap.DraftReceipt{Mailbox: archived.Mailbox, UIDValidity: archived.UIDValidity, UID: archived.UID}
 	stale := exact
 	stale.UIDValidity++
 	require.ErrorContains(t, client.DeleteCopy(t.Context(), stale), "UIDVALIDITY changed")
@@ -185,7 +185,7 @@ func TestProbeDeleteAfterArchiveMustNotFalselyMarkSourceDeleted(t *testing.T) {
 	require.Equal(t, resultFailed, deletionResult)
 	require.Error(t, deleteErr)
 	honest.Store(true)
-	trashIdentity := imap.ArchiveCopyIdentity{Mailbox: "Archiv", UIDValidity: archived.UIDValidity, UID: 1}
+	trashIdentity := imap.DraftReceipt{Mailbox: "Archiv", UIDValidity: archived.UIDValidity, UID: 1}
 	require.NoError(t, client.TrashCopy(t.Context(), trashIdentity))
 	_, err = observer.Select("Trash", &imapapi.SelectOptions{ReadOnly: true}).Wait()
 	require.NoError(t, err)
@@ -202,5 +202,4 @@ func TestProbeDeleteAfterArchiveMustNotFalselyMarkSourceDeleted(t *testing.T) {
 	assert.Empty(t, remaining)
 	require.NoError(t, st.DB().QueryRowContext(t.Context(), st.Rebind(`SELECT deleted_from_source_at FROM messages WHERE id=?`), id).Scan(&deleted))
 	assert.True(t, deleted.Valid)
-
 }

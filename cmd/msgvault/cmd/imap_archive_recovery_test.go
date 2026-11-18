@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,16 +29,22 @@ import (
 type failOnceFetchSession struct {
 	imapserver.Session
 
-	fail *atomic.Bool
+	fail     *atomic.Bool
+	moveFail *atomic.Bool
+	moves    *atomic.Int32
 }
 
 func (s *failOnceFetchSession) Move(w *imapserver.MoveWriter, set imapapi.NumSet, dest string) error {
+	s.moves.Add(1)
 	mover, ok := s.Session.(imapserver.SessionMove)
 	if !ok {
 		return errors.New("fixture lacks MOVE")
 	}
 	if err := mover.Move(w, set, dest); err != nil {
 		return fmt.Errorf("fixture MOVE: %w", err)
+	}
+	if s.moveFail.Swap(false) {
+		return &imapapi.Error{Type: imapapi.StatusResponseTypeNo, Text: "receipt then rejection"}
 	}
 	return nil
 }
@@ -51,6 +58,32 @@ func (s *failOnceFetchSession) Fetch(w *imapserver.FetchWriter, set imapapi.NumS
 	return nil
 }
 
+type disconnectReceiptListener struct {
+	net.Listener
+	armed *atomic.Bool
+}
+
+func (l disconnectReceiptListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return disconnectReceiptConn{Conn: c, armed: l.armed}, nil
+}
+
+type disconnectReceiptConn struct {
+	net.Conn
+	armed *atomic.Bool
+}
+
+func (c disconnectReceiptConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if err == nil && bytes.Contains(p, []byte("[COPYUID ")) && c.armed.Swap(false) {
+		_ = c.Conn.Close()
+	}
+	return n, err
+}
+
 func TestIMAPArchivePendingRecoveryBeforeSync(t *testing.T) {
 	user := imapmemserver.NewUser(testutil.IMAPTestUsername, testutil.IMAPTestPassword)
 	require.NoError(t, user.Create("INBOX", nil))
@@ -58,13 +91,14 @@ func TestIMAPArchivePendingRecoveryBeforeSync(t *testing.T) {
 	testutil.AppendIMAPMessage(t, user, "INBOX")
 	mem := imapmemserver.New()
 	mem.AddUser(user)
-	var fail atomic.Bool
+	var fail, moveFail, disconnect atomic.Bool
+	var moves atomic.Int32
 	srv := imapserver.New(&imapserver.Options{InsecureAuth: true, Caps: imapapi.CapSet{imapapi.CapIMAP4rev1: {}, imapapi.CapMove: {}, imapapi.CapUIDPlus: {}}, NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-		return &failOnceFetchSession{Session: mem.NewSession(), fail: &fail}, nil, nil
+		return &failOnceFetchSession{Session: mem.NewSession(), fail: &fail, moveFail: &moveFail, moves: &moves}, nil, nil
 	}})
 	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	go func() { _ = srv.Serve(listener) }()
+	go func() { _ = srv.Serve(disconnectReceiptListener{Listener: listener, armed: &disconnect}) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	addr := listener.Addr().String()
 	host, portText, err := net.SplitHostPort(addr)
@@ -109,6 +143,56 @@ func TestIMAPArchivePendingRecoveryBeforeSync(t *testing.T) {
 	adapter := &storeAPIAdapter{store: st, config: cfg, logger: slog.New(slog.DiscardHandler), emailTagClientFactory: func(context.Context, *store.Source) (gmail.API, error) {
 		return imap.NewClient(imapConfig, testutil.IMAPTestPassword), nil
 	}, draftCacheRefresh: func(context.Context, string) error { return nil }}
+	// The server sends COPYUID and then NO. A fresh syncer must recover the
+	// saved pair after reconnect, without dispatching another MOVE.
+	moveFail.Store(true)
+	requestedArchive := true
+	_, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requestedArchive}, nil, nil)
+	var receiptFailure *emailtags.MessageTagError
+	require.ErrorAs(t, err, &receiptFailure)
+	assert.Equal(t, "remote_unknown", receiptFailure.Code)
+	receiptPending, err := st.IMAPPendingMoveContext(t.Context(), source.ID, id)
+	require.NoError(t, err)
+	require.NotNil(t, receiptPending)
+	require.NotZero(t, receiptPending.DestinationUID)
+	assert.EqualValues(t, 1, moves.Load())
+	runSync(false)
+	receiptPending, err = st.IMAPPendingMoveContext(t.Context(), source.ID, id)
+	require.NoError(t, err)
+	assert.Nil(t, receiptPending)
+	assert.EqualValues(t, 1, moves.Load())
+	recovered, err := st.EmailTagTargetContext(t.Context(), id, "")
+	require.NoError(t, err)
+	assert.Equal(t, "Archiv", recovered.Mailbox)
+	assert.Equal(t, id, recovered.ID)
+	requestedArchive = false
+	_, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requestedArchive}, nil, nil)
+	require.NoError(t, err)
+	runSync(false)
+	// A disconnect after COPYUID also leaves durable evidence for a fresh sync.
+	disconnect.Store(true)
+	requestedArchive = true
+	_, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requestedArchive}, nil, nil)
+	require.ErrorAs(t, err, &receiptFailure)
+	assert.Equal(t, "remote_unknown", receiptFailure.Code)
+	receiptPending, err = st.IMAPPendingMoveContext(t.Context(), source.ID, id)
+	require.NoError(t, err)
+	require.NotNil(t, receiptPending)
+	require.NotZero(t, receiptPending.DestinationUID)
+	movesBeforeSync := moves.Load()
+	runSync(false)
+	receiptPending, err = st.IMAPPendingMoveContext(t.Context(), source.ID, id)
+	require.NoError(t, err)
+	assert.Nil(t, receiptPending)
+	assert.Equal(t, movesBeforeSync, moves.Load())
+	recovered, err = st.EmailTagTargetContext(t.Context(), id, "")
+	require.NoError(t, err)
+	assert.Equal(t, id, recovered.ID)
+	assert.Equal(t, "Archiv", recovered.Mailbox)
+	requestedArchive = false
+	_, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requestedArchive}, nil, nil)
+	require.NoError(t, err)
+	runSync(false)
 	// A locally stale destination epoch must refuse before MOVE or intent.
 	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`UPDATE imap_folder_state SET uidvalidity=uidvalidity+1 WHERE source_id=? AND mailbox=?`), source.ID, "Archiv")
 	require.NoError(t, err)
@@ -118,7 +202,7 @@ func TestIMAPArchivePendingRecoveryBeforeSync(t *testing.T) {
 	pendingBefore, err := st.IMAPPendingMoveContext(t.Context(), source.ID, id)
 	require.NoError(t, err)
 	assert.Nil(t, pendingBefore)
-	stillInbox, err := archiveTargetForTest(t.Context(), st, id)
+	stillInbox, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	assert.Equal(t, "INBOX", stillInbox.Mailbox)
 	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`UPDATE imap_folder_state SET uidvalidity=uidvalidity-1 WHERE source_id=? AND mailbox=?`), source.ID, "Archiv")
@@ -126,7 +210,7 @@ func TestIMAPArchivePendingRecoveryBeforeSync(t *testing.T) {
 	result, err := adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &desired}, nil, nil)
 	require.NoError(t, err)
 	require.True(t, result.Verified)
-	archived, err := archiveTargetForTest(t.Context(), st, id)
+	archived, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	assert.Equal(t, "Archiv", archived.Mailbox)
 	var next, epoch uint32
@@ -156,7 +240,7 @@ func TestIMAPArchivePendingRecoveryBeforeSync(t *testing.T) {
 	pending, err = st.IMAPPendingMoveContext(t.Context(), source.ID, id)
 	require.NoError(t, err)
 	require.Nil(t, pending, "pending move still stuck after exact verified retry")
-	final, err := archiveTargetForTest(t.Context(), st, id)
+	final, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	assert.Equal(t, "INBOX", final.Mailbox)
 	assert.Equal(t, id, final.ID)
@@ -174,7 +258,7 @@ func TestIMAPArchivePendingRecoveryBeforeSync(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pending)
 	assert.Zero(t, pending.DestinationUID)
-	still, err := archiveTargetForTest(t.Context(), st, id)
+	still, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	assert.Equal(t, final, still)
 	// Simulate the saved mapped copy being moved again by another mail client.

@@ -164,16 +164,15 @@ func o365AccountMailbox(account daemonclient.CLIAccount, graph bool) string {
 	return cfg.Username
 }
 
-func o365IMAPRegistration(host, email string, source *store.Source, sources []*store.Source) (string, string, error) {
+func o365IMAPRegistration(host, email string, source *store.Source, sources []*store.Source, changed bool, mailbox string) (string, string, error) {
 	cfg := &imapclient.Config{Host: host, Port: 993, TLS: true, Username: email, AuthMethod: imapclient.AuthXOAuth2}
 	identifier := cfg.Identifier()
-	if source != nil && source.SyncConfig.Valid {
-		old, err := imapclient.ConfigFromJSON(source.SyncConfig.String)
-		if err != nil {
-			return "", "", fmt.Errorf("parse existing IMAP config: %w", err)
-		}
-		cfg.Folders, cfg.ArchiveMailbox = old.Folders, old.ArchiveMailbox
+	var err error
+	cfg.ArchiveMailbox, err = refreshedIMAPArchiveMailbox(source, changed, mailbox)
+	if err != nil {
+		return "", "", err
 	}
+
 	for _, other := range sources {
 		if (source == nil || other.ID != source.ID) && other.Identifier == identifier {
 			return "", "", fmt.Errorf("IMAP host %s already belongs to another source (ID %d)", host, other.ID)
@@ -389,21 +388,11 @@ func runAddO365Local(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("determine IMAP host: %w", err)
 	}
 
-	identifier, cfgJSON, err := o365IMAPRegistration(imapHost, email, source, existing)
+	identifier, cfgJSON, err := o365IMAPRegistration(imapHost, email, source, existing, cmd.Flags().Changed("archive-mailbox"), o365ArchiveMailbox)
 	if err != nil {
 		return err
 	}
-	if cmd.Flags().Changed("archive-mailbox") {
-		config, err := imapclient.ConfigFromJSON(cfgJSON)
-		if err != nil {
-			return err
-		}
-		config.ArchiveMailbox = o365ArchiveMailbox
-		cfgJSON, err = config.ToJSON()
-		if err != nil {
-			return err
-		}
-	}
+
 	source, err = s.RegisterMicrosoftMail(cmd.Context(), source, sourceTypeIMAP, identifier, sql.NullString{String: binding.resolvedApp, Valid: binding.resolvedApp != ""}, cfgJSON)
 	if err != nil {
 		return fmt.Errorf("store OAuth app: %w", err)

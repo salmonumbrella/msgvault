@@ -2,7 +2,7 @@ module go.kenn.io/msgvault
 
 go 1.27.4
 
-replace github.com/emersion/go-imap/v2 => github.com/salmonumbrella/go-imap/v2 v2.0.0-beta.8.0.20261005161631-b21c765b0236
+replace github.com/emersion/go-imap/v2 => github.com/salmonumbrella/go-imap/v2 v2.0.0-beta.8.0.20261118142609-50879458f474
 
 require (
 	charm.land/bubbles/v2 v2.2.1
