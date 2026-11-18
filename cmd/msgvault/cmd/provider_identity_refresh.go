@@ -49,7 +49,6 @@ func newMessageSyncer(client gmail.API, st *store.Store, opts *msgsync.Options, 
 					if ctx.Err() != nil {
 						return ctx.Err()
 					}
-					continue
 				}
 			}
 			if len(moves) > 0 {

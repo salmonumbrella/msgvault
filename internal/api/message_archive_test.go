@@ -85,7 +85,9 @@ func TestArchiveMessageRouteValidationAndGate(t *testing.T) {
 func TestArchiveWriteOnlyFailureDoesNotRevealMailbox(t *testing.T) {
 	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	port := listener.Addr().(*net.TCPAddr).Port
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	require.True(t, ok)
+	port := addr.Port
 	require.NoError(t, listener.Close())
 	client := imap.NewClient(&imap.Config{Host: "127.0.0.1", Port: port, Username: "user@example.test"}, "fixture")
 	defer func() { _ = client.Close() }()
@@ -103,6 +105,6 @@ func TestArchiveWriteOnlyFailureDoesNotRevealMailbox(t *testing.T) {
 	srv.Router().ServeHTTP(w, req)
 	assert.NotEqual(t, http.StatusOK, w.Code)
 	assert.NotContains(t, w.Body.String(), "Private-Example-Folder")
-	assert.NotContains(t, w.Body.String(), "456")
-	assert.NotContains(t, w.Body.String(), "123")
+	assert.Contains(t, w.Body.String(), `"error":"provider_read_failed"`)
+	assert.Contains(t, w.Body.String(), "Cannot access the IMAP account")
 }

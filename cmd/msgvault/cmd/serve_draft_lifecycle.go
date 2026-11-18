@@ -358,10 +358,30 @@ func (a *storeAPIAdapter) loadManagedDraftSource(ctx context.Context, draft stor
 	if err != nil {
 		return nil, draftReplyError("invalid_source", err)
 	}
-	if err := a.validateManagedDraftSource(draft, source); err != nil {
+	if err := a.validateManagedDraftOwner(ctx, draft, source); err != nil {
 		return nil, err
 	}
 	return source, nil
+}
+
+// validateManagedDraftOwner adds the pending-move fence to the source checks:
+// a draft operation or recovery must not run while a native MOVE of its copy is
+// unresolved.
+func (a *storeAPIAdapter) validateManagedDraftOwner(ctx context.Context, draft store.IMAPDraft, source *store.Source) error {
+	messageIDs := []int64{draft.CurrentMessageID}
+	if draft.Pending != nil {
+		messageIDs = append(messageIDs, draft.Pending.OriginalMessageID)
+	}
+	for _, id := range messageIDs {
+		move, err := a.store.IMAPPendingMoveContext(ctx, draft.SourceID, id)
+		if err != nil {
+			return draftReplyError("local_failed", err)
+		}
+		if move != nil {
+			return draftReplyError("pending_operation", errors.New("an IMAP move of this draft is pending; sync the account first"))
+		}
+	}
+	return a.validateManagedDraftSource(draft, source)
 }
 
 func (a *storeAPIAdapter) validateManagedDraftSource(draft store.IMAPDraft, source *store.Source) error {
@@ -975,7 +995,7 @@ func (a *storeAPIAdapter) authorizeDraftRecovery(
 	if draft.Revision != intent.Revision {
 		return nil, draftReplyError("revision_mismatch", fmt.Errorf("expected revision %d, found %d", intent.Revision, draft.Revision))
 	}
-	if err := a.validateManagedDraftSource(draft, source); err != nil {
+	if err := a.validateManagedDraftOwner(ctx, draft, source); err != nil {
 		return nil, err
 	}
 	return source, nil

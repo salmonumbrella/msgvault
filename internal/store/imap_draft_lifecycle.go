@@ -56,6 +56,8 @@ var imapDrafts = draftTable[IMAPDraft]{
 	originalArgs: func(d IMAPDraft) []any {
 		return []any{d.CurrentMessageID, d.CurrentReceipt.Mailbox, d.CurrentReceipt.UIDValidity, d.CurrentReceipt.UID}
 	},
+	claimWhere: ` AND NOT EXISTS (SELECT 1 FROM imap_pending_moves m
+		WHERE m.source_id = imap_drafts.source_id AND m.message_id = imap_drafts.current_message_id)`,
 	withClaim: func(d IMAPDraft, operation string, raw []byte) IMAPDraft {
 		d.Pending = &IMAPDraftPending{
 			Operation: operation, OriginalMessageID: d.CurrentMessageID,
@@ -459,22 +461,9 @@ func (s *Store) retireIMAPDraftMembershipTx(
 	`, receipt.SourceID, receipt.Mailbox, receipt.UIDValidity, receipt.UID, messageID); err != nil {
 		return fmt.Errorf("retire IMAP draft membership: %w", err)
 	}
-	mailboxes, err := s.imapMembershipMailboxes(ctx, tx, receipt.SourceID, messageID)
+	mailboxes, err := s.rebuildIMAPMailboxLabelsTx(ctx, tx, receipt.SourceID, messageID)
 	if err != nil {
 		return err
-	}
-	labelIDs := make([]int64, 0, len(mailboxes))
-	for _, mailbox := range mailboxes {
-		labelID, err := ensureIMAPMailboxLabel(ctx, tx, receipt.SourceID, mailbox)
-		if err != nil {
-			return err
-		}
-		labelIDs = append(labelIDs, labelID)
-	}
-	if err := s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, messageID, func() error {
-		return replaceMessageLabelsTx(boundQuerier{ctx: ctx, q: tx}, messageID, labelIDs)
-	}); err != nil {
-		return fmt.Errorf("rebuild IMAP draft labels: %w", err)
 	}
 	if len(mailboxes) == 0 {
 		if _, err := tx.ExecContext(ctx, `

@@ -8,7 +8,6 @@ import (
 	"math"
 
 	"go.kenn.io/msgvault/internal/emailtags"
-	"go.kenn.io/msgvault/internal/imapkey"
 )
 
 const imapArchiveSourceType = "imap"
@@ -32,13 +31,22 @@ func (s *Store) CheckIMAPArchiveTargetContext(ctx context.Context, target EmailT
 	if err != nil {
 		return target, fmt.Errorf("read IMAP memberships: %w", err)
 	}
-	if len(copies) == 0 {
-		return target, emailtags.Failure("stale_identity", "no current mailbox copy for this message; run msgvault sync-full for the account without folder filters first", nil, nil)
+	if err := imapCopyCountFailure(len(copies)); err != nil {
+		return target, err
 	}
-	if len(copies) != 1 {
-		return target, emailtags.Failure("stale_identity", "exactly one current copy required; mailbox selection is unavailable", nil, nil)
+	return target, imapDraftIdle(ctx, s.db, "", target.SourceID, target.ID)
+}
+
+// imapCopyCountFailure explains why a message with n current copies cannot be
+// moved; it returns nil for exactly one.
+func imapCopyCountFailure(n int) error {
+	switch n {
+	case 1:
+		return nil
+	case 0:
+		return emailtags.Failure("stale_identity", "no current mailbox copy for this message; run msgvault sync-full for the account without folder filters first", nil, nil)
 	}
-	return target, nil
+	return emailtags.Failure("stale_identity", "exactly one current copy required; mailbox selection is unavailable", nil, nil)
 }
 
 func (s *Store) IMAPPendingMoveContext(ctx context.Context, sourceID, messageID int64) (*IMAPPendingMove, error) {
@@ -52,7 +60,7 @@ func (s *Store) IMAPPendingMoveContext(ctx context.Context, sourceID, messageID 
 	return &moves[0], nil
 }
 
-func checkIMAPMoveSource(ctx context.Context, tx *loggedTx, m IMAPPendingMove) error {
+func (s *Store) checkIMAPMoveSource(ctx context.Context, tx *loggedTx, m IMAPPendingMove) error {
 	var identifier string
 	err := tx.QueryRowContext(ctx, `SELECT identifier FROM sources WHERE id=? AND source_type='imap' AND NOT EXISTS(SELECT 1 FROM source_settings ss WHERE ss.source_id=sources.id AND ss.merged_into_source_id IS NOT NULL)`, m.Target.SourceID).Scan(&identifier)
 	if err != nil {
@@ -61,14 +69,14 @@ func checkIMAPMoveSource(ctx context.Context, tx *loggedTx, m IMAPPendingMove) e
 	if identifier != m.SourceIdentifier {
 		return errors.New("IMAP account identity changed")
 	}
-	return nil
+	return imapDraftIdle(ctx, tx, s.dialect.SelectForUpdate(), m.Target.SourceID, m.Target.ID)
 }
 
 // BeginIMAPMoveContext writes intent before dispatch, under the source lock.
 func (s *Store) BeginIMAPMoveContext(ctx context.Context, m IMAPPendingMove) error {
 	t := m.Target
 	return s.withAttributionTxContext(ctx, attributionLock{Sources: []int64{t.SourceID}}, func(tx *loggedTx) error {
-		if err := checkIMAPMoveSource(ctx, tx, m); err != nil {
+		if err := s.checkIMAPMoveSource(ctx, tx, m); err != nil {
 			return err
 		}
 		var count, exact int
@@ -91,6 +99,34 @@ func (s *Store) BeginIMAPMoveContext(ctx context.Context, m IMAPPendingMove) err
 		_, err = tx.ExecContext(ctx, `INSERT INTO imap_pending_moves(source_id,message_id,source_message_id,source_identifier,old_mailbox,old_uidvalidity,old_uid,destination,destination_uidvalidity) VALUES(?,?,?,?,?,?,?,?,?)`, t.SourceID, t.ID, t.SourceMessageID, m.SourceIdentifier, t.Mailbox, t.UIDValidity, t.UID, m.Destination, m.DestinationUIDValidity)
 		return err
 	})
+}
+
+// imapDraftIdle reads the managed draft that owns the message, as its current
+// copy or a pending edit's original, and refuses while an edit or delete is
+// pending. A transaction passes the dialect's row lock; draft claims refuse a
+// pending move, so either operation sees the other's evidence. The conflict
+// carries no draft or mailbox detail.
+func imapDraftIdle(ctx context.Context, q contextRowQuerier, lock string, sourceID, messageID int64) error {
+	var pending sql.NullString
+	err := q.QueryRowContext(ctx, `SELECT pending_operation FROM imap_drafts WHERE source_id=? AND (current_message_id=? OR pending_original_message_id=?)`+lock, sourceID, messageID, messageID).Scan(&pending)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read managed draft for IMAP move: %w", err)
+	}
+	if pending.Valid {
+		return emailtags.Failure("stale_identity", "a managed draft operation is pending for this message; finish or recover the draft first", nil, ErrIMAPDraftPending)
+	}
+	return nil
+}
+
+// moveIMAPDraftReceiptTx follows a verified move with the managed draft's
+// current receipt, so later edits and deletes address the relocated copy.
+func (s *Store) moveIMAPDraftReceiptTx(ctx context.Context, tx *loggedTx, m IMAPPendingMove) error {
+	t := m.Target
+	_, err := tx.ExecContext(ctx, `UPDATE imap_drafts SET current_mailbox=?, current_uidvalidity=?, current_uid=?, updated_at=`+s.dialect.Now()+` WHERE source_id=? AND current_message_id=? AND current_mailbox=? AND current_uidvalidity=? AND current_uid=?`, m.Destination, m.DestinationUIDValidity, m.DestinationUID, t.SourceID, t.ID, t.Mailbox, t.UIDValidity, t.UID)
+	return err
 }
 
 // SaveIMAPMoveMappingContext persists COPYUID immediately after the response.
@@ -141,7 +177,7 @@ func (s *Store) ReconcileIMAPMoveContext(ctx context.Context, m IMAPPendingMove)
 	}
 	t := m.Target
 	return s.withAttributionTxContext(ctx, attributionLock{Sources: []int64{t.SourceID}}, func(tx *loggedTx) error {
-		if err := checkIMAPMoveSource(ctx, tx, m); err != nil {
+		if err := s.checkIMAPMoveSource(ctx, tx, m); err != nil {
 			return err
 		}
 		var count int
@@ -171,19 +207,10 @@ func (s *Store) ReconcileIMAPMoveContext(ctx context.Context, m IMAPPendingMove)
 		if err := imapMoveRowResult(result, err, "source IMAP membership changed"); err != nil {
 			return err
 		}
-		mailboxes, err := s.imapMembershipMailboxes(ctx, tx, t.SourceID, t.ID)
-		if err != nil {
+		if _, err := s.rebuildIMAPMailboxLabelsTx(ctx, tx, t.SourceID, t.ID); err != nil {
 			return err
 		}
-		labels := make([]int64, 0, len(mailboxes))
-		for _, box := range mailboxes {
-			label, err := ensureIMAPMailboxLabel(ctx, tx, t.SourceID, box)
-			if err != nil {
-				return err
-			}
-			labels = append(labels, label)
-		}
-		if err := s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, t.ID, func() error { return replaceMessageLabelsTx(boundQuerier{ctx: ctx, q: tx}, t.ID, labels) }); err != nil {
+		if err := s.moveIMAPDraftReceiptTx(ctx, tx, m); err != nil {
 			return err
 		}
 		result, err = tx.ExecContext(ctx, `DELETE FROM imap_pending_moves WHERE source_id=? AND message_id=? AND destination_uid=?`, t.SourceID, t.ID, m.DestinationUID)
@@ -267,7 +294,7 @@ func (s *Store) IMAPCurrentCopyContext(ctx context.Context, sourceID int64, key 
 	}
 
 	for _, item := range copies {
-		if imapkey.Format(item.Mailbox, item.UID) == key {
+		if IMAPSourceMessageID(item.Mailbox, item.UID) == key {
 			return item, pending, nil
 		}
 	}

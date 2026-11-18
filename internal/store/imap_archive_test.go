@@ -49,15 +49,6 @@ func TestIMAPArchiveMovePersistence(t *testing.T) {
 	assert.Contains(t, labels, label)
 }
 
-func TestIMAPArchiveMissingCurrentCopyGuidance(t *testing.T) {
-	st, source, id := tagFixture(t, "imap", "INBOX|7")
-	target := store.EmailTagTarget{}
-	target.ID, target.SourceID, target.Provider = id, source.ID, "imap"
-	_, err := st.CheckIMAPArchiveTargetContext(t.Context(), target)
-	require.ErrorContains(t, err, "sync-full")
-	require.ErrorContains(t, err, "without folder filters")
-}
-
 func TestIMAPArchiveInvalidateMapping(t *testing.T) {
 	st, source, id := tagFixture(t, "imap", "INBOX|7")
 	if os.Getenv("MSGVAULT_TEST_DB") != "" {
@@ -94,6 +85,10 @@ func pendingValue(p *store.IMAPPendingMove) store.IMAPPendingMove {
 
 func TestIMAPArchiveRejectsAmbiguousAndChangedEpoch(t *testing.T) {
 	st, source, id := tagFixture(t, "imap", "INBOX|7")
+	missing := store.EmailTagTarget{ID: id, SourceID: source.ID, Provider: "imap"}
+	_, err := st.CheckIMAPArchiveTargetContext(t.Context(), missing)
+	require.ErrorContains(t, err, "sync-full")
+	require.ErrorContains(t, err, "without folder filters")
 	tagMembership(t, st, source.ID, id, "INBOX", 77, 7)
 	target, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)

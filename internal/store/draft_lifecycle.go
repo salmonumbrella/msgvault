@@ -33,6 +33,7 @@ type draftTable[D any] struct {
 	state              func(D) draftState
 	originalArgs       func(D) []any // current message ID, then originalColumns values
 	withClaim          func(draft D, operation string, raw []byte) D
+	claimWhere         string // optional extra claim predicate; a failed match reports errPending
 }
 
 func (t draftTable[D]) validateID(draftID string) error {
@@ -183,7 +184,7 @@ func (t draftTable[D]) claim(ctx context.Context, s *Store, draftID string, revi
 		result, err := tx.ExecContext(ctx, `UPDATE `+t.table+` SET pending_operation = ?, pending_original_message_id = ?, `+
 			assignDraftColumns(t.originalColumns, "?")+`pending_raw = ?, `+assignDraftColumns(t.replacementColumns, "NULL")+
 			`pending_code = NULL, updated_at = `+s.dialect.Now()+`
-			WHERE draft_id = ? AND revision = ? AND pending_operation IS NULL`, append(args, raw, draftID, revision)...)
+			WHERE draft_id = ? AND revision = ? AND pending_operation IS NULL`+t.claimWhere, append(args, raw, draftID, revision)...)
 		if err != nil {
 			return fmt.Errorf("claim %s draft %q: %w", t.provider, draftID, err)
 		}

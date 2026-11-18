@@ -353,10 +353,15 @@ type savedTestIntent struct {
 	move           *ArchiveMove
 	saves          int
 	failInvalidate bool
+	failSave       bool
+	clears         int
 }
 
 func (j *savedTestIntent) Begin(_ context.Context, m ArchiveMove) error { j.move = &m; return nil }
 func (j *savedTestIntent) SaveMapping(_ context.Context, m ArchiveMove) error {
+	if j.failSave {
+		return errors.New("save failed")
+	}
 	j.move = &m
 	j.saves++
 	return nil
@@ -370,7 +375,11 @@ func (j *savedTestIntent) Invalidate(_ context.Context, _ ArchiveMove) error {
 	return nil
 }
 
-func (j *savedTestIntent) Clear(context.Context, ArchiveMove) error { j.move = nil; return nil }
+func (j *savedTestIntent) Clear(context.Context, ArchiveMove) error {
+	j.clears++
+	j.move = nil
+	return nil
+}
 
 func TestArchiveCopyUnusableMappingNeverResends(t *testing.T) {
 	for _, mapping := range []string{"missing", "wrong source"} {
@@ -431,31 +440,6 @@ func (s *refusalSession) Move(w *imapserver.MoveWriter, set imaplib.NumSet, dest
 	return s.status
 }
 
-type refusalJournal struct {
-	move     *ArchiveMove
-	failSave bool
-	clears   int
-}
-
-func (j *refusalJournal) Begin(_ context.Context, m ArchiveMove) error { j.move = &m; return nil }
-func (j *refusalJournal) SaveMapping(_ context.Context, m ArchiveMove) error {
-	if j.failSave {
-		return errors.New("save failed")
-	}
-	j.move = &m
-	return nil
-}
-func (j *refusalJournal) Invalidate(_ context.Context, _ ArchiveMove) error {
-	j.move.DestinationUID = 0
-	return nil
-}
-
-func (j *refusalJournal) Clear(_ context.Context, _ ArchiveMove) error {
-	j.clears++
-	j.move = nil
-	return nil
-}
-
 func TestArchiveMoveRefusalKeepsOnlyUncertainIntents(t *testing.T) {
 	for _, tc := range []struct {
 		name                        string
@@ -496,7 +480,7 @@ func TestArchiveMoveRefusalKeepsOnlyUncertainIntents(t *testing.T) {
 				return err
 			}))
 			identity := DraftReceipt{Mailbox: "INBOX", UIDValidity: epoch, UID: 1}
-			journal := &refusalJournal{failSave: tc.failSave}
+			journal := &savedTestIntent{failSave: tc.failSave}
 			_, _, err = client.ArchiveCopy(t.Context(), journal, identity, nil, true, false)
 			require.Error(t, err)
 			assert.Equal(t, tc.retained, journal.move != nil)

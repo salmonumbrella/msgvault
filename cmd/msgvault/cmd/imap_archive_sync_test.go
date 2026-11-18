@@ -18,7 +18,7 @@ import (
 	"go.kenn.io/msgvault/internal/testutil"
 )
 
-func TestIMAPArchiveFilteredSyncKeepsIdentity(t *testing.T) {
+func TestIMAPArchiveFilteredSyncAndReconcileFailure(t *testing.T) {
 	addr, _ := testutil.StartIMAPMemServerForDrafts(t, testutil.IMAPDraftServerOptions{MessagesPerMailbox: map[string]int{"INBOX": 1, "Archiv": 0}, Caps: imapapi.CapSet{imapapi.CapIMAP4rev1: {}, imapapi.CapMove: {}, imapapi.CapUIDPlus: {}}})
 	host, portText, err := net.SplitHostPort(addr)
 	require.NoError(t, err)

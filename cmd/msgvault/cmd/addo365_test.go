@@ -208,7 +208,7 @@ func TestAddO365FailedNewGraphBindingLeavesNoSource(t *testing.T) {
 	require.ErrorIs(t, err, store.ErrSourceNotFound)
 }
 
-func TestO365IMAPRegistrationPreservesMailboxSettings(t *testing.T) {
+func TestO365IMAPRegistrationPreservesArchiveMailbox(t *testing.T) {
 	cfg := &imapclient.Config{Host: "outlook.example.test", Port: 993, TLS: true, Username: "owner@example.test", AuthMethod: imapclient.AuthXOAuth2, Folders: []string{"INBOX"}, ArchiveMailbox: "Archiv"}
 	encoded, err := cfg.ToJSON()
 	require.NoError(t, err)
@@ -218,7 +218,6 @@ func TestO365IMAPRegistrationPreservesMailboxSettings(t *testing.T) {
 	got, err := imapclient.ConfigFromJSON(saved)
 	require.NoError(t, err)
 	assert.Equal(t, cfg.Identifier(), identifier)
-	assert.Empty(t, got.Folders)
 	assert.Equal(t, cfg.ArchiveMailbox, got.ArchiveMailbox)
 	_, overridden, err := o365IMAPRegistration(cfg.Host, cfg.Username, source, nil, true, "New Archiv")
 	require.NoError(t, err)

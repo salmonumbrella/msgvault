@@ -8,7 +8,6 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"go.kenn.io/msgvault/internal/imapkey"
 	"slices"
 	"strconv"
 	"strings"
@@ -147,7 +146,7 @@ func (s *Store) readIMAPMessageAliases(
 		if err := rows.Scan(&uid, &canonicalSourceMessageID); err != nil {
 			return fmt.Errorf("scan IMAP source message alias: %w", err)
 		}
-		aliases[imapkey.Format(mailbox, uid)] = canonicalSourceMessageID
+		aliases[IMAPSourceMessageID(mailbox, uid)] = canonicalSourceMessageID
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate IMAP source message aliases: %w", err)
@@ -495,22 +494,9 @@ func (s *Store) applyIMAPMailboxDeltas(
 			if _, ok := protectedIDs[messageID]; ok {
 				continue
 			}
-			mailboxes, err := s.imapMembershipMailboxes(ctx, tx, sourceID, messageID)
+			mailboxes, err := s.rebuildIMAPMailboxLabelsTx(ctx, tx, sourceID, messageID)
 			if err != nil {
 				return err
-			}
-			labelIDs := make([]int64, 0, len(mailboxes))
-			for _, mailbox := range mailboxes {
-				labelID, err := ensureIMAPMailboxLabel(ctx, tx, sourceID, mailbox)
-				if err != nil {
-					return err
-				}
-				labelIDs = append(labelIDs, labelID)
-			}
-			if err := s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, messageID, func() error {
-				return replaceMessageLabelsTx(boundQuerier{ctx: ctx, q: tx}, messageID, labelIDs)
-			}); err != nil {
-				return fmt.Errorf("replace labels for IMAP message %d: %w", messageID, err)
 			}
 			if len(mailboxes) == 0 {
 				if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
@@ -1333,6 +1319,31 @@ func (s *Store) imapMembershipMailboxes(
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate memberships for IMAP message %d: %w", messageID, err)
+	}
+	return mailboxes, nil
+}
+
+// rebuildIMAPMailboxLabelsTx replaces a message's labels with one label per
+// live mailbox membership and returns those mailboxes.
+func (s *Store) rebuildIMAPMailboxLabelsTx(
+	ctx context.Context, tx *loggedTx, sourceID, messageID int64,
+) ([]string, error) {
+	mailboxes, err := s.imapMembershipMailboxes(ctx, tx, sourceID, messageID)
+	if err != nil {
+		return nil, err
+	}
+	labelIDs := make([]int64, 0, len(mailboxes))
+	for _, mailbox := range mailboxes {
+		labelID, err := ensureIMAPMailboxLabel(ctx, tx, sourceID, mailbox)
+		if err != nil {
+			return nil, err
+		}
+		labelIDs = append(labelIDs, labelID)
+	}
+	if err := s.refreshAccountAttributionIfOutboundChangedTx(ctx, tx, messageID, func() error {
+		return replaceMessageLabelsTx(boundQuerier{ctx: ctx, q: tx}, messageID, labelIDs)
+	}); err != nil {
+		return nil, fmt.Errorf("replace labels for IMAP message %d: %w", messageID, err)
 	}
 	return mailboxes, nil
 }

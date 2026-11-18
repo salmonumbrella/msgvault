@@ -28,7 +28,7 @@ The server must advertise one selectable Archive role. To choose a different
 mailbox, pass `--archive-mailbox "Mailbox name"` when running `add-imap` or
 `add-o365` for this account. The mailbox must already exist and cannot be
 INBOX, Trash, Junk, Sent, or Drafts. No mailbox is created automatically.
-Complete `msgvault sync-full` for the account without folder filters before archiving. Folder sync filters do not prevent restoring a moved copy.
+If msgvault reports no current mailbox copy, run `msgvault sync-full` for the account without folder filters and retry. Folder sync filters do not prevent restoring a moved copy.
 
 If a move's outcome is uncertain, including a disputed receipt, sync and inspect both folders. The daemon
 keeps a returned UID mapping and verifies it before reconciling the local
@@ -411,8 +411,10 @@ msgvault draft-recover <draft-id> --revision 1 --json
 ```
 
 Edit and delete require the same daemon-host `[[imap.drafts]]` grant and provider
-configuration as draft creation. Policy changes take effect after a daemon
-restart. Recovery uses the same policy after it checks the delegated action
+configuration as draft creation. When an archive or restore moves a managed draft,
+its receipt follows the verified move. Editing, deletion, and recovery still require
+the current mailbox to match the configured draft mailbox grant. Policy changes
+take effect after a daemon restart. Recovery also checks the delegated action
 grant. None of these commands sends mail.
 
 Editing supports plain-text drafts without attachments. `--body=` sets an empty

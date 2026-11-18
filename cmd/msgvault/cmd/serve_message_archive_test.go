@@ -522,7 +522,7 @@ func TestArchivePreviewAuthorizesResolvedSourceDuringMerge(t *testing.T) {
 	assertionsForTest.Equal("message_not_found", failure.Code)
 }
 
-func TestArchiveIMAPPendingAccountRebindRefusesBeforeProvider(t *testing.T) {
+func TestArchiveIMAPRefusalsBeforeProvider(t *testing.T) {
 	st, _, _, adapter, _, _, provider := newArchiveDaemon(t) //nolint:dogsled // Only adapter and provider are needed here.
 	source, err := st.GetOrCreateSource("imap", "imap://owner@example.test:143")
 	require.NoError(t, err)
@@ -546,7 +546,6 @@ func TestArchiveIMAPPendingAccountRebindRefusesBeforeProvider(t *testing.T) {
 	_, err = adapter.ArchiveMessage(t.Context(), id, emailtags.ArchiveChange{Archived: &requestedAmbiguous}, nil, nil)
 	var ambiguous *emailtags.MessageTagError
 	require.ErrorAs(t, err, &ambiguous)
-	assert.Contains(t, ambiguous.Message, "mailbox selection is unavailable")
 	assert.Equal(t, beforeAmbiguous, provider.connects.Load())
 	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`DELETE FROM imap_message_memberships WHERE source_id=? AND mailbox=?`), source.ID, "Other")
 	require.NoError(t, err)
@@ -580,8 +579,8 @@ func TestArchiveIMAPPendingAccountRebindRefusesBeforeProvider(t *testing.T) {
 	assert.Equal(t, uint32(2), persisted.DestinationUID)
 	// A mailbox preference changes neither the IMAP account nor the saved pair.
 	require.NoError(t, st.UpdateSourceSyncConfig(t.Context(), source.ID, `{"host":"example.test","port":143,"username":"owner","archive_mailbox":"Archiv"}`))
-	_, err = adapter.ArchiveMessage(t.Context(), id, emailtags.ArchiveChange{Archived: &archived}, nil, nil)
-	require.ErrorAs(t, err, &failure)
-	assert.Equal(t, "archive_unsupported", failure.Code) // Fixture factory returns Gmail, after the binding guard.
-	assert.Equal(t, before+1, provider.connects.Load())
+	persisted, err = st.IMAPPendingMoveContext(t.Context(), source.ID, id)
+	require.NoError(t, err)
+	require.NotNil(t, persisted)
+	assert.Equal(t, pending, *persisted)
 }

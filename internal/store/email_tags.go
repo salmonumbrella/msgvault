@@ -8,7 +8,6 @@ import (
 	"fmt"
 
 	"go.kenn.io/msgvault/internal/emailtags"
-	"go.kenn.io/msgvault/internal/imapkey"
 )
 
 // EmailTagTarget binds one archived message to its exact provider identity.
@@ -74,7 +73,7 @@ func (s *Store) emailTagTargetContext(ctx context.Context, id int64, mailbox str
 		count++
 		sole = target
 		sole.Mailbox, sole.UIDValidity, sole.UID = name, epoch, uid
-		if imapkey.Format(name, uid) == target.SourceMessageID {
+		if IMAPSourceMessageID(name, uid) == target.SourceMessageID {
 			target.Mailbox, target.UIDValidity, target.UID = name, epoch, uid
 			selected = true
 		}
