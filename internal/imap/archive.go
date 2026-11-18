@@ -222,7 +222,7 @@ func (c *Client) ArchiveCopy(ctx context.Context, journal ArchiveJournal, target
 		if _, ok := errors.AsType[*emailtags.MessageTagError](err); ok {
 			return result, pending, err
 		}
-		return result, pending, archiveFailure("provider_read_failed", fmt.Sprintf("Cannot access IMAP mailbox %q", target.Mailbox), err)
+		return result, pending, archiveFailure("provider_read_failed", "Cannot access the IMAP account", err)
 	}
 	return result, pending, nil
 }

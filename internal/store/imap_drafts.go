@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"go.kenn.io/msgvault/internal/imapkey"
 	"strings"
 	"time"
 )
@@ -203,5 +204,5 @@ func newIMAPDraftID() (string, error) {
 
 // IMAPDraftSourceMessageID returns the composite provider key used by sync.
 func IMAPDraftSourceMessageID(receipt IMAPDraftReceipt) string {
-	return fmt.Sprintf("%s|%d", receipt.Mailbox, receipt.UID)
+	return imapkey.Format(receipt.Mailbox, receipt.UID)
 }

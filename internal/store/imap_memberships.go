@@ -8,6 +8,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"go.kenn.io/msgvault/internal/imapkey"
 	"slices"
 	"strconv"
 	"strings"
@@ -146,7 +147,7 @@ func (s *Store) readIMAPMessageAliases(
 		if err := rows.Scan(&uid, &canonicalSourceMessageID); err != nil {
 			return fmt.Errorf("scan IMAP source message alias: %w", err)
 		}
-		aliases[fmt.Sprintf("%s|%d", mailbox, uid)] = canonicalSourceMessageID
+		aliases[imapkey.Format(mailbox, uid)] = canonicalSourceMessageID
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate IMAP source message aliases: %w", err)

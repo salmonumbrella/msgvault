@@ -138,14 +138,13 @@ func (e *Executor) deleteOne(ctx context.Context, sourceID int64, gmailID string
 	})
 	var identity imaplib.DraftReceipt
 	if exact {
-		target, hasCopy, pending, resolveErr := e.store.IMAPCurrentCopyContext(ctx, sourceID, gmailID)
+		target, pending, resolveErr := e.store.IMAPCurrentCopyContext(ctx, sourceID, gmailID)
 		if resolveErr != nil {
 			return resultFailed, resolveErr
 		}
 		if pending {
 			return resultFailed, errors.New("IMAP move is pending")
 		}
-		exact = hasCopy
 		identity = imaplib.DraftReceipt{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
 	}
 	switch {

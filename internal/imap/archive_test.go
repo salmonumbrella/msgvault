@@ -536,6 +536,7 @@ func (l taggedReceiptListener) Accept() (net.Conn, error) {
 
 type taggedReceiptConn struct {
 	net.Conn
+
 	epoch *atomic.Uint32
 	hits  *atomic.Int32
 }
@@ -654,4 +655,12 @@ func TestArchiveRepeatedCopyUID(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCompositeIDMailboxWithSeparator(t *testing.T) {
+	encoded := compositeID("Folder|Child", 42)
+	mailbox, uid, err := parseCompositeID(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, "Folder|Child", mailbox)
+	assert.EqualValues(t, 42, uid)
 }

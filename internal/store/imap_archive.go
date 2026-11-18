@@ -8,6 +8,7 @@ import (
 	"math"
 
 	"go.kenn.io/msgvault/internal/emailtags"
+	"go.kenn.io/msgvault/internal/imapkey"
 )
 
 const imapArchiveSourceType = "imap"
@@ -27,7 +28,7 @@ func (s *Store) CheckIMAPArchiveTargetContext(ctx context.Context, target EmailT
 	if target.Provider != imapArchiveSourceType {
 		return target, errors.New("source is not IMAP")
 	}
-	_, copies, err := s.imapCurrentCopies(ctx, target.SourceID, target.ID)
+	copies, err := s.imapCurrentCopies(ctx, target.SourceID, target.ID)
 	if err != nil {
 		return target, fmt.Errorf("read IMAP memberships: %w", err)
 	}
@@ -226,53 +227,52 @@ func loadIMAPPendingMoves(ctx context.Context, q contextRowsQuerier, sourceID, m
 	return moves, rows.Err()
 }
 
-func (s *Store) imapCurrentCopies(ctx context.Context, sourceID, messageID int64) (bool, []EmailTagTarget, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT m.mailbox,m.uidvalidity,m.uid, f.uidvalidity IS NOT NULL FROM imap_message_memberships m LEFT JOIN imap_folder_state f ON f.source_id=m.source_id AND f.mailbox=m.mailbox AND f.uidvalidity=m.uidvalidity WHERE m.source_id=? AND m.message_id=?`, sourceID, messageID)
+func (s *Store) imapCurrentCopies(ctx context.Context, sourceID, messageID int64) ([]EmailTagTarget, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT m.mailbox,m.uidvalidity,m.uid FROM imap_message_memberships m JOIN imap_folder_state f ON f.source_id=m.source_id AND f.mailbox=m.mailbox AND f.uidvalidity=m.uidvalidity WHERE m.source_id=? AND m.message_id=?`, sourceID, messageID)
 	if err != nil {
-		return false, nil, err
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var has bool
 	var copies []EmailTagTarget
 	for rows.Next() {
 		var item EmailTagTarget
-		var current bool
-		if err := rows.Scan(&item.Mailbox, &item.UIDValidity, &item.UID, &current); err != nil {
-			return false, nil, err
+		if err := rows.Scan(&item.Mailbox, &item.UIDValidity, &item.UID); err != nil {
+			return nil, err
 		}
-		has = true
-		if current {
-			copies = append(copies, item)
-		}
+		copies = append(copies, item)
 	}
-	return has, copies, rows.Err()
+	return copies, rows.Err()
 }
 
 // IMAPCurrentCopyContext resolves the current membership without guessing among copies.
-func (s *Store) IMAPCurrentCopyContext(ctx context.Context, sourceID int64, key string) (EmailTagTarget, bool, bool, error) {
+func (s *Store) IMAPCurrentCopyContext(ctx context.Context, sourceID int64, key string) (EmailTagTarget, bool, error) {
 	var target EmailTagTarget
 	var pending bool
 	err := s.db.QueryRowContext(ctx, `SELECT id, EXISTS(SELECT 1 FROM imap_pending_moves p WHERE p.source_id=messages.source_id AND p.message_id=messages.id) FROM messages WHERE source_id=? AND source_message_id=?`, sourceID, key).Scan(&target.ID, &pending)
 	if errors.Is(err, sql.ErrNoRows) {
-		return target, false, false, nil
+		return target, false, errors.New("no current IMAP copy; run msgvault sync-full without folder filters")
 	}
 	if err != nil {
-		return target, false, false, err
+		return target, false, err
 	}
-	has, copies, err := s.imapCurrentCopies(ctx, sourceID, target.ID)
+	copies, err := s.imapCurrentCopies(ctx, sourceID, target.ID)
 	if err != nil {
-		return target, has, pending, err
+		return target, pending, err
 	}
-	if !has {
-		return target, false, pending, nil
+	if len(copies) == 0 {
+		if pending {
+			return target, pending, nil
+		}
+		return target, pending, errors.New("no current IMAP copy; run msgvault sync-full without folder filters")
 	}
+
 	for _, item := range copies {
-		if fmt.Sprintf("%s|%d", item.Mailbox, item.UID) == key {
-			return item, true, pending, nil
+		if imapkey.Format(item.Mailbox, item.UID) == key {
+			return item, pending, nil
 		}
 	}
 	if len(copies) != 1 {
-		return target, true, pending, errors.New("IMAP current copy is stale or ambiguous")
+		return target, pending, errors.New("IMAP current copy is stale or ambiguous")
 	}
-	return copies[0], true, pending, nil
+	return copies[0], pending, nil
 }

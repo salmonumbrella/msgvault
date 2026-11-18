@@ -21,6 +21,7 @@ import (
 	"go.kenn.io/msgvault/internal/export"
 	"go.kenn.io/msgvault/internal/gmail"
 	"go.kenn.io/msgvault/internal/identityops"
+	"go.kenn.io/msgvault/internal/imapkey"
 	"go.kenn.io/msgvault/internal/mime"
 	"go.kenn.io/msgvault/internal/rederive"
 	"go.kenn.io/msgvault/internal/remoteimage"
@@ -1448,9 +1449,9 @@ func (s *Syncer) full(
 		for _, m := range moves {
 			g := scoped.failedRelocationGuards
 			g.add(gmail.MessageRelocationTarget{InternalID: m.Target.ID, SourceMessageID: m.Target.SourceMessageID})
-			g.bySourceMessageID[fmt.Sprintf("%s|%d", m.Target.Mailbox, m.Target.UID)] = m.Target.ID
+			g.bySourceMessageID[imapkey.Format(m.Target.Mailbox, m.Target.UID)] = m.Target.ID
 			if m.DestinationUID != 0 {
-				g.bySourceMessageID[fmt.Sprintf("%s|%d", m.Destination, m.DestinationUID)] = m.Target.ID
+				g.bySourceMessageID[imapkey.Format(m.Destination, m.DestinationUID)] = m.Target.ID
 			}
 		}
 	}

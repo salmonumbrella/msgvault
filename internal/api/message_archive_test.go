@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"go.kenn.io/msgvault/internal/apiprotocol"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/emailtags"
+	"go.kenn.io/msgvault/internal/imap"
 )
 
 type archiveHTTPStore struct {
@@ -78,4 +80,29 @@ func TestArchiveMessageRouteValidationAndGate(t *testing.T) {
 	assertionsForTest.Equal(http.StatusOK, preview.Code, preview.Body.String())
 	write := call("7", `{"archived":true}`)
 	assertionsForTest.Equal(http.StatusServiceUnavailable, write.Code, write.Body.String())
+}
+
+func TestArchiveWriteOnlyFailureDoesNotRevealMailbox(t *testing.T) {
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := listener.Addr().(*net.TCPAddr).Port
+	require.NoError(t, listener.Close())
+	client := imap.NewClient(&imap.Config{Host: "127.0.0.1", Port: port, Username: "user@example.test"}, "fixture")
+	defer func() { _ = client.Close() }()
+	_, _, providerErr := client.ArchiveCopy(t.Context(), nil, imap.DraftReceipt{Mailbox: "Private-Example-Folder", UIDValidity: 456, UID: 123}, nil, true, false)
+	require.Error(t, providerErr)
+	st := &archiveHTTPStore{fail: providerErr}
+	srv := NewServerWithOptions(ServerOptions{Config: &config.Config{Server: config.ServerConfig{APIKey: "owner", AgentAccess: true}}, Store: st, Logger: testLogger()})
+	t.Cleanup(srv.agentGrants.Close)
+	_, secret, _, err := srv.agentGrants.Issue("writer", []agentgrant.Permission{agentgrant.PermissionMessageArchive}, []agentgrant.SourceRef{{ID: 1, Type: "imap", Identifier: "user@example.test"}}, time.Time{})
+	require.NoError(t, err)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/messages/7/archive", strings.NewReader(`{"archived":true}`))
+	req.Header.Set(apiprotocol.AgentTokenHeader, secret)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	assert.NotEqual(t, http.StatusOK, w.Code)
+	assert.NotContains(t, w.Body.String(), "Private-Example-Folder")
+	assert.NotContains(t, w.Body.String(), "456")
+	assert.NotContains(t, w.Body.String(), "123")
 }

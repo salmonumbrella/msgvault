@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"go.kenn.io/msgvault/internal/imapkey"
 	"io"
 	"log/slog"
 	"net"
@@ -1766,9 +1767,7 @@ func (c *Client) listMailboxNames(ctx context.Context) ([]string, error) {
 }
 
 // compositeID builds a message identifier as "mailbox|uid".
-func compositeID(mailbox string, uid imap.UID) string {
-	return mailbox + "|" + strconv.FormatUint(uint64(uid), 10)
-}
+func compositeID(mailbox string, uid imap.UID) string { return imapkey.Format(mailbox, uint32(uid)) }
 
 // parseCompositeID splits a composite message ID into mailbox and UID.
 func parseCompositeID(id string) (mailbox string, uid imap.UID, err error) {
@@ -2018,7 +2017,7 @@ func (c *Client) RemoveCopy(ctx context.Context, identity DraftReceipt, trash bo
 			return err
 		}
 		if !exists {
-			return &gmailapi.NotFoundError{Path: fmt.Sprintf("%s|%d", identity.Mailbox, identity.UID)}
+			return &gmailapi.NotFoundError{Path: imapkey.Format(identity.Mailbox, identity.UID)}
 		}
 		uidSet := imap.UIDSetNum(imap.UID(identity.UID))
 		if trash {

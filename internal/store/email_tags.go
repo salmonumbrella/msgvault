@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"go.kenn.io/msgvault/internal/emailtags"
+	"go.kenn.io/msgvault/internal/imapkey"
 )
 
 // EmailTagTarget binds one archived message to its exact provider identity.
@@ -58,7 +59,7 @@ func (s *Store) emailTagTargetContext(ctx context.Context, id int64, mailbox str
 		}
 		return target, nil
 	}
-	_, copies, err := s.imapCurrentCopies(ctx, target.SourceID, id)
+	copies, err := s.imapCurrentCopies(ctx, target.SourceID, id)
 	if err != nil {
 		return target, fmt.Errorf("resolve IMAP tag membership: %w", err)
 	}
@@ -73,7 +74,7 @@ func (s *Store) emailTagTargetContext(ctx context.Context, id int64, mailbox str
 		count++
 		sole = target
 		sole.Mailbox, sole.UIDValidity, sole.UID = name, epoch, uid
-		if fmt.Sprintf("%s|%d", name, uid) == target.SourceMessageID {
+		if imapkey.Format(name, uid) == target.SourceMessageID {
 			target.Mailbox, target.UIDValidity, target.UID = name, epoch, uid
 			selected = true
 		}
