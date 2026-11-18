@@ -295,7 +295,26 @@ func (s *Store) applyIMAPMailboxDeltas(
 		if err != nil {
 			return err
 		}
-		resolver := imapMembershipResolver{ctx: ctx, tx: tx, sourceID: sourceID, sqlite: !s.IsPostgreSQL()}
+		protected := make(map[string]map[imapMembershipUID]struct{})
+		protectedIDs := make(map[int64]struct{})
+		moves, err := loadIMAPPendingMoves(ctx, tx, sourceID, 0)
+		if err != nil {
+			return err
+		}
+		for _, m := range moves {
+			protectedIDs[m.Target.ID] = struct{}{}
+			if protected[m.Target.Mailbox] == nil {
+				protected[m.Target.Mailbox] = make(map[imapMembershipUID]struct{})
+			}
+			protected[m.Target.Mailbox][imapMembershipUID{uidValidity: m.Target.UIDValidity, uid: m.Target.UID}] = struct{}{}
+			if m.DestinationUID != 0 {
+				if protected[m.Destination] == nil {
+					protected[m.Destination] = make(map[imapMembershipUID]struct{})
+				}
+				protected[m.Destination][imapMembershipUID{uidValidity: m.DestinationUIDValidity, uid: m.DestinationUID}] = struct{}{}
+			}
+		}
+		resolver := imapMembershipResolver{ctx: ctx, tx: tx, sourceID: sourceID, sqlite: !s.IsPostgreSQL(), protected: protectedIDs}
 		if err := resolver.primeIdentities(ctx, normalizedDeltas); err != nil {
 			return err
 		}
@@ -325,7 +344,7 @@ func (s *Store) applyIMAPMailboxDeltas(
 			trashRole = `l.source_label_id IN (` + placeholders + `)`
 		}
 		if err := retireAbsentIMAPMailboxes(
-			ctx, tx, sourceID, currentMailboxes, generations, affected,
+			ctx, tx, sourceID, currentMailboxes, generations, affected, protected,
 		); err != nil {
 			return err
 		}
@@ -352,13 +371,16 @@ func (s *Store) applyIMAPMailboxDeltas(
 				// This runs before any insert, as the wholesale delete did.
 				if err := deleteUnobservedIMAPMemberships(
 					ctx,
-					tx, sourceID, normalized.mailbox, stored, observed, affected,
+					tx, sourceID, normalized.mailbox, stored, observed, affected, protected[normalized.mailbox],
 				); err != nil {
 					return err
 				}
 			}
 
 			for _, uid := range delta.VanishedUIDs {
+				if _, ok := protected[normalized.mailbox][imapMembershipUID{uidValidity: normalized.uidValidity, uid: uid}]; ok {
+					continue
+				}
 				if err := captureIMAPMembershipMessageIDs(
 					ctx,
 					tx, affected,
@@ -378,6 +400,9 @@ func (s *Store) applyIMAPMailboxDeltas(
 			}
 
 			for _, observation := range delta.Memberships {
+				if _, ok := protected[normalized.mailbox][imapMembershipUID{uidValidity: normalized.uidValidity, uid: observation.UID}]; ok {
+					continue
+				}
 				observation.Mailbox = normalized.mailbox
 				observation.UIDValidity = normalized.uidValidity
 				messageID, err := resolver.resolve(ctx, observation)
@@ -465,6 +490,9 @@ func (s *Store) applyIMAPMailboxDeltas(
 		}
 
 		for _, messageID := range sortedIMAPMessageIDs(affected) {
+			if _, ok := protectedIDs[messageID]; ok {
+				continue
+			}
 			mailboxes, err := s.imapMembershipMailboxes(ctx, tx, sourceID, messageID)
 			if err != nil {
 				return err
@@ -582,9 +610,13 @@ func deleteUnobservedIMAPMemberships(
 	stored map[imapMembershipUID]storedIMAPMembership,
 	observed map[imapMembershipUID]struct{},
 	affected map[int64]struct{},
+	protected map[imapMembershipUID]struct{},
 ) error {
 	keys := make([]imapMembershipUID, 0, len(stored))
 	for key, prior := range stored {
+		if _, ok := protected[key]; ok {
+			continue
+		}
 		if _, kept := observed[key]; kept {
 			continue
 		}
@@ -770,6 +802,7 @@ func retireAbsentIMAPMailboxes(
 	current map[string]struct{},
 	generations []imapMembershipUIDGeneration,
 	affected map[int64]struct{},
+	protected map[string]map[imapMembershipUID]struct{},
 ) error {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT mailbox FROM imap_folder_state WHERE source_id = ?
@@ -804,19 +837,12 @@ func retireAbsentIMAPMailboxes(
 	}
 
 	for mailbox := range retired {
-		if err := captureIMAPMembershipMessageIDs(
-			ctx,
-			tx, affected,
-			`SELECT message_id FROM imap_message_memberships WHERE source_id = ? AND mailbox = ?`,
-			sourceID, mailbox,
-		); err != nil {
-			return fmt.Errorf("capture retired memberships for mailbox %q: %w", mailbox, err)
+		stored, err := loadIMAPMailboxMemberships(ctx, tx, sourceID, mailbox)
+		if err != nil {
+			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM imap_message_memberships
-			WHERE source_id = ? AND mailbox = ?
-		`, sourceID, mailbox); err != nil {
-			return fmt.Errorf("retire IMAP memberships for mailbox %q: %w", mailbox, err)
+		if err := deleteUnobservedIMAPMemberships(ctx, tx, sourceID, mailbox, stored, nil, affected, protected[mailbox]); err != nil {
+			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM imap_folder_state
@@ -898,6 +924,7 @@ func captureIMAPMembershipMessageIDs(
 }
 
 type imapMembershipResolver struct {
+	protected         map[int64]struct{}
 	ctx               context.Context
 	tx                *loggedTx
 	sourceID          int64
@@ -1002,6 +1029,9 @@ func (r *imapMembershipResolver) retireMailboxKeys(ctx context.Context, mailbox 
 		if err := rows.Scan(&c.id, &c.key, &c.deleted, &memberships, &old, &protected); err != nil {
 			_ = rows.Close()
 			return err
+		}
+		if _, ok := r.protected[c.id]; ok {
+			continue
 		}
 		separator := strings.LastIndexByte(c.key, '|')
 		if separator < 0 || c.key[:separator] != mailbox {

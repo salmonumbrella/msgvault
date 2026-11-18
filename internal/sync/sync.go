@@ -748,9 +748,8 @@ func (s *Syncer) processBatch(ctx context.Context, syncID, sourceID int64, listR
 	var existingCount int
 	inconclusiveRefreshes := make(map[string]inconclusiveLabelRefresh)
 	for _, id := range messageIDs {
-		if existing, exists := existingMap[id]; exists &&
-			(s.relocationCompositeProtected(id) ||
-				s.relocationRowProtectedByID(existing.ID)) {
+		if existing, exists := existingMap[id]; s.relocationCompositeProtected(id) ||
+			(exists && s.relocationRowProtectedByID(existing.ID)) {
 			// A failed relocation target keeps its keys and row out of
 			// ordinary routing entirely: label refresh, preferred rekey
 			// through a saved alias, UID-reuse invalidation, and dedup-stub
@@ -1439,6 +1438,22 @@ func (s *Syncer) full(
 	scoped := *s
 	scoped.store = s.store.ScopedToSync(source.ID, state.syncID)
 	scoped.failedRelocationGuards = newFailedRelocationGuards()
+	if s.opts.SourceType == sourceTypeIMAP {
+		moves, loadErr := s.store.IMAPPendingMovesContext(ctx, source.ID)
+		if loadErr != nil {
+			s.failStoppedSync(state.syncID, loadErr)
+			return nil, fmt.Errorf("load pending IMAP moves: %w", loadErr)
+		}
+		for _, m := range moves {
+			g := scoped.failedRelocationGuards
+			g.add(gmail.MessageRelocationTarget{InternalID: m.Target.ID, SourceMessageID: m.Target.SourceMessageID})
+			g.bySourceMessageID[fmt.Sprintf("%s|%d", m.Target.Mailbox, m.Target.UID)] = m.Target.ID
+			if m.DestinationUID != 0 {
+				g.bySourceMessageID[fmt.Sprintf("%s|%d", m.Destination, m.DestinationUID)] = m.Target.ID
+			}
+		}
+	}
+
 	scoped.requireLabelRefresh = reconcilePresence
 	s = &scoped
 	summary.SyncRunID = state.syncID

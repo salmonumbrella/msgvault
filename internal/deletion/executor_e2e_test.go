@@ -110,7 +110,7 @@ func (f *e2eFixture) upsertAttachment(gmailID, filename, storagePath, contentHas
 func (f *e2eFixture) countLive(sourceID int64) int {
 	f.t.Helper()
 	var n int
-	err := f.store.DB().QueryRow(f.store.Rebind(
+	err := f.store.DB().QueryRowContext(f.t.Context(), f.store.Rebind(
 		`SELECT COUNT(*) FROM messages WHERE source_id = ? AND `+
 			store.LiveMessagesWhere("", true),
 	), sourceID).Scan(&n)
@@ -121,7 +121,7 @@ func (f *e2eFixture) countLive(sourceID int64) int {
 func (f *e2eFixture) countTotal(sourceID int64) int {
 	f.t.Helper()
 	var n int
-	err := f.store.DB().QueryRow(
+	err := f.store.DB().QueryRowContext(f.t.Context(),
 		f.store.Rebind(`SELECT COUNT(*) FROM messages WHERE source_id = ?`),
 		sourceID,
 	).Scan(&n)
@@ -132,7 +132,7 @@ func (f *e2eFixture) countTotal(sourceID int64) int {
 func (f *e2eFixture) attachmentRowsForMessage(gmailID string) int {
 	f.t.Helper()
 	var n int
-	err := f.store.DB().QueryRow(f.store.Rebind(
+	err := f.store.DB().QueryRowContext(f.t.Context(), f.store.Rebind(
 		`SELECT COUNT(*) FROM attachments a
 		 JOIN messages m ON m.id = a.message_id
 		 WHERE m.source_message_id = ?`,
@@ -212,12 +212,12 @@ func TestExecutor_E2E_VersionTwoScopesDuplicateRemoteID(t *testing.T) {
 			require.NoError(tt.execute(tc, manifest.ID))
 
 			var otherDeletedAt any
-			require.NoError(f.store.DB().QueryRow(
+			require.NoError(f.store.DB().QueryRowContext(f.t.Context(),
 				f.store.Rebind(`SELECT deleted_from_source_at FROM messages WHERE id = ?`), otherRowID,
 			).Scan(&otherDeletedAt))
 			assert.Nil(otherDeletedAt)
 			var targetCount int
-			require.NoError(f.store.DB().QueryRow(
+			require.NoError(f.store.DB().QueryRowContext(f.t.Context(),
 				f.store.Rebind(`SELECT COUNT(*) FROM messages WHERE id = ?`), targetRowID,
 			).Scan(&targetCount))
 			assert.Equal(1, targetCount)

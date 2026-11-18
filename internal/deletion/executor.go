@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go.kenn.io/msgvault/internal/gmail"
+	imaplib "go.kenn.io/msgvault/internal/imap"
 	"go.kenn.io/msgvault/internal/msgraph"
 	"go.kenn.io/msgvault/internal/store"
 )
@@ -132,9 +133,30 @@ const (
 // or resultFatal for scope errors that should halt execution.
 func (e *Executor) deleteOne(ctx context.Context, sourceID int64, gmailID string, method Method) (deleteResult, error) {
 	var err error
-	if method == MethodTrash {
+	client, exact := e.client.(interface {
+		TrashCopy(ctx context.Context, identity imaplib.ArchiveCopyIdentity) error
+		DeleteCopy(ctx context.Context, identity imaplib.ArchiveCopyIdentity) error
+	})
+	var identity imaplib.ArchiveCopyIdentity
+	if exact {
+		target, hasCopy, pending, resolveErr := e.store.IMAPCurrentCopyContext(ctx, sourceID, gmailID)
+		if resolveErr != nil {
+			return resultFailed, resolveErr
+		}
+		if pending {
+			return resultFailed, errors.New("IMAP move is pending")
+		}
+		exact = hasCopy
+		identity = imaplib.ArchiveCopyIdentity{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
+	}
+	switch {
+	case exact && method == MethodTrash:
+		err = client.TrashCopy(ctx, identity)
+	case exact:
+		err = client.DeleteCopy(ctx, identity)
+	case method == MethodTrash:
 		err = e.client.TrashMessage(ctx, gmailID)
-	} else {
+	default:
 		err = e.client.DeleteMessage(ctx, gmailID)
 	}
 

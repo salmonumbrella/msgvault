@@ -1958,22 +1958,7 @@ func (c *Client) TrashMessage(ctx context.Context, messageID string) error {
 		if err := c.selectMailbox(ctx, mailbox); err != nil {
 			return err
 		}
-		// Populate trashMailbox via LIST if not yet discovered.
-		if c.trashMailbox == "" {
-			if _, err := c.listMailboxesLocked(ctx); err != nil {
-				c.logger.Warn("failed to discover trash mailbox, will use default", "error", err)
-			}
-		}
-		trashMailbox := c.trashMailbox
-		if trashMailbox == "" {
-			trashMailbox = Trash
-		}
-		var uidSet imap.UIDSet
-		uidSet.AddNum(uid)
-		if _, err := conn.Move(uidSet, trashMailbox).Wait(); err != nil {
-			return fmt.Errorf("MOVE to %q: %w", trashMailbox, err)
-		}
-		return nil
+		return c.moveUIDToTrashLocked(ctx, conn, imap.UIDSetNum(uid))
 	})
 }
 
@@ -1987,25 +1972,76 @@ func (c *Client) DeleteMessage(ctx context.Context, messageID string) error {
 		return err
 	}
 	return c.withConn(ctx, func(conn *imapclient.Client) error {
-		if !conn.Caps().Has(imap.CapUIDPlus) {
-			return errors.New("server does not support UIDPLUS; " +
-				"permanent delete requires UID EXPUNGE " +
-				"(use trash instead)")
-		}
 		if err := c.selectMailbox(ctx, mailbox); err != nil {
 			return err
 		}
-		var uidSet imap.UIDSet
-		uidSet.AddNum(uid)
-		if err := conn.Store(uidSet, &imap.StoreFlags{
-			Op:     imap.StoreFlagsAdd,
-			Silent: true,
-			Flags:  []imap.Flag{imap.FlagDeleted},
-		}, nil).Close(); err != nil {
-			return fmt.Errorf("UID STORE \\Deleted: %w", err)
+		return expungeUIDLocked(conn, imap.UIDSetNum(uid))
+	})
+}
+
+func (c *Client) moveUIDToTrashLocked(ctx context.Context, conn *imapclient.Client, uidSet imap.UIDSet) error {
+	if c.trashMailbox == "" {
+		if _, err := c.listMailboxesLocked(ctx); err != nil {
+			c.logger.Warn("failed to discover trash mailbox, will use default", "error", err)
 		}
-		if err := conn.UIDExpunge(uidSet).Close(); err != nil {
-			return fmt.Errorf("UID EXPUNGE: %w", err)
+	}
+	mailbox := c.trashMailbox
+	if mailbox == "" {
+		mailbox = Trash
+	}
+	if _, err := conn.Move(uidSet, mailbox).Wait(); err != nil {
+		return fmt.Errorf("MOVE to %q: %w", mailbox, err)
+	}
+	return nil
+}
+func expungeUIDLocked(conn *imapclient.Client, uidSet imap.UIDSet) error {
+	if !conn.Caps().Has(imap.CapUIDPlus) {
+		return errors.New("server does not support UIDPLUS; permanent delete requires UID EXPUNGE (use trash instead)")
+	}
+	if err := conn.Store(uidSet, &imap.StoreFlags{Op: imap.StoreFlagsAdd, Silent: true, Flags: []imap.Flag{imap.FlagDeleted}}, nil).Close(); err != nil {
+		return fmt.Errorf("UID STORE \\Deleted: %w", err)
+	}
+	if err := conn.UIDExpunge(uidSet).Close(); err != nil {
+		return fmt.Errorf("UID EXPUNGE: %w", err)
+	}
+	return nil
+}
+
+// TrashCopy and DeleteCopy operate only on the recorded mailbox epoch and UID.
+func (c *Client) TrashCopy(ctx context.Context, identity ArchiveCopyIdentity) error {
+	return c.deleteCopy(ctx, identity, true)
+}
+func (c *Client) DeleteCopy(ctx context.Context, identity ArchiveCopyIdentity) error {
+	return c.deleteCopy(ctx, identity, false)
+}
+func (c *Client) deleteCopy(ctx context.Context, identity ArchiveCopyIdentity, trash bool) error {
+	return c.withDraftConn(ctx, func(conn *imapclient.Client) error {
+		if identity.UIDValidity == 0 || identity.UID == 0 || identity.Mailbox == "" {
+			return errors.New("invalid IMAP copy identity")
+		}
+		if _, err := c.archiveSelect(conn, identity.Mailbox, identity.UIDValidity, false); err != nil {
+			return err
+		}
+		exists, err := archiveUIDExists(conn, identity.UID)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return &gmailapi.NotFoundError{Path: fmt.Sprintf("%s|%d", identity.Mailbox, identity.UID)}
+		}
+		uidSet := imap.UIDSetNum(imap.UID(identity.UID))
+		if trash {
+			return c.moveUIDToTrashLocked(ctx, conn, uidSet)
+		}
+		if err := expungeUIDLocked(conn, uidSet); err != nil {
+			return err
+		}
+		exists, err = archiveUIDExists(conn, identity.UID)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return errors.New("IMAP UID remains after delete")
 		}
 		return nil
 	})

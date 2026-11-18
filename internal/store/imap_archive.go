@@ -22,28 +22,16 @@ type IMAPPendingMove struct {
 	DestinationUID         uint32
 }
 
-// IMAPArchiveTargetContext refuses ambiguous copies even when the tag path
-// could prefer the original source key.
-func (s *Store) IMAPArchiveTargetContext(ctx context.Context, id int64) (EmailTagTarget, error) {
-	target, err := s.EmailTagTargetContext(ctx, id, "")
-	if err != nil {
-		return target, err
-	}
-	return s.CheckIMAPArchiveTargetContext(ctx, target)
-}
-
 // CheckIMAPArchiveTargetContext validates a previously authorized target.
 func (s *Store) CheckIMAPArchiveTargetContext(ctx context.Context, target EmailTagTarget) (EmailTagTarget, error) {
-	id := target.ID
-	var err error
 	if target.Provider != imapArchiveSourceType {
 		return target, errors.New("source is not IMAP")
 	}
-	var count int
-	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM imap_message_memberships m JOIN imap_folder_state f ON f.source_id=m.source_id AND f.mailbox=m.mailbox AND f.uidvalidity=m.uidvalidity WHERE m.source_id=? AND m.message_id=?`, target.SourceID, id).Scan(&count)
+	_, copies, err := s.imapCurrentCopies(ctx, target.SourceID, target.ID)
 	if err != nil {
-		return target, fmt.Errorf("count IMAP memberships: %w", err)
+		return target, fmt.Errorf("read IMAP memberships: %w", err)
 	}
+	count := len(copies)
 	if count != 1 {
 		return target, emailtags.Failure("stale_identity", "IMAP message must have exactly one current mailbox copy", nil, nil)
 	}
@@ -51,23 +39,14 @@ func (s *Store) CheckIMAPArchiveTargetContext(ctx context.Context, target EmailT
 }
 
 func (s *Store) IMAPPendingMoveContext(ctx context.Context, sourceID, messageID int64) (*IMAPPendingMove, error) {
-	var m IMAPPendingMove
-	var uid sql.NullInt64
-	m.Target.SourceID, m.Target.ID, m.Target.Provider = sourceID, messageID, imapArchiveSourceType
-	err := s.db.QueryRowContext(ctx, `SELECT source_message_id,source_identifier,old_mailbox,old_uidvalidity,old_uid,destination,destination_uidvalidity,destination_uid FROM imap_pending_moves WHERE source_id=? AND message_id=?`, sourceID, messageID).Scan(&m.Target.SourceMessageID, &m.SourceIdentifier, &m.Target.Mailbox, &m.Target.UIDValidity, &m.Target.UID, &m.Destination, &m.DestinationUIDValidity, &uid)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil //nolint:nilnil // No row means there is no pending move.
-	}
+	moves, err := loadIMAPPendingMoves(ctx, s.db, sourceID, messageID)
 	if err != nil {
-		return nil, fmt.Errorf("read pending IMAP move: %w", err)
+		return nil, err
 	}
-	if uid.Valid {
-		if uid.Int64 <= 0 || uid.Int64 > math.MaxUint32 {
-			return nil, errors.New("invalid pending destination UID")
-		}
-		m.DestinationUID = uint32(uid.Int64)
-	}
-	return &m, nil
+	if len(moves) == 0 {
+		return nil, nil
+	} //nolint:nilnil // No row means no pending move.
+	return &moves[0], nil
 }
 
 func checkIMAPMoveSource(ctx context.Context, tx *loggedTx, m IMAPPendingMove) error {
@@ -220,36 +199,89 @@ func (s *Store) ReconcileIMAPMoveContext(ctx context.Context, m IMAPPendingMove)
 	})
 }
 
-// MappedIMAPPendingMovesContext lists only moves whose exact mapping was saved.
-func (s *Store) MappedIMAPPendingMovesContext(ctx context.Context, sourceID int64) ([]IMAPPendingMove, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT message_id FROM imap_pending_moves WHERE source_id=? AND destination_uid IS NOT NULL`, sourceID)
+// IMAPPendingMovesContext returns all durable move evidence for one source.
+func (s *Store) IMAPPendingMovesContext(ctx context.Context, sourceID int64) ([]IMAPPendingMove, error) {
+	return loadIMAPPendingMoves(ctx, s.db, sourceID, 0)
+}
+
+func loadIMAPPendingMoves(ctx context.Context, q contextRowsQuerier, sourceID, messageID int64) ([]IMAPPendingMove, error) {
+	query := `SELECT message_id,source_message_id,source_identifier,old_mailbox,old_uidvalidity,old_uid,destination,destination_uidvalidity,destination_uid FROM imap_pending_moves WHERE source_id=?`
+	args := []any{sourceID}
+	if messageID != 0 {
+		query += ` AND message_id=?`
+		args = append(args, messageID)
+	}
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
 	var moves []IMAPPendingMove
-	for _, id := range ids {
-		move, err := s.IMAPPendingMoveContext(ctx, sourceID, id)
-		if err != nil {
+	for rows.Next() {
+		var m IMAPPendingMove
+		var uid sql.NullInt64
+		m.Target.SourceID, m.Target.Provider = sourceID, imapArchiveSourceType
+		if err := rows.Scan(&m.Target.ID, &m.Target.SourceMessageID, &m.SourceIdentifier, &m.Target.Mailbox, &m.Target.UIDValidity, &m.Target.UID, &m.Destination, &m.DestinationUIDValidity, &uid); err != nil {
 			return nil, err
 		}
-		if move != nil {
-			moves = append(moves, *move)
+		if uid.Valid {
+			if uid.Int64 <= 0 || uid.Int64 > math.MaxUint32 {
+				return nil, errors.New("invalid pending destination UID")
+			}
+			m.DestinationUID = uint32(uid.Int64)
+		}
+		moves = append(moves, m)
+	}
+	return moves, rows.Err()
+}
+
+func (s *Store) imapCurrentCopies(ctx context.Context, sourceID, messageID int64) (bool, []EmailTagTarget, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT m.mailbox,m.uidvalidity,m.uid, f.uidvalidity IS NOT NULL FROM imap_message_memberships m LEFT JOIN imap_folder_state f ON f.source_id=m.source_id AND f.mailbox=m.mailbox AND f.uidvalidity=m.uidvalidity WHERE m.source_id=? AND m.message_id=?`, sourceID, messageID)
+	if err != nil {
+		return false, nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var has bool
+	var copies []EmailTagTarget
+	for rows.Next() {
+		var item EmailTagTarget
+		var current bool
+		if err := rows.Scan(&item.Mailbox, &item.UIDValidity, &item.UID, &current); err != nil {
+			return false, nil, err
+		}
+		has = true
+		if current {
+			copies = append(copies, item)
 		}
 	}
-	return moves, nil
+	return has, copies, rows.Err()
+}
+
+// IMAPCurrentCopyContext resolves the current membership without guessing among copies.
+func (s *Store) IMAPCurrentCopyContext(ctx context.Context, sourceID int64, key string) (EmailTagTarget, bool, bool, error) {
+	var target EmailTagTarget
+	var pending bool
+	err := s.db.QueryRowContext(ctx, `SELECT id, EXISTS(SELECT 1 FROM imap_pending_moves p WHERE p.source_id=messages.source_id AND p.message_id=messages.id) FROM messages WHERE source_id=? AND source_message_id=?`, sourceID, key).Scan(&target.ID, &pending)
+	if errors.Is(err, sql.ErrNoRows) {
+		return target, false, false, nil
+	}
+	if err != nil {
+		return target, false, false, err
+	}
+	has, copies, err := s.imapCurrentCopies(ctx, sourceID, target.ID)
+	if err != nil {
+		return target, has, pending, err
+	}
+	if !has {
+		return target, false, pending, nil
+	}
+	for _, item := range copies {
+		if fmt.Sprintf("%s|%d", item.Mailbox, item.UID) == key {
+			return item, true, pending, nil
+		}
+	}
+	if len(copies) != 1 {
+		return target, true, pending, errors.New("IMAP current copy is stale or ambiguous")
+	}
+	return copies[0], true, pending, nil
 }

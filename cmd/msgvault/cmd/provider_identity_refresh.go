@@ -3,9 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
-	"fmt"
 
-	"go.kenn.io/msgvault/internal/emailtags"
 	"go.kenn.io/msgvault/internal/gmail"
 	imaplib "go.kenn.io/msgvault/internal/imap"
 	"go.kenn.io/msgvault/internal/provideridentity"
@@ -27,11 +25,14 @@ func newMessageSyncer(client gmail.API, st *store.Store, opts *msgsync.Options, 
 	syncer := msgsync.New(client, st, &configured)
 	if native, ok := client.(*imaplib.Client); ok {
 		syncer.WithBeforeSync(func(ctx context.Context, source *store.Source) error {
-			moves, err := st.MappedIMAPPendingMovesContext(ctx, source.ID)
+			moves, err := st.IMAPPendingMovesContext(ctx, source.ID)
 			if err != nil {
 				return err
 			}
 			for _, move := range moves {
+				if move.DestinationUID == 0 {
+					continue
+				}
 				if move.SourceIdentifier != source.Identifier || native.AccountIdentifier() != source.Identifier || !source.SyncConfig.Valid {
 					return errors.New("pending IMAP move account changed")
 				}
@@ -43,14 +44,14 @@ func newMessageSyncer(client gmail.API, st *store.Store, opts *msgsync.Options, 
 				recovery := &imaplib.ArchiveMove{Target: identity, Destination: move.Destination, DestinationUIDValidity: move.DestinationUIDValidity, DestinationUID: move.DestinationUID}
 				journal := imapArchiveJournal{store: st, target: move.Target, source: source}
 				_, verified, err := native.ArchiveCopy(ctx, journal, identity, recovery, true, false)
-				if err != nil {
-					if failure, ok := errors.AsType[*emailtags.MessageTagError](err); ok && failure.Code == "remote_unknown" {
-						continue
-					}
-					return fmt.Errorf("verify pending IMAP move: %w", err)
+				if err == nil {
+					err = st.ReconcileIMAPMoveContext(ctx, journal.move(*verified))
 				}
-				if err := st.ReconcileIMAPMoveContext(ctx, journal.move(*verified)); err != nil {
-					return fmt.Errorf("reconcile pending IMAP move: %w", err)
+				if err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					continue
 				}
 			}
 			if len(moves) > 0 {

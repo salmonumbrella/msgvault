@@ -350,6 +350,7 @@ It tests the connection before saving credentials.
 
 | Flag | Default | Description |
 |---|---|---|
+| `--archive-mailbox` | server role | Exact existing IMAP archive mailbox name |
 | `--host` | (required) | IMAP server hostname |
 | `--username` | (required) | IMAP username or email address |
 | `--port` | `993` | IMAP server port (993 for TLS, 143 for STARTTLS/plain) |
@@ -855,6 +856,7 @@ Requires a `client_id` in either `[microsoft]` or the selected `[microsoft.apps.
 | `--tenant` | `common` | Azure AD tenant ID (restricts which accounts can authorize) |
 | `--headless` | `false` | Sign in with a device code instead of a local browser |
 | `--no-default-identity` | `false` | Do not auto-confirm the email address as this account's "me" identity. Saved across syncs and re-authorization; only explicit `--no-default-identity=false` clears the choice. See [saved identity choice](#saved-default-identity-choice) |
+| `--archive-mailbox` | server role | Exact existing IMAP archive mailbox name; IMAP only |
 | `--graph` | `false` | Sync through the Microsoft Graph mail API instead of IMAP. Creates an `msmail` account. Needs the `Mail.Read` permission. `delete-staged` asks for `Mail.ReadWrite` on first use |
 | `--sign-in` | | Microsoft sign-in name and browser login hint when it differs from the mailbox address. IMAP only; mutually exclusive with `--graph` |
 | `--mail-write` | `false` | With `--graph`, request `Mail.ReadWrite` for category edits and remote deletion |

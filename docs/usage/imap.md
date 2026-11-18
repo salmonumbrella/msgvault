@@ -30,9 +30,10 @@ mailbox, pass `--archive-mailbox "Mailbox name"` when running `add-imap` or
 INBOX, Trash, Junk, Sent, or Drafts. No mailbox is created automatically.
 Folder sync filters do not prevent restoring the moved copy.
 
-If a move's outcome is uncertain, sync and inspect both folders before retrying.
-The daemon keeps a returned UID mapping and verifies it before reconciling the
-local message; it does not automatically resend an uncertain move.
+If a move's outcome is uncertain, sync and inspect both folders. The daemon
+keeps a returned UID mapping and verifies it before reconciling the local
+message. Sync and inspection do not clear an unknown outcome or authorize a
+second MOVE; the daemon does not automatically resend it. If another client moves the copy again before verification, sync may add its new UID as a separate message. The original remains readable, but the unverified pair cannot be resolved by matching similar messages.
 
 ## How later syncs find changes
 

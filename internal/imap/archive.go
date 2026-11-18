@@ -128,11 +128,10 @@ func (c *Client) ArchiveCopy(ctx context.Context, journal ArchiveJournal, target
 					return archiveFailure("archive_unsupported", "Set archive_mailbox for this IMAP account with add-imap or add-o365 --archive-mailbox", err)
 				}
 			}
-			selected, err := c.archiveSelect(conn, target.Mailbox, target.UIDValidity, true)
+			_, err := c.archiveSelect(conn, target.Mailbox, target.UIDValidity, true)
 			if err != nil {
 				return archiveFailure("stale_identity", "Cannot verify source mailbox and UIDVALIDITY; sync before retrying", err)
 			}
-			_ = selected
 			exists, err := archiveUIDExists(conn, target.UID)
 			if err != nil || !exists {
 				return archiveFailure("stale_identity", "IMAP message is absent or cannot be read; sync before retrying", err)
@@ -171,6 +170,16 @@ func (c *Client) ArchiveCopy(ctx context.Context, journal ArchiveJournal, target
 				return err
 			}
 			data, err := conn.Move(imaplib.UIDSetNum(imaplib.UID(target.UID)), destination).Wait()
+			if err != nil {
+				var status *imaplib.Error
+				if errors.As(err, &status) && (status.Type == imaplib.StatusResponseTypeBad || (status.Type == imaplib.StatusResponseTypeNo && status.Code == imaplib.ResponseCodeTryCreate)) {
+					// A definitive rejection cannot have dispatched a MOVE; clear even after cancellation.
+					if clearErr := journal.Clear(context.WithoutCancel(ctx), m); clearErr != nil {
+						return archiveFailure("local_failed", "Cannot clear rejected IMAP move intent", clearErr)
+					}
+					return archiveFailure("provider_write_failed", "IMAP MOVE was rejected", err)
+				}
+			}
 			if err != nil || data == nil {
 				return archiveFailure("remote_unknown", "IMAP MOVE may have run; sync and inspect both folders before retrying", err)
 			}
