@@ -5344,6 +5344,21 @@ func (e ExploreUnavailableAction) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(e))
 }
 
+type FactSummary struct {
+	ClaimedFields int64 `json:"claimed_fields"`
+
+	// HasFactHistory Whether claims, evidence, or pin events are stored
+	HasFactHistory bool `json:"has_fact_history"`
+
+	// HasValues Whether attribute values or employments are stored
+	HasValues     bool       `json:"has_values"`
+	LatestClaimAt *time.Time `json:"latest_claim_at" validate:"omitempty"`
+}
+
+func (f FactSummary) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(f))
+}
+
 type FieldDescriptor struct {
 	Cardinality string `json:"cardinality" validate:"required"`
 	Name        string `json:"name" validate:"required"`
@@ -7521,11 +7536,16 @@ func (m MediaAttachmentSearch) Validate() error {
 }
 
 type MediaSearchResponse struct {
+	// ActualMode Recording mode Docbank ran: lexical, semantic, hybrid, or unavailable when no recording search ran
+	ActualMode  string                 `json:"actual_mode" validate:"required"`
 	Attachments *MediaAttachmentSearch `json:"attachments,omitempty"`
 
 	// AttributionUnavailable Current recording occurrences whose selected transcript cannot be attributed, including searches with no hits
 	AttributionUnavailable int64          `json:"attribution_unavailable"`
 	Coverage               SearchCoverage `json:"coverage"`
+
+	// Degradations Why recording search ran below the requested mode, such as semantic_unconfigured or semantic_unavailable
+	Degradations []string `json:"degradations" validate:"required"`
 
 	// Partial Coverage or occurrence attribution is incomplete, even with no matching excerpts
 	Partial                bool                `json:"partial"`
@@ -7538,6 +7558,9 @@ type MediaSearchResponse struct {
 
 func (m MediaSearchResponse) Validate() error {
 	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(m.ActualMode, "required"); err != nil {
+		errors = errors.Append("ActualMode", err)
+	}
 	if m.Attachments != nil {
 		if v, ok := any(m.Attachments).(runtime.Validator); ok {
 			if err := v.Validate(); err != nil {
@@ -7549,6 +7572,9 @@ func (m MediaSearchResponse) Validate() error {
 		if err := v.Validate(); err != nil {
 			errors = errors.Append("Coverage", err)
 		}
+	}
+	if err := typesValidator.Var(m.Degradations, "required"); err != nil {
+		errors = errors.Append("Degradations", err)
 	}
 	if m.RecordingsError != nil {
 		if v, ok := any(m.RecordingsError).(runtime.Validator); ok {
@@ -11568,6 +11594,98 @@ func (p PersonContactPointPatchRequest) Validate() error {
 	return errors
 }
 
+type PersonCreateContact struct {
+	Type  *string `json:"type,omitzero"`
+	Value string  `json:"value" validate:"required"`
+}
+
+func (p PersonCreateContact) Validate() error {
+	var errors runtime.ValidationErrors
+	if err := runtime.ValidatePattern(p.Type, `^[A-Za-z0-9-]{1,64}$`); err != nil {
+		errors = errors.Append("Type", err)
+	}
+	if err := typesValidator.Var(p.Value, "required"); err != nil {
+		errors = errors.Append("Value", err)
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
+type PersonCreateInput struct {
+	Address *string               `json:"address,omitzero" validate:"omitempty,max=1000"`
+	Emails  []PersonCreateContact `json:"emails,omitempty"`
+	Name    string                `json:"name" validate:"required,max=256,min=1"`
+	Note    *string               `json:"note,omitzero" validate:"omitempty,max=10000"`
+	Org     *string               `json:"org,omitzero" validate:"omitempty,max=256"`
+	Phones  []PersonCreateContact `json:"phones,omitempty"`
+
+	// Source Provenance of every created value; defaults to user
+	Source *PersonCreateInputSource `json:"source,omitempty"`
+
+	// Title Job title at org; requires org
+	Title *string `json:"title,omitzero" validate:"omitempty,max=280"`
+}
+
+func (p PersonCreateInput) Validate() error {
+	var errors runtime.ValidationErrors
+	if p.Address != nil {
+		if err := typesValidator.Var(p.Address, "omitempty,max=1000"); err != nil {
+			errors = errors.Append("Address", err)
+		}
+	}
+	if len(p.Emails) > 200 {
+		errors = errors.Add("Emails", fmt.Sprintf("must have at most 200 items, got %d", len(p.Emails)))
+	}
+	for i, item := range p.Emails {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("Emails[%d]", i), err)
+			}
+		}
+	}
+	if err := typesValidator.Var(p.Name, "required,max=256,min=1"); err != nil {
+		errors = errors.Append("Name", err)
+	}
+	if p.Note != nil {
+		if err := typesValidator.Var(p.Note, "omitempty,max=10000"); err != nil {
+			errors = errors.Append("Note", err)
+		}
+	}
+	if p.Org != nil {
+		if err := typesValidator.Var(p.Org, "omitempty,max=256"); err != nil {
+			errors = errors.Append("Org", err)
+		}
+	}
+	if len(p.Phones) > 200 {
+		errors = errors.Add("Phones", fmt.Sprintf("must have at most 200 items, got %d", len(p.Phones)))
+	}
+	for i, item := range p.Phones {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("Phones[%d]", i), err)
+			}
+		}
+	}
+	if p.Source != nil {
+		if v, ok := any(p.Source).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("Source", err)
+			}
+		}
+	}
+	if p.Title != nil {
+		if err := typesValidator.Var(p.Title, "omitempty,max=280"); err != nil {
+			errors = errors.Append("Title", err)
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
 type PersonDate struct {
 	CalendarScale *string       `json:"calendar_scale,omitzero"`
 	Date          PartialDate   `json:"date"`
@@ -11953,16 +12071,23 @@ func (p PersonFactClaimsResponse) Validate() error {
 }
 
 type PersonFactDecision struct {
-	Action            string                   `json:"action" validate:"required"`
-	ClaimKey          string                   `json:"claim_key" validate:"required"`
-	CompetingClaimKey *string                  `json:"competing_claim_key,omitzero"`
-	CreatedAt         time.Time                `json:"created_at" validate:"required"`
-	DecisionKey       string                   `json:"decision_key" validate:"required"`
-	ID                int64                    `json:"id"`
-	Projection        *ProjectionRef           `json:"projection,omitempty"`
-	Reason            string                   `json:"reason" validate:"required"`
-	ResolutionID      int64                    `json:"resolution_id"`
-	Score             PersonFactScoreBreakdown `json:"score"`
+	Action   string `json:"action" validate:"required"`
+	ClaimKey string `json:"claim_key" validate:"required"`
+
+	// ClaimValue Submitted JSON value of the claim this decision describes
+	ClaimValue        string                     `json:"claim_value" validate:"required"`
+	CompetingClaimKey *string                    `json:"competing_claim_key,omitzero"`
+	CreatedAt         time.Time                  `json:"created_at" validate:"required"`
+	DecisionKey       string                     `json:"decision_key" validate:"required"`
+	ID                int64                      `json:"id"`
+	Outcome           *PersonFactDecisionOutcome `json:"outcome" validate:"required"`
+	Projection        *ProjectionRef             `json:"projection,omitempty"`
+	Reason            string                     `json:"reason" validate:"required"`
+	ResolutionID      int64                      `json:"resolution_id"`
+	ResolverVersion   string                     `json:"resolver_version" validate:"required"`
+	Score             PersonFactScoreBreakdown   `json:"score"`
+	ScoreMaxima       *PersonFactScoreBreakdown  `json:"score_maxima,omitempty"`
+	Target            TargetRef                  `json:"target"`
 }
 
 func (p PersonFactDecision) Validate() error {
@@ -11973,11 +12098,21 @@ func (p PersonFactDecision) Validate() error {
 	if err := typesValidator.Var(p.ClaimKey, "required"); err != nil {
 		errors = errors.Append("ClaimKey", err)
 	}
+	if err := typesValidator.Var(p.ClaimValue, "required"); err != nil {
+		errors = errors.Append("ClaimValue", err)
+	}
 	if err := typesValidator.Var(p.CreatedAt, "required"); err != nil {
 		errors = errors.Append("CreatedAt", err)
 	}
 	if err := typesValidator.Var(p.DecisionKey, "required"); err != nil {
 		errors = errors.Append("DecisionKey", err)
+	}
+	if p.Outcome != nil {
+		if v, ok := any(p.Outcome).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("Outcome", err)
+			}
+		}
 	}
 	if p.Projection != nil {
 		if v, ok := any(p.Projection).(runtime.Validator); ok {
@@ -11989,9 +12124,24 @@ func (p PersonFactDecision) Validate() error {
 	if err := typesValidator.Var(p.Reason, "required"); err != nil {
 		errors = errors.Append("Reason", err)
 	}
+	if err := typesValidator.Var(p.ResolverVersion, "required"); err != nil {
+		errors = errors.Append("ResolverVersion", err)
+	}
 	if v, ok := any(p.Score).(runtime.Validator); ok {
 		if err := v.Validate(); err != nil {
 			errors = errors.Append("Score", err)
+		}
+	}
+	if p.ScoreMaxima != nil {
+		if v, ok := any(p.ScoreMaxima).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("ScoreMaxima", err)
+			}
+		}
+	}
+	if v, ok := any(p.Target).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Target", err)
 		}
 	}
 	if len(errors) == 0 {
