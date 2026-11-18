@@ -129,3 +129,24 @@ func TestArchiveCommandLegacyIMAPText(t *testing.T) {
 	require.NoError(t, command.ExecuteContext(t.Context()))
 	assert.Equal(t, "Message 7: archived=true changed=true dry_run=false\n", output.String())
 }
+
+func TestArchiveCommandSelectedIMAPText(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		copy *emailtags.IMAPCopy
+		want string
+	}{
+		{"destination", &emailtags.IMAPCopy{Mailbox: "Archiv", UIDValidity: 88, UID: 9}, "Message 7: archived=true changed=true dry_run=false\nimap_copy: mailbox=\"Archiv\" uidvalidity=88 uid=9\n"},
+		{"no destination", nil, "Message 7: archived=true changed=true dry_run=false\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &cliArchiveBackend{result: &emailtags.ArchiveResult{MessageID: 7, Archived: true, Changed: true, IMAPCopy: tc.copy}}
+			command := newMessageArchiveCommand(true, backend)
+			var output bytes.Buffer
+			command.SetOut(&output)
+			command.SetArgs([]string{"--message", "7", "--mailbox", "INBOX", "--uidvalidity", "77", "--uid", "8"})
+			require.NoError(t, command.ExecuteContext(t.Context()))
+			assert.Equal(t, tc.want, output.String())
+		})
+	}
+}

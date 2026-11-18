@@ -6407,8 +6407,8 @@ type HybridSearchTimings struct {
 
 type IMAPCopy struct {
 	Mailbox     string `json:"mailbox" validate:"required"`
-	UID         int64  `json:"uid" validate:"gte=1"`
-	Uidvalidity int64  `json:"uidvalidity" validate:"gte=1"`
+	UID         int64  `json:"uid" validate:"gte=1,lte=4294967295"`
+	Uidvalidity int64  `json:"uidvalidity" validate:"gte=1,lte=4294967295"`
 }
 
 func (i IMAPCopy) Validate() error {

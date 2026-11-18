@@ -4,8 +4,14 @@
 
 export interface IMAPCopy {
   mailbox: string;
-  /** @minimum 1 */
+  /**
+   * @minimum 1
+   * @maximum 4294967295
+   */
   uid: number;
-  /** @minimum 1 */
+  /**
+   * @minimum 1
+   * @maximum 4294967295
+   */
   uidvalidity: number;
 }

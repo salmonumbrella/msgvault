@@ -83,6 +83,12 @@ func newMessageArchiveCommand(archived bool, backend messageArchiveBackend) *cob
 			if err != nil {
 				return fmt.Errorf("write message archive result: %w", err)
 			}
+			if selection != nil && result.IMAPCopy != nil {
+				destination := result.IMAPCopy
+				if _, err := fmt.Fprintf(cmd.OutOrStdout(), "imap_copy: mailbox=%q uidvalidity=%d uid=%d\n", destination.Mailbox, destination.UIDValidity, destination.UID); err != nil {
+					return fmt.Errorf("write message archive result: %w", err)
+				}
+			}
 			return nil
 		},
 	}

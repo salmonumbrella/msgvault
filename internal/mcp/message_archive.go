@@ -18,7 +18,9 @@ func messageArchiveDefinition() toolDefinition {
 	result, failure := outputSchemaFor[emailtags.ArchiveResult](), outputSchemaFor[emailtags.MessageTagError]()
 	result.Schema, failure.Schema = "", ""
 	definition := writeDefinition(ToolArchiveMessage, "Set a Gmail or IMAP message's archive state, or archive its entire Beeper chat with whole_chat=true. Beeper requires a source-wide grant without incoming sender restrictions. archived=false restores the inbox. Other providers return archive_unsupported. dry_run previews without writing. For multiple IMAP copies, an authorized read-capable preview lists imap_candidates; select one with imap_copy and use the confirmed destination tuple to restore it.", closedObject(map[string]*jsonschema.Schema{
-		"imap_copy":  closedObject(map[string]*jsonschema.Schema{"mailbox": {Type: "string"}, "uidvalidity": {Type: "integer"}, "uid": {Type: "integer"}}, "mailbox", "uidvalidity", "uid"),
+		"imap_copy": closedObject(map[string]*jsonschema.Schema{
+			"mailbox": {Type: "string"}, "uidvalidity": {Type: "integer", Minimum: new(float64(1)), Maximum: new(float64(4294967295))}, "uid": {Type: "integer", Minimum: new(float64(1)), Maximum: new(float64(4294967295))},
+		}, "mailbox", "uidvalidity", "uid"),
 		"whole_chat": booleanSchema("Required for Beeper: affects the entire chat"),
 		"message_id": safeIDSchema("Archived message ID"), "archived": booleanSchema("Desired archive state"), "dry_run": booleanSchema("Preview without writing"),
 	}, "message_id", "archived"), &jsonschema.Schema{Type: "object", AnyOf: []*jsonschema.Schema{result, failure}}, (*handlers).archiveMessage)
