@@ -494,12 +494,13 @@ state are preserved. Source ownership and the daemon work gate follow the
 the active sync finishes. The saved snapshot can be stale until the next sync.
 
 Microsoft Graph archive moves a message from a primary mailbox folder, including
-Sent and custom folders, to Archive. Restore moves it to Inbox. Messages in
-Deleted Items and its subfolders are excluded, as is Online Archive. An unlisted
-parent folder is refused. Writes require
+Sent and custom folders, directly to the Archive root. Restore always moves it
+to Inbox. Messages in Deleted Items and its subfolders are excluded, as is
+Online Archive. An unlisted parent folder is refused. Writes require
 `add-o365 --graph --mail-write`; previews need read access. The daemon verifies
 the immutable message ID and folder after a move and preserves categories
-omitted by Graph.
+omitted by Graph. Outlook may change the folder between the final check and the
+move; the check cannot prevent that concurrent change.
 
 For Beeper, send `{"archived":true,"whole_chat":true}` (or `archived:false`
 to restore the chat). This affects the whole chat, including messages newer than

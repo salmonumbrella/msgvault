@@ -157,26 +157,19 @@ func (c *Client) post(ctx context.Context, id, action string, body any) error {
 }
 
 // folderCatalog classifies the same folder tree for sync and verified writes.
-// known reuses well-known IDs already read by the caller.
-func (c *Client) folderCatalog(ctx context.Context, folders []Folder, known map[string]string) (map[string]store.LabelInfo, map[string]string, error) {
+func (c *Client) folderCatalog(ctx context.Context, folders []Folder) (map[string]store.LabelInfo, map[string]string, error) {
 	ids := make(map[string]string, len(systemFolders))
 	roles := make(map[string]string, len(systemFolders))
 	for name, role := range systemFolders {
-		id, ok := known[name]
-		if !ok {
-			var err error
-			id, err = c.WellKnownFolderID(ctx, name)
-			if errors.Is(err, msgraph.ErrNotFound) {
-				continue
-			}
-			if err != nil {
-				return nil, nil, fmt.Errorf("look up folder %s: %w", name, err)
-			}
+		id, err := c.WellKnownFolderID(ctx, name)
+		if errors.Is(err, msgraph.ErrNotFound) {
+			continue
 		}
-		if id != "" {
-			ids[name] = id
-			roles[id] = role
+		if err != nil {
+			return nil, nil, fmt.Errorf("look up folder %s: %w", name, err)
 		}
+		ids[name] = id
+		roles[id] = role
 	}
 	infos := make(map[string]store.LabelInfo, len(folders))
 	for _, f := range folders {

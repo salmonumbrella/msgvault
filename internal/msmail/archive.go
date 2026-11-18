@@ -49,15 +49,11 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 		}
 		return m, nil
 	}
-	before, err := read(ctx)
-	if err != nil {
-		return nil, archiveReadError(err)
-	}
 	folders, err := c.ListFolders(ctx)
 	if err != nil {
 		return nil, emailtags.Failure("provider_read_failed", "Cannot read Microsoft folder catalog; sync and retry", nil, err)
 	}
-	infos, _, err := c.folderCatalog(ctx, folders, map[string]string{folder: destination, "deleteditems": deleted})
+	infos, _, err := c.folderCatalog(ctx, folders)
 	if err != nil {
 		return nil, emailtags.Failure("provider_read_failed", "Cannot read Microsoft folder roles; sync and retry", nil, err)
 	}
@@ -65,11 +61,9 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 	for _, f := range folders {
 		parents[f.ID] = f.ParentID
 	}
-	if _, ok := parents[destination]; !ok {
-		return nil, emailtags.Failure("stale_identity", "Microsoft destination folder is not in the catalog; sync and retry", nil, nil)
-	}
-	if _, ok := parents[deleted]; !ok {
-		return nil, emailtags.Failure("stale_identity", "Microsoft Deleted Items is not in the catalog; sync and retry", nil, nil)
+	before, err := read(ctx)
+	if err != nil {
+		return nil, archiveReadError(err)
 	}
 	parent := before.ParentFolderID
 	for steps := 0; parent != ""; steps++ {
@@ -78,7 +72,7 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 		}
 		next, ok := parents[parent]
 		if !ok || parent == deleted {
-			return nil, emailtags.Failure("stale_identity", "Message folder is unavailable or in Deleted Items; sync and retry", nil, nil)
+			return nil, emailtags.Failure("stale_identity", "Message cannot be archived; sync and retry", nil, nil)
 		}
 		parent = next
 	}
@@ -90,7 +84,10 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 	}
 	if changed {
 		raw, postErr := c.SendNoRetry(ctx, http.MethodPost, "/me/messages/"+url.PathEscape(id)+"/move", map[string]string{"destinationId": destination}, "")
-		if errors.Is(postErr, msgraph.ErrForbidden) || errors.Is(postErr, msgraph.ErrNotFound) {
+		if errors.Is(postErr, msgraph.ErrForbidden) {
+			return result, emailtags.Failure("insufficient_scope", "Microsoft mail moves require Mail.ReadWrite; reauthorize with add-o365 --graph --mail-write", result, postErr)
+		}
+		if errors.Is(postErr, msgraph.ErrNotFound) {
 			return result, archiveReadError(postErr)
 		}
 		var throttled *msgraph.ThrottledError

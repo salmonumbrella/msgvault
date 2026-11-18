@@ -280,7 +280,7 @@ func (s *syncer) progressf(format string, args ...any) {
 // ensureLabels makes one label per folder. The label's source ID is the Graph
 // folder ID, so a folder rename changes only the label name.
 func (s *syncer) ensureLabels(ctx context.Context, folders []Folder) (map[string]int64, error) {
-	infos, ids, err := s.c.folderCatalog(ctx, folders, nil)
+	infos, ids, err := s.c.folderCatalog(ctx, folders)
 	if err != nil {
 		return nil, err
 	}

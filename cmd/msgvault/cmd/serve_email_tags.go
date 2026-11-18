@@ -120,11 +120,7 @@ func (a *storeAPIAdapter) providerMessageTags(ctx context.Context, source *store
 			}
 			granted, err := manager.HasScopes(source.Identifier)
 			if err != nil || !granted {
-				operation := "category editing"
-				if archive != nil {
-					operation = "archiving"
-				}
-				return nil, emailtags.Failure("insufficient_scope", "Microsoft "+operation+" requires Mail.ReadWrite; reauthorize with add-o365 --graph --mail-write", nil, err)
+				return nil, emailtags.Failure("insufficient_scope", "Microsoft mail writes require Mail.ReadWrite; reauthorize with add-o365 --graph --mail-write", nil, err)
 			}
 		}
 		factory := a.microsoftTagClientFactory

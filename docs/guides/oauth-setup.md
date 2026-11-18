@@ -682,7 +682,8 @@ and deletes. The daemon schedules the account like any other.
 To archive or restore messages with `msgvault archive` or `msgvault unarchive`, add the
 delegated `Mail.ReadWrite` permission and reauthorize with
 `msgvault add-o365 you@example.com --graph --mail-write`. Archive moves a
-message from a primary mailbox folder to Archive; restore moves it to Inbox.
+message from a primary mailbox folder directly to the Archive root; restore
+always moves it to Inbox.
 Messages in Deleted Items and its subfolders are excluded, as is Online Archive.
 An unlisted parent folder is refused. Previews need only
 `Mail.Read`. See [archive and unarchive](../cli-reference.md#archive-and-unarchive).

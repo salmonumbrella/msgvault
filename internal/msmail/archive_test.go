@@ -16,14 +16,14 @@ import (
 )
 
 type archiveGraph struct {
-	mu                                                                    sync.Mutex
-	parent                                                                string
-	posts, reads                                                          int
-	paths                                                                 map[string]int
-	status                                                                int
-	landed, mismatch, lost, cancel, failRead, failCatalog, missingDeleted bool
-	cancelFunc                                                            context.CancelFunc
-	server                                                                *httptest.Server
+	mu                                                                                    sync.Mutex
+	parent, parentOnCatalog                                                               string
+	posts, reads                                                                          int
+	paths                                                                                 map[string]int
+	status                                                                                int
+	landed, mismatch, lost, cancel, failRead, failCatalog, missingDeleted, missingArchive bool
+	cancelFunc                                                                            context.CancelFunc
+	server                                                                                *httptest.Server
 }
 
 func newArchiveGraph(t *testing.T) *archiveGraph {
@@ -36,6 +36,9 @@ func newArchiveGraph(t *testing.T) *archiveGraph {
 		assert.Contains(t, r.Header.Get("Prefer"), `IdType="ImmutableId"`)
 		switch {
 		case r.URL.Path == "/me/mailFolders":
+			if f.parentOnCatalog != "" {
+				f.parent = f.parentOnCatalog
+			}
 			if f.failCatalog {
 				w.WriteHeader(http.StatusForbidden)
 				return
@@ -50,6 +53,10 @@ func newArchiveGraph(t *testing.T) *archiveGraph {
 			name := strings.TrimPrefix(r.URL.Path, "/me/mailFolders/")
 			if name == "deleteditems" && !f.missingDeleted {
 				_ = json.MarshalWrite(w, map[string]string{"id": "deleted-id"})
+				return
+			}
+			if name == "archive" && f.missingArchive {
+				w.WriteHeader(http.StatusNotFound)
 				return
 			}
 			if name == "archive" || name == "inbox" {
@@ -126,6 +133,19 @@ func TestArchiveExcludedSubtree(t *testing.T) {
 		}
 	}
 }
+func TestArchiveParentChangesDuringCatalog(t *testing.T) {
+	for _, parent := range []string{"deleted-id", "grandchild-id"} {
+		t.Run(parent, func(t *testing.T) {
+			f := newArchiveGraph(t)
+			f.parentOnCatalog = parent
+			_, err := f.client().ArchiveMessage(t.Context(), archiveTestID, true, false)
+			var failure *emailtags.MessageTagError
+			require.ErrorAs(t, err, &failure)
+			assert.Equal(t, "stale_identity", failure.Code)
+			assert.Zero(t, f.posts)
+		})
+	}
+}
 func TestArchiveMessageMovesAndReadsBack(t *testing.T) {
 	for _, initial := range []string{"inbox-id", "sent-id", "custom-id"} {
 		for _, archived := range []bool{true, false} {
@@ -154,8 +174,12 @@ func TestArchiveMessageMovesAndReadsBack(t *testing.T) {
 				assert.True(t, got.Verified)
 				assert.False(t, got.Changed)
 				assert.Equal(t, expectedPosts, f.posts)
-				assert.Equal(t, 1, f.paths["/me/mailFolders/archive"]-beforeArchive)
-				assert.Equal(t, 1, f.paths["/me/mailFolders/deleteditems"]-beforeDeleted)
+				archiveLookups := 1
+				if archived {
+					archiveLookups++
+				}
+				assert.Equal(t, archiveLookups, f.paths["/me/mailFolders/archive"]-beforeArchive)
+				assert.Equal(t, 2, f.paths["/me/mailFolders/deleteditems"]-beforeDeleted)
 			})
 		}
 	}
@@ -165,7 +189,7 @@ func TestArchivePreflightFailure(t *testing.T) {
 		name string
 		set  func(*archiveGraph)
 		code string
-	}{{"unlisted parent", func(f *archiveGraph) { f.parent = "hidden" }, "stale_identity"}, {"missing deleted", func(f *archiveGraph) { f.missingDeleted = true }, "folder_not_found"}, {"catalog", func(f *archiveGraph) { f.failCatalog = true }, "provider_read_failed"}} {
+	}{{"unlisted parent", func(f *archiveGraph) { f.parent = "hidden" }, "stale_identity"}, {"missing deleted", func(f *archiveGraph) { f.missingDeleted = true }, "folder_not_found"}, {"missing archive", func(f *archiveGraph) { f.missingArchive = true }, "folder_not_found"}, {"catalog", func(f *archiveGraph) { f.failCatalog = true }, "provider_read_failed"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newArchiveGraph(t)
 			tc.set(f)
@@ -201,6 +225,11 @@ func TestArchiveMoveResponses(t *testing.T) {
 				var failure *emailtags.MessageTagError
 				require.ErrorAs(t, err, &failure)
 				assert.Equal(t, tc.code, failure.Code)
+				if tc.status == http.StatusForbidden {
+					assert.Contains(t, failure.Message, "Mail.ReadWrite")
+					assert.Contains(t, failure.Message, "add-o365 --graph --mail-write")
+					assert.Contains(t, failure.Message, "moves")
+				}
 				assert.False(t, got.Verified)
 				assert.False(t, got.Changed)
 			}
