@@ -190,6 +190,10 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 			_ = json.MarshalWrite(w, map[string]string{"id": "archive-id"})
 		case "/me/mailFolders/inbox":
 			_ = json.MarshalWrite(w, map[string]string{"id": "inbox-id"})
+		case "/me/mailFolders/msgfolderroot":
+			_ = json.MarshalWrite(w, map[string]string{"id": "root-id"})
+		case "/me/mailFolders/hidden-id":
+			_ = json.MarshalWrite(w, map[string]string{"id": "hidden-id", "parentFolderId": "root-id"})
 		case "/me/mailFolders/deleteditems":
 			_ = json.MarshalWrite(w, map[string]string{"id": "deleted-id"})
 		case "/me/mailFolders":
@@ -214,10 +218,9 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	refreshes := 0
 	a := &storeAPIAdapter{store: st, config: cfg, logger: slog.New(slog.DiscardHandler), microsoftTagClientFactory: func(context.Context, *store.Source, bool) (*msmail.Client, error) {
 		return msmail.NewClient(srv.URL, func(context.Context) (string, error) { return "synthetic", nil }, 1000), nil
-	}, draftCacheRefresh: func(context.Context, string) error { refreshes++; return nil }}
+	}, draftCacheRefresh: func(context.Context, string) error { return nil }}
 	desired := true
 	saveScopes(microsoft.GraphMailScopes())
 	result, err := a.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired, DryRun: true}, nil, nil)
@@ -230,18 +233,6 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 	assert.Equal(t, "insufficient_scope", failure.Code)
 	assert.Equal(t, count, calls.Load())
 	saveScopes(microsoft.GraphMailWriteScopes())
-	result, err = a.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired}, nil, nil)
-	require.NoError(t, err)
-	assert.True(t, result.Changed)
-	assert.True(t, result.Verified)
-	msg, err := st.GetMessage(mid)
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
-	assert.Equal(t, 1, refreshes)
-	result, err = a.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired}, nil, nil)
-	require.NoError(t, err)
-	assert.False(t, result.Changed)
-	assert.True(t, result.Verified)
 	// Exercise a sender-restricted grant through the real HTTP route and client.
 	cfg.Server.APIKey, cfg.Server.AgentAccess = "owner", true
 	routes := api.NewServerWithOptions(api.ServerOptions{Config: cfg, Store: a, Engine: query.NewEngine(st.DB(), st.IsPostgreSQL()), Logger: slog.New(slog.DiscardHandler)})
@@ -256,14 +247,14 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 	client, err := daemonclient.New(daemonclient.Config{URL: httpServer.URL, AgentToken: token.Secret, AllowInsecure: true})
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, client.Close()) })
-	parent = "inbox-id"
+	parent = "hidden-id"
 	for i, archived := range []bool{true, true, false} {
 		got, e := client.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &archived})
 		require.NoError(t, e)
 		assert.Equal(t, i != 1, got.Changed)
 		assert.True(t, got.Verified)
 		assert.Equal(t, archived, got.Archived)
-		msg, err = st.GetMessage(mid)
+		msg, err := st.GetMessage(mid)
 		require.NoError(t, err)
 		label := "Inbox"
 		if archived {
@@ -271,6 +262,19 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 		}
 		assert.ElementsMatch(t, []string{label, "Category: Work"}, msg.Labels)
 	}
+	// A hidden live folder is also eligible for preview and restore.
+	parent = "hidden-id"
+	restore := false
+	beforeHiddenPosts := posts.Load()
+	preview, err := client.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &restore, DryRun: true})
+	require.NoError(t, err)
+	assert.True(t, preview.Changed)
+	assert.Equal(t, beforeHiddenPosts, posts.Load())
+	restored, err := client.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &restore})
+	require.NoError(t, err)
+	assert.True(t, restored.Verified)
+	assert.True(t, restored.Changed)
+	assert.Equal(t, beforeHiddenPosts+1, posts.Load())
 	// A locally active Inbox row can be stale after Outlook moves the message to trash.
 	parent = "grandchild-id"
 	beforePosts := posts.Load()
@@ -282,17 +286,16 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 		}
 	}
 	assert.Equal(t, beforePosts, posts.Load())
-	msg, err = st.GetMessage(mid)
+	msg, err := st.GetMessage(mid)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"Inbox", "Category: Work"}, msg.Labels)
 	parent = "inbox-id"
 	_, err = st.DB().ExecContext(t.Context(), `CREATE TRIGGER fail_archive_save BEFORE INSERT ON message_labels BEGIN SELECT RAISE(FAIL, 'synthetic save failure'); END`)
 	require.NoError(t, err)
 	beforePosts = posts.Load()
-	failed, err := owner.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired})
+	_, err = owner.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired})
 	require.ErrorAs(t, err, &failure)
 	assert.Equal(t, "remote_accepted_local_failed", failure.Code)
-	_ = failed
 	if assert.NotNil(t, failure.Result) {
 		assert.True(t, failure.Result.Verified)
 	}

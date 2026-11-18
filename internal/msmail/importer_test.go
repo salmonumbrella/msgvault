@@ -140,6 +140,14 @@ func (f *fakeGraph) serve(w http.ResponseWriter, r *http.Request) {
 		f.delta(w, strings.Split(p, "/")[3], q)
 	case strings.HasPrefix(p, "/me/mailFolders/"):
 		id := strings.TrimPrefix(p, "/me/mailFolders/")
+		if id == "msgfolderroot" {
+			f.writeJSON(w, map[string]any{"id": "root"})
+			return
+		}
+		if id == "hidden" {
+			f.writeJSON(w, map[string]any{"id": "hidden", "parentFolderId": "root"})
+			return
+		}
 		if slices.Contains(f.folders, id) {
 			f.writeJSON(w, map[string]any{"id": id})
 			return

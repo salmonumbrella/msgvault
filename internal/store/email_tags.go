@@ -111,8 +111,9 @@ func (s *Store) SaveEmailTagsContext(ctx context.Context, target EmailTagTarget,
 	return s.withAttributionTxContext(ctx, attributionLock{Sources: []int64{target.SourceID}}, func(tx *loggedTx) error {
 		// The attribution transaction holds the source lock while we recheck identity.
 		var locked int64
-		err := tx.QueryRowContext(ctx, `SELECT id FROM messages
-   WHERE id=? AND source_id=? AND source_message_id=? AND deleted_at IS NULL AND deleted_from_source_at IS NULL`, target.ID, target.SourceID, target.SourceMessageID).Scan(&locked)
+		err := tx.QueryRowContext(ctx, `SELECT m.id FROM messages m JOIN sources s ON s.id=m.source_id
+   WHERE m.id=? AND m.source_id=? AND m.source_message_id=? AND m.deleted_at IS NULL AND m.deleted_from_source_at IS NULL
+   AND (? != 'msmail' OR s.source_type='msmail')`, target.ID, target.SourceID, target.SourceMessageID, target.Provider).Scan(&locked)
 		if err != nil {
 			return fmt.Errorf("archived tag identity changed: %w", err)
 		}
@@ -133,6 +134,29 @@ func (s *Store) SaveEmailTagsContext(ctx context.Context, target EmailTagTarget,
 			})
 		}
 		if target.Provider == "msmail" {
+			if result.MicrosoftFolderID != "" || result.MicrosoftFolders != nil || result.MicrosoftCategories != nil {
+				infos := make(map[string]LabelInfo, len(result.MicrosoftFolders))
+				for _, folder := range result.MicrosoftFolders {
+					info := LabelInfo{Name: folder.Name, Type: "user"}
+					if folder.System {
+						info.Type, info.SystemRole = "system", folder.SystemRole
+					}
+					infos[folder.ID] = info
+				}
+				if result.MicrosoftFolderID == "" {
+					return errors.New("Microsoft folder snapshot is incomplete")
+				}
+				if _, ok := infos[result.MicrosoftFolderID]; !ok {
+					return errors.New("verified Microsoft folder is absent from catalog")
+				}
+				ids, err := s.ensureMicrosoftMailFoldersTx(ctx, tx, target.SourceID, infos)
+				if err != nil {
+					return err
+				}
+				folderID := ids[result.MicrosoftFolderID]
+				_, err = s.reconcileMicrosoftMailLabelsTx(ctx, tx, target.SourceID, target.ID, &folderID, result.MicrosoftCategories)
+				return err
+			}
 			_, err := s.reconcileMicrosoftMailLabelsTx(ctx, tx, target.SourceID, target.ID, nil, &result.Tags)
 			return err
 		}
@@ -230,36 +254,4 @@ func GmailSystemRoleForLabelID(sourceLabelID string) string {
 		return LabelSystemRoleDrafts
 	}
 	return ""
-}
-
-// SaveMicrosoftMailArchiveContext reconciles a verified folder under the captured message identity.
-func (s *Store) SaveMicrosoftMailArchiveContext(ctx context.Context, target EmailTagTarget, result *emailtags.MessageTagResult) error {
-	if target.Provider != "msmail" || result == nil || !result.Verified || result.DryRun || result.MicrosoftFolderID == "" {
-		return errors.New("Microsoft folder snapshot is not verified")
-	}
-	infos := make(map[string]LabelInfo, len(result.MicrosoftFolders))
-	for _, folder := range result.MicrosoftFolders {
-		info := LabelInfo{Name: folder.Name, Type: "user"}
-		if folder.System {
-			info.Type, info.SystemRole = "system", folder.SystemRole
-		}
-		infos[folder.ID] = info
-	}
-	if _, ok := infos[result.MicrosoftFolderID]; !ok {
-		return errors.New("verified Microsoft folder is absent from catalog")
-	}
-	return s.withAttributionTxContext(ctx, attributionLock{Sources: []int64{target.SourceID}}, func(tx *loggedTx) error {
-		var locked int64
-		if err := tx.QueryRowContext(ctx, `SELECT m.id FROM messages m JOIN sources s ON s.id=m.source_id
- WHERE m.id=? AND m.source_id=? AND m.source_message_id=? AND m.deleted_at IS NULL AND m.deleted_from_source_at IS NULL AND s.source_type='msmail'`, target.ID, target.SourceID, target.SourceMessageID).Scan(&locked); err != nil {
-			return fmt.Errorf("Microsoft message identity changed: %w", err)
-		}
-		ids, err := s.ensureMicrosoftMailFoldersTx(ctx, tx, target.SourceID, infos)
-		if err != nil {
-			return err
-		}
-		folderID := ids[result.MicrosoftFolderID]
-		_, err = s.reconcileMicrosoftMailLabelsTx(ctx, tx, target.SourceID, target.ID, &folderID, result.MicrosoftCategories)
-		return err
-	})
 }

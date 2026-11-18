@@ -536,21 +536,38 @@ func TestMicrosoftArchiveFolderReconciliation(t *testing.T) {
 	require.NoError(t, err)
 	target, err := f.st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
-	result := &emailtags.MessageTagResult{Provider: "msmail", Verified: true, MicrosoftFolderID: "archive", MicrosoftFolders: []emailtags.MicrosoftFolder{{ID: "archive", Name: "Archiv", System: true}}}
-	require.NoError(t, f.st.SaveMicrosoftMailArchiveContext(t.Context(), target, result))
+	result := &emailtags.MessageTagResult{Provider: "msmail", Verified: true, MicrosoftFolderID: "archive", MicrosoftFolders: []emailtags.MicrosoftFolder{{ID: "inbox", Name: "Inbox", System: true}, {ID: "archive", Name: "Archiv", System: true}}}
+	require.NoError(t, f.st.SaveEmailTagsContext(t.Context(), target, result))
 	msg, err := f.st.GetMessage(id)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
 	result.MicrosoftFolders = nil
-	require.Error(t, f.st.SaveMicrosoftMailArchiveContext(t.Context(), target, result))
+	require.Error(t, f.st.SaveEmailTagsContext(t.Context(), target, result))
 	msg, err = f.st.GetMessage(id)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
-	result.MicrosoftFolders = []emailtags.MicrosoftFolder{{ID: "archive", Name: "Archiv", System: true}}
+	result.MicrosoftFolders = []emailtags.MicrosoftFolder{{ID: "inbox", Name: "Inbox", System: true}, {ID: "archive", Name: "Archiv", System: true}}
+	result.Provider = "gmail"
+	require.Error(t, f.st.SaveEmailTagsContext(t.Context(), target, result))
+	result.Provider = "msmail"
+	result.MicrosoftFolderID = ""
+	require.Error(t, f.st.SaveEmailTagsContext(t.Context(), target, result))
+	result.MicrosoftFolderID = "archive"
+	empty := []string{}
+	result.MicrosoftCategories = &empty
+	require.NoError(t, f.st.SaveEmailTagsContext(t.Context(), target, result))
+	msg, err = f.st.GetMessage(id)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"Archiv"}, msg.Labels)
+	result.MicrosoftCategories = &category
+	require.NoError(t, f.st.SaveEmailTagsContext(t.Context(), target, result))
 	target.SourceMessageID = "other"
-	result.MicrosoftFolders[0].Name = "Must not persist"
-	require.Error(t, f.st.SaveMicrosoftMailArchiveContext(t.Context(), target, result))
+	require.Error(t, f.st.SaveEmailTagsContext(t.Context(), target, result))
 	msg, err = f.st.GetMessage(id)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
+	target.SourceMessageID = msg.SourceMessageID
+	_, err = f.st.DB().ExecContext(t.Context(), f.st.Rebind(`UPDATE sources SET source_type=? WHERE id=?`), "gmail", f.source.ID)
+	require.NoError(t, err)
+	require.Error(t, f.st.SaveEmailTagsContext(t.Context(), target, result))
 }

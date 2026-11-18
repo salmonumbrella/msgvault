@@ -318,6 +318,8 @@ func TestArchiveReconciliationThenDeltaSync(t *testing.T) {
 	require.NotEmpty(t, initial["inbox"])
 	require.NotEmpty(t, initial["archive"])
 	walks := f.walkStarts.Load()
+	// Outlook moved the already-synced message into a hidden regular folder.
+	f.put("m1", "hidden")
 	// Omission on the move readback and delta must preserve the saved categories.
 	f.mu.Lock()
 	delete(f.categories, "m1")
@@ -332,7 +334,7 @@ func TestArchiveReconciliationThenDeltaSync(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, result.Verified)
 	require.Nil(t, result.MicrosoftCategories)
-	require.NoError(t, st.SaveMicrosoftMailArchiveContext(t.Context(), target, result))
+	require.NoError(t, st.SaveEmailTagsContext(t.Context(), target, result))
 	require.NoError(t, execution.Release())
 	msg, err := st.GetMessage(id)
 	require.NoError(t, err)

@@ -18,27 +18,6 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 	if archived {
 		folder = "archive"
 	}
-	resolve := func(name string) (string, error) {
-		value, err := c.WellKnownFolderID(ctx, name)
-		if err == nil && value != "" {
-			return value, nil
-		}
-		code := "provider_read_failed"
-		if errors.Is(err, msgraph.ErrForbidden) {
-			code = "insufficient_scope"
-		} else if errors.Is(err, msgraph.ErrNotFound) || (err == nil && value == "") {
-			code = "folder_not_found"
-		}
-		return "", emailtags.Failure(code, "Cannot resolve the Microsoft "+name+" folder in the primary mailbox", nil, err)
-	}
-	destination, err := resolve(folder)
-	if err != nil {
-		return nil, err
-	}
-	deleted, err := resolve("deleteditems")
-	if err != nil {
-		return nil, err
-	}
 	read := func(ctx context.Context) (MessageInfo, error) {
 		m, e := c.LookupMessage(ctx, id)
 		if e != nil {
@@ -51,11 +30,23 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 	}
 	folders, err := c.ListFolders(ctx)
 	if err != nil {
-		return nil, emailtags.Failure("provider_read_failed", "Cannot read Microsoft folder catalog; sync and retry", nil, err)
+		code := "provider_read_failed"
+		if errors.Is(err, msgraph.ErrForbidden) {
+			code = "insufficient_scope"
+		}
+		return nil, emailtags.Failure(code, "Cannot read Microsoft folder catalog; sync and retry", nil, err)
 	}
-	infos, _, err := c.folderCatalog(ctx, folders)
+	infos, ids, err := c.folderCatalog(ctx, folders)
 	if err != nil {
-		return nil, emailtags.Failure("provider_read_failed", "Cannot read Microsoft folder roles; sync and retry", nil, err)
+		code := "provider_read_failed"
+		if errors.Is(err, msgraph.ErrForbidden) {
+			code = "insufficient_scope"
+		}
+		return nil, emailtags.Failure(code, "Cannot read Microsoft folder roles; sync and retry", nil, err)
+	}
+	destination, deleted := ids[folder], ids["deleteditems"]
+	if destination == "" || deleted == "" {
+		return nil, emailtags.Failure("folder_not_found", "Cannot resolve Microsoft mailbox folders; sync and retry", nil, nil)
 	}
 	parents := make(map[string]string, len(folders))
 	for _, f := range folders {
@@ -66,15 +57,52 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 		return nil, archiveReadError(err)
 	}
 	parent := before.ParentFolderID
-	for steps := 0; parent != ""; steps++ {
-		if steps >= len(parents) {
-			return nil, emailtags.Failure("stale_identity", "Microsoft folder ancestry is invalid; sync and retry", nil, nil)
+	seen := make(map[string]bool)
+	root := ""
+	supplemental := false
+	hops := 0
+	refuse := func() (*emailtags.MessageTagResult, error) {
+		return nil, emailtags.Failure("stale_identity", "Message cannot be archived; sync and retry", nil, nil)
+	}
+	for parent != "" {
+		if parent == deleted || seen[parent] {
+			return refuse()
 		}
-		next, ok := parents[parent]
-		if !ok || parent == deleted {
-			return nil, emailtags.Failure("stale_identity", "Message cannot be archived; sync and retry", nil, nil)
+		seen[parent] = true
+		if next, ok := parents[parent]; ok {
+			parent = next
+			continue
 		}
-		parent = next
+		if root == "" {
+			root, err = c.WellKnownFolderID(ctx, "msgfolderroot")
+			supplemental = true
+			if err != nil || root == "" {
+				return refuse()
+			}
+		}
+		if parent == root {
+			break
+		}
+		hops++
+		if hops > 32 {
+			return refuse()
+		}
+		var ancestor struct {
+			ID       string `json:"id"`
+			ParentID string `json:"parentFolderId"`
+		}
+		err = c.GetJSON(ctx, "/me/mailFolders/"+url.PathEscape(parent)+"?$select=id,parentFolderId", &ancestor)
+		if err != nil || ancestor.ID != parent || ancestor.ParentID == "" {
+			return refuse()
+		}
+		parent = ancestor.ParentID
+	}
+	if supplemental {
+		after, err := read(ctx)
+		if err != nil || after.ParentFolderID != before.ParentFolderID {
+			return refuse()
+		}
+		before = after
 	}
 	changed := before.ParentFolderID != destination
 	result := &emailtags.MessageTagResult{Provider: SourceType, DryRun: dryRun}
@@ -110,7 +138,10 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 			return result, emailtags.Failure("remote_unknown", "Microsoft move outcome is uncertain; sync before retrying", result, readErr)
 		}
 		if after.ParentFolderID != destination {
-			return result, emailtags.Failure("verification_failed", "Microsoft move readback did not match the destination; sync before retrying", result, postErr)
+			if postErr != nil {
+				return result, emailtags.Failure("remote_unknown", "Microsoft move outcome is uncertain; sync before retrying", result, postErr)
+			}
+			return result, emailtags.Failure("verification_failed", "Microsoft move readback did not match the destination; sync before retrying", result, nil)
 		}
 		before = after
 	}

@@ -97,11 +97,7 @@ func (a *storeAPIAdapter) messageTags(ctx context.Context, id int64, change *ema
 	}
 	evidenceCtx, cancel := localDraftEvidenceContext(ctx)
 	defer cancel()
-	save := a.store.SaveEmailTagsContext
-	if archive != nil && target.Provider == sourceTypeMSMail {
-		save = a.store.SaveMicrosoftMailArchiveContext
-	}
-	if err := save(evidenceCtx, target, result); err != nil {
+	if err := a.store.SaveEmailTagsContext(evidenceCtx, target, result); err != nil {
 		return result, emailtags.Failure("remote_accepted_local_failed", "Provider tags were verified but could not be saved locally; sync the account", result, err)
 	}
 	if target.Provider == "gmail" || target.Provider == sourceTypeMSMail {

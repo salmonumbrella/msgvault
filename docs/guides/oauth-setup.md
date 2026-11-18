@@ -684,8 +684,9 @@ delegated `Mail.ReadWrite` permission and reauthorize with
 `msgvault add-o365 you@example.com --graph --mail-write`. Archive moves a
 message from a primary mailbox folder directly to the Archive root; restore
 always moves it to Inbox.
-Messages in Deleted Items and its subfolders are excluded, as is Online Archive.
-An unlisted parent folder is refused. Previews need only
+Messages in Deleted Items and its subfolders, Online Archive, and folders outside
+the primary mail tree are excluded. Hidden folders are eligible when their
+ancestry can be proved. Mail directly in Archive is already archived. Previews need only
 `Mail.Read`. See [archive and unarchive](../cli-reference.md#archive-and-unarchive).
 
 To delete messages at the source with `delete-staged`, also add the delegated
