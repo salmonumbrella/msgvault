@@ -49,6 +49,42 @@ func TestIMAPArchiveMovePersistence(t *testing.T) {
 	assert.Contains(t, labels, label)
 }
 
+func TestIMAPArchiveMissingCurrentCopyGuidance(t *testing.T) {
+	st, source, id := tagFixture(t, "imap", "INBOX|7")
+	target := store.EmailTagTarget{}
+	target.ID, target.SourceID, target.Provider = id, source.ID, "imap"
+	_, err := st.CheckIMAPArchiveTargetContext(t.Context(), target)
+	require.ErrorContains(t, err, "sync-full")
+	require.ErrorContains(t, err, "without folder filters")
+}
+
+func TestIMAPArchiveInvalidateMapping(t *testing.T) {
+	st, source, id := tagFixture(t, "imap", "INBOX|7")
+	if os.Getenv("MSGVAULT_TEST_DB") != "" {
+		require.True(t, st.IsPostgreSQL())
+	}
+	tagMembership(t, st, source.ID, id, "INBOX", 77, 7)
+	target, err := st.EmailTagTargetContext(t.Context(), id, "")
+	require.NoError(t, err)
+	move := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: target, Destination: "Archiv", DestinationUIDValidity: 88}
+	require.NoError(t, st.BeginIMAPMoveContext(t.Context(), move))
+	move.DestinationUID = 9
+	require.NoError(t, st.SaveIMAPMoveMappingContext(t.Context(), move))
+	wrong := move
+	wrong.DestinationUID = 10
+	require.Error(t, st.InvalidateIMAPMoveMappingContext(t.Context(), wrong))
+	wrong = move
+	wrong.SourceIdentifier = "other"
+	require.Error(t, st.InvalidateIMAPMoveMappingContext(t.Context(), wrong))
+	require.NoError(t, st.InvalidateIMAPMoveMappingContext(t.Context(), move))
+	require.Error(t, st.InvalidateIMAPMoveMappingContext(t.Context(), move))
+	require.Error(t, st.ReconcileIMAPMoveContext(t.Context(), move))
+	pending, err := st.IMAPPendingMoveContext(t.Context(), source.ID, id)
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	assert.Zero(t, pending.DestinationUID)
+}
+
 func pendingValue(p *store.IMAPPendingMove) store.IMAPPendingMove {
 	if p == nil {
 		return store.IMAPPendingMove{}
@@ -64,7 +100,7 @@ func TestIMAPArchiveRejectsAmbiguousAndChangedEpoch(t *testing.T) {
 	m := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: target, Destination: "Archiv", DestinationUIDValidity: 88}
 	tagMembership(t, st, source.ID, id, "Other", 20, 2)
 	_, err = st.CheckIMAPArchiveTargetContext(t.Context(), target)
-	require.Error(t, err)
+	require.ErrorContains(t, err, "mailbox selection is unavailable")
 	require.Error(t, st.BeginIMAPMoveContext(t.Context(), m))
 	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`DELETE FROM imap_message_memberships WHERE source_id=? AND mailbox=?`), source.ID, "Other")
 	require.NoError(t, err)

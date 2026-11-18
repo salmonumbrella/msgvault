@@ -134,8 +134,7 @@ const (
 func (e *Executor) deleteOne(ctx context.Context, sourceID int64, gmailID string, method Method) (deleteResult, error) {
 	var err error
 	client, exact := e.client.(interface {
-		TrashCopy(ctx context.Context, identity imaplib.DraftReceipt) error
-		DeleteCopy(ctx context.Context, identity imaplib.DraftReceipt) error
+		RemoveCopy(ctx context.Context, identity imaplib.DraftReceipt, trash bool) error
 	})
 	var identity imaplib.DraftReceipt
 	if exact {
@@ -150,10 +149,8 @@ func (e *Executor) deleteOne(ctx context.Context, sourceID int64, gmailID string
 		identity = imaplib.DraftReceipt{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
 	}
 	switch {
-	case exact && method == MethodTrash:
-		err = client.TrashCopy(ctx, identity)
 	case exact:
-		err = client.DeleteCopy(ctx, identity)
+		err = client.RemoveCopy(ctx, identity, method == MethodTrash)
 	case method == MethodTrash:
 		err = e.client.TrashMessage(ctx, gmailID)
 	default:

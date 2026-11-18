@@ -31,8 +31,11 @@ func (s *Store) CheckIMAPArchiveTargetContext(ctx context.Context, target EmailT
 	if err != nil {
 		return target, fmt.Errorf("read IMAP memberships: %w", err)
 	}
+	if len(copies) == 0 {
+		return target, emailtags.Failure("stale_identity", "no current mailbox copy for this message; run msgvault sync-full for the account without folder filters first", nil, nil)
+	}
 	if len(copies) != 1 {
-		return target, emailtags.Failure("stale_identity", "IMAP message must have exactly one current mailbox copy", nil, nil)
+		return target, emailtags.Failure("stale_identity", "exactly one current copy required; mailbox selection is unavailable", nil, nil)
 	}
 	return target, nil
 }
@@ -111,6 +114,15 @@ func imapMoveRowResult(result sql.Result, err error, message string) error {
 		return errors.New(message)
 	}
 	return nil
+}
+
+// InvalidateIMAPMoveMappingContext disowns a disputed receipt. A failed write
+// or crash before commit leaves the first mapping trusted; a lone wrong receipt
+// cannot be detected.
+func (s *Store) InvalidateIMAPMoveMappingContext(ctx context.Context, m IMAPPendingMove) error {
+	t := m.Target
+	result, err := s.db.ExecContext(ctx, `UPDATE imap_pending_moves SET destination_uid=NULL WHERE source_id=? AND message_id=? AND source_message_id=? AND source_identifier=? AND old_mailbox=? AND old_uidvalidity=? AND old_uid=? AND destination=? AND destination_uidvalidity=? AND destination_uid=? AND EXISTS(SELECT 1 FROM sources WHERE id=imap_pending_moves.source_id AND source_type='imap' AND identifier=? AND NOT EXISTS(SELECT 1 FROM source_settings ss WHERE ss.source_id=sources.id AND ss.merged_into_source_id IS NOT NULL))`, t.SourceID, t.ID, t.SourceMessageID, m.SourceIdentifier, t.Mailbox, t.UIDValidity, t.UID, m.Destination, m.DestinationUIDValidity, m.DestinationUID, m.SourceIdentifier)
+	return imapMoveRowResult(result, err, "pending IMAP move changed")
 }
 
 // ClearIMAPMoveContext removes an intent only when dispatch definitely did not happen.

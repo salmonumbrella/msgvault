@@ -28,9 +28,9 @@ The server must advertise one selectable Archive role. To choose a different
 mailbox, pass `--archive-mailbox "Mailbox name"` when running `add-imap` or
 `add-o365` for this account. The mailbox must already exist and cannot be
 INBOX, Trash, Junk, Sent, or Drafts. No mailbox is created automatically.
-Folder sync filters do not prevent restoring the moved copy.
+Complete `msgvault sync-full` for the account without folder filters before archiving. Folder sync filters do not prevent restoring a moved copy.
 
-If a move's outcome is uncertain, sync and inspect both folders. The daemon
+If a move's outcome is uncertain, including a disputed receipt, sync and inspect both folders. The daemon
 keeps a returned UID mapping and verifies it before reconciling the local
 message. Sync and inspection do not clear an unknown outcome or authorize a
 second MOVE; the daemon does not automatically resend it. If another client moves the copy again before verification, sync may add its new UID as a separate message. The original remains readable, but the unverified pair cannot be resolved by matching similar messages.

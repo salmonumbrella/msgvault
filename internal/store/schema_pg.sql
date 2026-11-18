@@ -1883,9 +1883,6 @@ CREATE TABLE IF NOT EXISTS imap_pending_moves (
     PRIMARY KEY (source_id, message_id)
 );
 
--- Managed outbound drafts retain the exact APPEND receipt and any interrupted
--- replacement bytes. The receipt is the mutation authority; mailbox sync only
--- observes memberships and never changes these fields.
 CREATE TABLE IF NOT EXISTS imap_drafts (
     draft_id TEXT PRIMARY KEY,
     source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,

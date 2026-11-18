@@ -39,8 +39,8 @@ func newMessageSyncer(client gmail.API, st *store.Store, opts *msgsync.Options, 
 				if err := imapSourceConfigMatches(source); err != nil {
 					return errors.New("pending IMAP move account configuration changed")
 				}
-				journal := imapArchiveJournal{store: st, source: source}
-				identity, recovery := journal.recovery(move)
+				journal := imapArchiveJournal{store: st, source: source, target: move.Target}
+				identity, recovery := imapArchiveRecovery(move)
 				_, verified, err := native.ArchiveCopy(ctx, journal, identity, recovery, true, false)
 				if err == nil {
 					err = st.ReconcileIMAPMoveContext(ctx, journal.move(*verified))

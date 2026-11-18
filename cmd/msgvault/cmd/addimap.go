@@ -279,17 +279,16 @@ func init() {
 
 // refreshedIMAPArchiveMailbox retains the configured destination on credential refresh.
 func refreshedIMAPArchiveMailbox(source *store.Source, changed bool, value string) (string, error) {
-	if !changed {
-		value = ""
-	}
+	var oldValue string
 	if source != nil && source.SyncConfig.Valid {
 		old, err := imapclient.ConfigFromJSON(source.SyncConfig.String)
 		if err != nil {
 			return "", fmt.Errorf("parse existing IMAP config: %w", err)
 		}
-		if !changed {
-			value = old.ArchiveMailbox
-		}
+		oldValue = old.ArchiveMailbox
 	}
-	return value, nil
+	if changed {
+		return value, nil
+	}
+	return oldValue, nil
 }

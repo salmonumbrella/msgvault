@@ -62,6 +62,10 @@ func (j archiveTestJournal) SaveMapping(ctx context.Context, m ArchiveMove) erro
 	return j.st.SaveIMAPMoveMappingContext(ctx, j.convert(m))
 }
 
+func (j archiveTestJournal) Invalidate(ctx context.Context, m ArchiveMove) error {
+	return j.st.InvalidateIMAPMoveMappingContext(ctx, j.convert(m))
+}
+
 func (j archiveTestJournal) Clear(ctx context.Context, m ArchiveMove) error {
 	return j.st.ClearIMAPMoveContext(ctx, j.convert(m))
 }
@@ -257,6 +261,10 @@ func (*refuseJournal) SaveMapping(context.Context, ArchiveMove) error {
 	return errors.New("unexpected mapping")
 }
 
+func (*refuseJournal) Invalidate(context.Context, ArchiveMove) error {
+	return errors.New("unexpected invalidation")
+}
+
 func (*refuseJournal) Clear(context.Context, ArchiveMove) error {
 	return errors.New("unexpected clear")
 }
@@ -342,14 +350,23 @@ func (s *badMappingSession) Move(w *imapserver.MoveWriter, _ imaplib.NumSet, _ s
 }
 
 type savedTestIntent struct {
-	move  *ArchiveMove
-	saves int
+	move           *ArchiveMove
+	saves          int
+	failInvalidate bool
 }
 
 func (j *savedTestIntent) Begin(_ context.Context, m ArchiveMove) error { j.move = &m; return nil }
 func (j *savedTestIntent) SaveMapping(_ context.Context, m ArchiveMove) error {
 	j.move = &m
 	j.saves++
+	return nil
+}
+
+func (j *savedTestIntent) Invalidate(_ context.Context, _ ArchiveMove) error {
+	if j.failInvalidate {
+		return errors.New("invalidation failed")
+	}
+	j.move.DestinationUID = 0
 	return nil
 }
 
@@ -428,6 +445,11 @@ func (j *refusalJournal) SaveMapping(_ context.Context, m ArchiveMove) error {
 	j.move = &m
 	return nil
 }
+func (j *refusalJournal) Invalidate(_ context.Context, _ ArchiveMove) error {
+	j.move.DestinationUID = 0
+	return nil
+}
+
 func (j *refusalJournal) Clear(_ context.Context, _ ArchiveMove) error {
 	j.clears++
 	j.move = nil
@@ -499,6 +521,7 @@ func TestArchiveMoveRefusalKeepsOnlyUncertainIntents(t *testing.T) {
 
 type taggedReceiptListener struct {
 	net.Listener
+
 	epoch *atomic.Uint32
 	hits  *atomic.Int32
 }
@@ -538,40 +561,50 @@ type repeatedReceiptSession struct {
 
 	epoch     *atomic.Uint32
 	different bool
+	unusable  bool
 	moves     *atomic.Int32
 }
 
 func (s *repeatedReceiptSession) Move(w *imapserver.MoveWriter, set imaplib.NumSet, dest string) error {
 	s.moves.Add(1)
+	if s.different {
+		if err := w.WriteCopyData(&imaplib.CopyData{UIDValidity: s.epoch.Load(), SourceUIDs: imaplib.UIDSetNum(1), DestUIDs: imaplib.UIDSetNum(1)}); err != nil {
+			return err
+		}
+	}
 	if err := s.Session.(imapserver.SessionMove).Move(w, set, dest); err != nil {
-		return err
+		return fmt.Errorf("fixture move: %w", err)
 	}
-	if !s.different {
-		return nil
+	if s.unusable {
+		return w.WriteCopyData(&imaplib.CopyData{UIDValidity: s.epoch.Load(), SourceUIDs: imaplib.UIDSetNum(999), DestUIDs: imaplib.UIDSetNum(1)})
 	}
-	uid := imaplib.UID(2)
-	return w.WriteCopyData(&imaplib.CopyData{UIDValidity: s.epoch.Load(), SourceUIDs: imaplib.UIDSetNum(1), DestUIDs: imaplib.UIDSetNum(uid)})
+	return nil
 }
 
 func TestArchiveRepeatedCopyUID(t *testing.T) {
-	for _, different := range []bool{false, true} {
-		t.Run(fmt.Sprintf("different=%v", different), func(t *testing.T) {
+	for _, mode := range []string{"same", "different", "unusable", "invalidate_failure"} {
+		t.Run(mode, func(t *testing.T) {
+			different := mode == "different" || mode == "invalidate_failure"
+			unusable := mode == "unusable"
 			user := imapmemserver.NewUser(testutil.IMAPTestUsername, testutil.IMAPTestPassword)
 			require.NoError(t, user.Create("INBOX", nil))
 			require.NoError(t, user.Create("Archiv", nil))
 			testutil.AppendIMAPMessage(t, user, "INBOX")
+			if different {
+				testutil.AppendIMAPMessage(t, user, "Archiv")
+			}
 			mem := imapmemserver.New()
 			mem.AddUser(user)
 			var epoch atomic.Uint32
 			var moves atomic.Int32
 			srv := imapserver.New(&imapserver.Options{InsecureAuth: true, Caps: imaplib.CapSet{imaplib.CapIMAP4rev1: {}, imaplib.CapMove: {}, imaplib.CapUIDPlus: {}}, NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
-				return &repeatedReceiptSession{Session: mem.NewSession(), epoch: &epoch, different: different, moves: &moves}, nil, nil
+				return &repeatedReceiptSession{Session: mem.NewSession(), epoch: &epoch, different: different, unusable: unusable, moves: &moves}, nil, nil
 			}})
 			listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 			require.NoError(t, err)
 			var tagged atomic.Int32
-			serving := net.Listener(listener)
-			if !different {
+			serving := listener
+			if !different && !unusable {
 				serving = taggedReceiptListener{Listener: listener, epoch: &epoch, hits: &tagged}
 			}
 			go func() { _ = srv.Serve(serving) }()
@@ -593,9 +626,9 @@ func TestArchiveRepeatedCopyUID(t *testing.T) {
 				return nil
 			}))
 			identity := DraftReceipt{Mailbox: "INBOX", UIDValidity: sourceEpoch, UID: 1}
-			journal := &savedTestIntent{}
+			journal := &savedTestIntent{failInvalidate: mode == "invalidate_failure"}
 			result, _, err := client.ArchiveCopy(t.Context(), journal, identity, nil, true, false)
-			if different {
+			if different || unusable {
 				require.Error(t, err)
 				assert.False(t, result.Verified)
 			} else {
@@ -603,16 +636,20 @@ func TestArchiveRepeatedCopyUID(t *testing.T) {
 				assert.True(t, result.Verified)
 			}
 			require.NotNil(t, journal.move)
-			assert.EqualValues(t, 1, journal.move.DestinationUID)
+			if mode == "different" || unusable {
+				assert.Zero(t, journal.move.DestinationUID)
+			} else {
+				assert.EqualValues(t, 1, journal.move.DestinationUID)
+			}
 			assert.Equal(t, 1, journal.saves)
 			assert.EqualValues(t, 1, moves.Load())
-			if !different {
+			if !different && !unusable {
 				assert.EqualValues(t, 1, tagged.Load())
 			}
-			if different {
+			if mode == "different" || unusable {
 				result, _, err = client.ArchiveCopy(t.Context(), journal, identity, journal.move, true, false)
-				require.NoError(t, err)
-				assert.True(t, result.Verified)
+				require.Error(t, err)
+				assert.False(t, result.Verified)
 				assert.EqualValues(t, 1, moves.Load())
 			}
 		})

@@ -79,6 +79,9 @@ func (j deletionProbeJournal) Begin(ctx context.Context, m imap.ArchiveMove) err
 func (j deletionProbeJournal) SaveMapping(ctx context.Context, m imap.ArchiveMove) error {
 	return j.st.SaveIMAPMoveMappingContext(ctx, j.convert(m))
 }
+func (j deletionProbeJournal) Invalidate(ctx context.Context, m imap.ArchiveMove) error {
+	return j.st.InvalidateIMAPMoveMappingContext(ctx, j.convert(m))
+}
 func (j deletionProbeJournal) Clear(ctx context.Context, m imap.ArchiveMove) error {
 	return j.st.ClearIMAPMoveContext(ctx, j.convert(m))
 }
@@ -149,17 +152,20 @@ func TestProbeDeleteAfterArchiveMustNotFalselyMarkSourceDeleted(t *testing.T) {
 	exact := imap.DraftReceipt{Mailbox: archived.Mailbox, UIDValidity: archived.UIDValidity, UID: archived.UID}
 	stale := exact
 	stale.UIDValidity++
-	require.ErrorContains(t, client.DeleteCopy(t.Context(), stale), "UIDVALIDITY changed")
-	require.ErrorContains(t, client.TrashCopy(t.Context(), stale), "UIDVALIDITY changed")
+	require.ErrorContains(t, client.RemoveCopy(t.Context(), stale, false), "UIDVALIDITY changed")
+	require.ErrorContains(t, client.RemoveCopy(t.Context(), stale, true), "UIDVALIDITY changed")
 	absent := exact
 	absent.UID += 1000
 	var notFound *gmail.NotFoundError
-	require.ErrorAs(t, client.DeleteCopy(t.Context(), absent), &notFound)
-	require.ErrorAs(t, client.TrashCopy(t.Context(), absent), &notFound)
+	require.ErrorAs(t, client.RemoveCopy(t.Context(), absent, false), &notFound)
+	require.ErrorAs(t, client.RemoveCopy(t.Context(), absent, true), &notFound)
 	assert.Zero(t, stores.Load())
 	assert.Zero(t, expunges.Load())
 	pending := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: archived, Destination: "INBOX", DestinationUIDValidity: selected.UIDValidity}
 	require.NoError(t, st.BeginIMAPMoveContext(t.Context(), pending))
+	pending.DestinationUID = 9
+	require.NoError(t, st.SaveIMAPMoveMappingContext(t.Context(), pending))
+	require.NoError(t, st.InvalidateIMAPMoveMappingContext(t.Context(), pending))
 	executor := NewExecutor(nil, st, client)
 	for _, method := range []Method{MethodTrash, MethodDelete} {
 		state, err := executor.deleteOne(t.Context(), source.ID, target.SourceMessageID, method)
@@ -186,7 +192,7 @@ func TestProbeDeleteAfterArchiveMustNotFalselyMarkSourceDeleted(t *testing.T) {
 	require.Error(t, deleteErr)
 	honest.Store(true)
 	trashIdentity := imap.DraftReceipt{Mailbox: "Archiv", UIDValidity: archived.UIDValidity, UID: 1}
-	require.NoError(t, client.TrashCopy(t.Context(), trashIdentity))
+	require.NoError(t, client.RemoveCopy(t.Context(), trashIdentity, true))
 	_, err = observer.Select("Trash", &imapapi.SelectOptions{ReadOnly: true}).Wait()
 	require.NoError(t, err)
 	trashed, err := observer.Fetch(imapapi.UIDSetNum(1), &imapapi.FetchOptions{UID: true}).Collect()

@@ -1444,6 +1444,7 @@ func (s *Syncer) full(
 			s.failStoppedSync(state.syncID, loadErr)
 			return nil, fmt.Errorf("load pending IMAP moves: %w", loadErr)
 		}
+		// Stop ingestion duplicating recorded tuples; an invalidated destination is unrecorded.
 		for _, m := range moves {
 			g := scoped.failedRelocationGuards
 			g.add(gmail.MessageRelocationTarget{InternalID: m.Target.ID, SourceMessageID: m.Target.SourceMessageID})

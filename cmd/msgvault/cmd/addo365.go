@@ -172,7 +172,6 @@ func o365IMAPRegistration(host, email string, source *store.Source, sources []*s
 	if err != nil {
 		return "", "", err
 	}
-
 	for _, other := range sources {
 		if (source == nil || other.ID != source.ID) && other.Identifier == identifier {
 			return "", "", fmt.Errorf("IMAP host %s already belongs to another source (ID %d)", host, other.ID)
@@ -392,7 +391,6 @@ func runAddO365Local(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-
 	source, err = s.RegisterMicrosoftMail(cmd.Context(), source, sourceTypeIMAP, identifier, sql.NullString{String: binding.resolvedApp, Valid: binding.resolvedApp != ""}, cfgJSON)
 	if err != nil {
 		return fmt.Errorf("store OAuth app: %w", err)

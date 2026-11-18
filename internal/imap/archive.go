@@ -23,6 +23,7 @@ type ArchiveMove struct {
 type ArchiveJournal interface {
 	Begin(ctx context.Context, move ArchiveMove) error
 	SaveMapping(ctx context.Context, move ArchiveMove) error
+	Invalidate(ctx context.Context, move ArchiveMove) error
 	Clear(ctx context.Context, move ArchiveMove) error
 }
 
@@ -36,18 +37,10 @@ func (c *Client) archiveDestination(ctx context.Context) (string, error) {
 	if _, err := c.listMailboxesLocked(ctx); err != nil {
 		return "", err
 	}
-	boxes := c.mailboxDiscovery
 	name := c.config.ArchiveMailbox
 	var chosen *imaplib.ListData
-	for _, box := range boxes {
-		if name != "" {
-			if box.Mailbox == name {
-				chosen = box
-				break
-			}
-			continue
-		}
-		if hasAttr(box.Attrs, imaplib.MailboxAttrArchive) && !hasAttr(box.Attrs, imaplib.MailboxAttrNoSelect) {
+	for _, box := range c.mailboxDiscovery {
+		if (name != "" && box.Mailbox == name) || (name == "" && hasAttr(box.Attrs, imaplib.MailboxAttrArchive) && !hasAttr(box.Attrs, imaplib.MailboxAttrNoSelect)) {
 			if chosen != nil {
 				return "", errors.New("multiple archive mailboxes")
 			}
@@ -92,6 +85,13 @@ func archiveUIDExists(conn *imapclient.Client, uid uint32) (bool, error) {
 	return true, nil
 }
 
+func (c *Client) archiveUIDPresent(conn *imapclient.Client, identity DraftReceipt, readOnly bool) (bool, error) {
+	if _, err := c.archiveSelect(conn, identity.Mailbox, identity.UIDValidity, readOnly); err != nil {
+		return false, err
+	}
+	return archiveUIDExists(conn, identity.UID)
+}
+
 func singletonArchiveUID(set imaplib.NumSet) (uint32, bool) {
 	uids, ok := set.(imaplib.UIDSet)
 	if !ok || len(uids) != 1 || uids[0].Start == 0 || uids[0].Start != uids[0].Stop {
@@ -121,13 +121,9 @@ func (c *Client) ArchiveCopy(ctx context.Context, journal ArchiveJournal, target
 					return archiveFailure("archive_unsupported", "Set archive_mailbox for this IMAP account with add-imap or add-o365 --archive-mailbox", err)
 				}
 			}
-			_, err := c.archiveSelect(conn, target.Mailbox, target.UIDValidity, true)
-			if err != nil {
-				return archiveFailure("stale_identity", "Cannot verify source mailbox and UIDVALIDITY; sync before retrying", err)
-			}
-			exists, err := archiveUIDExists(conn, target.UID)
+			exists, err := c.archiveUIDPresent(conn, target, true)
 			if err != nil || !exists {
-				return archiveFailure("stale_identity", "IMAP message is absent or cannot be read; sync before retrying", err)
+				return archiveFailure("stale_identity", "Cannot verify source IMAP mailbox and UID; sync before retrying", err)
 			}
 			if target.Mailbox == destination || (strings.EqualFold(target.Mailbox, "INBOX") && destination == "INBOX") {
 				result.Verified = true
@@ -169,16 +165,18 @@ func (c *Client) ArchiveCopy(ctx context.Context, journal ArchiveJournal, target
 				}
 				old, oldOK := singletonArchiveUID(data.SourceUIDs)
 				next, nextOK := singletonArchiveUID(data.DestUIDs)
-				if !oldOK || !nextOK || old != target.UID || data.UIDValidity != dest.UIDValidity {
+				if !oldOK || !nextOK || old != target.UID || data.UIDValidity != dest.UIDValidity || (saved && m.DestinationUID != next) {
 					receiptFailed = true
-					return errors.New("unusable COPYUID")
+					if saved {
+						// Disown disputed evidence even after caller cancellation.
+						if err := journal.Invalidate(context.WithoutCancel(ctx), m); err != nil {
+							return fmt.Errorf("invalidate COPYUID: %w", err)
+						}
+					}
+					return errors.New("unusable or conflicting COPYUID")
 				}
 				if saved {
-					if m.DestinationUID == next {
-						return nil
-					}
-					receiptFailed = true
-					return errors.New("conflicting COPYUID")
+					return nil
 				}
 				m.DestinationUID = next
 				// Persist the receipt even after caller cancellation.
@@ -205,17 +203,12 @@ func (c *Client) ArchiveCopy(ctx context.Context, journal ArchiveJournal, target
 			pending = &m
 		}
 		old := pending.Target
-		if _, err := c.archiveSelect(conn, old.Mailbox, old.UIDValidity, true); err != nil {
-			return archiveFailure("remote_unknown", "Cannot verify the original IMAP mailbox; sync and inspect both folders", err)
-		}
-		exists, err := archiveUIDExists(conn, old.UID)
+		exists, err := c.archiveUIDPresent(conn, old, true)
 		if err != nil || exists {
 			return archiveFailure("remote_unknown", "Original IMAP UID is not confirmed absent; sync and inspect both folders", err)
 		}
-		if _, err := c.archiveSelect(conn, pending.Destination, pending.DestinationUIDValidity, true); err != nil {
-			return archiveFailure("remote_unknown", "Cannot verify destination IMAP epoch; sync and inspect both folders", err)
-		}
-		exists, err = archiveUIDExists(conn, pending.DestinationUID)
+		destination := DraftReceipt{Mailbox: pending.Destination, UIDValidity: pending.DestinationUIDValidity, UID: pending.DestinationUID}
+		exists, err = c.archiveUIDPresent(conn, destination, true)
 		if err != nil || !exists {
 			return archiveFailure("remote_unknown", "Mapped IMAP destination UID is not confirmed; sync and inspect both folders", err)
 		}

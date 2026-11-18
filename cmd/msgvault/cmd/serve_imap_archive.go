@@ -29,12 +29,15 @@ func (j imapArchiveJournal) SaveMapping(ctx context.Context, m imaplib.ArchiveMo
 	return j.store.SaveIMAPMoveMappingContext(ctx, j.move(m))
 }
 
+func (j imapArchiveJournal) Invalidate(ctx context.Context, m imaplib.ArchiveMove) error {
+	return j.store.InvalidateIMAPMoveMappingContext(ctx, j.move(m))
+}
+
 func (j imapArchiveJournal) Clear(ctx context.Context, m imaplib.ArchiveMove) error {
 	return j.store.ClearIMAPMoveContext(ctx, j.move(m))
 }
 
-func (j *imapArchiveJournal) recovery(p store.IMAPPendingMove) (imaplib.DraftReceipt, *imaplib.ArchiveMove) {
-	j.target = p.Target
+func imapArchiveRecovery(p store.IMAPPendingMove) (imaplib.DraftReceipt, *imaplib.ArchiveMove) {
 	identity := imaplib.DraftReceipt{Mailbox: p.Target.Mailbox, UIDValidity: p.Target.UIDValidity, UID: p.Target.UID}
 	return identity, &imaplib.ArchiveMove{Target: identity, Destination: p.Destination, DestinationUIDValidity: p.DestinationUIDValidity, DestinationUID: p.DestinationUID}
 }
@@ -60,9 +63,9 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 			}
 		}
 		if err != nil {
-			if target.Provider == "imap" {
-				if failure, ok := errors.AsType[*emailtags.MessageTagError](err); ok && failure.Code == "stale_identity" {
-					return target, emailtags.Failure("stale_identity", "IMAP message must have exactly one current mailbox copy; mailbox selection is unavailable", nil, nil)
+			if failure, ok := errors.AsType[*emailtags.MessageTagError](err); target.Provider == "imap" && ok && failure.Code == "stale_identity" {
+				if _, checkErr := a.store.CheckIMAPArchiveTargetContext(ctx, target); checkErr != nil {
+					return target, checkErr
 				}
 			}
 			return target, err
@@ -148,7 +151,8 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 	identity := imaplib.DraftReceipt{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
 	var recovery *imaplib.ArchiveMove
 	if pending != nil {
-		identity, recovery = journal.recovery(*pending)
+		journal.target = pending.Target
+		identity, recovery = imapArchiveRecovery(*pending)
 	}
 	result, verified, err := native.ArchiveCopy(ctx, journal, identity, recovery, *change.Archived, change.DryRun)
 	if result != nil {

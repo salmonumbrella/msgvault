@@ -2007,22 +2007,13 @@ func expungeUIDLocked(conn *imapclient.Client, uidSet imap.UIDSet) error {
 	return nil
 }
 
-// TrashCopy and DeleteCopy operate only on the recorded mailbox epoch and UID.
-func (c *Client) TrashCopy(ctx context.Context, identity DraftReceipt) error {
-	return c.deleteCopy(ctx, identity, true)
-}
-func (c *Client) DeleteCopy(ctx context.Context, identity DraftReceipt) error {
-	return c.deleteCopy(ctx, identity, false)
-}
-func (c *Client) deleteCopy(ctx context.Context, identity DraftReceipt, trash bool) error {
+// RemoveCopy operates only on the recorded mailbox epoch and UID.
+func (c *Client) RemoveCopy(ctx context.Context, identity DraftReceipt, trash bool) error {
 	return c.withDraftConn(ctx, func(conn *imapclient.Client) error {
 		if identity.UIDValidity == 0 || identity.UID == 0 || identity.Mailbox == "" {
 			return errors.New("invalid IMAP copy identity")
 		}
-		if _, err := c.archiveSelect(conn, identity.Mailbox, identity.UIDValidity, false); err != nil {
-			return err
-		}
-		exists, err := archiveUIDExists(conn, identity.UID)
+		exists, err := c.archiveUIDPresent(conn, identity, false)
 		if err != nil {
 			return err
 		}

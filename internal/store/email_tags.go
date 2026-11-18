@@ -58,23 +58,15 @@ func (s *Store) emailTagTargetContext(ctx context.Context, id int64, mailbox str
 		}
 		return target, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT mm.mailbox,mm.uidvalidity,mm.uid
- FROM imap_message_memberships mm
- JOIN imap_folder_state fs ON fs.source_id=mm.source_id AND fs.mailbox=mm.mailbox AND fs.uidvalidity=mm.uidvalidity
- WHERE mm.message_id=? AND mm.source_id=?`, id, target.SourceID)
+	_, copies, err := s.imapCurrentCopies(ctx, target.SourceID, id)
 	if err != nil {
 		return target, fmt.Errorf("resolve IMAP tag membership: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
 	count := 0
 	var sole EmailTagTarget
 	selected := false
-	for rows.Next() {
-		var name string
-		var epoch, uid uint32
-		if err := rows.Scan(&name, &epoch, &uid); err != nil {
-			return target, err
-		}
+	for _, item := range copies {
+		name, epoch, uid := item.Mailbox, item.UIDValidity, item.UID
 		if mailbox != "" && name != mailbox {
 			continue
 		}
@@ -85,9 +77,6 @@ func (s *Store) emailTagTargetContext(ctx context.Context, id int64, mailbox str
 			target.Mailbox, target.UIDValidity, target.UID = name, epoch, uid
 			selected = true
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return target, err
 	}
 	if !selected && count == 1 {
 		target = sole

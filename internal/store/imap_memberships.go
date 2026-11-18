@@ -295,6 +295,7 @@ func (s *Store) applyIMAPMailboxDeltas(
 		if err != nil {
 			return err
 		}
+		// Finalization preserves pending rows and recorded tuples; disputed destinations are unrecorded.
 		protected := make(map[string]map[imapMembershipUID]struct{})
 		protectedIDs := make(map[int64]struct{})
 		moves, err := loadIMAPPendingMoves(ctx, tx, sourceID, 0)

@@ -31,6 +31,8 @@ type failOnceFetchSession struct {
 
 	fail     *atomic.Bool
 	moveFail *atomic.Bool
+	conflict *atomic.Bool
+	epoch    *atomic.Uint32
 	moves    *atomic.Int32
 }
 
@@ -39,6 +41,11 @@ func (s *failOnceFetchSession) Move(w *imapserver.MoveWriter, set imapapi.NumSet
 	mover, ok := s.Session.(imapserver.SessionMove)
 	if !ok {
 		return errors.New("fixture lacks MOVE")
+	}
+	if s.conflict != nil && s.conflict.Swap(false) {
+		if err := w.WriteCopyData(&imapapi.CopyData{UIDValidity: s.epoch.Load(), SourceUIDs: imapapi.UIDSetNum(1), DestUIDs: imapapi.UIDSetNum(1)}); err != nil {
+			return fmt.Errorf("fixture receipt: %w", err)
+		}
 	}
 	if err := mover.Move(w, set, dest); err != nil {
 		return fmt.Errorf("fixture MOVE: %w", err)
@@ -60,28 +67,33 @@ func (s *failOnceFetchSession) Fetch(w *imapserver.FetchWriter, set imapapi.NumS
 
 type disconnectReceiptListener struct {
 	net.Listener
+
 	armed *atomic.Bool
 }
 
 func (l disconnectReceiptListener) Accept() (net.Conn, error) {
 	c, err := l.Listener.Accept()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("accept fixture connection: %w", err)
 	}
 	return disconnectReceiptConn{Conn: c, armed: l.armed}, nil
 }
 
 type disconnectReceiptConn struct {
 	net.Conn
+
 	armed *atomic.Bool
 }
 
 func (c disconnectReceiptConn) Write(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
 	if err == nil && bytes.Contains(p, []byte("[COPYUID ")) && c.armed.Swap(false) {
-		_ = c.Conn.Close()
+		_ = c.Close()
 	}
-	return n, err
+	if err != nil {
+		return n, fmt.Errorf("write fixture connection: %w", err)
+	}
+	return n, nil
 }
 
 func TestIMAPArchivePendingRecoveryBeforeSync(t *testing.T) {
@@ -326,4 +338,106 @@ func TestIMAPArchivePendingRecoveryBeforeSync(t *testing.T) {
 	var rowsAfter int
 	require.NoError(t, st.DB().QueryRowContext(t.Context(), st.Rebind(`SELECT COUNT(*) FROM messages WHERE source_id=? AND source_message_id<>? AND deleted_from_source_at IS NULL`), source.ID, "synthetic-conflict").Scan(&rowsAfter))
 	assert.Equal(t, rows, rowsAfter)
+}
+
+func TestIMAPArchiveDisputedReceiptSurvivesSync(t *testing.T) {
+	user := imapmemserver.NewUser(testutil.IMAPTestUsername, testutil.IMAPTestPassword)
+	require.NoError(t, user.Create("INBOX", nil))
+	require.NoError(t, user.Create("Archiv", nil))
+	testutil.AppendIMAPMessage(t, user, "INBOX")
+	testutil.AppendIMAPMessage(t, user, "Archiv")
+	mem := imapmemserver.New()
+	mem.AddUser(user)
+	var fail, moveFail, disconnect, conflict atomic.Bool
+	var epoch atomic.Uint32
+	var moves atomic.Int32
+	srv := imapserver.New(&imapserver.Options{InsecureAuth: true, Caps: imapapi.CapSet{imapapi.CapIMAP4rev1: {}, imapapi.CapMove: {}, imapapi.CapUIDPlus: {}}, NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+		return &failOnceFetchSession{Session: mem.NewSession(), fail: &fail, moveFail: &moveFail, conflict: &conflict, epoch: &epoch, moves: &moves}, nil, nil
+	}})
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(disconnectReceiptListener{Listener: listener, armed: &disconnect}) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	addr := listener.Addr().String()
+	host, portText, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portText)
+	require.NoError(t, err)
+	imapConfig := &imap.Config{Host: host, Port: port, Username: testutil.IMAPTestUsername, ArchiveMailbox: "Archiv"}
+	st := testutil.NewTestStore(t)
+	if os.Getenv("MSGVAULT_TEST_DB") != "" {
+		require.True(t, st.IsPostgreSQL())
+	}
+	source, err := st.GetOrCreateSource("imap", imapConfig.Identifier())
+	require.NoError(t, err)
+	configJSON, err := imapConfig.ToJSON()
+	require.NoError(t, err)
+	require.NoError(t, st.UpdateSourceSyncConfig(t.Context(), source.ID, configJSON))
+	source, err = st.GetSourceByIDContext(t.Context(), source.ID)
+	require.NoError(t, err)
+	cfg := testConfigValue()
+	cfg.Data.DataDir = t.TempDir()
+	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+	runSync := func(filtered bool) {
+		t.Helper()
+		options := imapFolderStateOptions(st, source, false, cfg, testDiscardLogger())
+		if filtered {
+			options = append(options, imap.WithFolderFilter([]string{"INBOX"}, nil))
+		}
+		client := imap.NewClient(imapConfig, testutil.IMAPTestPassword, options...)
+		defer func() { require.NoError(t, client.Close()) }()
+		syncOptions := msgsync.DefaultOptions()
+		syncOptions.SourceType = sourceTypeIMAP
+		syncOptions.NoResume = true
+		summary, err := newMessageSyncer(client, st, syncOptions, invocationFromContext(testCtx)).WithLogger(slog.New(slog.DiscardHandler)).FullWithFinalizer(testCtx, source, func(summary *gmail.SyncSummary) error {
+			return saveIMAPFolderStates(testCtx, st, source, client, summary, 0)
+		})
+		require.NoError(t, err)
+		require.Zero(t, summary.Errors)
+	}
+	runSync(false)
+	var id int64
+	var sourceEpoch uint32
+	require.NoError(t, st.DB().QueryRowContext(t.Context(), st.Rebind(`SELECT id FROM messages WHERE source_id=? AND source_message_id=?`), source.ID, "INBOX|1").Scan(&id))
+	require.NoError(t, st.DB().QueryRowContext(t.Context(), st.Rebind(`SELECT uidvalidity FROM imap_folder_state WHERE source_id=? AND mailbox=?`), source.ID, "Archiv").Scan(&sourceEpoch))
+	epoch.Store(sourceEpoch)
+	adapter := &storeAPIAdapter{store: st, config: cfg, logger: slog.New(slog.DiscardHandler), emailTagClientFactory: func(context.Context, *store.Source) (gmail.API, error) {
+		return imap.NewClient(imapConfig, testutil.IMAPTestPassword), nil
+	}, draftCacheRefresh: func(context.Context, string) error { return nil }}
+	conflict.Store(true)
+	desired := true
+	_, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &desired}, nil, nil)
+	var failure *emailtags.MessageTagError
+	require.ErrorAs(t, err, &failure)
+	assert.Equal(t, "remote_unknown", failure.Code)
+	pending, err := st.IMAPPendingMoveContext(t.Context(), source.ID, id)
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	assert.Zero(t, pending.DestinationUID)
+	runSync(false)
+	for _, desired = range []bool{true, false} {
+		_, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &desired}, nil, nil)
+		require.ErrorAs(t, err, &failure)
+		assert.Equal(t, "remote_unknown", failure.Code)
+	}
+	assert.EqualValues(t, 1, moves.Load())
+	pending, err = st.IMAPPendingMoveContext(t.Context(), source.ID, id)
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	assert.Zero(t, pending.DestinationUID)
+	var unrelated, attached int
+	require.NoError(t, st.DB().QueryRowContext(t.Context(), st.Rebind(`SELECT COUNT(*) FROM imap_message_memberships WHERE source_id=? AND mailbox='Archiv' AND uid=1 AND message_id<>?`), source.ID, id).Scan(&unrelated))
+	require.NoError(t, st.DB().QueryRowContext(t.Context(), st.Rebind(`SELECT COUNT(*) FROM imap_message_memberships WHERE source_id=? AND mailbox='Archiv' AND message_id=?`), source.ID, id).Scan(&attached))
+	assert.Equal(t, 1, unrelated)
+	assert.Zero(t, attached)
+	var otherID int64
+	require.NoError(t, st.DB().QueryRowContext(t.Context(), st.Rebind(`SELECT message_id FROM imap_message_memberships WHERE source_id=? AND mailbox='Archiv' AND uid=1`), source.ID).Scan(&otherID))
+	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`DELETE FROM imap_message_memberships WHERE source_id=? AND message_id=?`), source.ID, otherID)
+	require.NoError(t, err)
+	runSync(true)
+	desired = true
+	_, err = adapter.ArchiveMessage(testCtx, otherID, emailtags.ArchiveChange{Archived: &desired}, nil, nil)
+	require.ErrorContains(t, err, "sync-full")
+	require.ErrorContains(t, err, "without folder filters")
+	assert.EqualValues(t, 1, moves.Load())
 }
