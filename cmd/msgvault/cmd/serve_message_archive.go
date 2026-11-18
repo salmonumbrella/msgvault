@@ -72,7 +72,7 @@ func (a *storeAPIAdapter) ArchiveMessage(ctx context.Context, id int64, change e
 		return nil, err
 	}
 	if target.Provider == sourceTypeMSMail {
-		return &emailtags.ArchiveResult{MessageID: id, SourceID: result.SourceID, Archived: *change.Archived, Changed: len(result.Before) > 0, DryRun: result.DryRun, Verified: result.Verified}, err
+		return &emailtags.ArchiveResult{MessageID: id, SourceID: result.SourceID, Archived: *change.Archived, Changed: result.Changed, DryRun: result.DryRun, Verified: result.Verified}, err
 	}
 	return &emailtags.ArchiveResult{MessageID: id, SourceID: result.SourceID, Archived: !slices.Contains(result.Tags, "INBOX"), Changed: slices.Contains(result.Before, "INBOX") != slices.Contains(result.Tags, "INBOX"), DryRun: result.DryRun, Verified: result.Verified}, err
 }

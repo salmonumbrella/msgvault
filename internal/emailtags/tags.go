@@ -27,6 +27,7 @@ type MicrosoftFolder struct {
 }
 
 type MessageTagResult struct {
+	Changed             bool              `json:"-"`
 	MicrosoftFolderID   string            `json:"-"`
 	MicrosoftFolders    []MicrosoftFolder `json:"-"`
 	MicrosoftCategories *[]string         `json:"-"`

@@ -495,7 +495,8 @@ the active sync finishes. The saved snapshot can be stale until the next sync.
 
 Microsoft Graph archive moves a message from a primary mailbox folder, including
 Sent and custom folders, to Archive. Restore moves it to Inbox. Messages in
-Deleted Items and Online Archive are excluded. Writes require
+Deleted Items and its subfolders are excluded, as is Online Archive. An unlisted
+parent folder is refused. Writes require
 `add-o365 --graph --mail-write`; previews need read access. The daemon verifies
 the immutable message ID and folder after a move and preserves categories
 omitted by Graph.

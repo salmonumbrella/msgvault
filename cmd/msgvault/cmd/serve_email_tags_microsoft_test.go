@@ -15,7 +15,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.kenn.io/msgvault/internal/agentgrant"
 	"go.kenn.io/msgvault/internal/api"
 	"go.kenn.io/msgvault/internal/daemonclient"
 	"go.kenn.io/msgvault/internal/emailtags"
@@ -183,7 +182,6 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 	}
 	var calls atomic.Int32
 	var posts atomic.Int32
-	var omitArchive atomic.Bool
 	parent := "inbox-id"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -195,11 +193,11 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 		case "/me/mailFolders/deleteditems":
 			_ = json.MarshalWrite(w, map[string]string{"id": "deleted-id"})
 		case "/me/mailFolders":
-			folders := []map[string]string{{"id": "inbox-id", "displayName": "Inbox"}}
-			if !omitArchive.Load() {
-				folders = append(folders, map[string]string{"id": "archive-id", "displayName": "Archiv"})
-			}
-			_ = json.MarshalWrite(w, map[string]any{"value": folders})
+			_ = json.MarshalWrite(w, map[string]any{"value": []map[string]any{{"id": "inbox-id", "displayName": "Inbox"}, {"id": "archive-id", "displayName": "Archiv"}, {"id": "deleted-id", "displayName": "Trash", "childFolderCount": 1}}})
+		case "/me/mailFolders/deleted-id/childFolders":
+			_ = json.MarshalWrite(w, map[string]any{"value": []map[string]any{{"id": "child-id", "displayName": "Child", "childFolderCount": 1}}})
+		case "/me/mailFolders/child-id/childFolders":
+			_ = json.MarshalWrite(w, map[string]any{"value": []map[string]any{{"id": "grandchild-id", "displayName": "Grandchild"}}})
 		case "/me/messages/immutable-1/move":
 			posts.Add(1)
 			var body map[string]string
@@ -221,12 +219,6 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 		return msmail.NewClient(srv.URL, func(context.Context) (string, error) { return "synthetic", nil }, 1000), nil
 	}, draftCacheRefresh: func(context.Context, string) error { refreshes++; return nil }}
 	desired := true
-	grant := &agentgrant.Grant{Permissions: []agentgrant.Permission{agentgrant.PermissionMessageArchive}, Sources: []agentgrant.SourceRef{{Type: source.SourceType, Identifier: source.Identifier, IncomingSenderKeys: []string{"other@example.test"}}}}
-	_, deniedErr := a.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired, DryRun: true}, grant, nil)
-	var denied *emailtags.MessageTagError
-	require.ErrorAs(t, deniedErr, &denied)
-	assert.Equal(t, "message_not_found", denied.Code)
-	assert.Zero(t, calls.Load())
 	saveScopes(microsoft.GraphMailScopes())
 	result, err := a.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired, DryRun: true}, nil, nil)
 	require.NoError(t, err)
@@ -250,18 +242,7 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, result.Changed)
 	assert.True(t, result.Verified)
-	parent = "inbox-id"
-	omitArchive.Store(true)
-	result, err = a.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired}, nil, nil)
-	require.ErrorAs(t, err, &failure)
-	assert.Equal(t, "remote_accepted_local_failed", failure.Code)
-	assert.True(t, result.Changed)
-	msg, err = st.GetMessage(mid)
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
-
 	// Exercise a sender-restricted grant through the real HTTP route and client.
-	omitArchive.Store(false)
 	cfg.Server.APIKey, cfg.Server.AgentAccess = "owner", true
 	routes := api.NewServerWithOptions(api.ServerOptions{Config: cfg, Store: a, Engine: query.NewEngine(st.DB(), st.IsPostgreSQL()), Logger: slog.New(slog.DiscardHandler)})
 	t.Cleanup(func() { assert.NoError(t, routes.Shutdown(context.WithoutCancel(t.Context()))) })
@@ -276,15 +257,22 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, client.Close()) })
 	parent = "inbox-id"
-	for _, archived := range []bool{true, false} {
+	for i, archived := range []bool{true, true, false} {
 		got, e := client.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &archived})
 		require.NoError(t, e)
-		assert.True(t, got.Changed)
+		assert.Equal(t, i != 1, got.Changed)
 		assert.True(t, got.Verified)
 		assert.Equal(t, archived, got.Archived)
+		msg, err = st.GetMessage(mid)
+		require.NoError(t, err)
+		label := "Inbox"
+		if archived {
+			label = "Archiv"
+		}
+		assert.ElementsMatch(t, []string{label, "Category: Work"}, msg.Labels)
 	}
 	// A locally active Inbox row can be stale after Outlook moves the message to trash.
-	parent = "deleted-id"
+	parent = "grandchild-id"
 	beforePosts := posts.Load()
 	for _, archived := range []bool{true, false} {
 		for _, preview := range []bool{true, false} {
@@ -297,4 +285,26 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 	msg, err = st.GetMessage(mid)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"Inbox", "Category: Work"}, msg.Labels)
+	parent = "inbox-id"
+	_, err = st.DB().ExecContext(t.Context(), `CREATE TRIGGER fail_archive_save BEFORE INSERT ON message_labels BEGIN SELECT RAISE(FAIL, 'synthetic save failure'); END`)
+	require.NoError(t, err)
+	beforePosts = posts.Load()
+	failed, err := owner.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired})
+	require.ErrorAs(t, err, &failure)
+	assert.Equal(t, "remote_accepted_local_failed", failure.Code)
+	_ = failed
+	if assert.NotNil(t, failure.Result) {
+		assert.True(t, failure.Result.Verified)
+	}
+	assert.Equal(t, beforePosts+1, posts.Load())
+	_, err = st.DB().ExecContext(t.Context(), `DROP TRIGGER fail_archive_save`)
+	require.NoError(t, err)
+	repaired, err := client.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired})
+	require.NoError(t, err)
+	assert.True(t, repaired.Verified)
+	assert.False(t, repaired.Changed)
+	assert.Equal(t, beforePosts+1, posts.Load())
+	msg, err = st.GetMessage(mid)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
 }

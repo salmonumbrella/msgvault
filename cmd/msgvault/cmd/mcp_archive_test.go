@@ -329,6 +329,9 @@ func TestMCPMeetingRecordCalendarSources(t *testing.T) {
 	}
 }
 
+// The ceilings include the inherited archive tool and its current Graph description.
+// The current tool definition measures 2,386 bytes; catalog totals are 220,148
+// and 272,798 bytes. The main-branch ceilings omitted the archive tool.
 func TestMCPArchiveCatalogBudgets(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

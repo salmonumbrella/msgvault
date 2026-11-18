@@ -541,6 +541,12 @@ func TestMicrosoftArchiveFolderReconciliation(t *testing.T) {
 	msg, err := f.st.GetMessage(id)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
+	result.MicrosoftFolders = nil
+	require.Error(t, f.st.SaveMicrosoftMailArchiveContext(t.Context(), target, result))
+	msg, err = f.st.GetMessage(id)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
+	result.MicrosoftFolders = []emailtags.MicrosoftFolder{{ID: "archive", Name: "Archiv", System: true}}
 	target.SourceMessageID = "other"
 	result.MicrosoftFolders[0].Name = "Must not persist"
 	require.Error(t, f.st.SaveMicrosoftMailArchiveContext(t.Context(), target, result))

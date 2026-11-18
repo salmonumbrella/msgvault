@@ -38,6 +38,7 @@ type Folder struct {
 	DisplayName      string `json:"displayName"`
 	ChildFolderCount int    `json:"childFolderCount"`
 	Path             string `json:"-"`
+	ParentID         string `json:"-"`
 }
 
 // DeltaMessage is one item of a folder's message delta. Removed is set when the
@@ -58,27 +59,28 @@ const folderSelect = "?$top=100&$select=id,displayName,childFolderCount"
 // ListFolders returns every folder in the mailbox, parents before children.
 func (c *Client) ListFolders(ctx context.Context) ([]Folder, error) {
 	var out []Folder
-	var walk func(string, string) error
-	walk = func(listURL, parent string) error {
+	var walk func(string, string, string) error
+	walk = func(listURL, parent, parentID string) error {
 		var level []Folder
 		if _, err := msgraph.PageThrough(ctx, c.Client, listURL, func(p []Folder) { level = append(level, p...) }); err != nil {
 			return err
 		}
 		for _, f := range level {
+			f.ParentID = parentID
 			f.Path = f.DisplayName
 			if parent != "" {
 				f.Path = parent + "/" + f.DisplayName
 			}
 			out = append(out, f)
 			if f.ChildFolderCount > 0 {
-				if err := walk("/me/mailFolders/"+url.PathEscape(f.ID)+"/childFolders"+folderSelect, f.Path); err != nil {
+				if err := walk("/me/mailFolders/"+url.PathEscape(f.ID)+"/childFolders"+folderSelect, f.Path, f.ID); err != nil {
 					return err
 				}
 			}
 		}
 		return nil
 	}
-	return out, walk("/me/mailFolders"+folderSelect, "")
+	return out, walk("/me/mailFolders"+folderSelect, "", "")
 }
 
 // WellKnownFolderID returns the ID of a well-known folder such as "sentitems".
@@ -112,6 +114,7 @@ func (c *Client) GetMIME(ctx context.Context, id string) ([]byte, error) {
 
 // MessageInfo is where a message is now and when it arrived.
 type MessageInfo struct {
+	ID               string    `json:"id"`
 	ParentFolderID   string    `json:"parentFolderId"`
 	ReceivedDateTime time.Time `json:"receivedDateTime"`
 	Categories       *[]string `json:"categories"`
@@ -121,7 +124,7 @@ type MessageInfo struct {
 // msgraph.ErrNotFound when the message no longer exists.
 func (c *Client) LookupMessage(ctx context.Context, id string) (MessageInfo, error) {
 	var m MessageInfo
-	err := c.GetJSON(ctx, "/me/messages/"+url.PathEscape(id)+"?$select=parentFolderId,receivedDateTime,categories", &m)
+	err := c.GetJSON(ctx, "/me/messages/"+url.PathEscape(id)+"?$select=id,parentFolderId,receivedDateTime,categories", &m)
 	return m, err
 }
 

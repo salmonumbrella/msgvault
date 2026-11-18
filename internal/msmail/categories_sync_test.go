@@ -296,6 +296,7 @@ func TestSyncMicrosoftCategoriesUpgradeIncludesUpdatesDuringWalk(t *testing.T) {
 // A verified archive move and its local evidence must not disturb the next delta round.
 func TestArchiveReconciliationThenDeltaSync(t *testing.T) {
 	f := newFakeGraph(t)
+	f.folders = append(f.folders, "deleteditems")
 	f.categories = map[string][]string{"m1": {"Work", "Personal"}}
 	f.put("m1", "inbox")
 	st := testutil.NewTestStore(t)
@@ -326,6 +327,7 @@ func TestArchiveReconciliationThenDeltaSync(t *testing.T) {
 	target, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	client := NewClient(f.srv.URL, func(context.Context) (string, error) { return "synthetic-token", nil }, 1000)
+	// This package cannot import cmd, so compose the adapter’s move and guarded save.
 	result, err := client.ArchiveMessage(t.Context(), target.SourceMessageID, true, false)
 	require.NoError(t, err)
 	require.True(t, result.Verified)

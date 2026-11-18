@@ -389,7 +389,8 @@ with `msgvault add-account <account> --force` if the daemon reports
 `insufficient_scope`. Microsoft Graph writes require `add-o365 --graph --mail-write`.
 Archive moves messages from primary mailbox folders, including Sent and custom
 folders, to Archive; unarchive moves them to Inbox. Messages in Deleted Items
-are excluded, as is Online Archive. Other providers return `archive_unsupported`.
+and its subfolders are excluded, as is Online Archive. An unlisted parent folder
+is refused. Other providers return `archive_unsupported`.
 See the [API contract](api-server.md#message-archiving) for readback and errors.
 
 For Beeper, select a locally archived message and opt into changing its entire chat:

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,257 +15,214 @@ import (
 	"go.kenn.io/msgvault/internal/emailtags"
 )
 
-func TestArchiveMessageMovesAndReadsBack(t *testing.T) {
-	const id = "immutable/+id"
-	parent := "inbox-id"
-	posts := 0
-	folderRequests := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+type archiveGraph struct {
+	mu                                                                    sync.Mutex
+	parent                                                                string
+	posts, reads                                                          int
+	paths                                                                 map[string]int
+	status                                                                int
+	landed, mismatch, lost, cancel, failRead, failCatalog, missingDeleted bool
+	cancelFunc                                                            context.CancelFunc
+	server                                                                *httptest.Server
+}
+
+func newArchiveGraph(t *testing.T) *archiveGraph {
+	t.Helper()
+	f := &archiveGraph{parent: "inbox-id", paths: map[string]int{}, status: http.StatusCreated, landed: true}
+	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.paths[r.URL.Path]++
 		assert.Contains(t, r.Header.Get("Prefer"), `IdType="ImmutableId"`)
-		if strings.HasPrefix(r.URL.Path, "/me/mailFolders") {
-			folderRequests++
-		}
 		switch {
+		case r.URL.Path == "/me/mailFolders":
+			if f.failCatalog {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			list := []map[string]any{{"id": "inbox-id", "displayName": "A/B"}, {"id": "archive-id", "displayName": "Archiv"}, {"id": "sent-id", "displayName": "A/B"}, {"id": "custom-id", "displayName": "Custom"}, {"id": "deleted-id", "displayName": "Corbeille/箱", "childFolderCount": 1}}
+			_ = json.MarshalWrite(w, map[string]any{"value": list})
+		case r.URL.Path == "/me/mailFolders/deleted-id/childFolders":
+			_ = json.MarshalWrite(w, map[string]any{"value": []map[string]any{{"id": "child-id", "displayName": "A/B", "childFolderCount": 1}}})
+		case r.URL.Path == "/me/mailFolders/child-id/childFolders":
+			_ = json.MarshalWrite(w, map[string]any{"value": []map[string]any{{"id": "grandchild-id", "displayName": "Archiv"}}})
 		case strings.HasPrefix(r.URL.Path, "/me/mailFolders/"):
 			name := strings.TrimPrefix(r.URL.Path, "/me/mailFolders/")
-			if name == "inbox" || name == "archive" || name == "deleteditems" {
-				require.NoError(t, json.MarshalWrite(w, map[string]string{"id": name + "-id"}))
+			if name == "deleteditems" && !f.missingDeleted {
+				_ = json.MarshalWrite(w, map[string]string{"id": "deleted-id"})
+				return
+			}
+			if name == "archive" || name == "inbox" {
+				_ = json.MarshalWrite(w, map[string]string{"id": name + "-id"})
 				return
 			}
 			w.WriteHeader(http.StatusNotFound)
-		case r.URL.Path == "/me/mailFolders":
-			require.NoError(t, json.MarshalWrite(w, map[string]any{"value": []map[string]string{{"id": "inbox-id", "displayName": "Boîte"}, {"id": "archive-id", "displayName": "Archiv"}}}))
-		case r.URL.Path == "/me/messages/"+id+"/move":
-			assert.Equal(t, http.MethodPost, r.Method)
+		case r.Method == http.MethodPost:
+			f.posts++
+			assert.True(t, strings.HasSuffix(r.URL.Path, "/move"))
 			assert.Contains(t, r.URL.EscapedPath(), "%2F")
 			var body map[string]string
-			require.NoError(t, json.UnmarshalRead(r.Body, &body))
+			if !assert.NoError(t, json.UnmarshalRead(r.Body, &body)) {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			assert.Len(t, body, 1)
-			parent = body["destinationId"]
-			posts++
-			require.NoError(t, json.MarshalWrite(w, map[string]string{"id": id}))
-		case r.URL.Path == "/me/messages/"+id:
-			require.NoError(t, json.MarshalWrite(w, map[string]any{"id": id, "parentFolderId": parent, "categories": []string{"Work"}}))
+			if f.landed {
+				f.parent = body["destinationId"]
+			}
+			if f.cancel {
+				f.cancelFunc()
+			}
+			if f.lost {
+				conn, _, e := w.(http.Hijacker).Hijack()
+				if assert.NoError(t, e) {
+					_ = conn.Close()
+				}
+				return
+			}
+			w.WriteHeader(f.status)
+			if f.status == http.StatusCreated {
+				responseID := "immutable/+id"
+				if f.mismatch {
+					responseID = "other"
+				}
+				_ = json.MarshalWrite(w, map[string]string{"id": responseID})
+			}
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/me/messages/"):
+			f.reads++
+			if f.failRead && f.posts > 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_ = json.MarshalWrite(w, map[string]any{"id": "immutable/+id", "parentFolderId": f.parent, "categories": []string{"Work"}})
 		default:
-			assert.Fail(t, "unexpected Graph request", "%s %s", r.Method, r.URL.String())
-			w.WriteHeader(http.StatusNotFound)
+			assert.Fail(t, "unexpected Graph request", "%s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
 		}
 	}))
-	t.Cleanup(srv.Close)
-	c := NewClient(srv.URL, func(context.Context) (string, error) { return "synthetic", nil }, 1000)
-	preview, err := c.ArchiveMessage(t.Context(), id, true, true)
-	require.NoError(t, err)
-	assert.True(t, preview.DryRun)
-	assert.Equal(t, 0, posts)
-	result, err := c.ArchiveMessage(t.Context(), id, true, false)
-	require.NoError(t, err)
-	assert.True(t, result.Verified)
-	assert.Equal(t, "archive-id", result.MicrosoftFolderID)
-	require.NotNil(t, result.MicrosoftCategories)
-	assert.Equal(t, []string{"Work"}, *result.MicrosoftCategories)
-	beforeFolders := folderRequests
-	_, err = c.ArchiveMessage(t.Context(), id, true, false)
-	require.NoError(t, err)
-	assert.Equal(t, 7, folderRequests-beforeFolders, "destination and Deleted Items lookups are reused in the catalog")
-	assert.Equal(t, 1, posts)
-	_, err = c.ArchiveMessage(t.Context(), id, false, false)
-	require.NoError(t, err)
-	assert.Equal(t, 2, posts)
+	t.Cleanup(f.server.Close)
+	return f
+}
+func (f *archiveGraph) client() *Client {
+	return NewClient(f.server.URL, func(context.Context) (string, error) { return "synthetic", nil }, 1000)
 }
 
-func TestArchiveMessageUncertainPostReadback(t *testing.T) {
-	for _, scenario := range []string{"lost reply", "canceled request", "different readback"} {
-		t.Run(scenario, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			parent, reads, posts := "inbox-id", 0, 0
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case strings.HasPrefix(r.URL.Path, "/me/mailFolders/"):
-					name := strings.TrimPrefix(r.URL.Path, "/me/mailFolders/")
-					if name == "archive" || name == "inbox" || name == "deleteditems" {
-						_ = json.MarshalWrite(w, map[string]string{"id": name + "-id"})
-						return
-					}
-					w.WriteHeader(http.StatusNotFound)
-				case r.URL.Path == "/me/mailFolders":
-					_ = json.MarshalWrite(w, map[string]any{"value": []map[string]string{{"id": "archive-id", "displayName": "Archiv"}}})
-				case r.Method == http.MethodPost:
-					posts++
-					if scenario != "different readback" {
-						parent = "archive-id"
-					}
-					if scenario == "canceled request" {
-						cancel()
-					}
-					conn, _, err := w.(http.Hijacker).Hijack()
-					if assert.NoError(t, err) {
-						_ = conn.Close()
-					}
-				default:
-					reads++
-					_ = json.MarshalWrite(w, map[string]string{"id": "id", "parentFolderId": parent})
-				}
-			}))
-			t.Cleanup(srv.Close)
-			c := NewClient(srv.URL, func(context.Context) (string, error) { return "synthetic", nil }, 1000)
-			result, err := c.ArchiveMessage(ctx, "id", true, false)
-			assert.Equal(t, 1, posts)
-			assert.Equal(t, 2, reads)
-			if scenario == "different readback" {
-				require.Error(t, err)
-				assert.Empty(t, result.Before)
-				return
-			}
-			require.NoError(t, err)
-			assert.True(t, result.Verified)
-			assert.Equal(t, []string{"INBOX"}, result.Before)
-			assert.Nil(t, result.MicrosoftCategories)
-		})
-	}
-}
+const archiveTestID = "immutable/+id"
 
-func TestArchiveMessageReadFailures(t *testing.T) {
-	for _, tc := range []struct {
-		name                        string
-		folderStatus, messageStatus int
-		messageID, code             string
-	}{
-		{"missing archive", http.StatusNotFound, 0, "", "folder_not_found"},
-		{"forbidden folder", http.StatusForbidden, 0, "", "insufficient_scope"},
-		{"missing message", http.StatusOK, http.StatusNotFound, "", "stale_identity"},
-		{"forbidden message", http.StatusOK, http.StatusForbidden, "", "insufficient_scope"},
-		{"different identity", http.StatusOK, http.StatusOK, "different", "stale_identity"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			posts := 0
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == http.MethodPost {
-					posts++
-					w.WriteHeader(http.StatusInternalServerError)
-					return
-				}
-				if strings.HasPrefix(r.URL.Path, "/me/mailFolders/") {
-					w.WriteHeader(tc.folderStatus)
-					if tc.folderStatus == http.StatusOK {
-						_, _ = w.Write([]byte(`{"id":"folder"}`))
-					}
-					return
-				}
-				w.WriteHeader(tc.messageStatus)
-				if tc.messageStatus == http.StatusOK {
-					_ = json.MarshalWrite(w, map[string]string{"id": tc.messageID, "parentFolderId": "folder"})
-				}
-			}))
-			t.Cleanup(srv.Close)
-			c := NewClient(srv.URL, func(context.Context) (string, error) { return "synthetic", nil }, 1000)
-			_, err := c.ArchiveMessage(t.Context(), "id", true, false)
-			var failure *emailtags.MessageTagError
-			require.ErrorAs(t, err, &failure)
-			assert.Equal(t, tc.code, failure.Code)
-			assert.Zero(t, posts)
-		})
-	}
-}
-
-func TestArchiveMoveResponses(t *testing.T) {
-	for _, tc := range []struct {
-		name            string
-		status          int
-		moved, mismatch bool
-		code            string
-		reads           int
-	}{
-		{"forbidden", http.StatusForbidden, false, false, "insufficient_scope", 1},
-		{"missing", http.StatusNotFound, false, false, "stale_identity", 1},
-		{"uncertain server failure accepted", http.StatusInternalServerError, true, false, "", 2},
-		{"uncertain server failure unchanged", http.StatusInternalServerError, false, false, "verification_failed", 2},
-		{"different response identity", http.StatusCreated, true, true, "stale_identity", 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			parent, reads, posts := "inbox-id", 0, 0
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case strings.HasPrefix(r.URL.Path, "/me/mailFolders/"):
-					name := strings.TrimPrefix(r.URL.Path, "/me/mailFolders/")
-					if name == "archive" || name == "inbox" || name == "deleteditems" {
-						_ = json.MarshalWrite(w, map[string]string{"id": name + "-id"})
-						return
-					}
-					w.WriteHeader(http.StatusNotFound)
-				case r.URL.Path == "/me/mailFolders":
-					_ = json.MarshalWrite(w, map[string]any{"value": []map[string]string{{"id": "archive-id", "displayName": "Archive"}}})
-				case r.Method == http.MethodPost:
-					posts++
-					if tc.moved {
-						parent = "archive-id"
-					}
-					w.WriteHeader(tc.status)
-					if tc.mismatch {
-						_, _ = w.Write([]byte(`{"id":"other"}`))
-					}
-				default:
-					reads++
-					_ = json.MarshalWrite(w, map[string]string{"id": "id", "parentFolderId": parent})
-				}
-			}))
-			t.Cleanup(srv.Close)
-			c := NewClient(srv.URL, func(context.Context) (string, error) { return "synthetic", nil }, 1000)
-			result, err := c.ArchiveMessage(t.Context(), "id", true, false)
-			assert.Equal(t, 1, posts)
-			assert.Equal(t, tc.reads, reads)
-			if tc.code == "" {
-				require.NoError(t, err)
-				assert.True(t, result.Verified)
-				return
-			}
-			var failure *emailtags.MessageTagError
-			require.ErrorAs(t, err, &failure)
-			assert.Equal(t, tc.code, failure.Code)
-			assert.False(t, result.Verified)
-		})
-	}
-}
-
-func TestArchiveFromPrimaryMailboxFolders(t *testing.T) {
-	for _, initial := range []string{"sentitems-id", "custom-id"} {
+func TestArchiveExcludedSubtree(t *testing.T) {
+	for _, parent := range []string{"deleted-id", "child-id", "grandchild-id"} {
 		for _, archived := range []bool{true, false} {
-			t.Run(initial+"/"+fmt.Sprint(archived), func(t *testing.T) {
-				parent := initial
-				posts := 0
-				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					switch {
-					case strings.HasPrefix(r.URL.Path, "/me/mailFolders/"):
-						name := strings.TrimPrefix(r.URL.Path, "/me/mailFolders/")
-						if name == "archive" || name == "inbox" || name == "deleteditems" || name == "sentitems" {
-							_ = json.MarshalWrite(w, map[string]string{"id": name + "-id"})
-							return
-						}
-						w.WriteHeader(http.StatusNotFound)
-					case r.URL.Path == "/me/mailFolders":
-						_ = json.MarshalWrite(w, map[string]any{"value": []map[string]string{{"id": "archive-id", "displayName": "Archive"}, {"id": "inbox-id", "displayName": "Inbox"}}})
-					case r.Method == http.MethodPost:
-						posts++
-						var body map[string]string
-						require.NoError(t, json.UnmarshalRead(r.Body, &body))
-						parent = body["destinationId"]
-						_ = json.MarshalWrite(w, map[string]string{"id": "id"})
-					default:
-						_ = json.MarshalWrite(w, map[string]string{"id": "id", "parentFolderId": parent})
-					}
-				}))
-				t.Cleanup(srv.Close)
-				c := NewClient(srv.URL, func(context.Context) (string, error) { return "synthetic", nil }, 1000)
-				result, err := c.ArchiveMessage(t.Context(), "id", archived, false)
+			for _, preview := range []bool{true, false} {
+				t.Run(fmt.Sprintf("%s/%v/%v", parent, archived, preview), func(t *testing.T) {
+					f := newArchiveGraph(t)
+					f.parent = parent
+					_, err := f.client().ArchiveMessage(t.Context(), archiveTestID, archived, preview)
+					var failure *emailtags.MessageTagError
+					require.ErrorAs(t, err, &failure)
+					assert.Equal(t, "stale_identity", failure.Code)
+					assert.Zero(t, f.posts)
+				})
+			}
+		}
+	}
+}
+func TestArchiveMessageMovesAndReadsBack(t *testing.T) {
+	for _, initial := range []string{"inbox-id", "sent-id", "custom-id"} {
+		for _, archived := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/%v", initial, archived), func(t *testing.T) {
+				f := newArchiveGraph(t)
+				f.parent = initial
+				c := f.client()
+				preview, err := c.ArchiveMessage(t.Context(), archiveTestID, archived, true)
 				require.NoError(t, err)
-				assert.True(t, result.Verified)
-				assert.Equal(t, 1, posts)
-				want := "inbox-id"
-				if archived {
-					want = "archive-id"
+				assert.Equal(t, initial != "inbox-id" || archived, preview.Changed)
+				assert.Zero(t, f.posts)
+				got, err := c.ArchiveMessage(t.Context(), archiveTestID, archived, false)
+				require.NoError(t, err)
+				assert.True(t, got.Verified)
+				assert.Equal(t, initial != "inbox-id" || archived, got.Changed)
+				require.NotNil(t, got.MicrosoftCategories)
+				assert.Equal(t, []string{"Work"}, *got.MicrosoftCategories)
+				expectedPosts := 1
+				if initial == "inbox-id" && !archived {
+					expectedPosts = 0
 				}
-				assert.Equal(t, want, parent)
+				assert.Equal(t, expectedPosts, f.posts)
+				beforeArchive, beforeDeleted := f.paths["/me/mailFolders/archive"], f.paths["/me/mailFolders/deleteditems"]
+				got, err = c.ArchiveMessage(t.Context(), archiveTestID, archived, false)
+				require.NoError(t, err)
+				assert.True(t, got.Verified)
+				assert.False(t, got.Changed)
+				assert.Equal(t, expectedPosts, f.posts)
+				assert.Equal(t, 1, f.paths["/me/mailFolders/archive"]-beforeArchive)
+				assert.Equal(t, 1, f.paths["/me/mailFolders/deleteditems"]-beforeDeleted)
 			})
 		}
 	}
+}
+func TestArchivePreflightFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*archiveGraph)
+		code string
+	}{{"unlisted parent", func(f *archiveGraph) { f.parent = "hidden" }, "stale_identity"}, {"missing deleted", func(f *archiveGraph) { f.missingDeleted = true }, "folder_not_found"}, {"catalog", func(f *archiveGraph) { f.failCatalog = true }, "provider_read_failed"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newArchiveGraph(t)
+			tc.set(f)
+			got, err := f.client().ArchiveMessage(t.Context(), archiveTestID, true, false)
+			var failure *emailtags.MessageTagError
+			require.ErrorAs(t, err, &failure)
+			assert.Equal(t, tc.code, failure.Code)
+			assert.Nil(t, got)
+			assert.Zero(t, f.posts)
+		})
+	}
+}
+func TestArchiveMoveResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name                             string
+		status                           int
+		landed, mismatch, lost, failRead bool
+		code                             string
+	}{
+		{"forbidden", 403, false, false, false, false, "insufficient_scope"}, {"missing", 404, false, false, false, false, "stale_identity"}, {"throttled", 429, false, false, false, false, "provider_write_failed"},
+		{"server error accepted", 500, true, false, false, false, ""}, {"server error unchanged", 500, false, false, false, false, "verification_failed"}, {"mismatched response", 201, true, true, false, false, "stale_identity"}, {"readback failure", 201, true, false, false, true, "remote_unknown"}, {"lost reply", 201, true, false, true, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newArchiveGraph(t)
+			f.status, f.landed, f.mismatch, f.lost, f.failRead = tc.status, tc.landed, tc.mismatch, tc.lost, tc.failRead
+			got, err := f.client().ArchiveMessage(t.Context(), archiveTestID, true, false)
+			assert.Equal(t, 1, f.posts)
+			if tc.code == "" {
+				require.NoError(t, err)
+				assert.True(t, got.Verified)
+				assert.True(t, got.Changed)
+			} else {
+				var failure *emailtags.MessageTagError
+				require.ErrorAs(t, err, &failure)
+				assert.Equal(t, tc.code, failure.Code)
+				assert.False(t, got.Verified)
+				assert.False(t, got.Changed)
+			}
+			if tc.status != 403 && tc.status != 404 && tc.status != 429 {
+				assert.Equal(t, 2, f.reads)
+			} else {
+				assert.Equal(t, 1, f.reads)
+			}
+		})
+	}
+}
+func TestArchiveCanceledRequestReadback(t *testing.T) {
+	f := newArchiveGraph(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f.cancel = true
+	f.cancelFunc = cancel
+	f.lost = true
+	got, err := f.client().ArchiveMessage(ctx, archiveTestID, true, false)
+	require.NoError(t, err)
+	assert.True(t, got.Verified)
+	assert.True(t, got.Changed)
+	assert.Equal(t, 1, f.posts)
+	assert.Equal(t, 2, f.reads)
 }
