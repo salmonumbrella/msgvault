@@ -91,7 +91,7 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 		}
 		if after.ParentFolderID != destination {
 			if postErr != nil {
-				return result, emailtags.Failure("remote_unknown", "Microsoft move outcome is uncertain; sync before retrying", result, postErr)
+				return result, archiveFailedMoveError(result, postErr, after.ParentFolderID == before.ParentFolderID)
 			}
 			return result, emailtags.Failure("verification_failed", "Microsoft move readback did not match the destination; sync before retrying", result, nil)
 		}
@@ -106,6 +106,21 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 		result.MicrosoftFolders[folderID] = emailtags.MicrosoftFolder(info)
 	}
 	return result, nil
+}
+
+// archiveFailedMoveError classifies a failed move whose readback is not the destination.
+// Graph's own rejection is definite only when the message stayed in its original folder;
+// 5xx, timeouts, transport failures and a move to a third folder stay uncertain.
+func archiveFailedMoveError(result *emailtags.MessageTagResult, postErr error, unchanged bool) error {
+	var status *msgraph.StatusError
+	rejected := errors.Is(postErr, msgraph.ErrPreconditionFailed)
+	if errors.As(postErr, &status) {
+		rejected = status.StatusCode == http.StatusBadRequest || status.StatusCode == http.StatusConflict
+	}
+	if rejected && unchanged {
+		return emailtags.Failure("provider_write_failed", "Microsoft rejected the move; the message was not moved", result, postErr)
+	}
+	return emailtags.Failure("remote_unknown", "Microsoft move outcome is uncertain; sync before retrying", result, postErr)
 }
 
 // archiveRefusal reports a message whose current folder archive actions must not move.

@@ -494,9 +494,9 @@ state are preserved. Source ownership and the daemon work gate follow the
 the active sync finishes. The saved snapshot can be stale until the next sync.
 
 Microsoft Graph archive moves a message from a primary mailbox folder, including
-Sent and custom folders, directly to the Archive root. Restore always moves it
-to Inbox. Messages in Deleted Items and its subfolders are excluded, as is
-Online Archive and folders outside the primary mail tree. Hidden folders are
+Sent, custom folders, and Archive subfolders, directly to the Archive root.
+Restore always moves it to Inbox. Messages in Deleted Items and its subfolders
+are excluded, as is Online Archive and folders outside the primary mail tree. Hidden folders are
 eligible when their ancestry can be proved. Mail directly in Archive is already
 archived. Writes require
 `add-o365 --graph --mail-write`; previews need read access. The daemon verifies

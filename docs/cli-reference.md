@@ -387,8 +387,9 @@ The owner has access. Delegated calls require `message.archive` on the message's
 source. Gmail writes require `gmail.modify` or `mail.google.com`; reauthorize
 with `msgvault add-account <account> --force` if the daemon reports
 `insufficient_scope`. Microsoft Graph writes require `add-o365 --graph --mail-write`.
-Archive moves messages from primary mailbox folders, including Sent and custom
-folders, directly to the Archive root; unarchive always moves them to Inbox.
+Archive moves messages from primary mailbox folders, including Sent, custom
+folders, and Archive subfolders, directly to the Archive root; unarchive always
+moves them to Inbox.
 Messages in Deleted Items and its subfolders, Online Archive, and folders outside
 the primary mail tree are excluded. Hidden folders are eligible when their
 ancestry can be proved. Mail directly in Archive is already archived. Other

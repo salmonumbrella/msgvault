@@ -17,7 +17,7 @@ import (
 
 type archiveGraph struct {
 	mu                                                                                    sync.Mutex
-	parent, parentOnCatalog, parentOnSupplement                                           string
+	parent, parentOnCatalog, parentOnSupplement, parentAfterPost                          string
 	ancestors                                                                             map[string]string
 	omitCatalog                                                                           string
 	badAncestor, emptyAncestor, denyAncestor, denyCatalog, emptyBody, malformed           bool
@@ -131,6 +131,9 @@ func newArchiveGraph(t *testing.T) *archiveGraph {
 			assert.Len(t, body, 1)
 			if f.landed {
 				f.parent = body["destinationId"]
+			}
+			if f.parentAfterPost != "" {
+				f.parent = f.parentAfterPost
 			}
 			if f.cancel {
 				f.cancelFunc()
@@ -355,6 +358,9 @@ func TestArchiveMoveResponses(t *testing.T) {
 		{"forbidden", 403, false, false, false, false, false, false, false, "insufficient_scope", 2},
 		{"missing", 404, false, false, false, false, false, false, false, "stale_identity", 2},
 		{"throttled", 429, false, false, false, false, false, false, false, "provider_write_failed", 2},
+		{"bad request unchanged", 400, false, false, false, false, false, false, false, "provider_write_failed", 3},
+		{"conflict unchanged", 409, false, false, false, false, false, false, false, "provider_write_failed", 3},
+		{"precondition unchanged", 412, false, false, false, false, false, false, false, "provider_write_failed", 3},
 		{"server error accepted", 500, true, false, false, false, false, false, false, "", 3},
 		{"server error unchanged", 500, false, false, false, false, false, false, false, "remote_unknown", 3},
 		{"success wrong parent", 201, false, false, false, false, false, false, false, "verification_failed", 3},
@@ -393,6 +399,18 @@ func TestArchiveMoveResponses(t *testing.T) {
 			assert.Equal(t, tc.reads, f.reads)
 		})
 	}
+	t.Run("rejected but parent changed", func(t *testing.T) {
+		f := newArchiveGraph(t)
+		f.status, f.landed, f.parentAfterPost = http.StatusBadRequest, false, "custom-id"
+		got, err := f.client().ArchiveMessage(t.Context(), archiveTestID, true, false)
+		var failure *emailtags.MessageTagError
+		require.ErrorAs(t, err, &failure)
+		assert.Equal(t, "remote_unknown", failure.Code)
+		assert.False(t, got.Verified)
+		assert.False(t, got.Changed)
+		assert.Equal(t, 1, f.posts)
+		assert.Equal(t, 3, f.reads)
+	})
 }
 
 // TestR6ArchivePreflightReadErrors proves that each live read preserves provider errors.
