@@ -35,6 +35,9 @@ type Config struct {
 	// they are applied after config folders in
 	// buildMessageListCache, so CLI values always take precedence.
 	Folders []string `json:"folders,omitempty"`
+
+	// ArchiveMailbox overrides the server's special-use archive mailbox.
+	ArchiveMailbox string `json:"archive_mailbox,omitempty"`
 }
 
 // EffectiveAuthMethod returns the auth method, defaulting to password

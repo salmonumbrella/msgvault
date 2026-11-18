@@ -23,6 +23,7 @@ var (
 	o365Graph                bool
 	o365SignIn               string
 	o365OAuthApp             string
+	o365ArchiveMailbox       string
 )
 
 func newAddO365Cmd() *cobra.Command {
@@ -166,6 +167,13 @@ func o365AccountMailbox(account daemonclient.CLIAccount, graph bool) string {
 func o365IMAPRegistration(host, email string, source *store.Source, sources []*store.Source) (string, string, error) {
 	cfg := &imapclient.Config{Host: host, Port: 993, TLS: true, Username: email, AuthMethod: imapclient.AuthXOAuth2}
 	identifier := cfg.Identifier()
+	if source != nil && source.SyncConfig.Valid {
+		old, err := imapclient.ConfigFromJSON(source.SyncConfig.String)
+		if err != nil {
+			return "", "", fmt.Errorf("parse existing IMAP config: %w", err)
+		}
+		cfg.Folders, cfg.ArchiveMailbox = old.Folders, old.ArchiveMailbox
+	}
 	for _, other := range sources {
 		if (source == nil || other.ID != source.ID) && other.Identifier == identifier {
 			return "", "", fmt.Errorf("IMAP host %s already belongs to another source (ID %d)", host, other.ID)
@@ -268,6 +276,8 @@ Examples:
 	cmd.Flags().StringVar(&o365SignIn, "sign-in", "",
 		"Microsoft sign-in name and browser login hint when it differs from the mailbox address (IMAP only)")
 	cmd.MarkFlagsMutuallyExclusive("graph", "sign-in")
+	cmd.Flags().StringVar(&o365ArchiveMailbox, "archive-mailbox", "", "Exact IMAP mailbox used for archiving")
+	cmd.MarkFlagsMutuallyExclusive("graph", "archive-mailbox")
 	cmd.Flags().Bool("mail-write", false, "With --graph, authorize category editing and remote deletion")
 	registerO365Flags(cmd)
 	return cmd
@@ -382,6 +392,17 @@ func runAddO365Local(cmd *cobra.Command, args []string) error {
 	identifier, cfgJSON, err := o365IMAPRegistration(imapHost, email, source, existing)
 	if err != nil {
 		return err
+	}
+	if cmd.Flags().Changed("archive-mailbox") {
+		config, err := imapclient.ConfigFromJSON(cfgJSON)
+		if err != nil {
+			return err
+		}
+		config.ArchiveMailbox = o365ArchiveMailbox
+		cfgJSON, err = config.ToJSON()
+		if err != nil {
+			return err
+		}
 	}
 	source, err = s.RegisterMicrosoftMail(cmd.Context(), source, sourceTypeIMAP, identifier, sql.NullString{String: binding.resolvedApp, Valid: binding.resolvedApp != ""}, cfgJSON)
 	if err != nil {

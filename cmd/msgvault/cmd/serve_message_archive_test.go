@@ -195,7 +195,7 @@ func TestArchiveMessageDaemonGrantEnforcement(t *testing.T) {
 					if target.name == "imap" {
 						var failure *emailtags.MessageTagError
 						require.ErrorAs(t, err, &failure)
-						assert.Equal(t, "archive_unsupported", failure.Code)
+						assert.Equal(t, "stale_identity", failure.Code)
 					} else {
 						require.NoError(t, err)
 						assert.True(t, result.DryRun)
@@ -517,4 +517,52 @@ func TestArchivePreviewAuthorizesResolvedSourceDuringMerge(t *testing.T) {
 	var failure *emailtags.MessageTagError
 	requirementsForTest.ErrorAs(err, &failure)
 	assertionsForTest.Equal("message_not_found", failure.Code)
+}
+
+func TestArchiveIMAPPendingAccountRebindRefusesBeforeProvider(t *testing.T) {
+	st, _, _, adapter, _, _, provider := newArchiveDaemon(t)
+	source, err := st.GetOrCreateSource("imap", "imap://owner@example.test:143")
+	require.NoError(t, err)
+	conv, err := st.EnsureConversation(t.Context(), source.ID, "thread-imap-binding", "Fixture")
+	require.NoError(t, err)
+	id, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: "INBOX|1", MessageType: "email"})
+	require.NoError(t, err)
+	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_folder_state(source_id,mailbox,uidvalidity,uidnext) VALUES(?,?,?,?)`), source.ID, "INBOX", 10, 2)
+	require.NoError(t, err)
+	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_message_memberships(source_id,mailbox,uidvalidity,uid,message_id) VALUES(?,?,?,?,?)`), source.ID, "INBOX", 10, 1, id)
+	require.NoError(t, err)
+	target, err := st.IMAPArchiveTargetContext(t.Context(), id)
+	require.NoError(t, err)
+	lock, err := st.AcquireSyncExecutionContext(t.Context(), source.ID)
+	require.NoError(t, err)
+	requested := true
+	beforeContention := provider.connects.Load()
+	_, err = adapter.ArchiveMessage(t.Context(), id, emailtags.ArchiveChange{Archived: &requested}, nil, nil)
+	var lockedFailure *emailtags.MessageTagError
+	require.ErrorAs(t, err, &lockedFailure)
+	assert.Equal(t, "sync_active", lockedFailure.Code)
+	assert.Equal(t, beforeContention, provider.connects.Load())
+	require.NoError(t, lock.Release())
+	pending := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: target, Destination: "Archiv", DestinationUIDValidity: 20}
+	require.NoError(t, st.BeginIMAPMoveContext(t.Context(), pending))
+	pending.DestinationUID = 2
+	require.NoError(t, st.SaveIMAPMoveMappingContext(t.Context(), pending))
+	require.NoError(t, st.UpdateSourceSyncConfig(t.Context(), source.ID, `{"host":"different.example.test","username":"owner"}`))
+	before := provider.connects.Load()
+	archived := true
+	_, err = adapter.ArchiveMessage(t.Context(), id, emailtags.ArchiveChange{Archived: &archived}, nil, nil)
+	var failure *emailtags.MessageTagError
+	require.ErrorAs(t, err, &failure)
+	assert.Equal(t, "stale_identity", failure.Code)
+	assert.Equal(t, before, provider.connects.Load())
+	persisted, err := st.IMAPPendingMoveContext(t.Context(), source.ID, id)
+	require.NoError(t, err)
+	require.NotNil(t, persisted)
+	assert.Equal(t, uint32(2), persisted.DestinationUID)
+	// A mailbox preference changes neither the IMAP account nor the saved pair.
+	require.NoError(t, st.UpdateSourceSyncConfig(t.Context(), source.ID, `{"host":"example.test","port":143,"username":"owner","archive_mailbox":"Archiv"}`))
+	_, err = adapter.ArchiveMessage(t.Context(), id, emailtags.ArchiveChange{Archived: &archived}, nil, nil)
+	require.ErrorAs(t, err, &failure)
+	assert.Equal(t, "archive_unsupported", failure.Code) // Fixture factory returns Gmail, after the binding guard.
+	assert.Equal(t, before+1, provider.connects.Load())
 }

@@ -54,6 +54,7 @@ var (
 	imapHost                 string
 	imapPort                 int
 	imapUsername             string
+	imapArchiveMailbox       string
 	imapNoTLS                bool
 	imapSTARTTLS             bool
 	noDefaultIdentityAddImap bool
@@ -152,6 +153,19 @@ Examples:
 				return fmt.Errorf("create source: %w", err)
 			}
 
+			// Preserve settings that credential refreshes do not explicitly change.
+			if source.SyncConfig.Valid {
+				old, err := imapclient.ConfigFromJSON(source.SyncConfig.String)
+				if err != nil {
+					return fmt.Errorf("parse existing IMAP config: %w", err)
+				}
+				imapCfg.Folders = old.Folders
+				imapCfg.ArchiveMailbox = old.ArchiveMailbox
+			}
+			if cmd.Flags().Changed("archive-mailbox") {
+				imapCfg.ArchiveMailbox = imapArchiveMailbox
+			}
+
 			// Store config JSON
 			cfgJSON, err := imapCfg.ToJSON()
 			if err != nil {
@@ -191,6 +205,7 @@ Examples:
 	cmd.Flags().StringVar(&imapHost, "host", "", "IMAP server hostname (required)")
 	cmd.Flags().IntVar(&imapPort, "port", 0, "IMAP server port (default: 993 for TLS, 143 otherwise; matches defaults in internal/microsoft/imap package)")
 	cmd.Flags().StringVar(&imapUsername, "username", "", "IMAP username / email address (required)")
+	cmd.Flags().StringVar(&imapArchiveMailbox, "archive-mailbox", "", "Exact IMAP mailbox used for archiving")
 	cmd.Flags().BoolVar(&imapNoTLS, "no-tls", false, "Disable TLS (plain connection, not recommended)")
 	cmd.Flags().BoolVar(&imapSTARTTLS, "starttls", false, "Use STARTTLS instead of implicit TLS")
 	cmd.Flags().BoolVar(&noDefaultIdentityAddImap, "no-default-identity", false, savedDefaultIdentityHelp)

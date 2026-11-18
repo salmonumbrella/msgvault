@@ -17,6 +17,23 @@ Sync reads the provider. It preserves messages already in your local archive
 when their server copies disappear. Remote deletion is a separate
 [staged workflow](/docs/usage/deletion/).
 
+## Archive and restore a message
+
+Use `msgvault archive --message <id>` to move one message to the server's
+archive mailbox and `msgvault unarchive --message <id>` to return it to INBOX.
+Use `--dry-run` to preview. The server must support native MOVE and UIDPLUS,
+and the message must have exactly one current mailbox copy.
+
+The server must advertise one selectable Archive role. To choose a different
+mailbox, pass `--archive-mailbox "Mailbox name"` when running `add-imap` or
+`add-o365` for this account. The mailbox must already exist and cannot be
+INBOX, Trash, Junk, Sent, or Drafts. No mailbox is created automatically.
+Folder sync filters do not prevent restoring the moved copy.
+
+If a move's outcome is uncertain, sync and inspect both folders before retrying.
+The daemon keeps a returned UID mapping and verifies it before reconciling the
+local message; it does not automatically resend an uncertain move.
+
 ## How later syncs find changes
 
 msgvault chooses the sync method from the server's capabilities:

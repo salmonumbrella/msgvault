@@ -25890,7 +25890,7 @@ paths:
           description: Error
       security:
         - apiKey: []
-      summary: Set a Gmail message or Beeper chat archive state
+      summary: Set a Gmail or IMAP message or Beeper chat archive state
       tags:
         - API
   /api/v1/messages/{id}/family:

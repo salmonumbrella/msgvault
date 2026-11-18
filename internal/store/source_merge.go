@@ -152,12 +152,18 @@ func (s *Store) MergeSourcesContext(ctx context.Context, req MergeSourcesRequest
 		}{
 			{table: "gmail_drafts", active: "discarded_at IS NULL OR pending_operation IS NOT NULL"},
 			{table: "imap_drafts", active: "discarded_at IS NULL OR pending_operation IS NOT NULL"},
+			{table: "imap_pending_moves", active: "1 = 1"},
 			{table: "beeper_drafts", active: "discarded_at IS NULL OR pending_operation IS NOT NULL"},
 			{table: "chat_drafts", active: "1 = 1"},
 		} {
 			var count int
 			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+draftTable.table+` WHERE source_id = ? AND (`+draftTable.active+`)`, req.FromSourceID).Scan(&count); err != nil {
 				return fmt.Errorf("check %s before merge: %w", draftTable.table, err)
+			}
+			if count == 0 && draftTable.table == "imap_pending_moves" {
+				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM imap_pending_moves WHERE source_id = ?`, req.IntoSourceID).Scan(&count); err != nil {
+					return fmt.Errorf("check pending moves in merge destination: %w", err)
+				}
 			}
 			if count > 0 {
 				return invalidSourceMerge("sources with active drafts or unresolved provider operations cannot be merged")

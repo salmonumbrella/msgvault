@@ -1868,6 +1868,21 @@ CREATE TABLE IF NOT EXISTS imap_message_memberships (
 CREATE INDEX IF NOT EXISTS idx_imap_message_memberships_source_message
     ON imap_message_memberships(source_id, message_id);
 
+-- Unresolved native MOVE evidence is retained until exact reconciliation.
+CREATE TABLE IF NOT EXISTS imap_pending_moves (
+    source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    source_message_id TEXT NOT NULL,
+    source_identifier TEXT NOT NULL,
+    old_mailbox TEXT NOT NULL,
+    old_uidvalidity BIGINT NOT NULL,
+    old_uid BIGINT NOT NULL,
+    destination TEXT NOT NULL,
+    destination_uidvalidity BIGINT NOT NULL,
+    destination_uid BIGINT,
+    PRIMARY KEY (source_id, message_id)
+);
+
 CREATE TABLE IF NOT EXISTS imap_drafts (
     draft_id TEXT PRIMARY KEY,
     source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,

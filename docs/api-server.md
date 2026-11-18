@@ -469,9 +469,9 @@ returns `409 person_uid_ambiguous`.
 
 ### Message archiving
 
-`POST /api/v1/messages/{id}/archive` sets a Gmail message's archive state or the
+`POST /api/v1/messages/{id}/archive` sets a Gmail or IMAP message's archive state or the
 state of the entire Beeper chat containing a message.
-Requires API schema 5.13.0 and owner authorization or a `message.archive` grant
+Requires API schema 5.17.0 and owner authorization or a `message.archive` grant
 for the message's source. Beeper requires `whole_chat: true`.
 Other providers return 501 `archive_unsupported`.
 Beeper chat archive state changes only in Beeper; the local archive does not change.
@@ -492,6 +492,10 @@ needed, reads it back, and saves the verified snapshot locally. Unrelated labels
 state are preserved. Source ownership and the daemon work gate follow the
 [native tag write rules](#native-email-tags). For 409 `sync_active`, retry after
 the active sync finishes. The saved snapshot can be stale until the next sync.
+
+For IMAP, the daemon moves one unambiguous mailbox copy with native MOVE and
+UIDPLUS, then verifies the destination UID and source absence. A pending
+uncertain move is not resent. See [IMAP archive controls](usage/imap.md#archive-and-restore-a-message).
 
 For Beeper, send `{"archived":true,"whole_chat":true}` (or `archived:false`
 to restore the chat). This affects the whole chat, including messages newer than
@@ -516,7 +520,7 @@ or invalid From targets return `404 message_not_found`, matching wrong-source
 targets. A token without `message.archive` receives `403 permission_denied`
 before the message lookup.
 
-Raw API callers must check that `/api/v1/health` reports `api_schema_version` 5.13.0 or newer before issuing `incoming_senders`: older daemons ignore this field and issue an unrestricted grant.
+Raw API callers must check that `/api/v1/health` reports `api_schema_version` 5.17.0 or newer before issuing `incoming_senders`: older daemons ignore this field and issue an unrestricted grant.
 
 Gmail writes require `gmail.modify` or `mail.google.com`. Missing consent returns
 403 `insufficient_scope`; reauthorize with `msgvault add-account <account> --force`.

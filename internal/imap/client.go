@@ -115,6 +115,7 @@ type Client struct {
 	selectedUIDValidity         uint32               // UIDVALIDITY from the last SELECT
 	selectedNumMessages         uint32               // EXISTS count from the last SELECT
 	mailboxCache                []string             // cached list of selectable mailboxes
+	mailboxDiscovery            []*imap.ListData     // exact LIST entries, including nonselectable mailboxes
 	messageListCache            []gmailapi.MessageID // full message ID list, built once per session
 	trashMailboxes              map[string]bool      // LIST-advertised \Trash mailboxes, or the fallback Trash
 	trashMailbox                string               // cached trash mailbox name
@@ -664,6 +665,7 @@ func (c *Client) listMailboxesLocked(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("LIST: %w", err)
 	}
 
+	c.mailboxDiscovery = items
 	var names []string
 	for _, item := range items {
 		if hasAttr(item.Attrs, imap.MailboxAttrNoSelect) {
@@ -775,6 +777,7 @@ func (c *Client) listMailboxesLocked(ctx context.Context) ([]string, error) {
 // QRESYNC connection.
 func (c *Client) clearMailboxDiscoveryLocked() {
 	c.mailboxCache = nil
+	c.mailboxDiscovery = nil
 	c.trashMailbox = ""
 	c.trashMailboxes = nil
 	c.junkMailbox = ""

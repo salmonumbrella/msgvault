@@ -20,7 +20,7 @@ appear in full under Inherited Flags.
 | Import local exports | [import-ics](#import-ics), [import-eml](#import-eml), [import-mbox](#import-mbox), [import-maildir](#import-maildir), [import-emlx](#import-emlx), [import-pst](#import-pst), [import-slackdump](#import-slackdump), [import-telegram](#import-telegram), [import-discord-package](#import-discord-package), [import-x](#import-x), [import-imazing-csv](#import-imazing-csv), [text imports](usage/text-messages.md) |
 | Search and browse | [search](#search), [find-chat](#find-chat), [tui](#tui), [show-message](#show-message), [media search](#media-search), [embeddings](#embeddings), [multimodal](#multimodal), [eval](#eval) |
 | Maintain people and contacts | [loops](#loops), [person](#person), [people guide](usage/people.md), [CardDAV](usage/people-carddav.md) |
-| Archive or restore a Gmail message or Beeper chat | [archive and unarchive](#archive-and-unarchive) |
+| Archive or restore a Gmail or IMAP message or Beeper chat | [archive and unarchive](#archive-and-unarchive) |
 | Edit live email tags | [message-tags](#message-tags) |
 | Find a partial address | [address](#address) |
 | Inspect staged room policy | [policy](#policy) |
@@ -367,8 +367,8 @@ After adding an account, sync it with `msgvault sync-full`. IMAP accounts use th
 
 ## archive and unarchive
 
-Remove one Gmail message from its inbox, or restore it, through the selected
-daemon. Use msgvault's positive archived message ID. Requires API schema 5.13.0.
+Remove one Gmail or IMAP message from its inbox, or restore it, through the selected
+daemon. Use msgvault's positive archived message ID. Requires API schema 5.17.0.
 
 ```bash
 msgvault archive --message 42 --dry-run --json
@@ -386,8 +386,12 @@ Unrelated labels and read/unread state are preserved.
 The owner has access. Delegated calls require `message.archive` on the message's
 source. Gmail writes require `gmail.modify` or `mail.google.com`; reauthorize
 with `msgvault add-account <account> --force` if the daemon reports
-`insufficient_scope`. Providers other than Gmail and Beeper return `archive_unsupported`.
+`insufficient_scope`. Providers other than Gmail, IMAP, and Beeper return `archive_unsupported`.
 See the [API contract](api-server.md#message-archiving) for readback and errors.
+
+For IMAP, the server must support native MOVE and UIDPLUS. Configure an archive
+mailbox if the server does not advertise exactly one safe Archive role. See
+[IMAP archive controls](usage/imap.md#archive-and-restore-a-message).
 
 For Beeper, select a locally archived message and opt into changing its entire chat:
 
@@ -6079,7 +6083,7 @@ msgvault agent-token issue --label code-reader \
 ```
 
 Repeat `--incoming-sender SOURCE_ID=ADDRESS` for additional allowed addresses.
-Requires daemon API schema 5.13.0. The bundled client rejects issuance with restrictions against older daemons; older daemons ignore the field in raw API requests.
+Requires daemon API schema 5.17.0. The bundled client rejects issuance with restrictions against older daemons; older daemons ignore the field in raw API requests.
 Omitting the flag allows reads and archiving from any sender on the selected sources.
 The restriction matches recorded From addresses and does not authenticate the sender. It applies to reads, reply parents, and archive writes. The separate `--sender` flag still selects
 confirmed outgoing draft identities. See the [archive API](api-server.md#message-archiving)

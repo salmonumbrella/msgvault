@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/config"
+	imapclient "go.kenn.io/msgvault/internal/imap"
 	"go.kenn.io/msgvault/internal/microsoft"
 	"go.kenn.io/msgvault/internal/store"
 )
@@ -205,4 +206,18 @@ func TestAddO365FailedNewGraphBindingLeavesNoSource(t *testing.T) {
 	defer cleanup()
 	_, err = s.GetSourceByIdentifier(ctx, "user@example.com")
 	require.ErrorIs(t, err, store.ErrSourceNotFound)
+}
+
+func TestO365IMAPRegistrationPreservesMailboxSettings(t *testing.T) {
+	cfg := &imapclient.Config{Host: "outlook.example.test", Port: 993, TLS: true, Username: "owner@example.test", AuthMethod: imapclient.AuthXOAuth2, Folders: []string{"INBOX"}, ArchiveMailbox: "Archiv"}
+	encoded, err := cfg.ToJSON()
+	require.NoError(t, err)
+	source := &store.Source{ID: 7, Identifier: cfg.Identifier(), SyncConfig: sql.NullString{String: encoded, Valid: true}}
+	identifier, saved, err := o365IMAPRegistration(cfg.Host, cfg.Username, source, nil)
+	require.NoError(t, err)
+	got, err := imapclient.ConfigFromJSON(saved)
+	require.NoError(t, err)
+	assert.Equal(t, cfg.Identifier(), identifier)
+	assert.Equal(t, cfg.Folders, got.Folders)
+	assert.Equal(t, cfg.ArchiveMailbox, got.ArchiveMailbox)
 }

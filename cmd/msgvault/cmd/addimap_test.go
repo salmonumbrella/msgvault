@@ -3,12 +3,16 @@ package cmd
 import (
 	"bytes"
 	"io"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	imapclient "go.kenn.io/msgvault/internal/imap"
+	"go.kenn.io/msgvault/internal/testutil"
 )
 
 func TestPasswordPromptStrategy(t *testing.T) {
@@ -230,4 +234,58 @@ func TestAddIMAPUsesDaemonRunnerAndForwardsPasswordEnv(t *testing.T) {
 	assert.Equal(1, int(requests.Load()), "runner endpoint calls")
 	assert.Equal("IMAP account added successfully!\n", stdout.String(), "stdout")
 	assert.Contains(stderr.String(), "Using password from MSGVAULT_IMAP_PASSWORD", "stderr")
+}
+
+func TestAddIMAPRefreshPreservesArchiveSettings(t *testing.T) {
+	oldHost, oldPort, oldUser, oldArchive := imapHost, imapPort, imapUsername, imapArchiveMailbox
+	oldNoTLS, oldStartTLS, oldNoIdentity := imapNoTLS, imapSTARTTLS, noDefaultIdentityAddImap
+	t.Cleanup(func() {
+		imapHost, imapPort, imapUsername, imapArchiveMailbox = oldHost, oldPort, oldUser, oldArchive
+		imapNoTLS, imapSTARTTLS, noDefaultIdentityAddImap = oldNoTLS, oldStartTLS, oldNoIdentity
+	})
+	t.Setenv(daemonCLISubprocessEnv, strconv.Itoa(os.Getppid()))
+	t.Setenv("MSGVAULT_IMAP_PASSWORD", testutil.IMAPTestPassword)
+	addr, _ := testutil.StartIMAPMemServer(t, map[string]int{"INBOX": 0, "Archiv": 0})
+	host, portText, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portText)
+	require.NoError(t, err)
+	cfg := lifecycleTestConfig(t.TempDir())
+	state := testInvocationWithConfig(cfg)
+	ctx := withInvocation(t.Context(), state)
+	st, cleanup, err := openWritableStoreAndInitForIngestInvocation(ctx, state)
+	require.NoError(t, err)
+	account := &imapclient.Config{Host: host, Port: port, Username: testutil.IMAPTestUsername, Folders: []string{"INBOX"}, ArchiveMailbox: "Archiv"}
+	source, err := st.GetOrCreateSource("imap", account.Identifier())
+	require.NoError(t, err)
+	data, err := account.ToJSON()
+	require.NoError(t, err)
+	require.NoError(t, st.UpdateSourceSyncConfig(ctx, source.ID, data))
+	cleanup()
+	run := func(extra ...string) {
+		cmd := newAddIMAPCmd()
+		cmd.SetContext(ctx)
+		args := []string{"--host", host, "--port", portText, "--username", testutil.IMAPTestUsername, "--no-tls", "--no-default-identity"}
+		cmd.SetArgs(append(args, extra...))
+		require.NoError(t, cmd.Execute())
+	}
+	read := func() *imapclient.Config {
+		s, closeStore, err := openWritableStoreAndInitForIngestInvocation(ctx, state)
+		require.NoError(t, err)
+		defer closeStore()
+		saved, err := s.GetSourceByID(source.ID)
+		require.NoError(t, err)
+		parsed, err := imapclient.ConfigFromJSON(saved.SyncConfig.String)
+		require.NoError(t, err)
+		assert.Equal(t, account.Identifier(), saved.Identifier)
+		return parsed
+	}
+	run()
+	saved := read()
+	assert.Equal(t, []string{"INBOX"}, saved.Folders)
+	assert.Equal(t, "Archiv", saved.ArchiveMailbox)
+	run("--archive-mailbox", "New Archiv")
+	saved = read()
+	assert.Equal(t, []string{"INBOX"}, saved.Folders)
+	assert.Equal(t, "New Archiv", saved.ArchiveMailbox)
 }

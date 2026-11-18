@@ -18,9 +18,9 @@ type messageArchiveBackend interface {
 func newMessageArchiveCommand(archived bool, backend messageArchiveBackend) *cobra.Command {
 	var id int64
 	var dryRun, asJSON, wholeChat bool
-	name, short := "archive", "Archive a Gmail message or a Beeper chat"
+	name, short := "archive", "Archive a Gmail or IMAP message or a Beeper chat"
 	if !archived {
-		name, short = "unarchive", "Restore a Gmail message or a Beeper chat to its inbox"
+		name, short = "unarchive", "Restore a Gmail or IMAP message or a Beeper chat to its inbox"
 	}
 	cmd := &cobra.Command{
 		Use: name + " --message <id>", Short: short, Args: cobra.NoArgs,

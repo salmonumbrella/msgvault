@@ -194,3 +194,17 @@ func TestConfigFromJSON_FoldersTrimmed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"Inbox", "Sent Items"}, cfg.Folders)
 }
+
+func TestArchiveMailboxConfigKeepsAccountIdentifier(t *testing.T) {
+	legacy, err := ConfigFromJSON(`{"host":"imap.example.test","port":993,"tls":true,"username":"owner@example.test"}`)
+	require.NoError(t, err)
+	assert.Empty(t, legacy.ArchiveMailbox)
+	identifier := legacy.Identifier()
+	legacy.ArchiveMailbox = "Archiv"
+	encoded, err := legacy.ToJSON()
+	require.NoError(t, err)
+	restored, err := ConfigFromJSON(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, "Archiv", restored.ArchiveMailbox)
+	assert.Equal(t, identifier, restored.Identifier())
+}

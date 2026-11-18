@@ -46,13 +46,16 @@ func (a *storeAPIAdapter) ArchiveMessage(ctx context.Context, id int64, change e
 				return emailtags.Failure("message_not_found", "Message not found", nil, nil)
 			}
 		}
-		if source.SourceType != sourceTypeGmail && source.SourceType != "" {
-			return emailtags.Failure("archive_unsupported", "Archiving is supported only for Gmail messages", nil, nil)
+		if source.SourceType != sourceTypeGmail && source.SourceType != sourceTypeIMAP && source.SourceType != "" {
+			return emailtags.Failure("archive_unsupported", "Archiving is supported only for connected Gmail and IMAP messages", nil, nil)
 		}
 		if change.WholeChat {
 			return emailtags.Failure("invalid_request", "whole_chat applies only to Beeper", nil, nil)
 		}
 		return nil
+	}
+	if target.Provider == sourceTypeIMAP {
+		return a.archiveIMAPCopy(ctx, id, change, acquireWrite, authorize)
 	}
 	if err == nil && target.Provider == sourceTypeGmail && change.Archived != nil {
 		if err := authorize(ctx, target); err != nil {
