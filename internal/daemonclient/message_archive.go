@@ -23,7 +23,7 @@ func (c *Client) ArchiveMessage(ctx context.Context, id int64, change emailtags.
 			return nil, err
 		}
 		if !supported {
-			return nil, emailtags.Failure("archive_unsupported", fmt.Sprintf("Upgrade the daemon to API schema %s for Beeper archiving", MessageArchiveMinAPISchemaVersion), nil, nil)
+			return nil, emailtags.Failure("archive_unsupported", fmt.Sprintf("Upgrade the daemon to API schema %s for chat archiving", MessageArchiveMinAPISchemaVersion), nil, nil)
 		}
 	}
 	options := &generated.ArchiveMessageRequestOptions{Body: &generated.ArchiveMessageBody{Archived: *change.Archived, DryRun: &change.DryRun, WholeChat: &change.WholeChat}}
@@ -36,5 +36,5 @@ func (c *Client) ArchiveMessage(ctx context.Context, id int64, change emailtags.
 }
 
 func archiveResponseError(change emailtags.ArchiveChange, cause error) error {
-	return messageWriteResponseError(!change.DryRun, "archive update outcome is unknown; read current tags or retry the desired state", cause)
+	return messageWriteResponseError(!change.DryRun, "archive update outcome is unknown; inspect the provider state or retry the desired state", cause)
 }

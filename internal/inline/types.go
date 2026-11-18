@@ -4,7 +4,10 @@ package inline
 import (
 	"context"
 	"encoding/json/jsontext"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.kenn.io/msgvault/internal/attachmentpolicy"
@@ -107,6 +110,22 @@ type ImportSummary struct {
 func chatKey(id int64) string { return fmt.Sprintf("chat:%d", id) }
 func messageKey(chatID, messageID int64) string {
 	return fmt.Sprintf("chat:%d:message:%d", chatID, messageID)
+}
+
+// ParseArchiveKeys verifies the canonical stored message and conversation keys.
+func ParseArchiveKeys(chat, message string) (int64, int64, error) {
+	chatPart, ok := strings.CutPrefix(chat, "chat:")
+	chatID, err := strconv.ParseInt(chatPart, 10, 64)
+	if !ok || err != nil || chatID <= 0 || chatID > MaxID || chatKey(chatID) != chat {
+		return 0, 0, errors.New("invalid Inline conversation key")
+	}
+	prefix := chat + ":message:"
+	messagePart, ok := strings.CutPrefix(message, prefix)
+	messageID, err := strconv.ParseInt(messagePart, 10, 64)
+	if !ok || err != nil || messageID <= 0 || messageID > MaxID || messageKey(chatID, messageID) != message {
+		return 0, 0, errors.New("invalid Inline message key")
+	}
+	return chatID, messageID, nil
 }
 
 func conversationType(t string) string {

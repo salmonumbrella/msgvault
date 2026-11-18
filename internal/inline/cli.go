@@ -330,6 +330,10 @@ func cliDecodePage(raw []byte, chatID, beforeID int64) (Page, error) {
 	return page, nil
 }
 
+func (c *CLIClient) getMessages(ctx context.Context, chatID int64, ids string) ([]byte, error) {
+	return c.run(ctx, "messages", "get", "--chat-id", strconv.FormatInt(chatID, 10), "--message-id", ids, "--json", "--compact")
+}
+
 func (c *CLIClient) Files(ctx context.Context, chatID int64, messageIDs []int64) ([]Media, error) {
 	if !cliValidID(chatID) || len(messageIDs) > cliPageSize {
 		return nil, errors.New("invalid Inline file lookup")
@@ -346,7 +350,7 @@ func (c *CLIClient) Files(ctx context.Context, chatID int64, messageIDs []int64)
 		requested[id] = true
 		ids[i] = strconv.FormatInt(id, 10)
 	}
-	raw, err := c.run(ctx, "messages", "get", "--chat-id", strconv.FormatInt(chatID, 10), "--message-id", strings.Join(ids, ","), "--json", "--compact")
+	raw, err := c.getMessages(ctx, chatID, strings.Join(ids, ","))
 	if err != nil {
 		return nil, err
 	}
@@ -577,15 +581,15 @@ func (c *CLIClient) Message(ctx context.Context, chatID, messageID int64) error 
 	if !cliValidID(chatID) || !cliValidID(messageID) {
 		return errors.New("invalid Inline message identity")
 	}
-	raw, err := c.run(ctx, "messages", "get", "--chat-id", strconv.FormatInt(chatID, 10), "--message-id", strconv.FormatInt(messageID, 10), "--json", "--compact")
+	raw, err := c.getMessages(ctx, chatID, strconv.FormatInt(messageID, 10))
 	if err != nil {
 		return err
 	}
-	message, err := cliDecodeMessage(raw, chatID)
-	if err != nil {
-		return err
+	var message struct {
+		ID     *int64 `json:"id"`
+		ChatID *int64 `json:"chat_id"`
 	}
-	if message.ID != messageID {
+	if jsonv2.Unmarshal(raw, &message) != nil || message.ID == nil || message.ChatID == nil || *message.ChatID != chatID || *message.ID != messageID {
 		return errors.New("Inline message identity differs")
 	}
 	return nil

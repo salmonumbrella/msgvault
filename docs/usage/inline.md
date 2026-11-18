@@ -111,6 +111,13 @@ The executable must support the JSON account, conversation, message-pagination,
 and media contracts used by the connector. The probe reports an incompatible
 installed CLI instead of treating incomplete output as a successful archive.
 
+To archive or restore a personal dialog, use `msgvault archive --message <id> --whole-chat`
+or `msgvault unarchive --message <id> --whole-chat`. The CLI connection verifies
+the selected message, account and dialog before changing the entire chat; the
+OAuth connection is read-only. The local archive remains unchanged. See
+[archive and unarchive](../cli-reference.md#archive-and-unarchive) for grants,
+preview and error handling.
+
 ## Sync and refresh
 
 The first sync walks the history currently readable in every discovered chat,
