@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -82,6 +83,7 @@ func newArchiveGraph(t *testing.T) *archiveGraph {
 			if ok {
 				f.ancestorCalls++
 				if f.ancestorStatus != 0 {
+					w.Header().Set("Retry-After", "120")
 					w.WriteHeader(f.ancestorStatus)
 					return
 				}
@@ -423,7 +425,12 @@ func TestR6ArchivePreflightReadErrors(t *testing.T) {
 			{http.StatusForbidden, "insufficient_scope"},
 			{http.StatusBadRequest, "provider_read_failed"},
 			{http.StatusNotFound, "stale_identity"},
+			{http.StatusTooManyRequests, "provider_read_failed"},
+			{http.StatusServiceUnavailable, "provider_read_failed"},
 		} {
+			if site != "ancestor" && (tc.status == http.StatusTooManyRequests || tc.status == http.StatusServiceUnavailable) {
+				continue
+			}
 			t.Run(fmt.Sprintf("%s/%d", site, tc.status), func(t *testing.T) {
 				f := newArchiveGraph(t)
 				switch site {
@@ -434,7 +441,11 @@ func TestR6ArchivePreflightReadErrors(t *testing.T) {
 				case "fresh message":
 					f.secondReadStatus = tc.status
 				}
-				got, err := f.client().ArchiveMessage(t.Context(), archiveTestID, true, false)
+				// The server's Retry-After exceeds this deadline, so Graph preserves
+				// its provider error without waiting for the retry delay.
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				got, err := f.client().ArchiveMessage(ctx, archiveTestID, true, false)
 				var failure *emailtags.MessageTagError
 				require.ErrorAs(t, err, &failure)
 				assert.Nil(t, got)
