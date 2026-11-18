@@ -148,6 +148,10 @@ func (f *fakeGraph) serve(w http.ResponseWriter, r *http.Request) {
 			f.writeJSON(w, map[string]any{"id": "hidden", "parentFolderId": "root"})
 			return
 		}
+		if slices.Contains(f.folders, id) && q.Get("$select") == "id,parentFolderId" {
+			f.writeJSON(w, map[string]any{"id": id, "parentFolderId": "root"})
+			return
+		}
 		if slices.Contains(f.folders, id) {
 			f.writeJSON(w, map[string]any{"id": id})
 			return

@@ -536,7 +536,7 @@ func TestMicrosoftArchiveFolderReconciliation(t *testing.T) {
 	require.NoError(t, err)
 	target, err := f.st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
-	result := &emailtags.MessageTagResult{Provider: "msmail", Verified: true, MicrosoftFolderID: "archive", MicrosoftFolders: []emailtags.MicrosoftFolder{{ID: "inbox", Name: "Inbox", System: true}, {ID: "archive", Name: "Archiv", System: true}}}
+	result := &emailtags.MessageTagResult{Provider: "msmail", Verified: true, MicrosoftFolderID: "archive", MicrosoftFolders: map[string]emailtags.MicrosoftFolder{"inbox": {Name: "Inbox", Type: "system"}, "archive": {Name: "Archiv", Type: "system"}}}
 	require.NoError(t, f.st.SaveEmailTagsContext(t.Context(), target, result))
 	msg, err := f.st.GetMessage(id)
 	require.NoError(t, err)
@@ -546,7 +546,7 @@ func TestMicrosoftArchiveFolderReconciliation(t *testing.T) {
 	msg, err = f.st.GetMessage(id)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
-	result.MicrosoftFolders = []emailtags.MicrosoftFolder{{ID: "inbox", Name: "Inbox", System: true}, {ID: "archive", Name: "Archiv", System: true}}
+	result.MicrosoftFolders = map[string]emailtags.MicrosoftFolder{"inbox": {Name: "Inbox", Type: "system"}, "archive": {Name: "Archiv", Type: "system"}}
 	result.Provider = "gmail"
 	require.Error(t, f.st.SaveEmailTagsContext(t.Context(), target, result))
 	result.Provider = "msmail"

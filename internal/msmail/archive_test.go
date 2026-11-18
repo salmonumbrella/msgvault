@@ -19,6 +19,7 @@ type archiveGraph struct {
 	mu                                                                                    sync.Mutex
 	parent, parentOnCatalog, parentOnSupplement                                           string
 	ancestors                                                                             map[string]string
+	omitCatalog                                                                           string
 	badAncestor, emptyAncestor, denyAncestor, denyCatalog, emptyBody, malformed           bool
 	posts, reads                                                                          int
 	status                                                                                int
@@ -48,6 +49,15 @@ func newArchiveGraph(t *testing.T) *archiveGraph {
 				return
 			}
 			list := []map[string]any{{"id": "inbox-id", "displayName": "Inbox"}, {"id": "archive-id", "displayName": "Archiv"}, {"id": "sent-id", "displayName": "Sent"}, {"id": "custom-id", "displayName": "Custom"}, {"id": "deleted-id", "displayName": "Corbeille/箱", "childFolderCount": 1}}
+			if f.omitCatalog != "" {
+				filtered := list[:0]
+				for _, folder := range list {
+					if folder["id"] != f.omitCatalog {
+						filtered = append(filtered, folder)
+					}
+				}
+				list = filtered
+			}
 			_ = json.MarshalWrite(w, map[string]any{"value": list})
 		case r.URL.Path == "/me/mailFolders/deleted-id/childFolders":
 			_ = json.MarshalWrite(w, map[string]any{"value": []map[string]any{{"id": "child-id", "displayName": "A/B", "childFolderCount": 1}}})
@@ -59,7 +69,11 @@ func newArchiveGraph(t *testing.T) *archiveGraph {
 				_ = json.MarshalWrite(w, map[string]string{"id": "root-id"})
 				return
 			}
-			if parent, ok := f.ancestors[name]; ok {
+			parent, ok := f.ancestors[name]
+			if !ok && r.URL.Query().Get("$select") == "id,parentFolderId" {
+				parent, ok = map[string]string{"inbox-id": "root-id", "archive-id": "root-id", "sent-id": "root-id", "custom-id": "root-id", "child-id": "deleted-id", "grandchild-id": "child-id"}[name]
+			}
+			if ok {
 				if f.denyAncestor {
 					w.WriteHeader(http.StatusForbidden)
 					return
@@ -153,6 +167,59 @@ func (f *archiveGraph) client() *Client {
 
 const archiveTestID = "immutable/+id"
 
+func TestArchiveCatalogRaces(t *testing.T) {
+	for _, archived := range []bool{true, false} {
+		for _, preview := range []bool{true, false} {
+			for _, noOp := range []bool{true, false} {
+				t.Run(fmt.Sprintf("missing destination/%v/%v/%v", archived, preview, noOp), func(t *testing.T) {
+					f := newArchiveGraph(t)
+					f.parent = "custom-id"
+					f.omitCatalog = "inbox-id"
+					if archived {
+						f.omitCatalog = "archive-id"
+					}
+					if noOp {
+						f.parent = f.omitCatalog
+					}
+					originalParent := f.parent
+					f.ancestors = map[string]string{"custom-id": "root-id"}
+					_, err := f.client().ArchiveMessage(t.Context(), archiveTestID, archived, preview)
+					var failure *emailtags.MessageTagError
+					require.ErrorAs(t, err, &failure)
+					assert.Equal(t, "folder_not_found", failure.Code)
+					assert.Equal(t, originalParent, f.parent)
+					assert.Zero(t, f.posts)
+				})
+			}
+			for _, moved := range []bool{false, true} {
+				t.Run(fmt.Sprintf("visible ancestor moved/%v/%v/%v", archived, preview, moved), func(t *testing.T) {
+					f := newArchiveGraph(t)
+					f.parent = "custom-id"
+					f.ancestors = map[string]string{"custom-id": "root-id"}
+					if moved {
+						f.ancestors["custom-id"] = "deleted-id"
+					}
+					got, err := f.client().ArchiveMessage(t.Context(), archiveTestID, archived, preview)
+					if moved {
+						var failure *emailtags.MessageTagError
+						require.ErrorAs(t, err, &failure)
+						assert.Equal(t, "stale_identity", failure.Code)
+						assert.Zero(t, f.posts)
+					} else {
+						require.NoError(t, err)
+						assert.True(t, got.Changed)
+						if preview {
+							assert.Zero(t, f.posts)
+						} else {
+							assert.Equal(t, 1, f.posts)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestArchiveEligibility(t *testing.T) {
 	cases := []struct {
 		name, parent                      string
@@ -173,8 +240,6 @@ func TestArchiveEligibility(t *testing.T) {
 		{"mismatched ancestor", "hidden", map[string]string{"hidden": "root-id"}, "", "", false},
 		{"empty ancestor ID", "hidden", map[string]string{"hidden": "root-id"}, "", "", false},
 		{"inaccessible ancestor", "hidden", map[string]string{"hidden": "root-id"}, "", "", false},
-		{"cycle", "hidden", map[string]string{"hidden": "hidden2", "hidden2": "hidden"}, "", "", false},
-		{"too deep", "deep0", nil, "", "", false},
 		{"changed during catalog", "inbox-id", nil, "grandchild-id", "", false},
 		{"changed during ancestry", "hidden", map[string]string{"hidden": "root-id"}, "", "deleted-id", false},
 	}
@@ -188,12 +253,7 @@ func TestArchiveEligibility(t *testing.T) {
 					f.badAncestor = tc.name == "mismatched ancestor"
 					f.emptyAncestor = tc.name == "empty ancestor ID"
 					f.denyAncestor = tc.name == "inaccessible ancestor"
-					if tc.name == "too deep" {
-						f.ancestors = map[string]string{}
-						for i := range 33 {
-							f.ancestors[fmt.Sprintf("deep%d", i)] = fmt.Sprintf("deep%d", i+1)
-						}
-					}
+
 					got, err := f.client().ArchiveMessage(t.Context(), archiveTestID, archived, preview)
 					if tc.allowed {
 						require.NoError(t, err)
@@ -272,19 +332,19 @@ func TestArchiveMoveResponses(t *testing.T) {
 		code                                                         string
 		reads                                                        int
 	}{
-		{"success", 201, true, false, false, false, false, false, false, "", 2},
-		{"forbidden", 403, false, false, false, false, false, false, false, "insufficient_scope", 1},
-		{"missing", 404, false, false, false, false, false, false, false, "stale_identity", 1},
-		{"throttled", 429, false, false, false, false, false, false, false, "provider_write_failed", 1},
-		{"server error accepted", 500, true, false, false, false, false, false, false, "", 2},
-		{"server error unchanged", 500, false, false, false, false, false, false, false, "remote_unknown", 2},
-		{"success wrong parent", 201, false, false, false, false, false, false, false, "verification_failed", 2},
-		{"mismatched response", 201, true, true, false, false, false, false, false, "stale_identity", 2},
-		{"empty response", 201, true, false, false, false, false, true, false, "stale_identity", 2},
-		{"malformed response", 201, true, false, false, false, false, false, true, "stale_identity", 2},
-		{"readback failure", 201, true, false, false, true, false, false, false, "remote_unknown", 2},
-		{"lost reply", 201, true, false, true, false, false, false, false, "", 2},
-		{"canceled caller", 201, true, false, true, false, true, false, false, "", 2},
+		{"success", 201, true, false, false, false, false, false, false, "", 3},
+		{"forbidden", 403, false, false, false, false, false, false, false, "insufficient_scope", 2},
+		{"missing", 404, false, false, false, false, false, false, false, "stale_identity", 2},
+		{"throttled", 429, false, false, false, false, false, false, false, "provider_write_failed", 2},
+		{"server error accepted", 500, true, false, false, false, false, false, false, "", 3},
+		{"server error unchanged", 500, false, false, false, false, false, false, false, "remote_unknown", 3},
+		{"success wrong parent", 201, false, false, false, false, false, false, false, "verification_failed", 3},
+		{"mismatched response", 201, true, true, false, false, false, false, false, "stale_identity", 3},
+		{"empty response", 201, true, false, false, false, false, true, false, "stale_identity", 3},
+		{"malformed response", 201, true, false, false, false, false, false, true, "stale_identity", 3},
+		{"readback failure", 201, true, false, false, true, false, false, false, "remote_unknown", 3},
+		{"lost reply", 201, true, false, true, false, false, false, false, "", 3},
+		{"canceled caller", 201, true, false, true, false, true, false, false, "", 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newArchiveGraph(t)

@@ -30,61 +30,29 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 	}
 	folders, err := c.ListFolders(ctx)
 	if err != nil {
-		code := "provider_read_failed"
-		if errors.Is(err, msgraph.ErrForbidden) {
-			code = "insufficient_scope"
-		}
-		return nil, emailtags.Failure(code, "Cannot read Microsoft folder catalog; sync and retry", nil, err)
+		return nil, archiveReadError(err)
 	}
 	infos, ids, err := c.folderCatalog(ctx, folders)
 	if err != nil {
-		code := "provider_read_failed"
-		if errors.Is(err, msgraph.ErrForbidden) {
-			code = "insufficient_scope"
-		}
-		return nil, emailtags.Failure(code, "Cannot read Microsoft folder roles; sync and retry", nil, err)
+		return nil, archiveReadError(err)
 	}
 	destination, deleted := ids[folder], ids["deleteditems"]
-	if destination == "" || deleted == "" {
-		return nil, emailtags.Failure("folder_not_found", "Cannot resolve Microsoft mailbox folders; sync and retry", nil, nil)
-	}
-	parents := make(map[string]string, len(folders))
-	for _, f := range folders {
-		parents[f.ID] = f.ParentID
+	if _, ok := infos[destination]; destination == "" || deleted == "" || !ok {
+		return nil, emailtags.Failure("folder_not_found", "Microsoft mailbox folder is unavailable", nil, nil)
 	}
 	before, err := read(ctx)
 	if err != nil {
 		return nil, archiveReadError(err)
 	}
-	parent := before.ParentFolderID
-	seen := make(map[string]bool)
-	root := ""
-	supplemental := false
-	hops := 0
+	root, err := c.WellKnownFolderID(ctx, "msgfolderroot")
 	refuse := func() (*emailtags.MessageTagResult, error) {
-		return nil, emailtags.Failure("stale_identity", "Message cannot be archived; sync and retry", nil, nil)
+		return nil, emailtags.Failure("stale_identity", "Message cannot be archived from its current folder", nil, nil)
 	}
-	for parent != "" {
-		if parent == deleted || seen[parent] {
-			return refuse()
-		}
-		seen[parent] = true
-		if next, ok := parents[parent]; ok {
-			parent = next
-			continue
-		}
-		if root == "" {
-			root, err = c.WellKnownFolderID(ctx, "msgfolderroot")
-			supplemental = true
-			if err != nil || root == "" {
-				return refuse()
-			}
-		}
-		if parent == root {
-			break
-		}
-		hops++
-		if hops > 32 {
+	if err != nil || root == "" {
+		return refuse()
+	}
+	for parent := before.ParentFolderID; parent != root; {
+		if parent == deleted {
 			return refuse()
 		}
 		var ancestor struct {
@@ -97,13 +65,11 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 		}
 		parent = ancestor.ParentID
 	}
-	if supplemental {
-		after, err := read(ctx)
-		if err != nil || after.ParentFolderID != before.ParentFolderID {
-			return refuse()
-		}
-		before = after
+	after, err := read(ctx)
+	if err != nil || after.ParentFolderID != before.ParentFolderID {
+		return refuse()
 	}
+	before = after
 	changed := before.ParentFolderID != destination
 	result := &emailtags.MessageTagResult{Provider: SourceType, DryRun: dryRun}
 	if dryRun {
@@ -149,8 +115,9 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 	result.Verified = true
 	result.MicrosoftFolderID = before.ParentFolderID
 	result.MicrosoftCategories = before.Categories
+	result.MicrosoftFolders = make(map[string]emailtags.MicrosoftFolder, len(infos))
 	for folderID, info := range infos {
-		result.MicrosoftFolders = append(result.MicrosoftFolders, emailtags.MicrosoftFolder{ID: folderID, Name: info.Name, SystemRole: info.SystemRole, System: info.Type == "system"})
+		result.MicrosoftFolders[folderID] = emailtags.MicrosoftFolder(info)
 	}
 	return result, nil
 }
@@ -166,5 +133,5 @@ func archiveReadError(err error) error {
 	} else if errors.Is(err, msgraph.ErrNotFound) {
 		code = "stale_identity"
 	}
-	return emailtags.Failure(code, "Cannot read the Microsoft message; check account access and sync", nil, err)
+	return emailtags.Failure(code, "Cannot read the Microsoft mailbox; check account access and sync", nil, err)
 }

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -185,6 +186,14 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 	parent := "inbox-id"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		if r.URL.Query().Get("$select") == "id,parentFolderId" {
+			name := strings.TrimPrefix(r.URL.Path, "/me/mailFolders/")
+			parents := map[string]string{"inbox-id": "root-id", "archive-id": "root-id", "hidden-id": "root-id", "grandchild-id": "child-id", "child-id": "deleted-id"}
+			if parentID, ok := parents[name]; ok {
+				_ = json.MarshalWrite(w, map[string]string{"id": name, "parentFolderId": parentID})
+				return
+			}
+		}
 		switch r.URL.Path {
 		case "/me/mailFolders/archive":
 			_ = json.MarshalWrite(w, map[string]string{"id": "archive-id"})
@@ -242,6 +251,16 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 	owner, err := daemonclient.New(daemonclient.Config{URL: httpServer.URL, APIKey: "owner", AllowInsecure: true})
 	require.NoError(t, err)
 	t.Cleanup(func() { assert.NoError(t, owner.Close()) })
+	deniedToken, err := owner.IssueAgentToken(t.Context(), "denied sender", []string{"message.archive"}, []int64{source.ID}, nil, map[int64][]string{source.ID: {"other@example.test"}}, time.Time{})
+	require.NoError(t, err)
+	deniedClient, err := daemonclient.New(daemonclient.Config{URL: httpServer.URL, AgentToken: deniedToken.Secret, AllowInsecure: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, deniedClient.Close()) })
+	beforeDenied := calls.Load()
+	_, err = deniedClient.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired})
+	require.ErrorAs(t, err, &failure)
+	assert.Equal(t, "message_not_found", failure.Code)
+	assert.Equal(t, beforeDenied, calls.Load())
 	token, err := owner.IssueAgentToken(t.Context(), "allowed sender", []string{"message.archive"}, []int64{source.ID}, nil, map[int64][]string{source.ID: {"allowed@example.test"}}, time.Time{})
 	require.NoError(t, err)
 	client, err := daemonclient.New(daemonclient.Config{URL: httpServer.URL, AgentToken: token.Secret, AllowInsecure: true})

@@ -501,8 +501,8 @@ eligible when their ancestry can be proved. Mail directly in Archive is already
 archived. Writes require
 `add-o365 --graph --mail-write`; previews need read access. The daemon verifies
 the immutable message ID and folder after a move and preserves categories
-omitted by Graph. Outlook may change the folder between the final check and the
-move; the check cannot prevent that concurrent change.
+omitted by Graph. Outlook may change the message folder or its ancestry during
+preflight or before the move; the checks cannot prevent concurrent changes.
 
 For Beeper, send `{"archived":true,"whole_chat":true}` (or `archived:false`
 to restore the chat). This affects the whole chat, including messages newer than

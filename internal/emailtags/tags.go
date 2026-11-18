@@ -22,28 +22,28 @@ type MessageTag struct {
 }
 
 type MicrosoftFolder struct {
-	ID, Name, SystemRole string
-	System               bool
+	Name, Type, SystemRole string
 }
 
 type MessageTagResult struct {
-	Changed             bool              `json:"-"`
-	MicrosoftFolderID   string            `json:"-"`
-	MicrosoftFolders    []MicrosoftFolder `json:"-"`
-	MicrosoftCategories *[]string         `json:"-"`
-	MessageID           int64             `json:"message_id"`
-	SourceID            int64             `json:"source_id"`
-	Provider            string            `json:"provider"`
-	Mailbox             string            `json:"mailbox,omitempty"`
-	UIDValidity         uint32            `json:"uidvalidity,omitzero" format:"int64" maximum:"4294967295"`
-	UID                 uint32            `json:"uid,omitzero" format:"int64" maximum:"4294967295"`
-	Flags               []string          `json:"flags,omitempty"`
-	Tags                []string          `json:"tags"`
-	Before              []string          `json:"before"`
-	AvailableTags       []MessageTag      `json:"available_tags"`
-	CanCreateKeywords   bool              `json:"can_create_keywords,omitempty"`
-	DryRun              bool              `json:"dry_run"`
-	Verified            bool              `json:"verified"`
+	MessageID         int64        `json:"message_id"`
+	SourceID          int64        `json:"source_id"`
+	Provider          string       `json:"provider"`
+	Mailbox           string       `json:"mailbox,omitempty"`
+	UIDValidity       uint32       `json:"uidvalidity,omitzero" format:"int64" maximum:"4294967295"`
+	UID               uint32       `json:"uid,omitzero" format:"int64" maximum:"4294967295"`
+	Flags             []string     `json:"flags,omitempty"`
+	Tags              []string     `json:"tags"`
+	Before            []string     `json:"before"`
+	AvailableTags     []MessageTag `json:"available_tags"`
+	CanCreateKeywords bool         `json:"can_create_keywords,omitempty"`
+	DryRun            bool         `json:"dry_run"`
+	Verified          bool         `json:"verified"`
+
+	Changed             bool                       `json:"-"`
+	MicrosoftFolderID   string                     `json:"-"`
+	MicrosoftFolders    map[string]MicrosoftFolder `json:"-"`
+	MicrosoftCategories *[]string                  `json:"-"`
 }
 
 // MessageTagError preserves the last observed result even when a write only partly applied.

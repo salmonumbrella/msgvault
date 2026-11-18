@@ -136,17 +136,10 @@ func (s *Store) SaveEmailTagsContext(ctx context.Context, target EmailTagTarget,
 		if target.Provider == "msmail" {
 			if result.MicrosoftFolderID != "" || result.MicrosoftFolders != nil || result.MicrosoftCategories != nil {
 				infos := make(map[string]LabelInfo, len(result.MicrosoftFolders))
-				for _, folder := range result.MicrosoftFolders {
-					info := LabelInfo{Name: folder.Name, Type: "user"}
-					if folder.System {
-						info.Type, info.SystemRole = "system", folder.SystemRole
-					}
-					infos[folder.ID] = info
+				for id, folder := range result.MicrosoftFolders {
+					infos[id] = LabelInfo(folder)
 				}
-				if result.MicrosoftFolderID == "" {
-					return errors.New("Microsoft folder snapshot is incomplete")
-				}
-				if _, ok := infos[result.MicrosoftFolderID]; !ok {
+				if _, ok := infos[result.MicrosoftFolderID]; result.MicrosoftFolderID == "" || !ok {
 					return errors.New("verified Microsoft folder is absent from catalog")
 				}
 				ids, err := s.ensureMicrosoftMailFoldersTx(ctx, tx, target.SourceID, infos)
