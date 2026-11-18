@@ -7320,8 +7320,6 @@ components:
       properties:
         issue:
           $ref: "#/components/schemas/KataIssueReceipt"
-        parent_ref:
-          type: string
         replayed:
           type: boolean
       required:
