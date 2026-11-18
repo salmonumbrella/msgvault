@@ -8,6 +8,8 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
+- With [Kata enabled](usage/open-loops.md#file-obligations-in-kata), the daemon files each open reply loop and cited promise as one Kata issue every hour. Each issue quotes and links its source message and names the person and conversation. A follow-up nests under the earlier open issue. The first pass files your existing backlog; set `auto_agenda = false` in `[integrations.kata]` to file only by hand with `msgvault loops agenda`. When the daemon listens on every interface, set `public_url` in `[server]` so these issues link to their messages.
+
 - Archive [Bland calls](usage/meetings.md#bland) as meetings with their summaries, retained transcripts and recordings saved locally, up to 1 GiB each by default (`max_media_mb`).
 
 - Start bounded Gmail or IMAP historical imports through MCP with `--allow-import-writes`, and follow their durable job status.
