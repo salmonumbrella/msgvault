@@ -44,30 +44,16 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 	if err != nil {
 		return nil, archiveReadError(err)
 	}
-	root, err := c.WellKnownFolderID(ctx, "msgfolderroot")
-	refuse := func() (*emailtags.MessageTagResult, error) {
-		return nil, emailtags.Failure("stale_identity", "Message cannot be archived from its current folder", nil, nil)
-	}
-	if err != nil || root == "" {
-		return refuse()
-	}
-	for parent := before.ParentFolderID; parent != root; {
-		if parent == deleted {
-			return refuse()
-		}
-		var ancestor struct {
-			ID       string `json:"id"`
-			ParentID string `json:"parentFolderId"`
-		}
-		err = c.GetJSON(ctx, "/me/mailFolders/"+url.PathEscape(parent)+"?$select=id,parentFolderId", &ancestor)
-		if err != nil || ancestor.ID != parent || ancestor.ParentID == "" {
-			return refuse()
-		}
-		parent = ancestor.ParentID
+	err = c.checkArchiveAncestry(ctx, before.ParentFolderID, deleted)
+	if err != nil {
+		return nil, err
 	}
 	after, err := read(ctx)
-	if err != nil || after.ParentFolderID != before.ParentFolderID {
-		return refuse()
+	if err != nil {
+		return nil, archiveReadError(err)
+	}
+	if after.ParentFolderID != before.ParentFolderID {
+		return nil, archiveRefusal()
 	}
 	before = after
 	changed := before.ParentFolderID != destination
@@ -120,6 +106,41 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 		result.MicrosoftFolders[folderID] = emailtags.MicrosoftFolder(info)
 	}
 	return result, nil
+}
+
+// archiveRefusal reports a message whose current folder archive actions must not move.
+func archiveRefusal() error {
+	return emailtags.Failure("stale_identity", "Message cannot be archived from its current folder", nil, nil)
+}
+
+// checkArchiveAncestry proves the folder is in the primary mail tree outside Deleted Items.
+// Provider read failures keep their own error class; only a positive finding refuses.
+func (c *Client) checkArchiveAncestry(ctx context.Context, parent, deleted string) error {
+	root, err := c.WellKnownFolderID(ctx, "msgfolderroot")
+	if err != nil {
+		return archiveReadError(err)
+	}
+	if root == "" {
+		return archiveRefusal()
+	}
+	for parent != root {
+		if parent == deleted {
+			return archiveRefusal()
+		}
+		var ancestor struct {
+			ID       string `json:"id"`
+			ParentID string `json:"parentFolderId"`
+		}
+		err = c.GetJSON(ctx, "/me/mailFolders/"+url.PathEscape(parent)+"?$select=id,parentFolderId", &ancestor)
+		if err != nil {
+			return archiveReadError(err)
+		}
+		if ancestor.ID != parent || ancestor.ParentID == "" {
+			return archiveRefusal()
+		}
+		parent = ancestor.ParentID
+	}
+	return nil
 }
 
 func archiveReadError(err error) error {

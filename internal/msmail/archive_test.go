@@ -22,6 +22,7 @@ type archiveGraph struct {
 	omitCatalog                                                                           string
 	badAncestor, emptyAncestor, denyAncestor, denyCatalog, emptyBody, malformed           bool
 	posts, reads                                                                          int
+	rootStatus, ancestorStatus, secondReadStatus, rootCalls, ancestorCalls                int
 	status                                                                                int
 	landed, mismatch, lost, cancel, failRead, failCatalog, missingDeleted, missingArchive bool
 	cancelFunc                                                                            context.CancelFunc
@@ -66,6 +67,11 @@ func newArchiveGraph(t *testing.T) *archiveGraph {
 		case strings.HasPrefix(r.URL.Path, "/me/mailFolders/"):
 			name := strings.TrimPrefix(r.URL.Path, "/me/mailFolders/")
 			if name == "msgfolderroot" {
+				f.rootCalls++
+				if f.rootStatus != 0 {
+					w.WriteHeader(f.rootStatus)
+					return
+				}
 				_ = json.MarshalWrite(w, map[string]string{"id": "root-id"})
 				return
 			}
@@ -74,6 +80,11 @@ func newArchiveGraph(t *testing.T) *archiveGraph {
 				parent, ok = map[string]string{"inbox-id": "root-id", "archive-id": "root-id", "sent-id": "root-id", "custom-id": "root-id", "child-id": "deleted-id", "grandchild-id": "child-id"}[name]
 			}
 			if ok {
+				f.ancestorCalls++
+				if f.ancestorStatus != 0 {
+					w.WriteHeader(f.ancestorStatus)
+					return
+				}
 				if f.denyAncestor {
 					w.WriteHeader(http.StatusForbidden)
 					return
@@ -148,6 +159,10 @@ func newArchiveGraph(t *testing.T) *archiveGraph {
 			}
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/me/messages/"):
 			f.reads++
+			if f.reads == 2 && f.secondReadStatus != 0 {
+				w.WriteHeader(f.secondReadStatus)
+				return
+			}
 			if f.failRead && f.posts > 0 {
 				w.WriteHeader(http.StatusBadRequest)
 				return
@@ -266,7 +281,11 @@ func TestArchiveEligibility(t *testing.T) {
 					} else {
 						var failure *emailtags.MessageTagError
 						require.ErrorAs(t, err, &failure)
-						assert.Equal(t, "stale_identity", failure.Code)
+						code := "stale_identity"
+						if tc.name == "inaccessible ancestor" {
+							code = "insufficient_scope"
+						}
+						assert.Equal(t, code, failure.Code)
 						assert.Zero(t, f.posts)
 					}
 				})
@@ -373,5 +392,44 @@ func TestArchiveMoveResponses(t *testing.T) {
 			}
 			assert.Equal(t, tc.reads, f.reads)
 		})
+	}
+}
+
+// TestR6ArchivePreflightReadErrors proves that each live read preserves provider errors.
+func TestR6ArchivePreflightReadErrors(t *testing.T) {
+	for _, site := range []string{"root", "ancestor", "fresh message"} {
+		for _, tc := range []struct {
+			status int
+			code   string
+		}{
+			{http.StatusForbidden, "insufficient_scope"},
+			{http.StatusBadRequest, "provider_read_failed"},
+			{http.StatusNotFound, "stale_identity"},
+		} {
+			t.Run(fmt.Sprintf("%s/%d", site, tc.status), func(t *testing.T) {
+				f := newArchiveGraph(t)
+				switch site {
+				case "root":
+					f.rootStatus = tc.status
+				case "ancestor":
+					f.ancestorStatus = tc.status
+				case "fresh message":
+					f.secondReadStatus = tc.status
+				}
+				got, err := f.client().ArchiveMessage(t.Context(), archiveTestID, true, false)
+				var failure *emailtags.MessageTagError
+				require.ErrorAs(t, err, &failure)
+				assert.Nil(t, got)
+				assert.Equal(t, tc.code, failure.Code)
+				assert.Zero(t, f.posts)
+				assert.Equal(t, 1, f.rootCalls)
+				if site != "root" {
+					assert.Equal(t, 1, f.ancestorCalls)
+				}
+				if site == "fresh message" {
+					assert.Equal(t, 2, f.reads)
+				}
+			})
+		}
 	}
 }
