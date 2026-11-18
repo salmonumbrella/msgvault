@@ -17,7 +17,7 @@ type MessageArchiveStore interface {
 }
 
 func (s *Server) registerMessageArchiveRoute(api huma.API) {
-	op := rawAPIV1Operation("archiveMessage", http.MethodPost, "/messages/{id}/archive", "Set a Gmail message or Beeper chat archive state")
+	op := rawAPIV1Operation("archiveMessage", http.MethodPost, "/messages/{id}/archive", "Set a Gmail or Microsoft Graph message or Beeper chat archive state")
 	op.Parameters = []*huma.Param{param("id", "path", huma.TypeInteger, "Archived message ID", true)}
 	op.RequestBody = jsonRequestBodyFor[emailtags.ArchiveChange](api)
 	op.Responses = jsonResponsesFor[emailtags.ArchiveResult](api)

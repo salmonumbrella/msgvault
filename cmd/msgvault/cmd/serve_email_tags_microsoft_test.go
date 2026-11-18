@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/agentgrant"
 	"go.kenn.io/msgvault/internal/emailtags"
 	"go.kenn.io/msgvault/internal/microsoft"
 	"go.kenn.io/msgvault/internal/msmail"
@@ -156,4 +157,91 @@ func TestDaemonMessageTagsSourceDeletedRead(t *testing.T) {
 	after, err := st.GetMessage(mid)
 	require.NoError(t, err)
 	assert.Equal(t, before, after, "reads must preserve archived state")
+}
+
+func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(sourceTypeMSMail, "owner@example.test")
+	require.NoError(t, err)
+	conv, err := st.EnsureConversation(t.Context(), source.ID, "thread-1", "Archive")
+	require.NoError(t, err)
+	mid, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: "immutable-1", MessageType: "email"})
+	require.NoError(t, err)
+	cfg := lifecycleTestConfig(t.TempDir())
+	tokenPath := microsoft.NewGraphMailManager("", "", "", cfg.TokensDir(), nil).TokenPath(source.Identifier)
+	require.NoError(t, os.MkdirAll(filepath.Dir(tokenPath), 0700))
+	saveScopes := func(scopes []string) {
+		data, e := json.Marshal(map[string]any{"access_token": "synthetic", "token_type": "Bearer", "scopes": scopes})
+		require.NoError(t, e)
+		require.NoError(t, os.WriteFile(tokenPath, data, 0600))
+	}
+	var calls atomic.Int32
+	var omitArchive atomic.Bool
+	parent := "inbox-id"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		switch r.URL.Path {
+		case "/me/mailFolders/archive":
+			_ = json.MarshalWrite(w, map[string]string{"id": "archive-id"})
+		case "/me/mailFolders/inbox":
+			_ = json.MarshalWrite(w, map[string]string{"id": "inbox-id"})
+		case "/me/mailFolders":
+			folders := []map[string]string{{"id": "inbox-id", "displayName": "Inbox"}}
+			if !omitArchive.Load() {
+				folders = append(folders, map[string]string{"id": "archive-id", "displayName": "Archiv"})
+			}
+			_ = json.MarshalWrite(w, map[string]any{"value": folders})
+		case "/me/messages/immutable-1/move":
+			parent = "archive-id"
+			_ = json.MarshalWrite(w, map[string]string{"id": "immutable-1"})
+		case "/me/messages/immutable-1":
+			_ = json.MarshalWrite(w, map[string]any{"id": "immutable-1", "parentFolderId": parent, "categories": []string{"Work"}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	refreshes := 0
+	a := &storeAPIAdapter{store: st, config: cfg, logger: slog.New(slog.DiscardHandler), microsoftTagClientFactory: func(context.Context, *store.Source, bool) (*msmail.Client, error) {
+		return msmail.NewClient(srv.URL, func(context.Context) (string, error) { return "synthetic", nil }, 1000), nil
+	}, draftCacheRefresh: func(context.Context, string) error { refreshes++; return nil }}
+	desired := true
+	grant := &agentgrant.Grant{Permissions: []agentgrant.Permission{agentgrant.PermissionMessageArchive}, Sources: []agentgrant.SourceRef{{Type: source.SourceType, Identifier: source.Identifier, IncomingSenderKeys: []string{"allowed@example.test"}}}}
+	_, deniedErr := a.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired, DryRun: true}, grant, nil)
+	var denied *emailtags.MessageTagError
+	require.ErrorAs(t, deniedErr, &denied)
+	assert.Equal(t, "message_not_found", denied.Code)
+	assert.Zero(t, calls.Load())
+	saveScopes(microsoft.GraphMailScopes())
+	result, err := a.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired, DryRun: true}, nil, nil)
+	require.NoError(t, err)
+	assert.True(t, result.Changed)
+	count := calls.Load()
+	_, err = a.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired}, nil, nil)
+	var failure *emailtags.MessageTagError
+	require.ErrorAs(t, err, &failure)
+	assert.Equal(t, "insufficient_scope", failure.Code)
+	assert.Equal(t, count, calls.Load())
+	saveScopes(microsoft.GraphMailWriteScopes())
+	result, err = a.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired}, nil, nil)
+	require.NoError(t, err)
+	assert.True(t, result.Changed)
+	assert.True(t, result.Verified)
+	msg, err := st.GetMessage(mid)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
+	assert.Equal(t, 1, refreshes)
+	result, err = a.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired}, nil, nil)
+	require.NoError(t, err)
+	assert.False(t, result.Changed)
+	assert.True(t, result.Verified)
+	parent = "inbox-id"
+	omitArchive.Store(true)
+	result, err = a.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired}, nil, nil)
+	require.ErrorAs(t, err, &failure)
+	assert.Equal(t, "remote_accepted_local_failed", failure.Code)
+	assert.True(t, result.Changed)
+	msg, err = st.GetMessage(mid)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
 }

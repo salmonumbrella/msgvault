@@ -97,7 +97,11 @@ func (a *storeAPIAdapter) messageTags(ctx context.Context, id int64, change *ema
 	}
 	evidenceCtx, cancel := localDraftEvidenceContext(ctx)
 	defer cancel()
-	if err := a.store.SaveEmailTagsContext(evidenceCtx, target, result); err != nil {
+	save := a.store.SaveEmailTagsContext
+	if archive != nil && target.Provider == sourceTypeMSMail {
+		save = a.store.SaveMicrosoftMailArchiveContext
+	}
+	if err := save(evidenceCtx, target, result); err != nil {
 		return result, emailtags.Failure("remote_accepted_local_failed", "Provider tags were verified but could not be saved locally; sync the account", result, err)
 	}
 	if target.Provider == "gmail" || target.Provider == sourceTypeMSMail {
@@ -116,7 +120,11 @@ func (a *storeAPIAdapter) providerMessageTags(ctx context.Context, source *store
 			}
 			granted, err := manager.HasScopes(source.Identifier)
 			if err != nil || !granted {
-				return nil, emailtags.Failure("insufficient_scope", "Microsoft category editing requires Mail.ReadWrite; reauthorize with add-o365 --graph --mail-write", nil, err)
+				operation := "category editing"
+				if archive != nil {
+					operation = "archiving"
+				}
+				return nil, emailtags.Failure("insufficient_scope", "Microsoft "+operation+" requires Mail.ReadWrite; reauthorize with add-o365 --graph --mail-write", nil, err)
 			}
 		}
 		factory := a.microsoftTagClientFactory
@@ -139,6 +147,9 @@ func (a *storeAPIAdapter) providerMessageTags(ctx context.Context, source *store
 		client, err := factory(ctx, source, write)
 		if err != nil {
 			return nil, emailtags.Failure("provider_unavailable", "Cannot connect to the Microsoft mailbox", nil, err)
+		}
+		if archive != nil {
+			return client.ArchiveMessage(ctx, target.SourceMessageID, *archive.Archived, archive.DryRun)
 		}
 		return client.MessageTags(ctx, target.SourceMessageID, change)
 	}

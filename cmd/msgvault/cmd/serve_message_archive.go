@@ -46,8 +46,8 @@ func (a *storeAPIAdapter) ArchiveMessage(ctx context.Context, id int64, change e
 				return emailtags.Failure("message_not_found", "Message not found", nil, nil)
 			}
 		}
-		if source.SourceType != sourceTypeGmail && source.SourceType != "" {
-			return emailtags.Failure("archive_unsupported", "Archiving is supported only for Gmail messages", nil, nil)
+		if source.SourceType != sourceTypeGmail && source.SourceType != sourceTypeMSMail && source.SourceType != "" {
+			return emailtags.Failure("archive_unsupported", "Archiving is supported for Gmail and Microsoft Graph messages", nil, nil)
 		}
 		if change.WholeChat {
 			return emailtags.Failure("invalid_request", "whole_chat applies only to Beeper", nil, nil)
@@ -70,6 +70,9 @@ func (a *storeAPIAdapter) ArchiveMessage(ctx context.Context, id int64, change e
 	}
 	if result == nil {
 		return nil, err
+	}
+	if target.Provider == sourceTypeMSMail {
+		return &emailtags.ArchiveResult{MessageID: id, SourceID: result.SourceID, Archived: *change.Archived, Changed: len(result.Before) > 0, DryRun: result.DryRun, Verified: result.Verified}, err
 	}
 	return &emailtags.ArchiveResult{MessageID: id, SourceID: result.SourceID, Archived: !slices.Contains(result.Tags, "INBOX"), Changed: slices.Contains(result.Before, "INBOX") != slices.Contains(result.Tags, "INBOX"), DryRun: result.DryRun, Verified: result.Verified}, err
 }

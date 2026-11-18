@@ -16,40 +16,44 @@ const microsoftCategoryPrefix = "msmail-category:"
 func (s *Store) EnsureMicrosoftMailFoldersContext(ctx context.Context, sourceID int64, labels map[string]LabelInfo) (map[string]int64, error) {
 	var result map[string]int64
 	err := s.withAttributionTxContext(ctx, attributionLock{Sources: []int64{sourceID}}, func(tx *loggedTx) error {
-		q := boundQuerier{ctx: ctx, q: tx}
-		folderNames := make(map[string]bool, len(labels))
-		for providerID, info := range labels {
-			if strings.HasPrefix(providerID, microsoftCategoryPrefix) {
-				return errors.New("microsoft folder identity uses the category namespace")
-			}
-			folderNames[info.Name] = true
-		}
-		for _, info := range labels {
-			var id int64
-			var providerID sql.NullString
-			err := q.QueryRow(`SELECT id,source_label_id FROM labels WHERE source_id=? AND name=?`, sourceID, info.Name).Scan(&id, &providerID)
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			if err != nil {
-				return fmt.Errorf("check Microsoft folder name: %w", err)
-			}
-			if !strings.HasPrefix(providerID.String, microsoftCategoryPrefix) {
-				continue
-			}
-			name, err := microsoftCategoryLabelName(q, sourceID, id, strings.TrimPrefix(providerID.String, microsoftCategoryPrefix), folderNames)
-			if err != nil {
-				return err
-			}
-			if _, err := q.Exec(`UPDATE labels SET name=? WHERE id=?`, name, id); err != nil {
-				return fmt.Errorf("rename Microsoft category label: %w", err)
-			}
-		}
 		var err error
-		result, err = ensureLabelsBatchWith(q, sourceID, labels, labelFlipsTx(ctx, tx, sourceID))
+		result, err = s.ensureMicrosoftMailFoldersTx(ctx, tx, sourceID, labels)
 		return err
 	})
 	return result, err
+}
+
+func (s *Store) ensureMicrosoftMailFoldersTx(ctx context.Context, tx *loggedTx, sourceID int64, labels map[string]LabelInfo) (map[string]int64, error) {
+	q := boundQuerier{ctx: ctx, q: tx}
+	folderNames := make(map[string]bool, len(labels))
+	for providerID, info := range labels {
+		if strings.HasPrefix(providerID, microsoftCategoryPrefix) {
+			return nil, errors.New("microsoft folder identity uses the category namespace")
+		}
+		folderNames[info.Name] = true
+	}
+	for _, info := range labels {
+		var id int64
+		var providerID sql.NullString
+		err := q.QueryRow(`SELECT id,source_label_id FROM labels WHERE source_id=? AND name=?`, sourceID, info.Name).Scan(&id, &providerID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("check Microsoft folder name: %w", err)
+		}
+		if !strings.HasPrefix(providerID.String, microsoftCategoryPrefix) {
+			continue
+		}
+		name, err := microsoftCategoryLabelName(q, sourceID, id, strings.TrimPrefix(providerID.String, microsoftCategoryPrefix), folderNames)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := q.Exec(`UPDATE labels SET name=? WHERE id=?`, name, id); err != nil {
+			return nil, fmt.Errorf("rename Microsoft category label: %w", err)
+		}
+	}
+	return ensureLabelsBatchWith(q, sourceID, labels, labelFlipsTx(ctx, tx, sourceID))
 }
 
 // microsoftCategoryLabelName returns "Category: <name>", or the first

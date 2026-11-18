@@ -525,3 +525,26 @@ func TestMicrosoftMailCategoriesDeduplicateSnapshotCaseVariants(t *testing.T) {
 	require.NoError(st.DB().QueryRowContext(t.Context(), st.Rebind(`SELECT COUNT(*) FROM labels WHERE source_id=?`), source.ID).Scan(&count))
 	assert.Equal(1, count)
 }
+
+func TestMicrosoftArchiveFolderReconciliation(t *testing.T) {
+	f := newAttrFixture(t, "msmail", attrSink)
+	folders, err := f.st.EnsureMicrosoftMailFoldersContext(t.Context(), f.source.ID, map[string]store.LabelInfo{"inbox": {Name: "Inbox", Type: "system"}})
+	require.NoError(t, err)
+	id := f.persist(attrMail{raw: "Delivered-To: " + attrSink + "\r\n\r\nbody", labels: []int64{folders["inbox"]}})
+	category := []string{"Work"}
+	_, err = f.st.ReconcileMicrosoftMailLabelsContext(t.Context(), id, nil, &category)
+	require.NoError(t, err)
+	target, err := f.st.EmailTagTargetContext(t.Context(), id, "")
+	require.NoError(t, err)
+	result := &emailtags.MessageTagResult{Provider: "msmail", Verified: true, MicrosoftFolderID: "archive", MicrosoftFolders: []emailtags.MicrosoftFolder{{ID: "archive", Name: "Archiv", System: true}}}
+	require.NoError(t, f.st.SaveMicrosoftMailArchiveContext(t.Context(), target, result))
+	msg, err := f.st.GetMessage(id)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
+	target.SourceMessageID = "other"
+	result.MicrosoftFolders[0].Name = "Must not persist"
+	require.Error(t, f.st.SaveMicrosoftMailArchiveContext(t.Context(), target, result))
+	msg, err = f.st.GetMessage(id)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
+}
