@@ -18,6 +18,8 @@ type messageArchiveBackend interface {
 func newMessageArchiveCommand(archived bool, backend messageArchiveBackend) *cobra.Command {
 	var id int64
 	var dryRun, asJSON, wholeChat bool
+	var mailbox string
+	var uidvalidity, uid uint32
 	name, short := "archive", "Archive a Gmail or IMAP message or a Beeper chat"
 	if !archived {
 		name, short = "unarchive", "Restore a Gmail or IMAP message or a Beeper chat to its inbox"
@@ -27,6 +29,19 @@ func newMessageArchiveCommand(archived bool, backend messageArchiveBackend) *cob
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if id <= 0 {
 				return errors.New("--message must be a positive archived message ID")
+			}
+			var selection *emailtags.IMAPCopy
+			present := 0
+			for _, name := range []string{"mailbox", "uidvalidity", "uid"} {
+				if cmd.Flags().Changed(name) {
+					present++
+				}
+			}
+			if present != 0 {
+				if present != 3 || mailbox == "" || uidvalidity == 0 || uid == 0 {
+					return errors.New("--mailbox, --uidvalidity and --uid require nonzero values together")
+				}
+				selection = &emailtags.IMAPCopy{Mailbox: mailbox, UIDValidity: uidvalidity, UID: uid}
 			}
 			client := backend
 			if client == nil {
@@ -44,7 +59,7 @@ func newMessageArchiveCommand(archived bool, backend messageArchiveBackend) *cob
 			if !supported {
 				return fmt.Errorf("upgrade the daemon to API schema %s or newer for message archiving", daemonclient.MessageArchiveMinAPISchemaVersion)
 			}
-			result, err := client.ArchiveMessage(cmd.Context(), id, emailtags.ArchiveChange{Archived: &archived, DryRun: dryRun, WholeChat: wholeChat})
+			result, err := client.ArchiveMessage(cmd.Context(), id, emailtags.ArchiveChange{Archived: &archived, DryRun: dryRun, WholeChat: wholeChat, IMAPCopy: selection})
 			if asJSON {
 				if writeErr := writeMessageTagJSON(cmd, result, err, emailtags.Failure("request_failed", "Cannot set provider archive state", nil, err), "write message archive JSON"); writeErr != nil {
 					return writeErr
@@ -53,6 +68,9 @@ func newMessageArchiveCommand(archived bool, backend messageArchiveBackend) *cob
 			}
 			if err != nil {
 				return err
+			}
+			if len(result.IMAPCandidates) > 0 || result.IMAPCopy != nil {
+				return writeMessageTagJSON(cmd, result, nil, nil, "write IMAP archive result")
 			}
 			if result.ChatID != "" {
 				_, err = fmt.Fprintf(cmd.OutOrStdout(), "Beeper chat %q: archived=%t changed=%t dry_run=%t\n", result.ChatID, result.Archived, result.Changed, result.DryRun)
@@ -69,6 +87,9 @@ func newMessageArchiveCommand(archived bool, backend messageArchiveBackend) *cob
 		},
 	}
 	cmd.Flags().Int64Var(&id, "message", 0, "Archived message ID")
+	cmd.Flags().StringVar(&mailbox, "mailbox", "", "Exact IMAP mailbox (requires --uidvalidity and --uid)")
+	cmd.Flags().Uint32Var(&uidvalidity, "uidvalidity", 0, "IMAP mailbox UIDVALIDITY")
+	cmd.Flags().Uint32Var(&uid, "uid", 0, "IMAP copy UID")
 	cmd.Flags().BoolVar(&wholeChat, "whole-chat", false, "Archive the entire Beeper chat containing this message")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview without writing")
 	cmd.Flags().BoolVar(&asJSON, flagJSON, false, "Output result as JSON")

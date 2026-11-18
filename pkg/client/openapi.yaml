@@ -535,6 +535,8 @@ components:
           type: boolean
         dry_run:
           type: boolean
+        imap_copy:
+          $ref: "#/components/schemas/IMAPCopy"
         whole_chat:
           type: boolean
       required:
@@ -550,6 +552,12 @@ components:
           type: string
         dry_run:
           type: boolean
+        imap_candidates:
+          items:
+            $ref: "#/components/schemas/IMAPCopy"
+          type: array
+        imap_copy:
+          $ref: "#/components/schemas/IMAPCopy"
         message_id:
           format: int64
           type: integer
@@ -6622,6 +6630,24 @@ components:
         - query_embedding_ms
         - retrieval_ms
         - hydration_ms
+      type: object
+    IMAPCopy:
+      additionalProperties: false
+      properties:
+        mailbox:
+          type: string
+        uid:
+          format: int64
+          minimum: 0
+          type: integer
+        uidvalidity:
+          format: int64
+          minimum: 0
+          type: integer
+      required:
+        - mailbox
+        - uidvalidity
+        - uid
       type: object
     IdentityConfirmationOutcome:
       properties:

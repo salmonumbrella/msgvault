@@ -16,6 +16,7 @@ const imapArchiveSourceType = "imap"
 // DestinationUID means dispatch may have happened but no mapping was saved.
 type IMAPPendingMove struct {
 	SourceIdentifier       string
+	Selected               bool
 	Target                 EmailTagTarget
 	Destination            string
 	DestinationUIDValidity uint32
@@ -46,7 +47,7 @@ func imapCopyCountFailure(n int) error {
 	case 0:
 		return emailtags.Failure("stale_identity", "no current mailbox copy for this message; run msgvault sync-full for the account without folder filters first", nil, nil)
 	}
-	return emailtags.Failure("stale_identity", "exactly one current copy required; mailbox selection is unavailable", nil, nil)
+	return emailtags.Failure("stale_identity", "multiple current IMAP copies; use an authorized dry-run to list candidates and select imap_copy", nil, nil)
 }
 
 func (s *Store) IMAPPendingMoveContext(ctx context.Context, sourceID, messageID int64) (*IMAPPendingMove, error) {
@@ -84,7 +85,7 @@ func (s *Store) BeginIMAPMoveContext(ctx context.Context, m IMAPPendingMove) err
 		if err != nil {
 			return err
 		}
-		if count != 1 || exact != 1 {
+		if exact != 1 || (!m.Selected && count != 1) {
 			return errors.New("IMAP membership changed")
 		}
 
@@ -269,6 +270,34 @@ func (s *Store) imapCurrentCopies(ctx context.Context, sourceID, messageID int64
 		copies = append(copies, item)
 	}
 	return copies, rows.Err()
+}
+
+// IMAPArchiveCopiesContext returns live tuples for an already authorized message.
+func (s *Store) IMAPArchiveCopiesContext(ctx context.Context, sourceID, messageID int64) ([]emailtags.IMAPCopy, error) {
+	copies, err := s.imapCurrentCopies(ctx, sourceID, messageID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]emailtags.IMAPCopy, 0, len(copies))
+	for _, c := range copies {
+		result = append(result, emailtags.IMAPCopy{Mailbox: c.Mailbox, UIDValidity: c.UIDValidity, UID: c.UID})
+	}
+	return result, nil
+}
+
+// CheckIMAPArchiveSelectionContext binds the exact tuple to this message and source.
+func (s *Store) CheckIMAPArchiveSelectionContext(ctx context.Context, target EmailTagTarget, selected emailtags.IMAPCopy) (EmailTagTarget, error) {
+	copies, err := s.imapCurrentCopies(ctx, target.SourceID, target.ID)
+	if err != nil {
+		return target, err
+	}
+	for _, c := range copies {
+		if c.Mailbox == selected.Mailbox && c.UIDValidity == selected.UIDValidity && c.UID == selected.UID {
+			target.Mailbox, target.UIDValidity, target.UID = c.Mailbox, c.UIDValidity, c.UID
+			return target, imapDraftIdle(ctx, s.db, "", target.SourceID, target.ID)
+		}
+	}
+	return target, emailtags.Failure("stale_identity", "IMAP copy is stale or does not belong to this message; sync and retry", nil, nil)
 }
 
 // IMAPCurrentCopyContext resolves the current membership without guessing among copies.

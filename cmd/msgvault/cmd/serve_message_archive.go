@@ -46,6 +46,9 @@ func (a *storeAPIAdapter) ArchiveMessage(ctx context.Context, id int64, change e
 				return emailtags.Failure("message_not_found", "Message not found", nil, nil)
 			}
 		}
+		if change.IMAPCopy != nil && source.SourceType != sourceTypeIMAP {
+			return emailtags.Failure("invalid_request", "imap_copy applies only to IMAP", nil, nil)
+		}
 		if source.SourceType != sourceTypeGmail && source.SourceType != sourceTypeIMAP && source.SourceType != "" {
 			return emailtags.Failure("archive_unsupported", "Archiving is supported only for connected Gmail and IMAP messages", nil, nil)
 		}
@@ -55,7 +58,7 @@ func (a *storeAPIAdapter) ArchiveMessage(ctx context.Context, id int64, change e
 		return nil
 	}
 	if target.Provider == sourceTypeIMAP {
-		return a.archiveIMAPCopy(ctx, id, change, acquireWrite, authorize)
+		return a.archiveIMAPCopy(ctx, id, change, acquireWrite, authorize, grant == nil || grant.HasPermission(agentgrant.PermissionMessageRead))
 	}
 	if err == nil && target.Provider == sourceTypeGmail && change.Archived != nil {
 		if err := authorize(ctx, target); err != nil {

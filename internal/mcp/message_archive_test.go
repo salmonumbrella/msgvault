@@ -45,3 +45,13 @@ func TestArchiveMessageToolPolicyAndArguments(t *testing.T) {
 	require.Contains(t, toolsByName(t, rawListTools(t, opts, true)), ToolArchiveMessage)
 	assert.NotContains(t, toolsByName(t, rawListTools(t, opts, false)), ToolArchiveMessage)
 }
+
+func TestArchiveMessageToolIMAPCopy(t *testing.T) {
+	backend := &archiveToolBackend{}
+	opts := ServeOptions{Engine: &querytest.MockEngine{}, MessageArchive: backend}
+	result := rawCallTool(t, opts, ToolArchiveMessage, map[string]any{"message_id": float64(7), "archived": true, "imap_copy": map[string]any{"mailbox": "INBOX", "uidvalidity": float64(77), "uid": float64(8)}})
+	assert.NotEqual(t, true, result["isError"])
+	assert.Equal(t, &emailtags.IMAPCopy{Mailbox: "INBOX", UIDValidity: 77, UID: 8}, backend.change.IMAPCopy)
+	result = rawCallTool(t, opts, ToolArchiveMessage, map[string]any{"message_id": float64(7), "archived": true, "imap_copy": map[string]any{"mailbox": "INBOX", "uid": float64(8)}})
+	assert.Equal(t, true, result["isError"])
+}

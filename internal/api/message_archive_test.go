@@ -21,8 +21,9 @@ import (
 type archiveHTTPStore struct {
 	mockStore
 
-	calls int
-	fail  error
+	calls  int
+	change emailtags.ArchiveChange
+	fail   error
 }
 
 func (s *archiveHTTPStore) ArchiveMessage(ctx context.Context, id int64, change emailtags.ArchiveChange, _ *agentgrant.Grant, acquire func(context.Context) (func(), error)) (*emailtags.ArchiveResult, error) {
@@ -34,6 +35,7 @@ func (s *archiveHTTPStore) ArchiveMessage(ctx context.Context, id int64, change 
 		defer release()
 	}
 	s.calls++
+	s.change = change
 	return &emailtags.ArchiveResult{MessageID: id, Archived: *change.Archived, DryRun: change.DryRun}, s.fail
 }
 func TestArchiveMessageRouteValidationAndGate(t *testing.T) {
@@ -51,12 +53,16 @@ func TestArchiveMessageRouteValidationAndGate(t *testing.T) {
 		srv.Router().ServeHTTP(w, req)
 		return w
 	}
-	for _, body := range []string{`{}`, `{"archived":null}`, `{"archived":true,"dry_run":null}`, `{"archived":true,"whole_chat":null}`, `{"archived":true,"whole_chat":"true"}`} {
+	for _, body := range []string{`{}`, `{"archived":null}`, `{"archived":true,"dry_run":null}`, `{"archived":true,"whole_chat":null}`, `{"archived":true,"whole_chat":"true"}`, `{"archived":true,"imap_copy":null}`, `{"archived":true,"imap_copy":{"mailbox":"INBOX","uid":1}}`} {
 		response := call("7", body)
 		assertionsForTest.Equal(http.StatusBadRequest, response.Code, response.Body.String())
 	}
 	assertionsForTest.Equal(http.StatusBadRequest, call("0", `{"archived":true}`).Code)
 	assertionsForTest.Zero(st.calls)
+	selected := call("7", `{"archived":true,"dry_run":true,"imap_copy":{"mailbox":"INBOX","uidvalidity":77,"uid":8}}`)
+	assertionsForTest.Equal(http.StatusOK, selected.Code, selected.Body.String())
+	assertionsForTest.Equal(&emailtags.IMAPCopy{Mailbox: "INBOX", UIDValidity: 77, UID: 8}, st.change.IMAPCopy)
+	st.calls = 0
 	delegated := NewServerWithOptions(ServerOptions{Config: &config.Config{Server: config.ServerConfig{APIKey: "owner", AgentAccess: true}}, Store: st, Logger: testLogger()})
 	t.Cleanup(delegated.agentGrants.Close)
 	_, secret, _, err := delegated.agentGrants.Issue("reader", []agentgrant.Permission{agentgrant.PermissionMessageRead}, []agentgrant.SourceRef{{ID: 1, Type: "gmail", Identifier: "owner@example.test"}}, time.Time{})
@@ -107,4 +113,18 @@ func TestArchiveWriteOnlyFailureDoesNotRevealMailbox(t *testing.T) {
 	assert.NotContains(t, w.Body.String(), "Private-Example-Folder")
 	assert.Contains(t, w.Body.String(), `"error":"provider_read_failed"`)
 	assert.Contains(t, w.Body.String(), "Cannot access the IMAP account")
+}
+
+func TestArchiveOldContractRejectsSelector(t *testing.T) {
+	// Slice 1 used this request shape with the same strict production decoder.
+	var old struct {
+		Archived  *bool `json:"archived"`
+		DryRun    bool  `json:"dry_run,omitempty"`
+		WholeChat bool  `json:"whole_chat,omitempty"`
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(`{"archived":true,"imap_copy":{"mailbox":"INBOX","uidvalidity":1,"uid":1}}`))
+	_, ok := decodeEntityRequestFields(w, r, &old, "message archive")
+	assert.False(t, ok)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }

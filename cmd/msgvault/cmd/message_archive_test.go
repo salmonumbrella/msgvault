@@ -90,3 +90,28 @@ func TestArchiveMessageCommands(t *testing.T) {
 	assertionsForTest.Contains(output.String(), `"error":"remote_unknown"`)
 	assertionsForTest.Contains(output.String(), `"tags":["UNREAD"]`)
 }
+
+func TestArchiveCommandIMAPSelection(t *testing.T) {
+	for _, tc := range []struct {
+		args  []string
+		valid bool
+	}{
+		{[]string{"--mailbox", "INBOX", "--uidvalidity", "77", "--uid", "8"}, true},
+		{[]string{"--mailbox", "INBOX", "--uid", "8"}, false},
+		{[]string{"--mailbox", "INBOX", "--uidvalidity", "77", "--uid", "0"}, false},
+	} {
+		backend := &cliArchiveBackend{}
+		command := newMessageArchiveCommand(true, backend)
+		command.SetArgs(append([]string{"--message", "7"}, tc.args...))
+		command.SetOut(&bytes.Buffer{})
+		command.SetErr(&bytes.Buffer{})
+		err := command.ExecuteContext(t.Context())
+		if tc.valid {
+			require.NoError(t, err)
+			assert.Equal(t, &emailtags.IMAPCopy{Mailbox: "INBOX", UIDValidity: 77, UID: 8}, backend.change.IMAPCopy)
+		} else {
+			require.Error(t, err)
+			assert.Zero(t, backend.id)
+		}
+	}
+}

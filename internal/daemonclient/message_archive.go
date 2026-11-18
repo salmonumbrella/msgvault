@@ -17,16 +17,23 @@ func (c *Client) ArchiveMessage(ctx context.Context, id int64, change emailtags.
 	if change.Archived == nil {
 		return nil, emailtags.Failure("invalid_request", "archived must be true or false", nil, nil)
 	}
-	if change.WholeChat {
+	if change.IMAPCopy != nil && (change.IMAPCopy.Mailbox == "" || change.IMAPCopy.UIDValidity == 0 || change.IMAPCopy.UID == 0) {
+		return nil, emailtags.Failure("invalid_request", "imap_copy requires mailbox, uidvalidity and uid", nil, nil)
+	}
+	if change.WholeChat || change.IMAPCopy != nil {
 		supported, err := c.SupportsAPISchemaVersion(ctx, MessageArchiveMinAPISchemaVersion)
 		if err != nil {
 			return nil, err
 		}
 		if !supported {
-			return nil, emailtags.Failure("archive_unsupported", fmt.Sprintf("Upgrade the daemon to API schema %s for Beeper archiving", MessageArchiveMinAPISchemaVersion), nil, nil)
+			return nil, emailtags.Failure("archive_unsupported", fmt.Sprintf("Upgrade the daemon to API schema %s for this archive option", MessageArchiveMinAPISchemaVersion), nil, nil)
 		}
 	}
-	options := &generated.ArchiveMessageRequestOptions{Body: &generated.ArchiveMessageBody{Archived: *change.Archived, DryRun: &change.DryRun, WholeChat: &change.WholeChat}}
+	var selection *generated.IMAPCopy
+	if change.IMAPCopy != nil {
+		selection = &generated.IMAPCopy{Mailbox: change.IMAPCopy.Mailbox, Uidvalidity: int64(change.IMAPCopy.UIDValidity), UID: int64(change.IMAPCopy.UID)}
+	}
+	options := &generated.ArchiveMessageRequestOptions{Body: &generated.ArchiveMessageBody{Archived: *change.Archived, DryRun: &change.DryRun, WholeChat: &change.WholeChat, ImapCopy: selection}}
 	resp, err := c.doGeneratedRequestWithHTTPClient(ctx, http.MethodPost, fmt.Sprintf("/api/v1/messages/%d/archive", id), options, c.httpClient, maxMessageTagErrorBodyBytes)
 	if err != nil {
 		return nil, archiveResponseError(change, err)

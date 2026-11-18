@@ -95,7 +95,7 @@ func TestIMAPArchiveRejectsAmbiguousAndChangedEpoch(t *testing.T) {
 	m := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: target, Destination: "Archiv", DestinationUIDValidity: 88}
 	tagMembership(t, st, source.ID, id, "Other", 20, 2)
 	_, err = st.CheckIMAPArchiveTargetContext(t.Context(), target)
-	require.ErrorContains(t, err, "mailbox selection is unavailable")
+	require.ErrorContains(t, err, "select imap_copy")
 	require.Error(t, st.BeginIMAPMoveContext(t.Context(), m))
 	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`DELETE FROM imap_message_memberships WHERE source_id=? AND mailbox=?`), source.ID, "Other")
 	require.NoError(t, err)
@@ -175,4 +175,23 @@ func TestIMAPArchivePendingPreservesResetTuple(t *testing.T) {
 	var epoch uint32
 	require.NoError(t, st.DB().QueryRowContext(t.Context(), st.Rebind(`SELECT uidvalidity FROM imap_folder_state WHERE source_id=? AND mailbox=?`), source.ID, "INBOX").Scan(&epoch))
 	assert.Equal(t, uint32(78), epoch)
+}
+
+func TestIMAPArchiveMoveKeepsSiblingCopies(t *testing.T) {
+	st, source, id := tagFixture(t, "imap", "INBOX|7")
+	tagMembership(t, st, source.ID, id, "INBOX", 77, 7)
+	_, err := st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_message_memberships(source_id,mailbox,uidvalidity,uid,message_id,flags) VALUES(?,?,?,?,?,?)`), source.ID, "INBOX", 77, 8, id, `["\\Seen"]`)
+	require.NoError(t, err)
+	tagMembership(t, st, source.ID, id, "Other", 20, 2)
+	target, err := st.EmailTagTargetContext(t.Context(), id, "")
+	require.NoError(t, err)
+	target.UID = 8
+	move := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Selected: true, Target: target, Destination: "Archiv", DestinationUIDValidity: 88}
+	require.NoError(t, st.BeginIMAPMoveContext(t.Context(), move))
+	move.DestinationUID = 9
+	require.NoError(t, st.SaveIMAPMoveMappingContext(t.Context(), move))
+	require.NoError(t, st.ReconcileIMAPMoveContext(t.Context(), move))
+	var count int
+	require.NoError(t, st.DB().QueryRowContext(t.Context(), st.Rebind(`SELECT COUNT(*) FROM imap_message_memberships WHERE source_id=? AND message_id=?`), source.ID, id).Scan(&count))
+	assert.Equal(t, 3, count)
 }

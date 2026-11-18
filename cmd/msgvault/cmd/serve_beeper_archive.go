@@ -25,6 +25,9 @@ func (a *storeAPIAdapter) archiveBeeperChat(ctx context.Context, id int64, chang
 			return nil, emailtags.Failure("message_not_found", "Message not found", nil, nil)
 		}
 	}
+	if change.IMAPCopy != nil {
+		return nil, emailtags.Failure("invalid_request", "imap_copy applies only to IMAP", nil, nil)
+	}
 	if strings.HasPrefix(chatID, "msgvault-archive:") {
 		return nil, emailtags.Failure("stale_identity", "Chat was archived by a source merge", nil, nil)
 	}

@@ -453,6 +453,7 @@ export * from "./identitySearchHTTPRequest";
 export * from "./identitySearchSort";
 export * from "./identitySearchSortDirection";
 export * from "./identitySearchSortField";
+export * from "./iMAPCopy";
 export * from "./importedMessage";
 export * from "./importedMessageMetadata";
 export * from "./importEntry";

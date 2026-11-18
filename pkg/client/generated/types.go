@@ -486,19 +486,59 @@ func (a AppendPersonNoteRequest) Validate() error {
 }
 
 type ArchiveChange struct {
-	Archived  bool  `json:"archived"`
-	DryRun    *bool `json:"dry_run,omitempty"`
-	WholeChat *bool `json:"whole_chat,omitempty"`
+	Archived  bool      `json:"archived"`
+	DryRun    *bool     `json:"dry_run,omitempty"`
+	ImapCopy  *IMAPCopy `json:"imap_copy,omitempty"`
+	WholeChat *bool     `json:"whole_chat,omitempty"`
+}
+
+func (a ArchiveChange) Validate() error {
+	var errors runtime.ValidationErrors
+	if a.ImapCopy != nil {
+		if v, ok := any(a.ImapCopy).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("ImapCopy", err)
+			}
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
 }
 
 type ArchiveResult struct {
-	Archived  bool    `json:"archived"`
-	Changed   bool    `json:"changed"`
-	ChatID    *string `json:"chat_id,omitzero"`
-	DryRun    bool    `json:"dry_run"`
-	MessageID int64   `json:"message_id"`
-	SourceID  int64   `json:"source_id"`
-	Verified  bool    `json:"verified"`
+	Archived       bool       `json:"archived"`
+	Changed        bool       `json:"changed"`
+	ChatID         *string    `json:"chat_id,omitzero"`
+	DryRun         bool       `json:"dry_run"`
+	ImapCandidates []IMAPCopy `json:"imap_candidates,omitempty"`
+	ImapCopy       *IMAPCopy  `json:"imap_copy,omitempty"`
+	MessageID      int64      `json:"message_id"`
+	SourceID       int64      `json:"source_id"`
+	Verified       bool       `json:"verified"`
+}
+
+func (a ArchiveResult) Validate() error {
+	var errors runtime.ValidationErrors
+	for i, item := range a.ImapCandidates {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("ImapCandidates[%d]", i), err)
+			}
+		}
+	}
+	if a.ImapCopy != nil {
+		if v, ok := any(a.ImapCopy).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("ImapCopy", err)
+			}
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
 }
 
 type AttachmentInfo struct {
@@ -6363,6 +6403,16 @@ type HybridSearchTimings struct {
 	HydrationMs      int64 `json:"hydration_ms"`
 	QueryEmbeddingMs int64 `json:"query_embedding_ms"`
 	RetrievalMs      int64 `json:"retrieval_ms"`
+}
+
+type IMAPCopy struct {
+	Mailbox     string `json:"mailbox" validate:"required"`
+	UID         int64  `json:"uid" validate:"gte=0"`
+	Uidvalidity int64  `json:"uidvalidity" validate:"gte=0"`
+}
+
+func (i IMAPCopy) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(i))
 }
 
 type IdentityConfirmationOutcome struct {

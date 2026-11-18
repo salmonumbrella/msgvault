@@ -584,3 +584,39 @@ func TestArchiveIMAPRefusalsBeforeProvider(t *testing.T) {
 	require.NotNil(t, persisted)
 	assert.Equal(t, pending, *persisted)
 }
+
+func TestArchiveIMAPCandidateGrantDisclosure(t *testing.T) {
+	st, _, _, _, serverURL, owner, _ := newArchiveDaemon(t) //nolint:dogsled // Only the store and HTTP clients are used.
+	source, err := st.GetOrCreateSource("imap", "candidates@example.test")
+	require.NoError(t, err)
+	conv, err := st.EnsureConversation(t.Context(), source.ID, "candidate-thread", "Fixture")
+	require.NoError(t, err)
+	id, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: "INBOX|1", MessageType: "email"})
+	require.NoError(t, err)
+	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_folder_state(source_id,mailbox,uidvalidity,uidnext) VALUES(?,?,?,?)`), source.ID, "INBOX", 10, 3)
+	require.NoError(t, err)
+	for _, uid := range []int{1, 2} {
+		_, err = st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_message_memberships(source_id,mailbox,uidvalidity,uid,message_id) VALUES(?,?,?,?,?)`), source.ID, "INBOX", 10, uid, id)
+		require.NoError(t, err)
+	}
+	archived := true
+	change := emailtags.ArchiveChange{Archived: &archived, DryRun: true}
+	for _, tc := range []struct {
+		permissions []string
+		allowed     bool
+	}{{[]string{"message.archive"}, false}, {[]string{"message.archive", "message.read"}, true}} {
+		token, err := owner.IssueAgentToken(t.Context(), "fixture", tc.permissions, []int64{source.ID}, nil, nil, time.Time{})
+		require.NoError(t, err)
+		client, err := daemonclient.New(daemonclient.Config{URL: serverURL, AgentToken: token.Secret, AllowInsecure: true})
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, client.Close()) })
+		result, err := client.ArchiveMessage(t.Context(), id, change)
+		if tc.allowed {
+			require.NoError(t, err)
+			assert.Len(t, result.IMAPCandidates, 2)
+		} else {
+			require.Error(t, err)
+			assert.Nil(t, result)
+		}
+	}
+}

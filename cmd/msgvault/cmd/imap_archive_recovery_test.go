@@ -441,3 +441,126 @@ func TestIMAPArchiveDisputedReceiptSurvivesSync(t *testing.T) {
 	require.ErrorContains(t, err, "without folder filters")
 	assert.EqualValues(t, 1, moves.Load())
 }
+
+func TestIMAPArchiveSelectedCopyRoundTrip(t *testing.T) {
+	user := imapmemserver.NewUser(testutil.IMAPTestUsername, testutil.IMAPTestPassword)
+	require.NoError(t, user.Create("INBOX", nil))
+	require.NoError(t, user.Create("Archiv", nil))
+	require.NoError(t, user.Create("Other", nil))
+	testutil.AppendIMAPMessage(t, user, "INBOX")
+	testutil.AppendIMAPMessage(t, user, "INBOX")
+	testutil.AppendIMAPMessage(t, user, "Other")
+	mem := imapmemserver.New()
+	mem.AddUser(user)
+	var fail, moveFail, disconnect atomic.Bool
+	var moves atomic.Int32
+	srv := imapserver.New(&imapserver.Options{InsecureAuth: true, Caps: imapapi.CapSet{imapapi.CapIMAP4rev1: {}, imapapi.CapMove: {}, imapapi.CapUIDPlus: {}}, NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+		return &failOnceFetchSession{Session: mem.NewSession(), fail: &fail, moveFail: &moveFail, moves: &moves}, nil, nil
+	}})
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(disconnectReceiptListener{Listener: listener, armed: &disconnect}) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	addr := listener.Addr().String()
+	host, portText, err := net.SplitHostPort(addr)
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portText)
+	require.NoError(t, err)
+	imapConfig := &imap.Config{Host: host, Port: port, Username: testutil.IMAPTestUsername, ArchiveMailbox: "Archiv"}
+	st := testutil.NewTestStore(t)
+	if os.Getenv("MSGVAULT_TEST_DB") != "" {
+		require.True(t, st.IsPostgreSQL())
+	}
+	source, err := st.GetOrCreateSource("imap", imapConfig.Identifier())
+	require.NoError(t, err)
+	configJSON, err := imapConfig.ToJSON()
+	require.NoError(t, err)
+	require.NoError(t, st.UpdateSourceSyncConfig(t.Context(), source.ID, configJSON))
+	source, err = st.GetSourceByIDContext(t.Context(), source.ID)
+	require.NoError(t, err)
+	cfg := testConfigValue()
+	cfg.Data.DataDir = t.TempDir()
+	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+	runSync := func(filtered bool) {
+		t.Helper()
+		options := imapFolderStateOptions(st, source, false, cfg, testDiscardLogger())
+		if filtered {
+			options = append(options, imap.WithFolderFilter([]string{"INBOX"}, nil))
+		}
+		client := imap.NewClient(imapConfig, testutil.IMAPTestPassword, options...)
+		defer func() { require.NoError(t, client.Close()) }()
+		syncOptions := msgsync.DefaultOptions()
+		syncOptions.SourceType = sourceTypeIMAP
+		syncOptions.NoResume = true
+		summary, err := newMessageSyncer(client, st, syncOptions, invocationFromContext(testCtx)).WithLogger(slog.New(slog.DiscardHandler)).FullWithFinalizer(testCtx, source, func(summary *gmail.SyncSummary) error {
+			return saveIMAPFolderStates(testCtx, st, source, client, summary, 0)
+		})
+		require.NoError(t, err)
+		require.Zero(t, summary.Errors)
+	}
+	runSync(false)
+	var id int64
+	require.NoError(t, st.DB().QueryRowContext(t.Context(), st.Rebind(`SELECT id FROM messages WHERE source_id=? AND source_message_id='INBOX|1'`), source.ID).Scan(&id))
+	adapter := &storeAPIAdapter{store: st, config: cfg, logger: slog.New(slog.DiscardHandler), emailTagClientFactory: func(context.Context, *store.Source) (gmail.API, error) {
+		return imap.NewClient(imapConfig, testutil.IMAPTestPassword), nil
+	}, draftCacheRefresh: func(context.Context, string) error { return nil }}
+	_, err = st.DB().ExecContext(testCtx, st.Rebind(`UPDATE imap_message_memberships SET message_id=? WHERE source_id=?`), id, source.ID)
+	require.NoError(t, err)
+	_, err = st.DB().ExecContext(testCtx, st.Rebind(`UPDATE imap_message_memberships SET flags=? WHERE source_id=? AND mailbox=? AND uid=?`), `["\\Seen"]`, source.ID, "INBOX", 1)
+	require.NoError(t, err)
+	before, err := st.GetMessage(id)
+	require.NoError(t, err)
+	copies, err := st.IMAPArchiveCopiesContext(testCtx, source.ID, id)
+	require.NoError(t, err)
+	require.Len(t, copies, 3)
+	requested := true
+	preview, err := adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requested, DryRun: true}, nil, nil)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, copies, preview.IMAPCandidates)
+	var selected emailtags.IMAPCopy
+	for _, c := range copies {
+		if c.Mailbox == "INBOX" && c.UID == 2 {
+			selected = c
+		}
+	}
+	require.NotZero(t, selected.UID)
+	sibling, err := st.EmailTagTargetContext(testCtx, id, "")
+	require.NoError(t, err)
+	var destEpoch uint32
+	require.NoError(t, st.DB().QueryRowContext(testCtx, st.Rebind(`SELECT uidvalidity FROM imap_folder_state WHERE source_id=? AND mailbox=?`), source.ID, "Archiv").Scan(&destEpoch))
+	pending := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: sibling, Selected: true, Destination: "Archiv", DestinationUIDValidity: destEpoch}
+	require.NoError(t, st.BeginIMAPMoveContext(testCtx, pending))
+	_, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requested, IMAPCopy: &selected}, nil, nil)
+	require.Error(t, err)
+	assert.Zero(t, moves.Load())
+	require.NoError(t, st.ClearIMAPMoveContext(testCtx, pending))
+	result, err := adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requested, IMAPCopy: &selected}, nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result.IMAPCopy)
+	assert.True(t, result.Verified)
+	assert.Equal(t, "Archiv", result.IMAPCopy.Mailbox)
+	_, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requested, IMAPCopy: &selected}, nil, nil)
+	require.Error(t, err)
+	restore := false
+	result, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &restore, IMAPCopy: result.IMAPCopy}, nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result.IMAPCopy)
+	assert.Equal(t, "INBOX", result.IMAPCopy.Mailbox)
+	remaining, err := st.IMAPArchiveCopiesContext(testCtx, source.ID, id)
+	require.NoError(t, err)
+	assert.Len(t, remaining, 3)
+	after, err := st.GetMessage(id)
+	require.NoError(t, err)
+	assert.Equal(t, before.Subject, after.Subject)
+	assert.Equal(t, before.Snippet, after.Snippet)
+	var flags string
+	require.NoError(t, st.DB().QueryRowContext(testCtx, st.Rebind(`SELECT flags FROM imap_message_memberships WHERE source_id=? AND mailbox=? AND uid=?`), source.ID, "INBOX", 1).Scan(&flags))
+	assert.Equal(t, `["\\Seen"]`, flags)
+	assert.Contains(t, after.Labels, "INBOX")
+	assert.Contains(t, after.Labels, "Other")
+	for _, c := range copies {
+		if c != selected {
+			assert.Contains(t, remaining, c)
+		}
+	}
+}

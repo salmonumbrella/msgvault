@@ -12,15 +12,16 @@ import (
 )
 
 type imapArchiveJournal struct {
-	store  *store.Store
-	target store.EmailTagTarget
-	source *store.Source
+	store    *store.Store
+	target   store.EmailTagTarget
+	source   *store.Source
+	selected bool
 }
 
 func (j imapArchiveJournal) move(m imaplib.ArchiveMove) store.IMAPPendingMove {
 	t := j.target
 	t.Mailbox, t.UIDValidity, t.UID = m.Target.Mailbox, m.Target.UIDValidity, m.Target.UID
-	return store.IMAPPendingMove{SourceIdentifier: j.source.Identifier, Target: t, Destination: m.Destination, DestinationUIDValidity: m.DestinationUIDValidity, DestinationUID: m.DestinationUID}
+	return store.IMAPPendingMove{SourceIdentifier: j.source.Identifier, Selected: j.selected, Target: t, Destination: m.Destination, DestinationUIDValidity: m.DestinationUIDValidity, DestinationUID: m.DestinationUID}
 }
 func (j imapArchiveJournal) Begin(ctx context.Context, m imaplib.ArchiveMove) error {
 	return j.store.BeginIMAPMoveContext(ctx, j.move(m))
@@ -53,14 +54,27 @@ func imapSourceConfigMatches(source *store.Source) error {
 	return nil
 }
 
-func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change emailtags.ArchiveChange, acquireWrite func(context.Context) (func(), error), authorize func(context.Context, store.EmailTagTarget) error) (*emailtags.ArchiveResult, error) {
+func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change emailtags.ArchiveChange, acquireWrite func(context.Context) (func(), error), authorize func(context.Context, store.EmailTagTarget) error, allowCandidates bool) (*emailtags.ArchiveResult, error) {
 	ctx = a.invocationContext(ctx)
+	if change.Archived == nil {
+		return nil, emailtags.Failure("invalid_request", "archived is required", nil, nil)
+	}
 	resolve := func() (store.EmailTagTarget, error) {
 		target, err := a.store.EmailTagTargetContext(ctx, id, "")
 		if target.SourceID != 0 {
 			if authErr := authorize(ctx, target); authErr != nil {
 				return store.EmailTagTarget{}, authErr
 			}
+		}
+		if change.IMAPCopy != nil {
+			c := change.IMAPCopy
+			if c.Mailbox == "" || c.UIDValidity == 0 || c.UID == 0 {
+				return target, emailtags.Failure("invalid_request", "imap_copy requires mailbox, uidvalidity and uid", nil, nil)
+			}
+			if target.SourceID == 0 {
+				return target, err
+			}
+			return a.store.CheckIMAPArchiveSelectionContext(ctx, target, *c)
 		}
 		if err != nil {
 			if failure, ok := errors.AsType[*emailtags.MessageTagError](err); target.Provider == "imap" && ok && failure.Code == "stale_identity" {
@@ -74,10 +88,16 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 	}
 	target, err := resolve()
 	if err != nil {
+		if change.IMAPCopy == nil && change.DryRun && allowCandidates && target.SourceID != 0 {
+			copies, listErr := a.store.IMAPArchiveCopiesContext(ctx, target.SourceID, id)
+			if listErr != nil {
+				return nil, listErr
+			}
+			if len(copies) > 1 {
+				return &emailtags.ArchiveResult{MessageID: id, SourceID: target.SourceID, Archived: *change.Archived, DryRun: true, IMAPCandidates: copies}, nil
+			}
+		}
 		return nil, err
-	}
-	if change.Archived == nil {
-		return nil, emailtags.Failure("invalid_request", "archived is required", nil, nil)
 	}
 	write := !change.DryRun
 	if write && acquireWrite != nil {
@@ -123,6 +143,9 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 	if err != nil {
 		return nil, err
 	}
+	if pending != nil && change.IMAPCopy != nil && (pending.Target.Mailbox != target.Mailbox || pending.Target.UIDValidity != target.UIDValidity || pending.Target.UID != target.UID) {
+		return nil, emailtags.Failure("stale_identity", "A different IMAP copy has a pending move; reconcile it first", nil, nil)
+	}
 	if pending != nil && (pending.SourceIdentifier != source.Identifier || source.MergedIntoSourceID != 0) {
 		return nil, emailtags.Failure("stale_identity", "IMAP account changed while a move was pending; inspect both folders", nil, nil)
 	}
@@ -147,7 +170,7 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 	if !ok {
 		return nil, emailtags.Failure("archive_unsupported", "Source does not support IMAP archiving", nil, nil)
 	}
-	journal := imapArchiveJournal{store: a.store, target: target, source: source}
+	journal := imapArchiveJournal{store: a.store, target: target, source: source, selected: change.IMAPCopy != nil}
 	identity := imaplib.DraftReceipt{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
 	var recovery *imaplib.ArchiveMove
 	if pending != nil {
@@ -161,6 +184,9 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 	if err != nil {
 		return result, err
 	}
+	if result.Verified && verified == nil {
+		result.IMAPCopy = &emailtags.IMAPCopy{Mailbox: identity.Mailbox, UIDValidity: identity.UIDValidity, UID: identity.UID}
+	}
 	if write && result.Verified && result.Changed {
 		// Persist verified remote evidence even if the caller disconnects.
 		evidenceCtx, cancel := localDraftEvidenceContext(ctx)
@@ -168,6 +194,7 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 		if err := a.store.ReconcileIMAPMoveContext(evidenceCtx, journal.move(*verified)); err != nil {
 			return result, emailtags.Failure("remote_accepted_local_failed", "IMAP move was verified but could not be saved locally; sync the account", nil, err)
 		}
+		result.IMAPCopy = &emailtags.IMAPCopy{Mailbox: verified.Destination, UIDValidity: verified.DestinationUIDValidity, UID: verified.DestinationUID}
 		a.releaseDraftSourceAndRefreshCache(ctx, source, execution)
 		if result.Archived != *change.Archived {
 			return result, emailtags.Failure("stale_identity", "Earlier IMAP move was reconciled; retry the requested state", nil, nil)
