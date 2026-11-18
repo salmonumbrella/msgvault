@@ -6592,6 +6592,7 @@ components:
       additionalProperties: false
       properties:
         mailbox:
+          minLength: 1
           type: string
         uid:
           format: int64

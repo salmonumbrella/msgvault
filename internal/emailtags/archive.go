@@ -2,7 +2,7 @@ package emailtags
 
 // IMAPCopy identifies one mailbox generation and UID.
 type IMAPCopy struct {
-	Mailbox     string `json:"mailbox"`
+	Mailbox     string `json:"mailbox" minLength:"1"`
 	UIDValidity uint32 `json:"uidvalidity" format:"int64" minimum:"1" maximum:"4294967295"`
 	UID         uint32 `json:"uid" format:"int64" minimum:"1" maximum:"4294967295"`
 }

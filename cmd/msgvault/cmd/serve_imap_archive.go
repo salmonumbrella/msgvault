@@ -67,9 +67,6 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 		}
 		if change.IMAPCopy != nil {
 			c := change.IMAPCopy
-			if !c.Valid() {
-				return target, emailtags.Failure("invalid_request", "imap_copy requires mailbox, uidvalidity and uid", nil, nil)
-			}
 			if target.SourceID == 0 {
 				return target, err
 			}

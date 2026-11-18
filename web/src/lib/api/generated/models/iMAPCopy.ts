@@ -3,6 +3,7 @@
  */
 
 export interface IMAPCopy {
+  /** @minLength 1 */
   mailbox: string;
   /**
    * @minimum 1

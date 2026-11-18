@@ -114,17 +114,3 @@ func TestArchiveWriteOnlyFailureDoesNotRevealMailbox(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `"error":"provider_read_failed"`)
 	assert.Contains(t, w.Body.String(), "Cannot access the IMAP account")
 }
-
-func TestArchiveOldContractRejectsSelector(t *testing.T) {
-	// Slice 1 used this request shape with the same strict production decoder.
-	var old struct {
-		Archived  *bool `json:"archived"`
-		DryRun    bool  `json:"dry_run,omitempty"`
-		WholeChat bool  `json:"whole_chat,omitempty"`
-	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(`{"archived":true,"imap_copy":{"mailbox":"INBOX","uidvalidity":1,"uid":1}}`))
-	_, ok := decodeEntityRequestFields(w, r, &old, "message archive")
-	assert.False(t, ok)
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-}

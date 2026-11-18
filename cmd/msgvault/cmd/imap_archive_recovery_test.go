@@ -452,6 +452,7 @@ func TestIMAPArchiveSelectedCopyRoundTrip(t *testing.T) {
 	testutil.AppendIMAPMessage(t, user, "Other")
 	mem := imapmemserver.New()
 	mem.AddUser(user)
+	// The shared session and listener dereference these inactive fault switches.
 	var fail, moveFail, disconnect atomic.Bool
 	var connections atomic.Int32
 	var moves atomic.Int32
@@ -537,6 +538,9 @@ func TestIMAPArchiveSelectedCopyRoundTrip(t *testing.T) {
 	}, draftCacheRefresh: func(context.Context, string) error { return nil }}
 	_, err = st.DB().ExecContext(testCtx, st.Rebind(`UPDATE imap_message_memberships SET message_id=? WHERE source_id=?`), id, source.ID)
 	require.NoError(t, err)
+	for _, oldKey := range []string{"INBOX|2", "Other|1"} {
+		require.NoError(t, st.MarkMessageDeletedContext(testCtx, source.ID, oldKey))
+	}
 	before, err := st.GetMessage(id)
 	require.NoError(t, err)
 	copies, err := st.IMAPArchiveCopiesContext(testCtx, source.ID, id)
@@ -562,7 +566,7 @@ func TestIMAPArchiveSelectedCopyRoundTrip(t *testing.T) {
 	pending := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: sibling, Destination: "Archiv", DestinationUIDValidity: destEpoch}
 	require.NoError(t, st.BeginIMAPMoveContext(testCtx, pending))
 	_, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requested, IMAPCopy: &selected}, nil, nil)
-	require.Error(t, err)
+	require.ErrorContains(t, err, "different IMAP copy has a pending move")
 	assert.Zero(t, moves.Load())
 	require.NoError(t, st.ClearIMAPMoveContext(testCtx, pending))
 	result, err := adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requested, IMAPCopy: &selected}, nil, nil)
@@ -575,7 +579,7 @@ func TestIMAPArchiveSelectedCopyRoundTrip(t *testing.T) {
 	runSync(false)
 	beforeStale := connections.Load()
 	_, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requested, IMAPCopy: &selected}, nil, nil)
-	require.Error(t, err)
+	require.ErrorContains(t, err, "stale_identity")
 	assert.Equal(t, beforeStale, connections.Load())
 	assert.EqualValues(t, 1, moves.Load())
 	restore := false

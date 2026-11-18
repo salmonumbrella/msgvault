@@ -17,9 +17,6 @@ func (c *Client) ArchiveMessage(ctx context.Context, id int64, change emailtags.
 	if change.Archived == nil {
 		return nil, emailtags.Failure("invalid_request", "archived must be true or false", nil, nil)
 	}
-	if change.IMAPCopy != nil && !change.IMAPCopy.Valid() {
-		return nil, emailtags.Failure("invalid_request", "imap_copy requires mailbox, uidvalidity and uid", nil, nil)
-	}
 	if change.WholeChat || change.IMAPCopy != nil {
 		supported, err := c.SupportsAPISchemaVersion(ctx, MessageArchiveMinAPISchemaVersion)
 		if err != nil {

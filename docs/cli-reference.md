@@ -391,8 +391,10 @@ with `msgvault add-account <account> --force` if the daemon reports
 See the [API contract](api-server.md#message-archiving) for readback and errors.
 
 For IMAP, the server must support native MOVE and UIDPLUS. Configure an archive
-mailbox if the server does not advertise exactly one safe Archive role. Use `--mailbox`, `--uidvalidity`, and `--uid` together to select a copy when a message has several. See
-[IMAP archive controls](usage/imap.md#archive-and-restore-a-message).
+mailbox if the server does not advertise exactly one safe Archive role. Use
+`--mailbox`, `--uidvalidity`, and `--uid` together to select a copy when a
+message has several. See [IMAP archive
+controls](usage/imap.md#archive-and-restore-a-message).
 
 For Beeper, select a locally archived message and opt into changing its entire chat:
 

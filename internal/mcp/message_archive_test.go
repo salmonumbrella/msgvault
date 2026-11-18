@@ -52,6 +52,7 @@ func TestArchiveMessageToolIMAPCopy(t *testing.T) {
 	result := rawCallTool(t, opts, ToolArchiveMessage, map[string]any{"message_id": float64(7), "archived": true, "imap_copy": map[string]any{"mailbox": "INBOX", "uidvalidity": float64(77), "uid": float64(8)}})
 	assert.NotEqual(t, true, result["isError"])
 	assert.Equal(t, &emailtags.IMAPCopy{Mailbox: "INBOX", UIDValidity: 77, UID: 8}, backend.change.IMAPCopy)
+	// This exercises the SDK input schema's required fields, not the handler's validation.
 	result = rawCallTool(t, opts, ToolArchiveMessage, map[string]any{"message_id": float64(7), "archived": true, "imap_copy": map[string]any{"mailbox": "INBOX", "uid": float64(8)}})
 	assert.Equal(t, true, result["isError"])
 }
