@@ -128,15 +128,15 @@ func TestLoopsDaemonVersions(t *testing.T) {
 		closed, warning, conflict                                     bool
 	}{
 		{name: "old_reply_loop_daemon", version: "3.23.0", minimum: "3.44.0", args: []string{"list", "--json"}},
-		{name: "old_closed_commitment_daemon", version: "5.16.0", minimum: "5.17.0", args: []string{"list", "--json", "--include-closed"}},
-		{name: "older_commitment_daemon", version: "5.16.0", minimum: "5.17.0", args: []string{"done", "c12"}},
-		{name: "compatible_closed_commitment_daemon", version: "5.17.0", path: "/api/v1/loops", method: http.MethodGet, response: `{"items":[],"truncated":false,"coverage_incomplete":false,"skipped_unparseable":0}`, args: []string{"list", "--json", "--include-closed"}, closed: true},
-		{name: "agenda", version: "5.18.0", path: "/api/v1/loops/commitments/c12/agenda", method: http.MethodPost, response: `{"issue":{"uid":"u","ref":"a","qualified_ref":"example#a","project":"example","title":"Reply","status":"open","revision":"1","web_url":"https://kata.example/a"},"replayed":true}`, output: "example#a https://kata.example/a (already filed)\n", args: []string{"agenda", "c12"}},
-		{name: "agenda_person_required", version: "5.18.0", path: "/api/v1/loops/42/agenda", method: http.MethodPost, response: `{"error":"person_required","message":"link the contact to a person first"}`, args: []string{"agenda", "42"}, conflict: true},
-		{name: "agenda_old_daemon", version: "5.17.0", minimum: "5.18.0", args: []string{"agenda", "c12"}},
-		{name: "commitment", version: "5.17.0", path: "/api/v1/loops/commitments/c12/decision", method: http.MethodPost, response: `{"id":"c12","state":"done"}`, output: "c12 is done.\n", args: []string{"done", "c12"}, state: "done"},
+		{name: "old_closed_commitment_daemon", version: "5.17.0", minimum: "5.18.0", args: []string{"list", "--json", "--include-closed"}},
+		{name: "older_commitment_daemon", version: "5.17.0", minimum: "5.18.0", args: []string{"done", "c12"}},
+		{name: "compatible_closed_commitment_daemon", version: "5.18.0", path: "/api/v1/loops", method: http.MethodGet, response: `{"items":[],"truncated":false,"coverage_incomplete":false,"skipped_unparseable":0}`, args: []string{"list", "--json", "--include-closed"}, closed: true},
+		{name: "agenda", version: "5.19.0", path: "/api/v1/loops/commitments/c12/agenda", method: http.MethodPost, response: `{"issue":{"uid":"u","ref":"a","qualified_ref":"example#a","project":"example","title":"Reply","status":"open","revision":"1","web_url":"https://kata.example/a"},"replayed":true}`, output: "example#a https://kata.example/a (already filed)\n", args: []string{"agenda", "c12"}},
+		{name: "agenda_person_required", version: "5.19.0", path: "/api/v1/loops/42/agenda", method: http.MethodPost, response: `{"error":"person_required","message":"link the contact to a person first"}`, args: []string{"agenda", "42"}, conflict: true},
+		{name: "agenda_old_daemon", version: "5.18.0", minimum: "5.19.0", args: []string{"agenda", "c12"}},
+		{name: "commitment", version: "5.18.0", path: "/api/v1/loops/commitments/c12/decision", method: http.MethodPost, response: `{"id":"c12","state":"done"}`, output: "c12 is done.\n", args: []string{"done", "c12"}, state: "done"},
 		{name: "existing_reply_loop", version: "3.44.0", path: "/api/v1/loops/42/done", method: http.MethodPost, response: `{"anchor_message_id":42,"state":"done"}`, args: []string{"done", "42"}},
-		{name: "old_daemon_warning", version: "5.16.0", path: "/api/v1/loops", method: http.MethodGet, response: `{"items":[{"kind":"reply_owed","anchor_message_id":42,"question_message_ids":[42],"conversation_id":1,"source_id":1,"channel":"email","counterparty":{"participant_id":1,"display_name":"Sam Example","address":"sam@example.test"},"summary":"Reply needed","owed_since_at":"2026-11-10T12:00:00Z","last_activity_at":"2026-11-10T12:00:00Z"}],"truncated":false,"coverage_incomplete":false,"skipped_unparseable":0}`, args: []string{"list", "--json"}, warning: true},
+		{name: "old_daemon_warning", version: "5.17.0", path: "/api/v1/loops", method: http.MethodGet, response: `{"items":[{"kind":"reply_owed","anchor_message_id":42,"question_message_ids":[42],"conversation_id":1,"source_id":1,"channel":"email","counterparty":{"participant_id":1,"display_name":"Sam Example","address":"sam@example.test"},"summary":"Reply needed","owed_since_at":"2026-11-10T12:00:00Z","last_activity_at":"2026-11-10T12:00:00Z"}],"truncated":false,"coverage_incomplete":false,"skipped_unparseable":0}`, args: []string{"list", "--json"}, warning: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			requests := 0

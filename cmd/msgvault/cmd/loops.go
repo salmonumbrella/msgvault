@@ -20,8 +20,8 @@ import (
 const (
 	loopsMinAPISchemaVersion = "3.44.0"
 	// commitmentMinAPISchemaVersion covers commitments and decisions.
-	commitmentMinAPISchemaVersion = "5.17.0"
-	agendaMinAPISchemaVersion     = "5.18.0"
+	commitmentMinAPISchemaVersion = "5.18.0"
+	agendaMinAPISchemaVersion     = "5.19.0"
 )
 
 func init() {
