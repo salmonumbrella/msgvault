@@ -4,8 +4,8 @@
 
 export interface IMAPCopy {
   mailbox: string;
-  /** @minimum 0 */
+  /** @minimum 1 */
   uid: number;
-  /** @minimum 0 */
+  /** @minimum 1 */
   uidvalidity: number;
 }

@@ -3,8 +3,13 @@ package emailtags
 // IMAPCopy identifies one mailbox generation and UID.
 type IMAPCopy struct {
 	Mailbox     string `json:"mailbox"`
-	UIDValidity uint32 `json:"uidvalidity" format:"int64"`
-	UID         uint32 `json:"uid" format:"int64"`
+	UIDValidity uint32 `json:"uidvalidity" format:"int64" minimum:"1"`
+	UID         uint32 `json:"uid" format:"int64" minimum:"1"`
+}
+
+// Valid reports whether all components identify an IMAP copy.
+func (c *IMAPCopy) Valid() bool {
+	return c != nil && c.Mailbox != "" && c.UIDValidity != 0 && c.UID != 0
 }
 
 // ArchiveChange requires an explicit desired state, including false for unarchive.

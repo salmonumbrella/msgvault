@@ -6638,11 +6638,11 @@ components:
           type: string
         uid:
           format: int64
-          minimum: 0
+          minimum: 1
           type: integer
         uidvalidity:
           format: int64
-          minimum: 0
+          minimum: 1
           type: integer
       required:
         - mailbox

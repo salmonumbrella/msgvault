@@ -38,10 +38,10 @@ func newMessageArchiveCommand(archived bool, backend messageArchiveBackend) *cob
 				}
 			}
 			if present != 0 {
-				if present != 3 || mailbox == "" || uidvalidity == 0 || uid == 0 {
+				selection = &emailtags.IMAPCopy{Mailbox: mailbox, UIDValidity: uidvalidity, UID: uid}
+				if present != 3 || !selection.Valid() {
 					return errors.New("--mailbox, --uidvalidity and --uid require nonzero values together")
 				}
-				selection = &emailtags.IMAPCopy{Mailbox: mailbox, UIDValidity: uidvalidity, UID: uid}
 			}
 			client := backend
 			if client == nil {
@@ -69,7 +69,7 @@ func newMessageArchiveCommand(archived bool, backend messageArchiveBackend) *cob
 			if err != nil {
 				return err
 			}
-			if len(result.IMAPCandidates) > 0 || result.IMAPCopy != nil {
+			if len(result.IMAPCandidates) > 0 {
 				return writeMessageTagJSON(cmd, result, nil, nil, "write IMAP archive result")
 			}
 			if result.ChatID != "" {

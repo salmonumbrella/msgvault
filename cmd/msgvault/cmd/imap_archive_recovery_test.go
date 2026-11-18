@@ -453,6 +453,7 @@ func TestIMAPArchiveSelectedCopyRoundTrip(t *testing.T) {
 	mem := imapmemserver.New()
 	mem.AddUser(user)
 	var fail, moveFail, disconnect atomic.Bool
+	var connections atomic.Int32
 	var moves atomic.Int32
 	srv := imapserver.New(&imapserver.Options{InsecureAuth: true, Caps: imapapi.CapSet{imapapi.CapIMAP4rev1: {}, imapapi.CapMove: {}, imapapi.CapUIDPlus: {}}, NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
 		return &failOnceFetchSession{Session: mem.NewSession(), fail: &fail, moveFail: &moveFail, moves: &moves}, nil, nil
@@ -462,6 +463,35 @@ func TestIMAPArchiveSelectedCopyRoundTrip(t *testing.T) {
 	go func() { _ = srv.Serve(disconnectReceiptListener{Listener: listener, armed: &disconnect}) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	addr := listener.Addr().String()
+	testutil.SetIMAPFlags(t, addr, "INBOX", 1, imapapi.FlagSeen)
+	testutil.SetIMAPFlags(t, addr, "Other", 1, imapapi.FlagFlagged)
+	provider, err := imapclient.DialInsecure(addr, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, provider.Close()) })
+	require.NoError(t, provider.Login(testutil.IMAPTestUsername, testutil.IMAPTestPassword).Wait())
+	checkProvider := func(mailbox string, wantUIDs []imapapi.UID) {
+		t.Helper()
+		_, err := provider.Select(mailbox, &imapapi.SelectOptions{ReadOnly: true}).Wait()
+		require.NoError(t, err)
+		var all imapapi.UIDSet
+		all.AddRange(1, 0)
+		messages, err := provider.Fetch(all, &imapapi.FetchOptions{UID: true, Flags: true}).Collect()
+		require.NoError(t, err)
+		require.Len(t, messages, len(wantUIDs))
+		var got []imapapi.UID
+		for _, message := range messages {
+			got = append(got, message.UID)
+			if message.UID == 1 {
+				if mailbox == "INBOX" {
+					assert.Contains(t, message.Flags, imapapi.FlagSeen)
+				} else {
+					assert.Contains(t, message.Flags, imapapi.FlagFlagged)
+				}
+			}
+		}
+		assert.ElementsMatch(t, wantUIDs, got)
+	}
+
 	host, portText, err := net.SplitHostPort(addr)
 	require.NoError(t, err)
 	port, err := strconv.Atoi(portText)
@@ -502,11 +532,10 @@ func TestIMAPArchiveSelectedCopyRoundTrip(t *testing.T) {
 	var id int64
 	require.NoError(t, st.DB().QueryRowContext(t.Context(), st.Rebind(`SELECT id FROM messages WHERE source_id=? AND source_message_id='INBOX|1'`), source.ID).Scan(&id))
 	adapter := &storeAPIAdapter{store: st, config: cfg, logger: slog.New(slog.DiscardHandler), emailTagClientFactory: func(context.Context, *store.Source) (gmail.API, error) {
+		connections.Add(1)
 		return imap.NewClient(imapConfig, testutil.IMAPTestPassword), nil
 	}, draftCacheRefresh: func(context.Context, string) error { return nil }}
 	_, err = st.DB().ExecContext(testCtx, st.Rebind(`UPDATE imap_message_memberships SET message_id=? WHERE source_id=?`), id, source.ID)
-	require.NoError(t, err)
-	_, err = st.DB().ExecContext(testCtx, st.Rebind(`UPDATE imap_message_memberships SET flags=? WHERE source_id=? AND mailbox=? AND uid=?`), `["\\Seen"]`, source.ID, "INBOX", 1)
 	require.NoError(t, err)
 	before, err := st.GetMessage(id)
 	require.NoError(t, err)
@@ -516,7 +545,9 @@ func TestIMAPArchiveSelectedCopyRoundTrip(t *testing.T) {
 	requested := true
 	preview, err := adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requested, DryRun: true}, nil, nil)
 	require.NoError(t, err)
-	assert.ElementsMatch(t, copies, preview.IMAPCandidates)
+	assert.Equal(t, copies, preview.IMAPCandidates)
+	assert.Equal(t, []string{"INBOX", "INBOX", "Other"}, []string{copies[0].Mailbox, copies[1].Mailbox, copies[2].Mailbox})
+	assert.Less(t, copies[0].UID, copies[1].UID)
 	var selected emailtags.IMAPCopy
 	for _, c := range copies {
 		if c.Mailbox == "INBOX" && c.UID == 2 {
@@ -528,7 +559,7 @@ func TestIMAPArchiveSelectedCopyRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	var destEpoch uint32
 	require.NoError(t, st.DB().QueryRowContext(testCtx, st.Rebind(`SELECT uidvalidity FROM imap_folder_state WHERE source_id=? AND mailbox=?`), source.ID, "Archiv").Scan(&destEpoch))
-	pending := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: sibling, Selected: true, Destination: "Archiv", DestinationUIDValidity: destEpoch}
+	pending := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: sibling, Destination: "Archiv", DestinationUIDValidity: destEpoch}
 	require.NoError(t, st.BeginIMAPMoveContext(testCtx, pending))
 	_, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requested, IMAPCopy: &selected}, nil, nil)
 	require.Error(t, err)
@@ -539,13 +570,22 @@ func TestIMAPArchiveSelectedCopyRoundTrip(t *testing.T) {
 	require.NotNil(t, result.IMAPCopy)
 	assert.True(t, result.Verified)
 	assert.Equal(t, "Archiv", result.IMAPCopy.Mailbox)
+	checkProvider("INBOX", []imapapi.UID{1})
+	checkProvider("Other", []imapapi.UID{1})
+	runSync(false)
+	beforeStale := connections.Load()
 	_, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &requested, IMAPCopy: &selected}, nil, nil)
 	require.Error(t, err)
+	assert.Equal(t, beforeStale, connections.Load())
+	assert.EqualValues(t, 1, moves.Load())
 	restore := false
 	result, err = adapter.ArchiveMessage(testCtx, id, emailtags.ArchiveChange{Archived: &restore, IMAPCopy: result.IMAPCopy}, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, result.IMAPCopy)
 	assert.Equal(t, "INBOX", result.IMAPCopy.Mailbox)
+	checkProvider("INBOX", []imapapi.UID{1, imapapi.UID(result.IMAPCopy.UID)})
+	checkProvider("Other", []imapapi.UID{1})
+	runSync(false)
 	remaining, err := st.IMAPArchiveCopiesContext(testCtx, source.ID, id)
 	require.NoError(t, err)
 	assert.Len(t, remaining, 3)

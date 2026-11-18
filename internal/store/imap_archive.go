@@ -16,7 +16,6 @@ const imapArchiveSourceType = "imap"
 // DestinationUID means dispatch may have happened but no mapping was saved.
 type IMAPPendingMove struct {
 	SourceIdentifier       string
-	Selected               bool
 	Target                 EmailTagTarget
 	Destination            string
 	DestinationUIDValidity uint32
@@ -80,12 +79,12 @@ func (s *Store) BeginIMAPMoveContext(ctx context.Context, m IMAPPendingMove) err
 		if err := s.checkIMAPMoveSource(ctx, tx, m); err != nil {
 			return err
 		}
-		var count, exact int
-		err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(CASE WHEN mm.mailbox=? AND mm.uidvalidity=? AND mm.uid=? THEN 1 END) FROM messages msg JOIN sources src ON src.id=msg.source_id JOIN imap_message_memberships mm ON mm.source_id=msg.source_id AND mm.message_id=msg.id JOIN imap_folder_state fs ON fs.source_id=mm.source_id AND fs.mailbox=mm.mailbox AND fs.uidvalidity=mm.uidvalidity WHERE msg.id=? AND msg.source_id=? AND msg.source_message_id=? AND msg.deleted_at IS NULL AND msg.deleted_from_source_at IS NULL AND NOT EXISTS(SELECT 1 FROM source_settings ss WHERE ss.source_id=src.id AND ss.merged_into_source_id IS NOT NULL)`, t.Mailbox, t.UIDValidity, t.UID, t.ID, t.SourceID, t.SourceMessageID).Scan(&count, &exact)
+		var exact int
+		err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages msg JOIN sources src ON src.id=msg.source_id JOIN imap_message_memberships mm ON mm.source_id=msg.source_id AND mm.message_id=msg.id JOIN imap_folder_state fs ON fs.source_id=mm.source_id AND fs.mailbox=mm.mailbox AND fs.uidvalidity=mm.uidvalidity WHERE mm.mailbox=? AND mm.uidvalidity=? AND mm.uid=? AND msg.id=? AND msg.source_id=? AND msg.source_message_id=? AND msg.deleted_at IS NULL AND msg.deleted_from_source_at IS NULL AND NOT EXISTS(SELECT 1 FROM source_settings ss WHERE ss.source_id=src.id AND ss.merged_into_source_id IS NOT NULL)`, t.Mailbox, t.UIDValidity, t.UID, t.ID, t.SourceID, t.SourceMessageID).Scan(&exact)
 		if err != nil {
 			return err
 		}
-		if exact != 1 || (!m.Selected && count != 1) {
+		if exact != 1 {
 			return errors.New("IMAP membership changed")
 		}
 
@@ -256,7 +255,7 @@ func loadIMAPPendingMoves(ctx context.Context, q contextRowsQuerier, sourceID, m
 }
 
 func (s *Store) imapCurrentCopies(ctx context.Context, sourceID, messageID int64) ([]EmailTagTarget, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT m.mailbox,m.uidvalidity,m.uid FROM imap_message_memberships m JOIN imap_folder_state f ON f.source_id=m.source_id AND f.mailbox=m.mailbox AND f.uidvalidity=m.uidvalidity WHERE m.source_id=? AND m.message_id=?`, sourceID, messageID)
+	rows, err := s.db.QueryContext(ctx, `SELECT m.mailbox,m.uidvalidity,m.uid FROM imap_message_memberships m JOIN imap_folder_state f ON f.source_id=m.source_id AND f.mailbox=m.mailbox AND f.uidvalidity=m.uidvalidity WHERE m.source_id=? AND m.message_id=? ORDER BY m.mailbox,m.uidvalidity,m.uid`, sourceID, messageID)
 	if err != nil {
 		return nil, err
 	}

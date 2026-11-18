@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/agentgrant"
@@ -586,7 +587,7 @@ func TestArchiveIMAPRefusalsBeforeProvider(t *testing.T) {
 }
 
 func TestArchiveIMAPCandidateGrantDisclosure(t *testing.T) {
-	st, _, _, _, serverURL, owner, _ := newArchiveDaemon(t) //nolint:dogsled // Only the store and HTTP clients are used.
+	st, _, _, _, serverURL, owner, provider := newArchiveDaemon(t) //nolint:dogsled // Only the store, HTTP clients and provider counter are used.
 	source, err := st.GetOrCreateSource("imap", "candidates@example.test")
 	require.NoError(t, err)
 	conv, err := st.EnsureConversation(t.Context(), source.ID, "candidate-thread", "Fixture")
@@ -617,6 +618,19 @@ func TestArchiveIMAPCandidateGrantDisclosure(t *testing.T) {
 		} else {
 			require.Error(t, err)
 			assert.Nil(t, result)
+			before := provider.connects.Load()
+			stale := &emailtags.IMAPCopy{Mailbox: "INBOX", UIDValidity: 9, UID: 1}
+			_, err = client.ArchiveMessage(t.Context(), id, emailtags.ArchiveChange{Archived: &archived, IMAPCopy: stale})
+			require.Error(t, err)
+			assert.Equal(t, before, provider.connects.Load())
+			opts, err := delegatedMCPServeOptions(t.Context(), client)
+			require.NoError(t, err)
+			session, closeSession := archiveMCPSession(t, opts)
+			result, err := session.CallTool(t.Context(), &sdkmcp.CallToolParams{Name: "archive_message", Arguments: map[string]any{"message_id": id, "archived": true, "imap_copy": map[string]any{"mailbox": "INBOX", "uidvalidity": 9, "uid": 1}}})
+			require.NoError(t, err)
+			assert.True(t, result.IsError)
+			assert.Equal(t, before, provider.connects.Load())
+			closeSession()
 		}
 	}
 }

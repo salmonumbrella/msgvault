@@ -493,7 +493,7 @@ state are preserved. Source ownership and the daemon work gate follow the
 [native tag write rules](#native-email-tags). For 409 `sync_active`, retry after
 the active sync finishes. The saved snapshot can be stale until the next sync.
 
-For IMAP, the daemon moves one mailbox copy with native MOVE and UIDPLUS, then verifies the destination UID and source absence. For multiple copies, an owner or a grant with both `message.archive` and `message.read` can preview to obtain `imap_candidates`. Select a copy with `"imap_copy":{"mailbox":"INBOX","uidvalidity":77,"uid":8}`. A confirmed result includes the destination `imap_copy` for a later restore. All three fields are required and the numeric values must be positive. A pending uncertain move is not resent. See [IMAP archive controls](usage/imap.md#archive-and-restore-a-message).
+For IMAP, the daemon moves one mailbox copy with native MOVE and UIDPLUS, then verifies the destination UID and source absence. For multiple copies, an owner or a grant with both `message.archive` and `message.read` can preview to obtain `imap_candidates`. Select a copy with `"imap_copy":{"mailbox":"INBOX","uidvalidity":77,"uid":8}`. A confirmed result includes the destination `imap_copy` for a later restore. In a candidate-only preview, `archived` is the requested state and `verified` is false; `changed: false` does not establish a no-op until a copy is selected. All three fields are required and the numeric values must be positive. A pending uncertain move is not resent. See [IMAP archive controls](usage/imap.md#archive-and-restore-a-message).
 
 For Beeper, send `{"archived":true,"whole_chat":true}` (or `archived:false`
 to restore the chat). This affects the whole chat, including messages newer than

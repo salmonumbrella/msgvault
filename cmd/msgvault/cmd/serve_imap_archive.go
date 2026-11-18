@@ -12,16 +12,15 @@ import (
 )
 
 type imapArchiveJournal struct {
-	store    *store.Store
-	target   store.EmailTagTarget
-	source   *store.Source
-	selected bool
+	store  *store.Store
+	target store.EmailTagTarget
+	source *store.Source
 }
 
 func (j imapArchiveJournal) move(m imaplib.ArchiveMove) store.IMAPPendingMove {
 	t := j.target
 	t.Mailbox, t.UIDValidity, t.UID = m.Target.Mailbox, m.Target.UIDValidity, m.Target.UID
-	return store.IMAPPendingMove{SourceIdentifier: j.source.Identifier, Selected: j.selected, Target: t, Destination: m.Destination, DestinationUIDValidity: m.DestinationUIDValidity, DestinationUID: m.DestinationUID}
+	return store.IMAPPendingMove{SourceIdentifier: j.source.Identifier, Target: t, Destination: m.Destination, DestinationUIDValidity: m.DestinationUIDValidity, DestinationUID: m.DestinationUID}
 }
 func (j imapArchiveJournal) Begin(ctx context.Context, m imaplib.ArchiveMove) error {
 	return j.store.BeginIMAPMoveContext(ctx, j.move(m))
@@ -68,7 +67,7 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 		}
 		if change.IMAPCopy != nil {
 			c := change.IMAPCopy
-			if c.Mailbox == "" || c.UIDValidity == 0 || c.UID == 0 {
+			if !c.Valid() {
 				return target, emailtags.Failure("invalid_request", "imap_copy requires mailbox, uidvalidity and uid", nil, nil)
 			}
 			if target.SourceID == 0 {
@@ -170,7 +169,7 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 	if !ok {
 		return nil, emailtags.Failure("archive_unsupported", "Source does not support IMAP archiving", nil, nil)
 	}
-	journal := imapArchiveJournal{store: a.store, target: target, source: source, selected: change.IMAPCopy != nil}
+	journal := imapArchiveJournal{store: a.store, target: target, source: source}
 	identity := imaplib.DraftReceipt{Mailbox: target.Mailbox, UIDValidity: target.UIDValidity, UID: target.UID}
 	var recovery *imaplib.ArchiveMove
 	if pending != nil {

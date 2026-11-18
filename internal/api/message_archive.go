@@ -34,7 +34,7 @@ func decodeArchiveChange(w http.ResponseWriter, r *http.Request, change *emailta
 	if !ok {
 		return false
 	}
-	if raw, present := fields["imap_copy"]; present && (string(raw) == "null" || change.IMAPCopy == nil || change.IMAPCopy.Mailbox == "" || change.IMAPCopy.UIDValidity == 0 || change.IMAPCopy.UID == 0) {
+	if raw, present := fields["imap_copy"]; present && (string(raw) == "null" || !change.IMAPCopy.Valid()) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "imap_copy requires mailbox, uidvalidity and uid")
 		return false
 	}

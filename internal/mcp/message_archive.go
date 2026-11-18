@@ -48,7 +48,7 @@ func (h *handlers) archiveMessage(ctx context.Context, req toolRequest) (*toolRe
 			return toolErrorResult("invalid imap_copy"), nil //nolint:nilerr // MCP reports input errors in the tool result.
 		}
 		selection = &emailtags.IMAPCopy{}
-		if err := json.Unmarshal(data, selection); err != nil || selection.Mailbox == "" || selection.UIDValidity == 0 || selection.UID == 0 {
+		if err := json.Unmarshal(data, selection); err != nil || !selection.Valid() {
 			return toolErrorResult("imap_copy requires mailbox, uidvalidity and uid"), nil //nolint:nilerr // MCP reports input errors in the tool result.
 		}
 	}

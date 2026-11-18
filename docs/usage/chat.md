@@ -507,7 +507,7 @@ The MCP server exposes the following tools to connected AI clients:
 | `aggregate` | Grouped statistics (top senders, domains, labels, or message volume by calendar year) | `group_by` (string: sender/recipient/domain/label/time), `limit` (int), `after` (string), `before` (string), `account` (string) |
 | `query_sql` | Advanced read-only SQL over the published analytics cache. Returns rows and freshness metadata, or an accepted refresh job. | `sql` (string, required), `fresh` (bool, default false) |
 | `get_message_tags` | Read native Gmail labels, IMAP keywords, or Microsoft Graph categories. Read-only. | `message_id` (int, required), `mailbox` (string, IMAP only) |
-| `archive_message` | Set a Gmail or IMAP message or its entire Beeper chat archive state; requires `message.archive` for delegated calls | `message_id` (int, required), `archived` (bool, required), `dry_run` (bool), `whole_chat` (bool, required true for Beeper; source-wide grants only) |
+| `archive_message` | Set a Gmail or IMAP message or its entire Beeper chat archive state; requires `message.archive` for delegated calls | `message_id` (int, required), `archived` (bool, required), `dry_run` (bool), `imap_copy` (object: `mailbox`, `uidvalidity`, `uid`; IMAP only), `whole_chat` (bool, required true for Beeper; source-wide grants only) |
 | `update_message_tags` | Add or remove native email tags through the daemon. Write-class. | `message_id` (int, required), `add` / `remove` (string arrays), `mailbox` (string, IMAP only), `dry_run` (bool) |
 | `list_saved_views` | List persistent reusable Saved Views and their complete definitions. Read-only. | — |
 | `get_saved_view` | Get one Saved View and its canonical definition and revision. Read-only. | `id` (int, required) |

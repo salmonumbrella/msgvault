@@ -96,7 +96,11 @@ func TestIMAPArchiveRejectsAmbiguousAndChangedEpoch(t *testing.T) {
 	tagMembership(t, st, source.ID, id, "Other", 20, 2)
 	_, err = st.CheckIMAPArchiveTargetContext(t.Context(), target)
 	require.ErrorContains(t, err, "select imap_copy")
-	require.Error(t, st.BeginIMAPMoveContext(t.Context(), m))
+	require.NoError(t, st.BeginIMAPMoveContext(t.Context(), m))
+	require.NoError(t, st.ClearIMAPMoveContext(t.Context(), m))
+	stale := m
+	stale.Target.UIDValidity++
+	require.Error(t, st.BeginIMAPMoveContext(t.Context(), stale))
 	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`DELETE FROM imap_message_memberships WHERE source_id=? AND mailbox=?`), source.ID, "Other")
 	require.NoError(t, err)
 	require.NoError(t, st.BeginIMAPMoveContext(t.Context(), m))
@@ -186,7 +190,7 @@ func TestIMAPArchiveMoveKeepsSiblingCopies(t *testing.T) {
 	target, err := st.EmailTagTargetContext(t.Context(), id, "")
 	require.NoError(t, err)
 	target.UID = 8
-	move := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Selected: true, Target: target, Destination: "Archiv", DestinationUIDValidity: 88}
+	move := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: target, Destination: "Archiv", DestinationUIDValidity: 88}
 	require.NoError(t, st.BeginIMAPMoveContext(t.Context(), move))
 	move.DestinationUID = 9
 	require.NoError(t, st.SaveIMAPMoveMappingContext(t.Context(), move))

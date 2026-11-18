@@ -17,6 +17,7 @@ type cliArchiveBackend struct {
 	id      int64
 	change  emailtags.ArchiveChange
 	failure error
+	result  *emailtags.ArchiveResult
 }
 
 func TestArchiveCommandRefusesOldDaemon(t *testing.T) {
@@ -50,6 +51,9 @@ func (b *cliArchiveBackend) ArchiveMessage(_ context.Context, id int64, change e
 	b.id, b.change = id, change
 	if b.failure != nil {
 		return nil, b.failure
+	}
+	if b.result != nil {
+		return b.result, nil
 	}
 	return &emailtags.ArchiveResult{MessageID: id, Archived: *change.Archived, Changed: true, DryRun: change.DryRun}, nil
 }
@@ -114,4 +118,14 @@ func TestArchiveCommandIMAPSelection(t *testing.T) {
 			assert.Zero(t, backend.id)
 		}
 	}
+}
+
+func TestArchiveCommandLegacyIMAPText(t *testing.T) {
+	backend := &cliArchiveBackend{result: &emailtags.ArchiveResult{MessageID: 7, Archived: true, Changed: true, Verified: true, IMAPCopy: &emailtags.IMAPCopy{Mailbox: "Archiv", UIDValidity: 88, UID: 9}}}
+	command := newMessageArchiveCommand(true, backend)
+	var output bytes.Buffer
+	command.SetOut(&output)
+	command.SetArgs([]string{"--message", "7"})
+	require.NoError(t, command.ExecuteContext(t.Context()))
+	assert.Equal(t, "Message 7: archived=true changed=true dry_run=false\n", output.String())
 }

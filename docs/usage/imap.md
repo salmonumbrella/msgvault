@@ -24,7 +24,7 @@ archive mailbox and `msgvault unarchive --message <id>` to return it to INBOX.
 Use `--dry-run` to preview. The server must support native MOVE and UIDPLUS,
 and the message must have a current mailbox copy.
 
-When a message has several copies, run `msgvault archive --message <id> --dry-run --json` to list `imap_candidates`. Select one with `--mailbox`, `--uidvalidity`, and `--uid` together. The confirmed `imap_copy` in the result identifies the destination; supply that tuple to `unarchive` to restore the same copy. The HTTP and MCP interfaces accept the same `imap_copy` object. Preview requires archive permission; a delegated grant also needs `message.read` to list candidates. A moved or stale tuple must be refreshed before retrying.
+When a message has several copies, run `msgvault archive --message <id> --dry-run --json` to list `imap_candidates`. Select one with `--mailbox`, `--uidvalidity`, and `--uid` together. Only the selected copy moves; the message remains in INBOX while another INBOX copy exists. The confirmed `imap_copy` in the result identifies the destination; supply that tuple to `unarchive` to restore the same copy. The HTTP and MCP interfaces accept the same `imap_copy` object. Preview requires archive permission; a delegated grant also needs `message.read` to list candidates. A moved or stale tuple must be refreshed before retrying.
 
 The server must advertise one selectable Archive role. To choose a different
 mailbox, pass `--archive-mailbox "Mailbox name"` when running `add-imap` or
