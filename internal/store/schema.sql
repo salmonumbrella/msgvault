@@ -2119,9 +2119,6 @@ CREATE TABLE IF NOT EXISTS imap_message_memberships (
 CREATE INDEX IF NOT EXISTS idx_imap_message_memberships_source_message
     ON imap_message_memberships(source_id, message_id);
 
--- Managed outbound drafts retain the exact APPEND receipt and any interrupted
--- replacement bytes. The receipt is the mutation authority; mailbox sync only
--- observes memberships and never changes these fields.
 -- Unresolved native MOVE evidence is retained until exact reconciliation.
 CREATE TABLE IF NOT EXISTS imap_pending_moves (
     source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
@@ -2137,6 +2134,9 @@ CREATE TABLE IF NOT EXISTS imap_pending_moves (
     PRIMARY KEY (source_id, message_id)
 );
 
+-- Managed outbound drafts retain the exact APPEND receipt and any interrupted
+-- replacement bytes. The receipt is the mutation authority; mailbox sync only
+-- observes memberships and never changes these fields.
 CREATE TABLE IF NOT EXISTS imap_drafts (
     draft_id TEXT PRIMARY KEY,
     source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,

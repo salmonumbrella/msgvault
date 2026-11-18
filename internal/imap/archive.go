@@ -28,9 +28,9 @@ type ArchiveMove struct {
 
 // ArchiveJournal persists intent before dispatch and COPYUID before readback.
 type ArchiveJournal interface {
-	Begin(context.Context, ArchiveMove) error
-	SaveMapping(context.Context, ArchiveMove) error
-	Clear(context.Context, ArchiveMove) error
+	Begin(ctx context.Context, move ArchiveMove) error
+	SaveMapping(ctx context.Context, move ArchiveMove) error
+	Clear(ctx context.Context, move ArchiveMove) error
 }
 
 func archiveFailure(code, message string, err error) error {
@@ -74,7 +74,7 @@ func (c *Client) archiveSelect(conn *imapclient.Client, mailbox string, epoch ui
 	c.clearQresyncCapture()
 	selected, err := conn.Select(mailbox, &imaplib.SelectOptions{ReadOnly: readOnly}).Wait()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("select mailbox: %w", err)
 	}
 	if selected.UIDValidity == 0 || (epoch != 0 && selected.UIDValidity != epoch) {
 		return nil, errors.New("UIDVALIDITY changed")
@@ -88,7 +88,7 @@ func (c *Client) archiveSelect(conn *imapclient.Client, mailbox string, epoch ui
 func archiveUIDExists(conn *imapclient.Client, uid uint32) (bool, error) {
 	messages, err := conn.Fetch(imaplib.UIDSetNum(imaplib.UID(uid)), &imaplib.FetchOptions{UID: true}).Collect()
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("fetch UID: %w", err)
 	}
 	if len(messages) == 0 {
 		return false, nil

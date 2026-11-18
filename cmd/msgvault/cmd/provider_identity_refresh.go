@@ -3,8 +3,11 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 
+	"go.kenn.io/msgvault/internal/emailtags"
 	"go.kenn.io/msgvault/internal/gmail"
+	imaplib "go.kenn.io/msgvault/internal/imap"
 	"go.kenn.io/msgvault/internal/provideridentity"
 	"go.kenn.io/msgvault/internal/store"
 	msgsync "go.kenn.io/msgvault/internal/sync"
@@ -21,7 +24,46 @@ func newMessageSyncer(client gmail.API, st *store.Store, opts *msgsync.Options, 
 		configured.RelayedSenders = state.cfg.RelayedSenders
 	}
 	configured.RemoteImages = configuredRemoteImageFetcher(state.cfg)
-	return withAutomaticProviderIdentityRefresh(msgsync.New(client, st, &configured), st, state)
+	syncer := msgsync.New(client, st, &configured)
+	if native, ok := client.(*imaplib.Client); ok {
+		syncer.WithBeforeSync(func(ctx context.Context, source *store.Source) error {
+			moves, err := st.MappedIMAPPendingMovesContext(ctx, source.ID)
+			if err != nil {
+				return err
+			}
+			for _, move := range moves {
+				if move.SourceIdentifier != source.Identifier || native.AccountIdentifier() != source.Identifier || !source.SyncConfig.Valid {
+					return errors.New("pending IMAP move account changed")
+				}
+				account, err := imaplib.ConfigFromJSON(source.SyncConfig.String)
+				if err != nil || account.Identifier() != source.Identifier {
+					return errors.New("pending IMAP move account configuration changed")
+				}
+				identity := imaplib.ArchiveCopyIdentity{Mailbox: move.Target.Mailbox, UIDValidity: move.Target.UIDValidity, UID: move.Target.UID}
+				recovery := &imaplib.ArchiveMove{Target: identity, Destination: move.Destination, DestinationUIDValidity: move.DestinationUIDValidity, DestinationUID: move.DestinationUID}
+				journal := imapArchiveJournal{store: st, target: move.Target, source: source}
+				_, verified, err := native.ArchiveCopy(ctx, journal, identity, recovery, true, false)
+				if err != nil {
+					if failure, ok := errors.AsType[*emailtags.MessageTagError](err); ok && failure.Code == "remote_unknown" {
+						continue
+					}
+					return fmt.Errorf("verify pending IMAP move: %w", err)
+				}
+				if err := st.ReconcileIMAPMoveContext(ctx, journal.move(*verified)); err != nil {
+					return fmt.Errorf("reconcile pending IMAP move: %w", err)
+				}
+			}
+			if len(moves) > 0 {
+				states, err := loadIMAPFolderStates(st, source.ID)
+				if err != nil {
+					return err
+				}
+				native.ResetFolderStates(states)
+			}
+			return nil
+		})
+	}
+	return withAutomaticProviderIdentityRefresh(syncer, st, state)
 }
 
 func withAutomaticProviderIdentityRefresh(syncer *msgsync.Syncer, st *store.Store, state *invocation) *msgsync.Syncer {

@@ -329,7 +329,7 @@ func TestArchiveWholeChatProviderErrors(t *testing.T) {
 		name string
 		id   int64
 		code string
-	}{{"imap", imapID, "archive_unsupported"}, {"gmail", gmailID, "invalid_request"}} {
+	}{{"imap", imapID, "invalid_request"}, {"gmail", gmailID, "invalid_request"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			archived := true
 			_, err := owner.ArchiveMessage(t.Context(), tc.id, emailtags.ArchiveChange{Archived: &archived, WholeChat: true})
@@ -371,8 +371,11 @@ func TestArchiveMessageUnsupportedProviderAndMissingScope(t *testing.T) {
 			var failure *emailtags.MessageTagError
 			requirementsForTest.ErrorAs(err, &failure)
 			want := "archive_unsupported"
-			if provider == "gmail" {
+			switch provider {
+			case "gmail":
 				want = "insufficient_scope"
+			case "imap":
+				want = "stale_identity"
 			}
 			assertionsForTest.Equal(want, failure.Code)
 			assertionsForTest.Zero(connects)
@@ -520,7 +523,7 @@ func TestArchivePreviewAuthorizesResolvedSourceDuringMerge(t *testing.T) {
 }
 
 func TestArchiveIMAPPendingAccountRebindRefusesBeforeProvider(t *testing.T) {
-	st, _, _, adapter, _, _, provider := newArchiveDaemon(t)
+	st, _, _, adapter, _, _, provider := newArchiveDaemon(t) //nolint:dogsled // Only adapter and provider are needed here.
 	source, err := st.GetOrCreateSource("imap", "imap://owner@example.test:143")
 	require.NoError(t, err)
 	conv, err := st.EnsureConversation(t.Context(), source.ID, "thread-imap-binding", "Fixture")
@@ -530,6 +533,22 @@ func TestArchiveIMAPPendingAccountRebindRefusesBeforeProvider(t *testing.T) {
 	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_folder_state(source_id,mailbox,uidvalidity,uidnext) VALUES(?,?,?,?)`), source.ID, "INBOX", 10, 2)
 	require.NoError(t, err)
 	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_message_memberships(source_id,mailbox,uidvalidity,uid,message_id) VALUES(?,?,?,?,?)`), source.ID, "INBOX", 10, 1, id)
+	require.NoError(t, err)
+	// A message with multiple noncanonical copies cannot be selected by this API.
+	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`UPDATE messages SET source_message_id=? WHERE id=?`), "old-key", id)
+	require.NoError(t, err)
+	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_folder_state(source_id,mailbox,uidvalidity,uidnext) VALUES(?,?,?,?)`), source.ID, "Other", 11, 2)
+	require.NoError(t, err)
+	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_message_memberships(source_id,mailbox,uidvalidity,uid,message_id) VALUES(?,?,?,?,?)`), source.ID, "Other", 11, 1, id)
+	require.NoError(t, err)
+	requestedAmbiguous := true
+	beforeAmbiguous := provider.connects.Load()
+	_, err = adapter.ArchiveMessage(t.Context(), id, emailtags.ArchiveChange{Archived: &requestedAmbiguous}, nil, nil)
+	var ambiguous *emailtags.MessageTagError
+	require.ErrorAs(t, err, &ambiguous)
+	assert.Contains(t, ambiguous.Message, "mailbox selection is unavailable")
+	assert.Equal(t, beforeAmbiguous, provider.connects.Load())
+	_, err = st.DB().ExecContext(t.Context(), st.Rebind(`DELETE FROM imap_message_memberships WHERE source_id=? AND mailbox=?`), source.ID, "Other")
 	require.NoError(t, err)
 	target, err := st.IMAPArchiveTargetContext(t.Context(), id)
 	require.NoError(t, err)

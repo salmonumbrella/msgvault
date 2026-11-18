@@ -1,9 +1,11 @@
+//nolint:wrapcheck,forcetypeassert // Fixture delegates the test server protocol without altering errors.
 package imap
 
 import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"sync/atomic"
@@ -21,6 +23,7 @@ import (
 
 type archiveTestSession struct {
 	imapserver.Session
+
 	moves     chan<- imaplib.NumSet
 	interrupt *atomic.Bool
 	failRead  *atomic.Bool
@@ -36,7 +39,7 @@ func (s *archiveTestSession) Move(w *imapserver.MoveWriter, set imaplib.NumSet, 
 
 func (s *archiveTestSession) Fetch(w *imapserver.FetchWriter, set imaplib.NumSet, opts *imaplib.FetchOptions) error {
 	if s.failRead != nil && s.failRead.Swap(false) {
-		return fmt.Errorf("synthetic readback interruption")
+		return errors.New("synthetic readback interruption")
 	}
 	return s.Session.Fetch(w, set, opts)
 }
@@ -125,7 +128,7 @@ func TestArchiveCopyNativeRoundTrip(t *testing.T) {
 	assert.Empty(t, moves)
 	require.NoError(t, st.ClearIMAPMoveContext(t.Context(), journal.convert(intent)))
 	interrupt.Store(true)
-	result, _, err := client.ArchiveCopy(t.Context(), journal, identity, nil, true, false)
+	_, _, err = client.ArchiveCopy(t.Context(), journal, identity, nil, true, false)
 	require.Error(t, err)
 	assert.Equal(t, imaplib.UIDSetNum(1), <-moves)
 	saved, err := st.IMAPPendingMoveContext(t.Context(), source.ID, id)
@@ -183,7 +186,7 @@ func TestArchiveCopyNativeRoundTrip(t *testing.T) {
 			return err
 		}
 		if !exists {
-			return fmt.Errorf("unrelated pre-deleted UID disappeared")
+			return errors.New("unrelated pre-deleted UID disappeared")
 		}
 		return nil
 	}))
@@ -214,6 +217,7 @@ func (c archiveDowngradeConn) Write(p []byte) (int, error) {
 
 type archiveRefusalSession struct {
 	imapserver.Session
+
 	boxes  []*imaplib.ListData
 	writes chan<- string
 }
@@ -247,14 +251,14 @@ type refuseJournal struct{ began bool }
 
 func (j *refuseJournal) Begin(context.Context, ArchiveMove) error {
 	j.began = true
-	return fmt.Errorf("unexpected intent")
+	return errors.New("unexpected intent")
 }
 func (*refuseJournal) SaveMapping(context.Context, ArchiveMove) error {
-	return fmt.Errorf("unexpected mapping")
+	return errors.New("unexpected mapping")
 }
 
 func (*refuseJournal) Clear(context.Context, ArchiveMove) error {
-	return fmt.Errorf("unexpected clear")
+	return errors.New("unexpected clear")
 }
 
 func TestArchiveCopyRefusalsDoNotWrite(t *testing.T) {
@@ -294,7 +298,7 @@ func TestArchiveCopyRefusalsDoNotWrite(t *testing.T) {
 			}})
 			listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 			require.NoError(t, err)
-			var serving net.Listener = listener
+			serving := listener
 			if tc.downgrade {
 				serving = archiveDowngradeListener{Listener: listener}
 			}
@@ -324,6 +328,7 @@ func TestArchiveCopyRefusalsDoNotWrite(t *testing.T) {
 
 type badMappingSession struct {
 	imapserver.Session
+
 	mapping string
 	writes  chan<- string
 }

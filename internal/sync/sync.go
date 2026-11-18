@@ -96,6 +96,7 @@ type Syncer struct {
 	opts               *Options
 	successfulHookName string
 	successfulHook     SuccessfulSyncHook
+	beforeSync         func(context.Context, *store.Source) error
 
 	acquisitionSyncID        int64
 	pendingAcquisitions      map[string]struct{}
@@ -267,6 +268,12 @@ func (s *Syncer) defersAuthoritativeLabelReconciliation() bool {
 		return false
 	}
 	return defersAuthoritativeLabelReconciliation(s.client)
+}
+
+// WithBeforeSync runs under source ownership before any message ingestion.
+func (s *Syncer) WithBeforeSync(hook func(context.Context, *store.Source) error) *Syncer {
+	s.beforeSync = hook
+	return s
 }
 
 // WithSuccessfulSyncHook installs one best-effort post-completion hook.
@@ -1277,6 +1284,11 @@ func (s *Syncer) runWithSyncExecution(
 	src, err := s.store.GetSourceByIDContext(ctx, sourceID)
 	if err != nil {
 		return nil, fmt.Errorf("load source %d: %w", sourceID, err)
+	}
+	if src != nil && s.beforeSync != nil {
+		if err := s.beforeSync(ctx, src); err != nil {
+			return nil, fmt.Errorf("prepare source sync: %w", err)
+		}
 	}
 	if src != nil {
 		rederive.Heal(ctx, s.logger, s.store, src)

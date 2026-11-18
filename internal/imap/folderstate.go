@@ -150,6 +150,13 @@ func WithFolderStates(states map[string]FolderState) Option {
 	}
 }
 
+// ResetFolderStates refreshes the saved baseline before sync enumeration.
+func (c *Client) ResetFolderStates(states map[string]FolderState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	WithFolderStates(states)(c)
+}
+
 // WithSourceMessageAliasLoader supplies durable mailbox-UID aliases from the
 // last completed sync. They prevent a changed secondary copy without a
 // Message-ID from being re-imported under its secondary mailbox identity. The

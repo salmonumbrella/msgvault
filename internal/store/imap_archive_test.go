@@ -102,3 +102,17 @@ func TestIMAPArchiveReconcileConflictKeepsIntent(t *testing.T) {
 	require.NotNil(t, pending)
 	assert.Equal(t, uint32(9), pending.DestinationUID)
 }
+
+func TestIMAPArchiveStaleDestinationRefusedBeforeIntent(t *testing.T) {
+	st, source, id := tagFixture(t, "imap", "INBOX|7")
+	tagMembership(t, st, source.ID, id, "INBOX", 77, 7)
+	_, err := st.DB().ExecContext(t.Context(), st.Rebind(`INSERT INTO imap_folder_state(source_id,mailbox,uidvalidity,uidnext) VALUES(?,?,?,?)`), source.ID, "Archiv", 88, 1)
+	require.NoError(t, err)
+	target, err := st.IMAPArchiveTargetContext(t.Context(), id)
+	require.NoError(t, err)
+	move := store.IMAPPendingMove{SourceIdentifier: source.Identifier, Target: target, Destination: "Archiv", DestinationUIDValidity: 89}
+	require.ErrorContains(t, st.BeginIMAPMoveContext(t.Context(), move), "epoch changed")
+	pending, err := st.IMAPPendingMoveContext(t.Context(), source.ID, id)
+	require.NoError(t, err)
+	assert.Nil(t, pending)
+}

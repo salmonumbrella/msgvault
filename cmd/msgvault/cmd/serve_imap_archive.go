@@ -43,9 +43,14 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 			}
 		}
 		if err != nil {
+			if target.Provider == "imap" {
+				if failure, ok := errors.AsType[*emailtags.MessageTagError](err); ok && failure.Code == "stale_identity" {
+					return target, emailtags.Failure("stale_identity", "IMAP message must have exactly one current mailbox copy; mailbox selection is unavailable", nil, nil)
+				}
+			}
 			return target, err
 		}
-		return a.store.IMAPArchiveTargetContext(ctx, id)
+		return a.store.CheckIMAPArchiveTargetContext(ctx, target)
 	}
 	target, err := resolve()
 	if err != nil {
@@ -86,7 +91,7 @@ func (a *storeAPIAdapter) archiveIMAPCopy(ctx context.Context, id int64, change 
 			return nil, err
 		}
 		current, sourceErr := a.store.GetSourceByIDContext(ctx, target.SourceID)
-		if sourceErr != nil || current.SourceType != source.SourceType || current.Identifier != source.Identifier || current.SyncConfig != source.SyncConfig || current.OAuthApp != source.OAuthApp || !current.CreatedAt.Equal(source.CreatedAt) || current.MergedIntoSourceID != 0 {
+		if sourceErr != nil || current.SourceType != source.SourceType || current.Identifier != source.Identifier || current.OAuthApp != source.OAuthApp || !current.CreatedAt.Equal(source.CreatedAt) || current.MergedIntoSourceID != 0 {
 			return nil, emailtags.Failure("stale_identity", "IMAP account changed; sync and retry", nil, sourceErr)
 		}
 		source = current

@@ -159,3 +159,6 @@ func ParseIdentifier(identifier string) (*Config, error) {
 
 	return cfg, nil
 }
+
+// AccountIdentifier returns the account identity used by this client.
+func (c *Client) AccountIdentifier() string { return c.config.Identifier() }
