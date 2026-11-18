@@ -130,6 +130,7 @@ import type {
   EndEmploymentBody,
   EndEmploymentPathParameters,
   ExplainPersonTierPathParameters,
+  FactSummary,
   FastSearchParams,
   FileMetadataResponse,
   FilterMessagesParams,
@@ -185,6 +186,7 @@ import type {
   GetPersonBriefPathParameters,
   GetPersonByUIDParams,
   GetPersonContactStatePathParameters,
+  GetPersonFactSummaryPathParameters,
   GetPersonMergePathParameters,
   GetPersonMergeSnapshotPathParameters,
   GetPersonMessagingRoutesParams,
@@ -353,6 +355,7 @@ import type {
   PersonBriefEnrollment,
   PersonBriefRun,
   PersonBriefVersionsResponse,
+  PersonCreateInput,
   PersonDayPage,
   PersonDaysPage,
   PersonEnrichmentProviderUpdate,
@@ -2960,6 +2963,24 @@ export const findContactCandidates = (
   );
 };
 /**
+ * Creates a durable profile with a new vCard UID and user-curated contact data. Refuses contacts already present on a person or observed participant cluster. A title requires an organization. Does not publish to CardDAV.
+ * @summary Create a person without message participants
+ */
+export const createStandalonePerson = (
+  personCreateInput: PersonCreateInput,
+  options?: SecondParameter<typeof orvalFetch<Person>>,
+) => {
+  return orvalFetch<Person>(
+    {
+      url: `/api/v1/people/create`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: personCreateInput,
+    },
+    options,
+  );
+};
+/**
  * Returns one stable, non-sensitive page of promoted durable people.
  * @summary Query durable people for the Directory
  */
@@ -3460,6 +3481,21 @@ export const setPersonFactPin = (
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       data: setPersonFactPinRequest,
+    },
+    options,
+  );
+};
+/**
+ * @summary Get person fact summary
+ */
+export const getPersonFactSummary = (
+  { id }: GetPersonFactSummaryPathParameters,
+  options?: SecondParameter<typeof orvalFetch<FactSummary>>,
+) => {
+  return orvalFetch<FactSummary>(
+    {
+      url: `/api/v1/people/${encodeURIComponent(String(id))}/fact-summary`,
+      method: "GET",
     },
     options,
   );

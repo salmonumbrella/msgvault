@@ -207,6 +207,9 @@ type ServeOptions struct {
 	PersonCardDAV  PersonCardDAVBackend
 	MessageTags    MessageTagBackend
 	MessageArchive MessageArchiveBackend
+	// PersonCreator is present only when the daemon serves standalone person
+	// creation. Older daemons omit create_person.
+	PersonCreator PersonCreator
 	// IdentityScoring exposes consented manual scoring. Consent is
 	// recorded through the CLI/API, never by an MCP tool.
 	IdentityScoring IdentityScoringBackend
@@ -375,7 +378,7 @@ func newMCPServerWithPolicy(
 	}
 	capabilities := &sdkmcp.ServerCapabilities{Tools: &sdkmcp.ToolCapabilities{}}
 	instructions := archiveSafetyInstructions + " " + decisionMemoryInstructions + " Use returned web_url values when linking to archived messages."
-	instructions += " Agent guide: https://msgvault.io/docs/guides/agent-quickstart.md (msgvault quickstart --mcp)."
+	instructions += " Agent guide: https://msgvault.io/docs/guides/agent-quickstart.md (msgvault quickstart --mcp). " + bundledSkills().Instructions()
 	if !opts.DelegatedOnly {
 		capabilities.Resources = &sdkmcp.ResourceCapabilities{}
 	} else {
@@ -395,6 +398,8 @@ func newMCPServerWithPolicy(
 		invocationPolicyMiddleware(policy),
 		cachePolicyMiddleware,
 	)
+	// Guides need no archive access, so every session, including delegated ones, gets them.
+	bundledSkills().Register(s)
 
 	if opts.downloads == nil {
 		opts.downloads = &downloadCache{}
@@ -430,6 +435,7 @@ func newMCPServerWithPolicy(
 		personCardDAV:        opts.PersonCardDAV,
 		messageTags:          opts.MessageTags,
 		messageArchive:       opts.MessageArchive,
+		personCreator:        opts.PersonCreator,
 		identityScoring:      opts.IdentityScoring,
 		drafts:               opts.Drafts,
 		contactRoutesBackend: opts.ContactRoutesBackend,

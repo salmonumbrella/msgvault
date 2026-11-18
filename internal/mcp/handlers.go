@@ -160,6 +160,7 @@ type handlers struct {
 	personCardDAV        PersonCardDAVBackend
 	messageTags          MessageTagBackend
 	messageArchive       MessageArchiveBackend
+	personCreator        PersonCreator
 	identityScoring      IdentityScoringBackend
 	drafts               DraftRunner
 	contactRoutesBackend ContactRoutesBackend
