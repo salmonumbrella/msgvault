@@ -1,6 +1,7 @@
 package msmail
 
 import (
+	"context"
 	"encoding/json/v2"
 	"fmt"
 	"net/http"
@@ -290,4 +291,74 @@ func TestSyncMicrosoftCategoriesUpgradeIncludesUpdatesDuringWalk(t *testing.T) {
 	_, err = f.sync(t, st)
 	require.NoError(err)
 	assert.Equal(map[string]string{"m1": "body m1 v1"}, snippets(t, st), "the replacement cursor must not skip the content update")
+}
+
+// A verified archive move and its local evidence must not disturb the next delta round.
+func TestArchiveReconciliationThenDeltaSync(t *testing.T) {
+	f := newFakeGraph(t)
+	f.categories = map[string][]string{"m1": {"Work", "Personal"}}
+	f.put("m1", "inbox")
+	st := testutil.NewTestStore(t)
+	_, err := f.sync(t, st)
+	require.NoError(t, err)
+	source, err := st.GetSourceByTypeAndIdentifier(t.Context(), SourceType, "me@example.com")
+	require.NoError(t, err)
+	ids, err := st.MessageExistsBatch(source.ID, []string{"m1"})
+	require.NoError(t, err)
+	id := ids["m1"]
+	require.NotZero(t, id)
+	last, err := st.GetLastSuccessfulSyncContext(t.Context(), source.ID)
+	require.NoError(t, err)
+	require.NotNil(t, last)
+	require.True(t, last.CursorAfter.Valid)
+	cursorBefore := last.CursorAfter.String
+	var initial map[string]string
+	require.NoError(t, json.Unmarshal([]byte(cursorBefore), &initial))
+	require.NotEmpty(t, initial["inbox"])
+	require.NotEmpty(t, initial["archive"])
+	walks := f.walkStarts.Load()
+	// Omission on the move readback and delta must preserve the saved categories.
+	f.mu.Lock()
+	delete(f.categories, "m1")
+	f.mu.Unlock()
+	execution, err := st.AcquireSyncExecutionContext(t.Context(), source.ID)
+	require.NoError(t, err)
+	target, err := st.EmailTagTargetContext(t.Context(), id, "")
+	require.NoError(t, err)
+	client := NewClient(f.srv.URL, func(context.Context) (string, error) { return "synthetic-token", nil }, 1000)
+	result, err := client.ArchiveMessage(t.Context(), target.SourceMessageID, true, false)
+	require.NoError(t, err)
+	require.True(t, result.Verified)
+	require.Nil(t, result.MicrosoftCategories)
+	require.NoError(t, st.SaveMicrosoftMailArchiveContext(t.Context(), target, result))
+	require.NoError(t, execution.Release())
+	msg, err := st.GetMessage(id)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"Archive", "Category: Work", "Category: Personal"}, msg.Labels)
+	last, err = st.GetLastSuccessfulSyncContext(t.Context(), source.ID)
+	require.NoError(t, err)
+	require.NotNil(t, last)
+	assert.Equal(t, cursorBefore, last.CursorAfter.String, "archive must not alter sync cursors")
+	_, err = f.sync(t, st)
+	require.NoError(t, err)
+	assert.Equal(t, walks, f.walkStarts.Load(), "delta uses existing cursors instead of rewalking")
+	ids, err = st.MessageExistsBatch(source.ID, []string{"m1"})
+	require.NoError(t, err)
+	assert.Equal(t, id, ids["m1"])
+	var count int
+	require.NoError(t, st.DB().QueryRowContext(t.Context(), st.Rebind(`SELECT count(*) FROM messages WHERE source_id=? AND source_message_id=?`), source.ID, "m1").Scan(&count))
+	assert.Equal(t, 1, count)
+	msg, err = st.GetMessage(id)
+	require.NoError(t, err)
+	assert.Nil(t, msg.DeletedAt)
+	assert.ElementsMatch(t, []string{"Archive", "Category: Work", "Category: Personal"}, msg.Labels)
+	last, err = st.GetLastSuccessfulSyncContext(t.Context(), source.ID)
+	require.NoError(t, err)
+	require.NotNil(t, last)
+	var after map[string]string
+	require.NoError(t, json.Unmarshal([]byte(last.CursorAfter.String), &after))
+	assert.NotEmpty(t, after["inbox"])
+	assert.NotEmpty(t, after["archive"])
+	assert.NotEqual(t, initial["inbox"], after["inbox"])
+	assert.NotEqual(t, initial["archive"], after["archive"])
 }

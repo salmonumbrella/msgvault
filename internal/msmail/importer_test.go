@@ -191,7 +191,7 @@ func (f *fakeGraph) serve(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":{"code":"ErrorItemNotFound"}}`, http.StatusNotFound)
 			return
 		}
-		item := map[string]any{"parentFolderId": folder, "receivedDateTime": "2024-01-01T10:00:00Z"}
+		item := map[string]any{"id": id, "parentFolderId": folder, "receivedDateTime": "2024-01-01T10:00:00Z"}
 		if f.categories != nil {
 			assert.Contains(f.t, strings.Split(q.Get("$select"), ","), "categories")
 		}
@@ -226,6 +226,7 @@ func (f *fakeGraph) write(w http.ResponseWriter, r *http.Request) {
 		assert.NoError(f.t, json.UnmarshalRead(r.Body, &body))
 		f.folder[id] = body.DestinationID
 		w.WriteHeader(http.StatusCreated)
+		f.writeJSON(w, map[string]string{"id": id, "parentFolderId": body.DestinationID})
 	case "permanentDelete":
 		delete(f.folder, id)
 		w.WriteHeader(http.StatusNoContent)
