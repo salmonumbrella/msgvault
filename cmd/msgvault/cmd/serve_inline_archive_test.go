@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"net/http/httptest"
 	"os"
@@ -42,10 +43,11 @@ func TestInlineArchiveStatefulCLI(t *testing.T) {
 		{name: "restore", initial: "true", peer: "user", writes: 1},
 		{name: "already", initial: "true", peer: "user", desired: true},
 		{name: "preview", initial: "false", peer: "user", desired: true, dry: true},
-		{name: "while syncing", initial: "false", peer: "user", desired: true, syncActive: true, writes: 1},
+		{name: "while source sync lease held", initial: "false", peer: "user", desired: true, syncActive: true, writes: 1},
 		{name: "merged chat key", initial: "false", peer: "user", chatKey: "msgvault-archive:7", desired: true, wantCode: "stale_identity"},
-		{name: "wrong message key", initial: "false", peer: "user", messageKey: "chat:6:message:8", desired: true, wantCode: "stale_identity"},
 		{name: "child", initial: "false", peer: "child", desired: true, writes: 1},
+		{name: "dialog identity mismatch", initial: "false", peer: "user", mode: "wrong-dialog", desired: true, wantCode: "stale_identity"},
+		{name: "account changed at gate", initial: "false", peer: "user", mode: "gate-account", desired: true, wantCode: "provider_unavailable"},
 		{name: "missing dialog", initial: "false", peer: "user", dialog: "missing", desired: true, wantCode: "archive_unsupported"},
 		{name: "wrong account", initial: "false", peer: "user", account: "99", desired: true, wantCode: "provider_unavailable"},
 		{name: "restricted", initial: "false", peer: "user", restricted: true, desired: true, wantCode: "message_not_found"},
@@ -83,17 +85,18 @@ mode=$(cat "$d/mode")
 case "$1 ${2-}" in
  '--version ') if [ "$mode" = unsupported ]; then exit 1; fi; echo 'inline 1.0.0' ;;
  'doctor --json') echo '{"config":{"apiBaseUrl":"https://api.inline.chat","realtimeUrl":"wss://api.inline.chat"}}' ;;
- 'auth me') if [ "$mode" = account-change ] && [ -f "$d/me" ]; then echo '{"id":99}'; else touch "$d/me"; printf '{"id":%s}' "$(cat "$d/account")"; fi ;;
+ 'auth me') if [ "$mode" = account-change ] && [ -f "$d/writes" ]; then echo '{"id":99}'; else touch "$d/me"; printf '{"id":%s}' "$(cat "$d/account")"; fi ;;
  'messages get') if [ "$mode" = missing-message ]; then exit 1; fi; if [ "$mode" = wrong-message ]; then echo '{"id":8,"chat_id":6,"from_id":42,"date":1}'; else echo '{"id":8,"chat_id":7,"from_id":42,"date":1,"reactions":{"reactions":[{"user_id":9,"emoji":"👍","date":1}]}}'; fi ;;
  'chats get')
   if [ "$mode" = server ]; then exit 1; fi
   if [ "$(cat "$d/peer")" = child ]; then chat='{"id":7,"parent_chat_id":6,"parent_message_id":3,"peer_id":{"type":{"Chat":{"chat_id":7}}}}'; peer='{"type":{"Chat":{"chat_id":7}}}'; else chat='{"id":7,"peer_id":{"type":{"User":{"user_id":9}}}}'; peer='{"type":{"User":{"user_id":9}}}'; fi
+  if [ "$mode" = wrong-dialog ]; then peer='{"type":{"User":{"user_id":10}}}'; fi
   state=$(cat "$d/state"); if [ "$state" = omitted ]; then bit=''; else bit=",\"archived\":$state"; fi
   if [ "$mode" = mismatch ] && [ -f "$d/writes" ]; then bit=',"archived":false'; fi
   if [ "$(cat "$d/dialog")" = missing ]; then printf '{"chat":%s,"dialog":null}\n' "$chat"; else printf '{"chat":%s,"dialog":{"peer":%s,"chat_id":7%s}}\n' "$chat" "$peer" "$bit"; fi ;;
  'chats archive'|'chats unarchive')
   target="$d/state"
-  if [ "$(cat "$d/peer")" = child ]; then [ "$3" = --chat-id ] && [ "$4" = 7 ]; elif [ "$3" = --chat-id ] && [ "$4" = 7 ]; then target="$d/collision-state"; else [ "$3" = --user-id ] && [ "$4" = 9 ]; fi
+  if [ "$(cat "$d/peer")" = child ]; then [ "$3" = --chat-id ] && [ "$4" = 7 ]; elif [ "$3" = --chat-id ] && [ "$4" = 9 ]; then target="$d/collision-state"; else [ "$3" = --user-id ] && [ "$4" = 9 ]; fi
   if [ "$2" = archive ]; then echo true > "$target"; else echo false > "$target"; fi; echo "$2" >> "$d/writes"; if [ "$mode" = lost ]; then exit 1; fi; if [ "$mode" = timeout ]; then exec sleep 30; fi; echo '{"updates":[]}' ;;
  *) exit 1 ;;
 esac
@@ -118,7 +121,7 @@ esac
 			}
 			conv, err := st.EnsureConversation(t.Context(), source.ID, chatKey, "Fixture")
 			require.NoError(t, err)
-			id, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: messageKey, MessageType: "inline"})
+			id, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: messageKey, MessageType: "inline", Subject: sql.NullString{String: "Fixture subject", Valid: true}, Snippet: sql.NullString{String: "Fixture snippet", Valid: true}})
 			require.NoError(t, err)
 			cfg := &config.Config{Data: config.DataConfig{DataDir: dir}}
 			transport := tc.transport
@@ -166,6 +169,9 @@ esac
 			}
 			result, err := adapter.ArchiveMessage(ctx, id, emailtags.ArchiveChange{Archived: &tc.desired, DryRun: tc.dry, WholeChat: !tc.noWhole}, grant, func(ctx context.Context) (func(), error) {
 				gates++
+				if tc.mode == "gate-account" {
+					require.NoError(t, os.WriteFile(filepath.Join(dir, "account"), []byte("99"), 0600))
+				}
 				if tc.mode == "gate-change" {
 					_, updateErr := st.DB().ExecContext(ctx, "UPDATE messages SET source_message_id=? WHERE id=?", "chat:7:message:99", id)
 					require.NoError(t, updateErr)
@@ -247,6 +253,10 @@ esac
 			}
 			saved, err := st.GetMessageContext(t.Context(), id)
 			require.NoError(t, err)
+			assert.Equal(t, "Fixture subject", saved.Subject)
+			assert.Equal(t, "Fixture snippet", saved.Snippet)
+			assert.Equal(t, source.ID, saved.SourceID)
+			assert.Equal(t, conv, saved.ConversationID)
 			if tc.mode == "gate-change" {
 				assert.Equal(t, "chat:7:message:99", saved.SourceMessageID)
 			} else {

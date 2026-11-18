@@ -95,6 +95,9 @@ func (a *storeAPIAdapter) archiveInlineChat(ctx context.Context, id int64, chang
 	if err != nil || lockedRecord == nil || lockedRecord.Identifier != source.Identifier || lockedRecord.SourceType != source.SourceType || !lockedRecord.CreatedAt.Equal(source.CreatedAt) || lockedRecord.MergedIntoSourceID != 0 {
 		return nil, emailtags.Failure("stale_identity", "Inline source identity changed; sync and retry", nil, err)
 	}
+	if err := verifyAccount(); err != nil {
+		return nil, emailtags.Failure("provider_unavailable", "Cannot verify Inline account", nil, err)
+	}
 	if err := client.ArchiveDialog(ctx, before, *change.Archived); err != nil {
 		return nil, emailtags.Failure("remote_unknown", "Inline archive outcome is unknown; inspect the dialog in Inline and retry the desired state", nil, err)
 	}
@@ -111,6 +114,9 @@ func (a *storeAPIAdapter) archiveInlineChat(ctx context.Context, id int64, chang
 
 // Process failures do not establish whether the target or provider is available.
 func inlineReadFailure(code, message string, err error) error {
+	if errors.Is(err, inline.ErrDialogIdentity) {
+		return emailtags.Failure("stale_identity", "Inline dialog identity changed; sync and retry", nil, err)
+	}
 	var commandErr *inline.CLICommandError
 	if errors.As(err, &commandErr) {
 		return emailtags.Failure("provider_unavailable", "Cannot contact Inline CLI", nil, err)

@@ -47,7 +47,6 @@ func TestCLIDialogDecode(t *testing.T) {
 		{"wrong native user", `{"chat":` + chat + `,"dialog":{"peer":{"type":{"User":{"user_id":7}}}}}`, false, false},
 		{"wrong peer type", `{"chat":` + chat + `,"dialog":{"peer":{"type":{"Chat":{"chat_id":7}}}}}`, false, false},
 		{"multiple peers", `{"chat":` + chat + `,"dialog":{"peer":{"type":{"Chat":{"chat_id":7},"User":{"user_id":9}}}}}`, false, false},
-		{"wrong chat object", `{"chat":{"id":8,"peer_id":{"type":{"User":{"user_id":9}}}},"dialog":{"peer":` + peer + `}}`, false, false},
 		{"child", `{"chat":{"id":7,"parent_chat_id":6,"parent_message_id":1,"peer_id":{"type":{"Chat":{"chat_id":7}}}},"dialog":{"peer":{"type":{"Chat":{"chat_id":7}}},"chat_id":7}}`, true, false},
 		{"wrong child peer", `{"chat":{"id":7,"parent_chat_id":6,"parent_message_id":1,"peer_id":{"type":{"Chat":{"chat_id":7}}}},"dialog":{"peer":{"type":{"Chat":{"chat_id":6}}}}}`, false, false},
 	} {

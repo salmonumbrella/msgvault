@@ -516,6 +516,9 @@ func cliDecodeMedia(variants map[string]jsontext.Value, chatID, messageID int64)
 	return nil, nil
 }
 
+// ErrDialogIdentity marks a parsed dialog that identifies a different target.
+var ErrDialogIdentity = errors.New("Inline dialog identity differs")
+
 // DialogState identifies a personal dialog and its native mutation peer.
 type DialogState struct {
 	Conversation Conversation
@@ -553,7 +556,7 @@ func cliDecodeDialog(raw []byte, chatID, accountUserID int64) (DialogState, erro
 		return DialogState{}, err
 	}
 	if result.Dialog.ChatID != nil && *result.Dialog.ChatID != chatID {
-		return DialogState{}, errors.New("Inline dialog chat identity differs")
+		return DialogState{}, fmt.Errorf("%w: chat ID", ErrDialogIdentity)
 	}
 	peer := result.Dialog.Peer.Type
 	if len(peer) != 1 {
@@ -563,15 +566,21 @@ func cliDecodeDialog(raw []byte, chatID, accountUserID int64) (DialogState, erro
 		var v struct {
 			ID *int64 `json:"user_id"`
 		}
-		if jsonv2.Unmarshal(peer["User"], &v) != nil || v.ID == nil || *v.ID != conv.PeerUserID {
-			return DialogState{}, errors.New("Inline dialog user peer differs")
+		if jsonv2.Unmarshal(peer["User"], &v) != nil || v.ID == nil {
+			return DialogState{}, errors.New("unsupported Inline dialog user peer")
+		}
+		if *v.ID != conv.PeerUserID {
+			return DialogState{}, fmt.Errorf("%w: user peer", ErrDialogIdentity)
 		}
 	} else {
 		var v struct {
 			ID *int64 `json:"chat_id"`
 		}
-		if jsonv2.Unmarshal(peer["Chat"], &v) != nil || v.ID == nil || *v.ID != chatID {
-			return DialogState{}, errors.New("Inline dialog chat peer differs")
+		if jsonv2.Unmarshal(peer["Chat"], &v) != nil || v.ID == nil {
+			return DialogState{}, errors.New("unsupported Inline dialog chat peer")
+		}
+		if *v.ID != chatID {
+			return DialogState{}, fmt.Errorf("%w: chat peer", ErrDialogIdentity)
 		}
 	}
 	return DialogState{Conversation: conv, Archived: result.Dialog.Archived != nil && *result.Dialog.Archived}, nil
