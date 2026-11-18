@@ -96,6 +96,22 @@ func (c disconnectReceiptConn) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+func archiveRecoverySource(t *testing.T, imapConfig *imap.Config) (*store.Store, *store.Source) {
+	t.Helper()
+	st := testutil.NewTestStore(t)
+	if os.Getenv("MSGVAULT_TEST_DB") != "" {
+		require.True(t, st.IsPostgreSQL())
+	}
+	source, err := st.GetOrCreateSource("imap", imapConfig.Identifier())
+	require.NoError(t, err)
+	configJSON, err := imapConfig.ToJSON()
+	require.NoError(t, err)
+	require.NoError(t, st.UpdateSourceSyncConfig(t.Context(), source.ID, configJSON))
+	source, err = st.GetSourceByIDContext(t.Context(), source.ID)
+	require.NoError(t, err)
+	return st, source
+}
+
 func TestIMAPArchivePendingRecoveryBeforeSync(t *testing.T) {
 	user := imapmemserver.NewUser(testutil.IMAPTestUsername, testutil.IMAPTestPassword)
 	require.NoError(t, user.Create("INBOX", nil))
@@ -118,17 +134,7 @@ func TestIMAPArchivePendingRecoveryBeforeSync(t *testing.T) {
 	port, err := strconv.Atoi(portText)
 	require.NoError(t, err)
 	imapConfig := &imap.Config{Host: host, Port: port, Username: testutil.IMAPTestUsername, ArchiveMailbox: "Archiv"}
-	st := testutil.NewTestStore(t)
-	if os.Getenv("MSGVAULT_TEST_DB") != "" {
-		require.True(t, st.IsPostgreSQL())
-	}
-	source, err := st.GetOrCreateSource("imap", imapConfig.Identifier())
-	require.NoError(t, err)
-	configJSON, err := imapConfig.ToJSON()
-	require.NoError(t, err)
-	require.NoError(t, st.UpdateSourceSyncConfig(t.Context(), source.ID, configJSON))
-	source, err = st.GetSourceByIDContext(t.Context(), source.ID)
-	require.NoError(t, err)
+	st, source := archiveRecoverySource(t, imapConfig)
 	cfg := testConfigValue()
 	cfg.Data.DataDir = t.TempDir()
 	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
@@ -364,17 +370,7 @@ func TestIMAPArchiveDisputedReceiptSurvivesSync(t *testing.T) {
 	port, err := strconv.Atoi(portText)
 	require.NoError(t, err)
 	imapConfig := &imap.Config{Host: host, Port: port, Username: testutil.IMAPTestUsername, ArchiveMailbox: "Archiv"}
-	st := testutil.NewTestStore(t)
-	if os.Getenv("MSGVAULT_TEST_DB") != "" {
-		require.True(t, st.IsPostgreSQL())
-	}
-	source, err := st.GetOrCreateSource("imap", imapConfig.Identifier())
-	require.NoError(t, err)
-	configJSON, err := imapConfig.ToJSON()
-	require.NoError(t, err)
-	require.NoError(t, st.UpdateSourceSyncConfig(t.Context(), source.ID, configJSON))
-	source, err = st.GetSourceByIDContext(t.Context(), source.ID)
-	require.NoError(t, err)
+	st, source := archiveRecoverySource(t, imapConfig)
 	cfg := testConfigValue()
 	cfg.Data.DataDir = t.TempDir()
 	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
@@ -498,17 +494,7 @@ func TestIMAPArchiveSelectedCopyRoundTrip(t *testing.T) {
 	port, err := strconv.Atoi(portText)
 	require.NoError(t, err)
 	imapConfig := &imap.Config{Host: host, Port: port, Username: testutil.IMAPTestUsername, ArchiveMailbox: "Archiv"}
-	st := testutil.NewTestStore(t)
-	if os.Getenv("MSGVAULT_TEST_DB") != "" {
-		require.True(t, st.IsPostgreSQL())
-	}
-	source, err := st.GetOrCreateSource("imap", imapConfig.Identifier())
-	require.NoError(t, err)
-	configJSON, err := imapConfig.ToJSON()
-	require.NoError(t, err)
-	require.NoError(t, st.UpdateSourceSyncConfig(t.Context(), source.ID, configJSON))
-	source, err = st.GetSourceByIDContext(t.Context(), source.ID)
-	require.NoError(t, err)
+	st, source := archiveRecoverySource(t, imapConfig)
 	cfg := testConfigValue()
 	cfg.Data.DataDir = t.TempDir()
 	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})

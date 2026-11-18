@@ -129,7 +129,7 @@ func TestArchiveCommandSelectedIMAPText(t *testing.T) {
 	}{
 		{"destination", true, &emailtags.IMAPCopy{Mailbox: "Archiv", UIDValidity: 88, UID: 9}, "Message 7: archived=true changed=true dry_run=false\nimap_copy: mailbox=\"Archiv\" uidvalidity=88 uid=9\n"},
 		{"no destination", true, nil, "Message 7: archived=true changed=true dry_run=false\n"},
-		{"legacy", false, &emailtags.IMAPCopy{Mailbox: "Archiv", UIDValidity: 88, UID: 9}, "Message 7: archived=true changed=true dry_run=false\n"},
+		{"unselected", false, &emailtags.IMAPCopy{Mailbox: "Archiv", UIDValidity: 88, UID: 9}, "Message 7: archived=true changed=true dry_run=false\nimap_copy: mailbox=\"Archiv\" uidvalidity=88 uid=9\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := &cliArchiveBackend{result: &emailtags.ArchiveResult{MessageID: 7, Archived: true, Changed: true, IMAPCopy: tc.copy}}
