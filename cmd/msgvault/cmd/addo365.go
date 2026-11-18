@@ -245,7 +245,8 @@ With --graph, the account syncs through the Microsoft Graph mail API instead
 of IMAP. Use it when IMAP is turned off for the mailbox. It needs the Mail.Read
 permission on the app registration. The first delete-staged for the account
 asks for Mail.ReadWrite, which the app registration must also list. A Graph
-account can request it during sign-in with --mail-write for category editing.
+account can request it during sign-in with --mail-write for archiving, category
+editing, and remote deletion.
 The Graph account is separate: if the mailbox is also synced over IMAP, the
 vault holds two copies, and 'msgvault dedup --collection' hides the extra ones.
 
@@ -268,7 +269,7 @@ Examples:
 	cmd.Flags().StringVar(&o365SignIn, "sign-in", "",
 		"Microsoft sign-in name and browser login hint when it differs from the mailbox address (IMAP only)")
 	cmd.MarkFlagsMutuallyExclusive("graph", "sign-in")
-	cmd.Flags().Bool("mail-write", false, "With --graph, authorize category editing and remote deletion")
+	cmd.Flags().Bool("mail-write", false, "With --graph, authorize archiving, category editing, and remote deletion")
 	registerO365Flags(cmd)
 	return cmd
 }

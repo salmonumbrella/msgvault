@@ -679,6 +679,13 @@ type `msmail`. Each mail folder becomes a label. The first sync downloads every
 folder. Later syncs fetch only the changes, including moves between folders
 and deletes. The daemon schedules the account like any other.
 
+To archive or restore messages with `msgvault archive` or `msgvault unarchive`, add the
+delegated `Mail.ReadWrite` permission and reauthorize with
+`msgvault add-o365 you@example.com --graph --mail-write`. Archive moves a
+message from a primary mailbox folder to Archive; restore moves it to Inbox.
+Messages in Deleted Items and Online Archive are excluded. Previews need only
+`Mail.Read`. See [archive and unarchive](../cli-reference.md#archive-and-unarchive).
+
 To delete messages at the source with `delete-staged`, also add the delegated
 permission `Mail.ReadWrite`. Sync does not use it. The first `delete-staged`
 for the account asks to upgrade the token. See

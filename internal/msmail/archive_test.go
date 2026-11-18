@@ -3,6 +3,7 @@ package msmail
 import (
 	"context"
 	"encoding/json/v2"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,12 +18,16 @@ func TestArchiveMessageMovesAndReadsBack(t *testing.T) {
 	const id = "immutable/+id"
 	parent := "inbox-id"
 	posts := 0
+	folderRequests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Contains(t, r.Header.Get("Prefer"), `IdType="ImmutableId"`)
+		if strings.HasPrefix(r.URL.Path, "/me/mailFolders") {
+			folderRequests++
+		}
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/me/mailFolders/"):
 			name := strings.TrimPrefix(r.URL.Path, "/me/mailFolders/")
-			if name == "inbox" || name == "archive" {
+			if name == "inbox" || name == "archive" || name == "deleteditems" {
 				require.NoError(t, json.MarshalWrite(w, map[string]string{"id": name + "-id"}))
 				return
 			}
@@ -57,8 +62,10 @@ func TestArchiveMessageMovesAndReadsBack(t *testing.T) {
 	assert.Equal(t, "archive-id", result.MicrosoftFolderID)
 	require.NotNil(t, result.MicrosoftCategories)
 	assert.Equal(t, []string{"Work"}, *result.MicrosoftCategories)
+	beforeFolders := folderRequests
 	_, err = c.ArchiveMessage(t.Context(), id, true, false)
 	require.NoError(t, err)
+	assert.Equal(t, 7, folderRequests-beforeFolders, "destination and Deleted Items lookups are reused in the catalog")
 	assert.Equal(t, 1, posts)
 	_, err = c.ArchiveMessage(t.Context(), id, false, false)
 	require.NoError(t, err)
@@ -75,7 +82,7 @@ func TestArchiveMessageUncertainPostReadback(t *testing.T) {
 				switch {
 				case strings.HasPrefix(r.URL.Path, "/me/mailFolders/"):
 					name := strings.TrimPrefix(r.URL.Path, "/me/mailFolders/")
-					if name == "archive" || name == "inbox" {
+					if name == "archive" || name == "inbox" || name == "deleteditems" {
 						_ = json.MarshalWrite(w, map[string]string{"id": name + "-id"})
 						return
 					}
@@ -157,5 +164,107 @@ func TestArchiveMessageReadFailures(t *testing.T) {
 			assert.Equal(t, tc.code, failure.Code)
 			assert.Zero(t, posts)
 		})
+	}
+}
+
+func TestArchiveMoveResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		status          int
+		moved, mismatch bool
+		code            string
+		reads           int
+	}{
+		{"forbidden", http.StatusForbidden, false, false, "insufficient_scope", 1},
+		{"missing", http.StatusNotFound, false, false, "stale_identity", 1},
+		{"uncertain server failure accepted", http.StatusInternalServerError, true, false, "", 2},
+		{"uncertain server failure unchanged", http.StatusInternalServerError, false, false, "verification_failed", 2},
+		{"different response identity", http.StatusCreated, true, true, "stale_identity", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent, reads, posts := "inbox-id", 0, 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasPrefix(r.URL.Path, "/me/mailFolders/"):
+					name := strings.TrimPrefix(r.URL.Path, "/me/mailFolders/")
+					if name == "archive" || name == "inbox" || name == "deleteditems" {
+						_ = json.MarshalWrite(w, map[string]string{"id": name + "-id"})
+						return
+					}
+					w.WriteHeader(http.StatusNotFound)
+				case r.URL.Path == "/me/mailFolders":
+					_ = json.MarshalWrite(w, map[string]any{"value": []map[string]string{{"id": "archive-id", "displayName": "Archive"}}})
+				case r.Method == http.MethodPost:
+					posts++
+					if tc.moved {
+						parent = "archive-id"
+					}
+					w.WriteHeader(tc.status)
+					if tc.mismatch {
+						_, _ = w.Write([]byte(`{"id":"other"}`))
+					}
+				default:
+					reads++
+					_ = json.MarshalWrite(w, map[string]string{"id": "id", "parentFolderId": parent})
+				}
+			}))
+			t.Cleanup(srv.Close)
+			c := NewClient(srv.URL, func(context.Context) (string, error) { return "synthetic", nil }, 1000)
+			result, err := c.ArchiveMessage(t.Context(), "id", true, false)
+			assert.Equal(t, 1, posts)
+			assert.Equal(t, tc.reads, reads)
+			if tc.code == "" {
+				require.NoError(t, err)
+				assert.True(t, result.Verified)
+				return
+			}
+			var failure *emailtags.MessageTagError
+			require.ErrorAs(t, err, &failure)
+			assert.Equal(t, tc.code, failure.Code)
+			assert.False(t, result.Verified)
+		})
+	}
+}
+
+func TestArchiveFromPrimaryMailboxFolders(t *testing.T) {
+	for _, initial := range []string{"sentitems-id", "custom-id"} {
+		for _, archived := range []bool{true, false} {
+			t.Run(initial+"/"+fmt.Sprint(archived), func(t *testing.T) {
+				parent := initial
+				posts := 0
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case strings.HasPrefix(r.URL.Path, "/me/mailFolders/"):
+						name := strings.TrimPrefix(r.URL.Path, "/me/mailFolders/")
+						if name == "archive" || name == "inbox" || name == "deleteditems" || name == "sentitems" {
+							_ = json.MarshalWrite(w, map[string]string{"id": name + "-id"})
+							return
+						}
+						w.WriteHeader(http.StatusNotFound)
+					case r.URL.Path == "/me/mailFolders":
+						_ = json.MarshalWrite(w, map[string]any{"value": []map[string]string{{"id": "archive-id", "displayName": "Archive"}, {"id": "inbox-id", "displayName": "Inbox"}}})
+					case r.Method == http.MethodPost:
+						posts++
+						var body map[string]string
+						require.NoError(t, json.UnmarshalRead(r.Body, &body))
+						parent = body["destinationId"]
+						_ = json.MarshalWrite(w, map[string]string{"id": "id"})
+					default:
+						_ = json.MarshalWrite(w, map[string]string{"id": "id", "parentFolderId": parent})
+					}
+				}))
+				t.Cleanup(srv.Close)
+				c := NewClient(srv.URL, func(context.Context) (string, error) { return "synthetic", nil }, 1000)
+				result, err := c.ArchiveMessage(t.Context(), "id", archived, false)
+				require.NoError(t, err)
+				assert.True(t, result.Verified)
+				assert.Equal(t, 1, posts)
+				want := "inbox-id"
+				if archived {
+					want = "archive-id"
+				}
+				assert.Equal(t, want, parent)
+			})
+		}
 	}
 }

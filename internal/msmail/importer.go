@@ -280,36 +280,16 @@ func (s *syncer) progressf(format string, args ...any) {
 // ensureLabels makes one label per folder. The label's source ID is the Graph
 // folder ID, so a folder rename changes only the label name.
 func (s *syncer) ensureLabels(ctx context.Context, folders []Folder) (map[string]int64, error) {
-	system := map[string]string{} // folder ID -> system role
-	for name, role := range systemFolders {
-		id, err := s.c.WellKnownFolderID(ctx, name)
-		if errors.Is(err, msgraph.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("look up folder %s: %w", name, err)
-		}
-		system[id] = role
-		switch name {
-		case "drafts":
-			s.drafts = id
-		case "deleteditems":
-			s.trash = id
-		}
+	infos, ids, err := s.c.folderCatalog(ctx, folders, nil)
+	if err != nil {
+		return nil, err
 	}
+	s.drafts, s.trash = ids["drafts"], ids["deleteditems"]
 	id, err := s.c.WellKnownFolderID(ctx, "recoverableitemsdeletions")
 	if err != nil && !errors.Is(err, msgraph.ErrNotFound) {
 		return nil, fmt.Errorf("look up folder recoverableitemsdeletions: %w", err)
 	}
 	s.deletions = id
-	infos := make(map[string]store.LabelInfo, len(folders))
-	for _, f := range folders {
-		info := store.LabelInfo{Name: f.Path, Type: "user"}
-		if role, ok := system[f.ID]; ok {
-			info.Type, info.SystemRole = "system", role
-		}
-		infos[f.ID] = info
-	}
 	return s.st.EnsureMicrosoftMailFoldersContext(ctx, s.sourceID, infos)
 }
 

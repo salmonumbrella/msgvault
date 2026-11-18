@@ -493,7 +493,12 @@ state are preserved. Source ownership and the daemon work gate follow the
 [native tag write rules](#native-email-tags). For 409 `sync_active`, retry after
 the active sync finishes. The saved snapshot can be stale until the next sync.
 
-Microsoft Graph moves the message between the primary mailbox Archive and Inbox folders. Writes require `add-o365 --graph --mail-write`; previews need read access. The daemon verifies the immutable message ID and folder after a move and preserves categories omitted by Graph. Online Archive and Deleted Items are not destinations.
+Microsoft Graph archive moves a message from a primary mailbox folder, including
+Sent and custom folders, to Archive. Restore moves it to Inbox. Messages in
+Deleted Items and Online Archive are excluded. Writes require
+`add-o365 --graph --mail-write`; previews need read access. The daemon verifies
+the immutable message ID and folder after a move and preserves categories
+omitted by Graph.
 
 For Beeper, send `{"archived":true,"whole_chat":true}` (or `archived:false`
 to restore the chat). This affects the whole chat, including messages newer than

@@ -387,8 +387,9 @@ The owner has access. Delegated calls require `message.archive` on the message's
 source. Gmail writes require `gmail.modify` or `mail.google.com`; reauthorize
 with `msgvault add-account <account> --force` if the daemon reports
 `insufficient_scope`. Microsoft Graph writes require `add-o365 --graph --mail-write`.
-Moves use the primary mailbox Archive and Inbox folders. Online Archive and Deleted
-Items are not destinations. Other providers return `archive_unsupported`.
+Archive moves messages from primary mailbox folders, including Sent and custom
+folders, to Archive; unarchive moves them to Inbox. Messages in Deleted Items
+are excluded, as is Online Archive. Other providers return `archive_unsupported`.
 See the [API contract](api-server.md#message-archiving) for readback and errors.
 
 For Beeper, select a locally archived message and opt into changing its entire chat:
@@ -855,7 +856,7 @@ Requires a `client_id` in either `[microsoft]` or the selected `[microsoft.apps.
 | `--no-default-identity` | `false` | Do not auto-confirm the email address as this account's "me" identity. Saved across syncs and re-authorization; only explicit `--no-default-identity=false` clears the choice. See [saved identity choice](#saved-default-identity-choice) |
 | `--graph` | `false` | Sync through the Microsoft Graph mail API instead of IMAP. Creates an `msmail` account. Needs the `Mail.Read` permission. `delete-staged` asks for `Mail.ReadWrite` on first use |
 | `--sign-in` | | Microsoft sign-in name and browser login hint when it differs from the mailbox address. IMAP only; mutually exclusive with `--graph` |
-| `--mail-write` | `false` | With `--graph`, request `Mail.ReadWrite` for category edits and remote deletion |
+| `--mail-write` | `false` | With `--graph`, request `Mail.ReadWrite` for archiving, category edits, and remote deletion |
 
 IMAP checks Microsoft's `email` claim when present, otherwise `preferred_username`. A differing username now requires `--sign-in`, including during re-authorization; msgvault previously accepted it with a warning. The flag permits that username only when `email` is absent. Failed checks preserve existing credentials. Graph mail and Teams also consult your Microsoft profile when token identity fields differ or are absent, accepting your mailbox or an SMTP alias listed there.
 

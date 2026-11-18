@@ -51,6 +51,17 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 	if err != nil {
 		return nil, archiveReadError(err)
 	}
+	deleted, err := c.WellKnownFolderID(ctx, "deleteditems")
+	if err != nil || deleted == "" {
+		code := "provider_read_failed"
+		if errors.Is(err, msgraph.ErrForbidden) {
+			code = "insufficient_scope"
+		}
+		return nil, emailtags.Failure(code, "Cannot resolve Microsoft Deleted Items; sync and retry", nil, err)
+	}
+	if before.Parent == deleted {
+		return nil, emailtags.Failure("stale_identity", "Message is in Deleted Items; restore it in Outlook before archiving", nil, nil)
+	}
 	result := &emailtags.MessageTagResult{Provider: SourceType, DryRun: dryRun}
 	needsMove := before.Parent != destination
 	if dryRun {
@@ -64,11 +75,10 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 		if postErr != nil && (errors.Is(postErr, msgraph.ErrForbidden) || errors.Is(postErr, msgraph.ErrNotFound)) {
 			return result, archiveReadError(postErr)
 		}
+		responseMismatch := false
 		if postErr == nil {
 			var moved archiveSnapshot
-			if json.Unmarshal(raw, &moved) != nil || moved.ID != id {
-				return result, emailtags.Failure("stale_identity", "Microsoft returned a different message after the move; sync and retry", result, nil)
-			}
+			responseMismatch = json.Unmarshal(raw, &moved) != nil || moved.ID != id
 		}
 		readCtx := ctx
 		cancel := func() {}
@@ -78,6 +88,9 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 		}
 		defer cancel()
 		after, readErr := c.archiveRead(readCtx, id)
+		if responseMismatch {
+			return result, emailtags.Failure("stale_identity", "Microsoft returned a different message after the move; sync and retry", result, readErr)
+		}
 		if readErr != nil {
 			return result, emailtags.Failure("remote_unknown", "Microsoft move outcome is uncertain; sync before retrying", result, readErr)
 		}
@@ -98,19 +111,12 @@ func (c *Client) ArchiveMessage(ctx context.Context, id string, archived, dryRun
 	if err != nil {
 		return result, emailtags.Failure("remote_accepted_local_failed", "Microsoft folder was verified but its catalog could not be read; sync the account", result, err)
 	}
-	roles := make(map[string]string)
-	for name, role := range systemFolders {
-		folderID, roleErr := c.WellKnownFolderID(catalogCtx, name)
-		if roleErr != nil && !errors.Is(roleErr, msgraph.ErrNotFound) {
-			return result, emailtags.Failure("remote_accepted_local_failed", "Cannot read Microsoft folder roles; sync the account", result, roleErr)
-		}
-		if folderID != "" {
-			roles[folderID] = role
-		}
+	infos, _, err := c.folderCatalog(catalogCtx, folders, map[string]string{folder: destination, "deleteditems": deleted})
+	if err != nil {
+		return result, emailtags.Failure("remote_accepted_local_failed", "Cannot read Microsoft folder roles; sync the account", result, err)
 	}
-	for _, f := range folders {
-		role, system := roles[f.ID]
-		result.MicrosoftFolders = append(result.MicrosoftFolders, emailtags.MicrosoftFolder{ID: f.ID, Name: f.Path, SystemRole: role, System: system})
+	for id, info := range infos {
+		result.MicrosoftFolders = append(result.MicrosoftFolders, emailtags.MicrosoftFolder{ID: id, Name: info.Name, SystemRole: info.SystemRole, System: info.Type == "system"})
 	}
 	result.MicrosoftFolderID = before.Parent
 	result.MicrosoftCategories = before.Categories

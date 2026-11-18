@@ -6,11 +6,13 @@ package msmail
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"time"
 
 	"go.kenn.io/msgvault/internal/gmail"
 	"go.kenn.io/msgvault/internal/msgraph"
+	"go.kenn.io/msgvault/internal/store"
 )
 
 // GraphBaseURL is the production Graph endpoint.
@@ -149,4 +151,37 @@ func (c *Client) post(ctx context.Context, id, action string, body any) error {
 		return &gmail.NotFoundError{Path: path}
 	}
 	return err
+}
+
+// folderCatalog classifies the same folder tree for sync and verified writes.
+// known reuses well-known IDs already read by the caller.
+func (c *Client) folderCatalog(ctx context.Context, folders []Folder, known map[string]string) (map[string]store.LabelInfo, map[string]string, error) {
+	ids := make(map[string]string, len(systemFolders))
+	roles := make(map[string]string, len(systemFolders))
+	for name, role := range systemFolders {
+		id, ok := known[name]
+		if !ok {
+			var err error
+			id, err = c.WellKnownFolderID(ctx, name)
+			if errors.Is(err, msgraph.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("look up folder %s: %w", name, err)
+			}
+		}
+		if id != "" {
+			ids[name] = id
+			roles[id] = role
+		}
+	}
+	infos := make(map[string]store.LabelInfo, len(folders))
+	for _, f := range folders {
+		info := store.LabelInfo{Name: f.Path, Type: "user"}
+		if role, ok := roles[f.ID]; ok {
+			info.Type, info.SystemRole = "system", role
+		}
+		infos[f.ID] = info
+	}
+	return infos, ids, nil
 }

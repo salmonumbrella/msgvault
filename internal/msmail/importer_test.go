@@ -144,6 +144,10 @@ func (f *fakeGraph) serve(w http.ResponseWriter, r *http.Request) {
 			f.writeJSON(w, map[string]any{"id": id})
 			return
 		}
+		if id == "deleteditems" {
+			f.writeJSON(w, map[string]any{"id": "deleteditems"})
+			return
+		}
 		if id == "recoverableitemsdeletions" {
 			f.writeJSON(w, map[string]any{"id": "deletions"})
 			return

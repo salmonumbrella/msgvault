@@ -11,13 +11,17 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/agentgrant"
+	"go.kenn.io/msgvault/internal/api"
+	"go.kenn.io/msgvault/internal/daemonclient"
 	"go.kenn.io/msgvault/internal/emailtags"
 	"go.kenn.io/msgvault/internal/microsoft"
 	"go.kenn.io/msgvault/internal/msmail"
+	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
 )
@@ -165,7 +169,9 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 	require.NoError(t, err)
 	conv, err := st.EnsureConversation(t.Context(), source.ID, "thread-1", "Archive")
 	require.NoError(t, err)
-	mid, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: "immutable-1", MessageType: "email"})
+	sender, err := st.EnsureParticipant("allowed@example.test", "Allowed", "example.test")
+	require.NoError(t, err)
+	mid, err := st.PersistMessageContext(t.Context(), &store.MessagePersistData{Message: &store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: "immutable-1", MessageType: "email", SenderID: sql.NullInt64{Int64: sender, Valid: true}}, Recipients: []store.RecipientSet{{Type: "from", ParticipantIDs: []int64{sender}, EmailAddresses: []string{"allowed@example.test"}, DisplayNames: []string{"Allowed"}}}})
 	require.NoError(t, err)
 	cfg := lifecycleTestConfig(t.TempDir())
 	tokenPath := microsoft.NewGraphMailManager("", "", "", cfg.TokensDir(), nil).TokenPath(source.Identifier)
@@ -176,6 +182,7 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 		require.NoError(t, os.WriteFile(tokenPath, data, 0600))
 	}
 	var calls atomic.Int32
+	var posts atomic.Int32
 	var omitArchive atomic.Bool
 	parent := "inbox-id"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +192,8 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 			_ = json.MarshalWrite(w, map[string]string{"id": "archive-id"})
 		case "/me/mailFolders/inbox":
 			_ = json.MarshalWrite(w, map[string]string{"id": "inbox-id"})
+		case "/me/mailFolders/deleteditems":
+			_ = json.MarshalWrite(w, map[string]string{"id": "deleted-id"})
 		case "/me/mailFolders":
 			folders := []map[string]string{{"id": "inbox-id", "displayName": "Inbox"}}
 			if !omitArchive.Load() {
@@ -192,7 +201,13 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 			}
 			_ = json.MarshalWrite(w, map[string]any{"value": folders})
 		case "/me/messages/immutable-1/move":
-			parent = "archive-id"
+			posts.Add(1)
+			var body map[string]string
+			if !assert.NoError(t, json.UnmarshalRead(r.Body, &body)) {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			parent = body["destinationId"]
 			_ = json.MarshalWrite(w, map[string]string{"id": "immutable-1"})
 		case "/me/messages/immutable-1":
 			_ = json.MarshalWrite(w, map[string]any{"id": "immutable-1", "parentFolderId": parent, "categories": []string{"Work"}})
@@ -206,7 +221,7 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 		return msmail.NewClient(srv.URL, func(context.Context) (string, error) { return "synthetic", nil }, 1000), nil
 	}, draftCacheRefresh: func(context.Context, string) error { refreshes++; return nil }}
 	desired := true
-	grant := &agentgrant.Grant{Permissions: []agentgrant.Permission{agentgrant.PermissionMessageArchive}, Sources: []agentgrant.SourceRef{{Type: source.SourceType, Identifier: source.Identifier, IncomingSenderKeys: []string{"allowed@example.test"}}}}
+	grant := &agentgrant.Grant{Permissions: []agentgrant.Permission{agentgrant.PermissionMessageArchive}, Sources: []agentgrant.SourceRef{{Type: source.SourceType, Identifier: source.Identifier, IncomingSenderKeys: []string{"other@example.test"}}}}
 	_, deniedErr := a.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &desired, DryRun: true}, grant, nil)
 	var denied *emailtags.MessageTagError
 	require.ErrorAs(t, deniedErr, &denied)
@@ -244,4 +259,42 @@ func TestDaemonMicrosoftArchiveConsentAndPersistence(t *testing.T) {
 	msg, err = st.GetMessage(mid)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"Archiv", "Category: Work"}, msg.Labels)
+
+	// Exercise a sender-restricted grant through the real HTTP route and client.
+	omitArchive.Store(false)
+	cfg.Server.APIKey, cfg.Server.AgentAccess = "owner", true
+	routes := api.NewServerWithOptions(api.ServerOptions{Config: cfg, Store: a, Engine: query.NewEngine(st.DB(), st.IsPostgreSQL()), Logger: slog.New(slog.DiscardHandler)})
+	t.Cleanup(func() { assert.NoError(t, routes.Shutdown(context.WithoutCancel(t.Context()))) })
+	httpServer := httptest.NewServer(routes.Router())
+	t.Cleanup(httpServer.Close)
+	owner, err := daemonclient.New(daemonclient.Config{URL: httpServer.URL, APIKey: "owner", AllowInsecure: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, owner.Close()) })
+	token, err := owner.IssueAgentToken(t.Context(), "allowed sender", []string{"message.archive"}, []int64{source.ID}, nil, map[int64][]string{source.ID: {"allowed@example.test"}}, time.Time{})
+	require.NoError(t, err)
+	client, err := daemonclient.New(daemonclient.Config{URL: httpServer.URL, AgentToken: token.Secret, AllowInsecure: true})
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, client.Close()) })
+	parent = "inbox-id"
+	for _, archived := range []bool{true, false} {
+		got, e := client.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &archived})
+		require.NoError(t, e)
+		assert.True(t, got.Changed)
+		assert.True(t, got.Verified)
+		assert.Equal(t, archived, got.Archived)
+	}
+	// A locally active Inbox row can be stale after Outlook moves the message to trash.
+	parent = "deleted-id"
+	beforePosts := posts.Load()
+	for _, archived := range []bool{true, false} {
+		for _, preview := range []bool{true, false} {
+			_, e := client.ArchiveMessage(t.Context(), mid, emailtags.ArchiveChange{Archived: &archived, DryRun: preview})
+			require.ErrorAs(t, e, &failure)
+			assert.Equal(t, "stale_identity", failure.Code)
+		}
+	}
+	assert.Equal(t, beforePosts, posts.Load())
+	msg, err = st.GetMessage(mid)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"Inbox", "Category: Work"}, msg.Labels)
 }
