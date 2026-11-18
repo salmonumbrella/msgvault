@@ -28,9 +28,6 @@ func (a *storeAPIAdapter) archiveInlineChat(ctx context.Context, id int64, chang
 	if !change.WholeChat {
 		return nil, emailtags.Failure("invalid_request", "Inline archives entire chats; set whole_chat=true", nil, nil)
 	}
-	if change.Archived == nil {
-		return nil, emailtags.Failure("invalid_request", "archived is required", nil, nil)
-	}
 	account := a.config.GetInlineAccount(source.Identifier)
 	if account == nil || account.EffectiveTransport() != "cli" {
 		return nil, emailtags.Failure("archive_unsupported", "Inline archiving requires a configured CLI transport", nil, nil)
@@ -56,7 +53,7 @@ func (a *storeAPIAdapter) archiveInlineChat(ctx context.Context, id int64, chang
 		if err != nil {
 			return err
 		}
-		if me.Identifier() != source.Identifier || me.Origin != inline.ProductionOrigin {
+		if me.Identifier() != source.Identifier {
 			return errors.New("authenticated Inline account differs from configuration")
 		}
 		return nil
@@ -65,11 +62,11 @@ func (a *storeAPIAdapter) archiveInlineChat(ctx context.Context, id int64, chang
 		return nil, emailtags.Failure("provider_unavailable", "Cannot verify Inline account", nil, err)
 	}
 	if err := client.Message(ctx, chatID, messageID); err != nil {
-		return nil, emailtags.Failure("stale_identity", "Cannot verify Inline message and chat", nil, err)
+		return nil, inlineReadFailure("stale_identity", "Cannot verify Inline message and chat", err)
 	}
 	before, err := client.Dialog(ctx, chatID)
 	if err != nil {
-		return nil, emailtags.Failure("archive_unsupported", "Cannot read Inline personal dialog", nil, err)
+		return nil, inlineReadFailure("archive_unsupported", "Cannot read Inline personal dialog", err)
 	}
 	result := &emailtags.ArchiveResult{MessageID: id, SourceID: sourceID, ChatID: chatKey, Archived: *change.Archived, Changed: before.Archived != *change.Archived, DryRun: change.DryRun}
 	if change.DryRun {
@@ -110,4 +107,13 @@ func (a *storeAPIAdapter) archiveInlineChat(ctx context.Context, id int64, chang
 	}
 	result.Verified = true
 	return result, nil
+}
+
+// Process failures do not establish whether the target or provider is available.
+func inlineReadFailure(code, message string, err error) error {
+	var commandErr *inline.CLICommandError
+	if errors.As(err, &commandErr) {
+		return emailtags.Failure("provider_unavailable", "Cannot contact Inline CLI", nil, err)
+	}
+	return emailtags.Failure(code, message, nil, err)
 }

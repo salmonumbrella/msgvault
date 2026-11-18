@@ -66,7 +66,18 @@ func (b *cliBoundedBuffer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (c *CLIClient) run(ctx context.Context, args ...string) ([]byte, error) {
+// CLICommandError identifies a subprocess failure without exposing its diagnostics.
+type CLICommandError struct{ cause error }
+
+func (e *CLICommandError) Error() string { return e.cause.Error() }
+func (e *CLICommandError) Unwrap() error { return e.cause }
+
+func (c *CLIClient) run(ctx context.Context, args ...string) (output []byte, err error) {
+	defer func() {
+		if err != nil {
+			err = &CLICommandError{cause: err}
+		}
+	}()
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.executable, args...) //nolint:gosec // The operator configures the daemon-host executable; fixed read commands use arguments directly without a shell.
@@ -75,7 +86,7 @@ func (c *CLIClient) run(ctx context.Context, args ...string) ([]byte, error) {
 	stderr := &cliBoundedBuffer{limit: c.maxStderr, cancel: cancel}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	consolewindow.Hide(cmd)
-	err := cmd.Run()
+	err = cmd.Run()
 	if stdout.overflow || stderr.overflow {
 		return nil, errors.New("inline CLI output exceeds the bounded response limit")
 	}
@@ -520,6 +531,10 @@ func (c *CLIClient) Dialog(ctx context.Context, chatID int64) (DialogState, erro
 	if err != nil {
 		return DialogState{}, err
 	}
+	return cliDecodeDialog(raw, chatID, c.accountUserID)
+}
+
+func cliDecodeDialog(raw []byte, chatID, accountUserID int64) (DialogState, error) {
 	var result struct {
 		Chat   jsontext.Value `json:"chat"`
 		Dialog *struct {
@@ -533,7 +548,7 @@ func (c *CLIClient) Dialog(ctx context.Context, chatID int64) (DialogState, erro
 	if jsonv2.Unmarshal(raw, &result) != nil || result.Dialog == nil {
 		return DialogState{}, errors.New("Inline chat has no readable personal dialog")
 	}
-	conv, err := cliDecodeConversation(result.Chat, chatID, c.accountUserID)
+	conv, err := cliDecodeConversation(result.Chat, chatID, accountUserID)
 	if err != nil {
 		return DialogState{}, err
 	}
@@ -585,6 +600,10 @@ func (c *CLIClient) Message(ctx context.Context, chatID, messageID int64) error 
 	if err != nil {
 		return err
 	}
+	return cliVerifyMessageIdentity(raw, chatID, messageID)
+}
+
+func cliVerifyMessageIdentity(raw []byte, chatID, messageID int64) error {
 	var message struct {
 		ID     *int64 `json:"id"`
 		ChatID *int64 `json:"chat_id"`

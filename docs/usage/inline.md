@@ -105,7 +105,9 @@ msgvault sync-inline
 is outside the daemon's `PATH`. Inline's CLI keeps its own authentication.
 msgvault does not copy or inspect the CLI's credentials.
 Each read launches a separate CLI process, so keep it signed in to the same
-account throughout the run.
+account throughout the run. msgvault cannot pin the CLI account between processes;
+a change during an archive operation can affect another account before readback
+detects the mismatch.
 
 The executable must support the JSON account, conversation, message-pagination,
 and media contracts used by the connector. The probe reports an incompatible

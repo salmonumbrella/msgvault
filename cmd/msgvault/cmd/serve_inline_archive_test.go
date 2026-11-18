@@ -52,8 +52,10 @@ func TestInlineArchiveStatefulCLI(t *testing.T) {
 		{name: "no whole chat", initial: "false", peer: "user", noWhole: true, desired: true, wantCode: "invalid_request"},
 		{name: "outside filter", initial: "false", peer: "user", filter: true, desired: true, wantCode: "stale_identity"},
 		{name: "unsupported binary", initial: "false", peer: "user", mode: "unsupported", desired: true, wantCode: "provider_unavailable"},
-		{name: "deleted message", initial: "false", peer: "user", mode: "missing-message", desired: true, wantCode: "stale_identity"},
-		{name: "unsupported server", initial: "false", peer: "user", mode: "server", desired: true, wantCode: "archive_unsupported"},
+		{name: "message command failure", initial: "false", peer: "user", mode: "missing-message", desired: true, wantCode: "provider_unavailable"},
+		{name: "message identity mismatch", initial: "false", peer: "user", mode: "wrong-message", desired: true, wantCode: "stale_identity"},
+		{name: "identity changed at gate", initial: "false", peer: "user", mode: "gate-change", desired: true, wantCode: "stale_identity"},
+		{name: "unsupported server", initial: "false", peer: "user", mode: "server", desired: true, wantCode: "provider_unavailable"},
 		{name: "account changed", initial: "false", peer: "user", mode: "account-change", desired: true, wantCode: "remote_unknown", writes: 1},
 		{name: "timeout after write", initial: "false", peer: "user", mode: "timeout", desired: true, wantCode: "remote_unknown", writes: 1},
 		{name: "lost response", initial: "false", peer: "user", mode: "lost", desired: true, wantCode: "remote_unknown", writes: 1},
@@ -82,7 +84,7 @@ case "$1 ${2-}" in
  '--version ') if [ "$mode" = unsupported ]; then exit 1; fi; echo 'inline 1.0.0' ;;
  'doctor --json') echo '{"config":{"apiBaseUrl":"https://api.inline.chat","realtimeUrl":"wss://api.inline.chat"}}' ;;
  'auth me') if [ "$mode" = account-change ] && [ -f "$d/me" ]; then echo '{"id":99}'; else touch "$d/me"; printf '{"id":%s}' "$(cat "$d/account")"; fi ;;
- 'messages get') if [ "$mode" = missing-message ]; then exit 1; fi; echo '{"id":8,"chat_id":7,"media":{"media":{"FutureVariant":{}}},"reactions":{"reactions":[{"user_id":0}]}}' ;;
+ 'messages get') if [ "$mode" = missing-message ]; then exit 1; fi; if [ "$mode" = wrong-message ]; then echo '{"id":8,"chat_id":6,"from_id":42,"date":1}'; else echo '{"id":8,"chat_id":7,"from_id":42,"date":1,"reactions":{"reactions":[{"user_id":9,"emoji":"👍","date":1}]}}'; fi ;;
  'chats get')
   if [ "$mode" = server ]; then exit 1; fi
   if [ "$(cat "$d/peer")" = child ]; then chat='{"id":7,"parent_chat_id":6,"parent_message_id":3,"peer_id":{"type":{"Chat":{"chat_id":7}}}}'; peer='{"type":{"Chat":{"chat_id":7}}}'; else chat='{"id":7,"peer_id":{"type":{"User":{"user_id":9}}}}'; peer='{"type":{"User":{"user_id":9}}}'; fi
@@ -162,7 +164,14 @@ esac
 				}()
 				defer func() { cancel(); <-done }()
 			}
-			result, err := adapter.ArchiveMessage(ctx, id, emailtags.ArchiveChange{Archived: &tc.desired, DryRun: tc.dry, WholeChat: !tc.noWhole}, grant, func(context.Context) (func(), error) { gates++; return func() {}, nil })
+			result, err := adapter.ArchiveMessage(ctx, id, emailtags.ArchiveChange{Archived: &tc.desired, DryRun: tc.dry, WholeChat: !tc.noWhole}, grant, func(ctx context.Context) (func(), error) {
+				gates++
+				if tc.mode == "gate-change" {
+					_, updateErr := st.DB().ExecContext(ctx, "UPDATE messages SET source_message_id=? WHERE id=?", "chat:7:message:99", id)
+					require.NoError(t, updateErr)
+				}
+				return func() {}, nil
+			})
 			if tc.wantCode != "" {
 				var failure *emailtags.MessageTagError
 				require.ErrorAs(t, err, &failure)
@@ -238,7 +247,11 @@ esac
 			}
 			saved, err := st.GetMessageContext(t.Context(), id)
 			require.NoError(t, err)
-			assert.Equal(t, messageKey, saved.SourceMessageID)
+			if tc.mode == "gate-change" {
+				assert.Equal(t, "chat:7:message:99", saved.SourceMessageID)
+			} else {
+				assert.Equal(t, messageKey, saved.SourceMessageID)
+			}
 		})
 	}
 }
