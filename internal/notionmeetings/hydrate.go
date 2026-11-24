@@ -519,7 +519,12 @@ func transcriptTemporarilyUnavailable(err error) bool {
 	return errors.As(err, &network) || errors.Is(err, io.EOF)
 }
 
+// extractMarkdownTranscript reads the transcript section of Notion-flavored
+// Markdown, falling back to a "Transcript" heading for page text.
 func extractMarkdownTranscript(markdown string) string {
+	if text, found := markdownTranscriptSection(markdown); found {
+		return text
+	}
 	lines := strings.Split(strings.ReplaceAll(markdown, "\r\n", "\n"), "\n")
 	for index, line := range lines {
 		headingLevel, heading, isHeading := markdownHeading(line)
@@ -547,6 +552,34 @@ func extractMarkdownTranscript(markdown string) string {
 		return strings.TrimSpace(strings.Join(lines[index+1:end], "\n"))
 	}
 	return ""
+}
+
+const (
+	transcriptSectionOpen  = "<meeting-notes-section-transcript"
+	transcriptSectionClose = "</meeting-notes-section-transcript>"
+)
+
+// markdownTranscriptSection returns the first meeting transcript section. A
+// "Transcript omitted" placeholder means Notion did not load it, so it counts
+// as no transcript.
+func markdownTranscriptSection(markdown string) (string, bool) {
+	_, rest, found := strings.Cut(markdown, transcriptSectionOpen)
+	if !found {
+		return "", false
+	}
+	if rest == "" || (rest[0] != '>' && rest[0] != ' ' && rest[0] != '\t' && rest[0] != '\n') {
+		return "", false
+	}
+	open := strings.IndexByte(rest, '>')
+	end := strings.Index(rest, transcriptSectionClose)
+	if open < 0 || end < open {
+		return "", false
+	}
+	text := strings.TrimSpace(rest[open+1 : end])
+	if strings.HasPrefix(text, "Transcript omitted") {
+		return "", true
+	}
+	return text, true
 }
 
 func markdownHeading(line string) (int, string, bool) {

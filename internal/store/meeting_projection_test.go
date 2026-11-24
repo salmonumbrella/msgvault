@@ -116,6 +116,24 @@ func TestMeetingLinkProjectionRefreshesEvidence(t *testing.T) {
 	assert.Equal(`["google_event_id","other@example.com","event-b",""]`, key)
 }
 
+func TestMeetingLinkProjectionUsesNotionCalendarEventID(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	st := newRFC822IDBackfillBackendStore(t)
+	raw := `{"schema_version":1,"discovery":{"meeting_notes":{"calendar_event":{"event_id":"event-a_20270314T100000Z","start_time":"2027-03-14T10:00:00Z","end_time":"2027-03-14T10:30:00Z"}}},"canonical":{}}`
+	data, id := projectionFixture(t, st, "notion-link", "notion_meeting_json", raw)
+	var count int
+	require.NoError(st.db.QueryRow(`SELECT COUNT(*) FROM meeting_details WHERE message_id = ? AND link_key IS NOT NULL`, id).Scan(&count))
+	assert.Zero(count, "an event ID without a calendar owner cannot name the calendar")
+
+	data.Metadata = &sql.NullString{String: `{"calendar_owner":"owner@example.com"}`, Valid: true}
+	_, err := st.PersistMessage(data)
+	require.NoError(err)
+	var key string
+	require.NoError(st.db.QueryRow(`SELECT link_key FROM meeting_details WHERE message_id = ?`, id).Scan(&key))
+	assert.Equal(`["google_event_id","owner@example.com","event-a_20270314T100000Z",""]`, key)
+}
+
 func TestMeetingProjectionDirectWritesAndCascade(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)

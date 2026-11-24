@@ -27,12 +27,14 @@ const (
 	transcriptRetryCadence     = 6 * time.Hour
 	transcriptRetryWindow      = 7 * 24 * time.Hour
 	unknownTranscriptRetrySpan = 48 * time.Hour
+	// maxDiscoveryQueries bounds one run's discovery at 5,000 meeting notes.
+	maxDiscoveryQueries = 100
 )
 
 // Source is the read-only Notion surface required by a sync run.
 type Source interface {
 	hydrationSource
-	QueryMeetingNotes(ctx context.Context, limit int) (*QueryResult, error)
+	QueryMeetingNotes(ctx context.Context, limit int, createdOnOrBefore time.Time) (*QueryResult, error)
 }
 
 type Importer struct {
@@ -199,14 +201,10 @@ func (imp *Importer) Import(ctx context.Context, opts ImportOptions) (sum *Impor
 		}
 	}()
 
-	result, err := imp.client.QueryMeetingNotes(ctx, maxQueryResults)
+	result, newest, err := imp.discoverMeetings(ctx)
 	if err != nil {
 		sum.Errors++
-		return sum, fmt.Errorf("query Notion meeting notes: %w", err)
-	}
-	if result == nil {
-		sum.Errors++
-		return sum, errors.New("query Notion meeting notes returned no response")
+		return sum, err
 	}
 
 	progress := opts.Progress
@@ -223,7 +221,7 @@ func (imp *Importer) Import(ctx context.Context, opts ImportOptions) (sum *Impor
 	maps.Copy(next.TranscriptRetryUntil, state.TranscriptRetryUntil)
 	sum.PartialCoverage = result.HasMore
 	if result.HasMore {
-		progress(fmt.Sprintf("Notion discovery is partial: %d meetings returned and more are unavailable through pagination", len(result.Results)))
+		progress(fmt.Sprintf("Notion discovery is partial: found %d meetings, but Notion could not list the rest", len(result.Results)))
 	}
 
 	pendingByID := make(map[string]pendingTranscript, len(state.Pending))
@@ -299,6 +297,12 @@ func (imp *Importer) Import(ctx context.Context, opts ImportOptions) (sum *Impor
 		}
 		if !opts.CreatedAfter.IsZero() && candidateTime(meeting).Before(opts.CreatedAfter) {
 			continue
+		}
+		// Older notes rarely change, so only new or edited ones are refetched.
+		if _, recent := newest[id]; !recent && !opts.Full {
+			if known, ok := state.Known[id]; ok && known.LastEditedTime == meeting.LastEditedTime {
+				continue
+			}
 		}
 		if opts.Limit > 0 && remaining == 0 {
 			continue
@@ -978,6 +982,73 @@ func preserveArchivedAttendeeRelationships(
 		meeting.Warnings = append(meeting.Warnings,
 			"user directory lookup failed; preserved previously verified attendees from archived relationships")
 	}
+}
+
+// discoverMeetings pages back through meeting notes by creation minute,
+// because the query endpoint returns at most 50 notes and has no cursor. It
+// returns every note found and the IDs of the newest page, which is always
+// refreshed. HasMore reports notes left undiscovered.
+func (imp *Importer) discoverMeetings(ctx context.Context) (*QueryResult, map[string]struct{}, error) {
+	all := &QueryResult{}
+	seen := map[string]struct{}{}
+	var newest map[string]struct{}
+	var bound time.Time
+	for query := range maxDiscoveryQueries {
+		page, err := imp.client.QueryMeetingNotes(ctx, maxQueryResults, bound)
+		if err != nil {
+			return nil, nil, fmt.Errorf("query Notion meeting notes: %w", err)
+		}
+		if page == nil {
+			return nil, nil, errors.New("query Notion meeting notes returned no response")
+		}
+		fresh := 0
+		var oldest time.Time
+		for _, meeting := range page.Results {
+			id := strings.TrimSpace(meeting.ID)
+			if id == "" {
+				return nil, nil, errors.New("notion discovery returned a meeting without an ID")
+			}
+			created := parseNotionTime(meeting.CreatedTime)
+			if created.IsZero() {
+				return nil, nil, fmt.Errorf("%w: meeting %s has no creation time", ErrMalformedResponse, id)
+			}
+			if !bound.IsZero() && created.After(bound.Add(time.Minute)) {
+				return nil, nil, fmt.Errorf("%w: meeting %s is newer than the requested window", ErrMalformedResponse, id)
+			}
+			if oldest.IsZero() || created.Before(oldest) {
+				oldest = created
+			}
+			if _, duplicate := seen[id]; duplicate {
+				if query == 0 {
+					return nil, nil, fmt.Errorf("notion discovery returned duplicate meeting ID %q", id)
+				}
+				continue
+			}
+			seen[id] = struct{}{}
+			all.Results = append(all.Results, meeting)
+			fresh++
+		}
+		if query == 0 {
+			newest = maps.Clone(seen)
+		}
+		if !page.HasMore {
+			return all, newest, nil
+		}
+		if len(page.Results) == 0 {
+			all.HasMore = true
+			return all, newest, nil
+		}
+		next := oldest.UTC().Truncate(time.Minute)
+		if fresh == 0 {
+			// More than a page of notes share this minute; the filter cannot
+			// split it, so skip the rest of it and report partial coverage.
+			next = next.Add(-time.Minute)
+			all.HasMore = true
+		}
+		bound = next
+	}
+	all.HasMore = true
+	return all, newest, nil
 }
 
 func coverageFor(result *QueryResult, limited bool) Coverage {

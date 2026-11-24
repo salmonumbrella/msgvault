@@ -22,14 +22,28 @@ type fakeImportSource struct {
 
 	query    *QueryResult
 	queryErr error
+	bounds   []time.Time
 }
 
-func (f *fakeImportSource) QueryMeetingNotes(context.Context, int) (*QueryResult, error) {
+// QueryMeetingNotes serves f.query newest first. A bound keeps only notes
+// created in or before its minute, like the Notion created_time filter.
+func (f *fakeImportSource) QueryMeetingNotes(_ context.Context, limit int, createdOnOrBefore time.Time) (*QueryResult, error) {
+	f.bounds = append(f.bounds, createdOnOrBefore)
 	if f.queryErr != nil {
 		return nil, f.queryErr
 	}
-	result := *f.query
-	result.Results = append([]MeetingNote(nil), f.query.Results...)
+	result := QueryResult{HasMore: f.query.HasMore}
+	for _, meeting := range f.query.Results {
+		if !createdOnOrBefore.IsZero() && !parseNotionTime(meeting.CreatedTime).Before(createdOnOrBefore.Add(time.Minute)) {
+			continue
+		}
+		result.Results = append(result.Results, meeting)
+	}
+	if limit > 0 && len(result.Results) > limit {
+		result.Results, result.HasMore = result.Results[:limit], true
+	} else if !createdOnOrBefore.IsZero() {
+		result.HasMore = false
+	}
 	for i := range result.Results {
 		raw, err := json.Marshal(result.Results[i])
 		if err != nil {
@@ -710,14 +724,83 @@ func TestImporterLimitAndAfterRemainLocalVisibleSetBounds(t *testing.T) {
 func TestImporterRecordsPartialCoverageWithoutLooping(t *testing.T) {
 	assert := assert.New(t)
 	st, source, imp := newImporterFixture(t)
-	source.query.HasMore = true
+	// More notes than one page share a creation minute, which the
+	// minute-precision filter cannot split.
+	source.query = &QueryResult{Results: numberedMeetings(source, maxQueryResults+1, func(int) string { return "2026-08-29T09:59:00Z" })}
 
 	summary, err := imp.Import(t.Context(), ImportOptions{Identifier: "work"})
 	require.NoError(t, err)
 	state := lastNotionState(t, st, summary.SourceID)
 	assert.True(state.Coverage.HasMore)
-	assert.Equal(1, state.Coverage.Returned)
+	assert.Equal(maxQueryResults, state.Coverage.Returned)
 	assert.True(summary.PartialCoverage)
+	minute := time.Date(2026, 8, 29, 9, 59, 0, 0, time.UTC)
+	assert.Equal([]time.Time{{}, minute, minute.Add(-time.Minute)}, source.bounds)
+}
+
+func TestImporterStopsOnEmptyPageThatReportsMore(t *testing.T) {
+	assert := assert.New(t)
+	st, source, imp := newImporterFixture(t)
+	source.query = &QueryResult{HasMore: true}
+
+	summary, err := imp.Import(t.Context(), ImportOptions{Identifier: "work"})
+	require.NoError(t, err)
+	assert.True(summary.PartialCoverage)
+	assert.True(lastNotionState(t, st, summary.SourceID).Coverage.HasMore)
+	assert.Len(source.bounds, 1)
+}
+
+// numberedMeetings returns synthetic meetings newest first, created at
+// created(i), and registers their headers with the hydration fake.
+func numberedMeetings(source *fakeImportSource, n int, created func(int) string) []MeetingNote {
+	meetings := make([]MeetingNote, 0, n)
+	for i := range n {
+		meeting := hydrationMeeting()
+		meeting.ID = fmt.Sprintf("meeting-%03d", i)
+		meeting.CreatedTime = created(i)
+		raw, err := json.Marshal(meeting)
+		if err != nil {
+			panic(err)
+		}
+		meeting.Raw = nil
+		source.blocks[meeting.ID] = &Block{Object: "block", ID: meeting.ID, Type: "meeting_notes", Parent: meeting.Parent, Raw: raw}
+		meetings = append(meetings, meeting)
+	}
+	return meetings
+}
+
+func TestImporterPagesPastFiftyMeetingsByCreationTime(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	st, source, imp := newImporterFixture(t)
+	base := time.Date(2026, 8, 29, 9, 0, 0, 0, time.UTC)
+	// Two notes per minute, so each page ends partway through a minute and
+	// the next page repeats the notes already seen from it.
+	source.query = &QueryResult{HasMore: true, Results: numberedMeetings(source, 120, func(i int) string {
+		return base.Add(-time.Duration(i/2) * time.Minute).Add(-time.Duration(i%2) * time.Second).Format(time.RFC3339)
+	})}
+
+	first, err := imp.Import(t.Context(), ImportOptions{Identifier: "work"})
+	require.NoError(err)
+	assert.Equal(int64(120), first.MeetingsAdded)
+	assert.False(first.PartialCoverage)
+	state := lastNotionState(t, st, first.SourceID)
+	assert.Len(state.Known, 120)
+	assert.False(state.Coverage.HasMore)
+	require.Len(source.bounds, 3)
+	assert.True(source.bounds[0].IsZero())
+	assert.Equal(base.Add(-25*time.Minute), source.bounds[1])
+	assert.Equal(base.Add(-49*time.Minute), source.bounds[2])
+
+	source.bounds = nil
+	edited := source.query.Results[100]
+	edited.LastEditedTime = "2026-08-29T11:00:00Z"
+	source.query.Results[100] = edited
+	second, err := imp.Import(t.Context(), ImportOptions{Identifier: "work"})
+	require.NoError(err)
+	// The newest page is always refreshed; older notes only when edited.
+	assert.Equal(int64(maxQueryResults+1), second.MeetingsProcessed)
+	assert.Len(lastNotionState(t, st, second.SourceID).Known, 120)
 }
 
 func TestImporterHardFailureRetainsLastSuccessfulState(t *testing.T) {

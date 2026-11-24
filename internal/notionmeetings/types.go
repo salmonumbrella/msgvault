@@ -38,6 +38,9 @@ type MeetingChildren struct {
 }
 
 type MeetingCalendarEvent struct {
+	// EventID is the provider's event ID; for Google calendars it is the
+	// Google Calendar event ID, including recurring instance IDs.
+	EventID   string   `json:"event_id"`
 	StartTime string   `json:"start_time"`
 	EndTime   string   `json:"end_time"`
 	Attendees []string `json:"attendees"`
@@ -49,6 +52,7 @@ type MeetingRecording struct {
 }
 
 type MeetingNotesData struct {
+	IsFullPage    bool                 `json:"is_full_page"`
 	Title         []RichText           `json:"title"`
 	Status        string               `json:"status"`
 	Children      MeetingChildren      `json:"children"`

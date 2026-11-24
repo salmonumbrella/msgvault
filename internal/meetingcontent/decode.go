@@ -16,7 +16,7 @@ const MaxRawBytes = 64 << 20
 const reasonMissingField = "missing_field"
 const reasonInvalidSection = "invalid_section"
 
-func Decode(rawFormat string, raw, _ []byte) Content {
+func Decode(rawFormat string, raw, metadata []byte) Content {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return unavailableContent("missing_raw")
 	}
@@ -37,7 +37,7 @@ func Decode(rawFormat string, raw, _ []byte) Content {
 	case "plaud_json":
 		return decodePlaud(fields)
 	case "notion_meeting_json":
-		return decodeNotion(fields)
+		return decodeNotion(fields, metadata)
 	case "muesli_json":
 		return decodeMuesli(fields)
 	case "pocket_json":

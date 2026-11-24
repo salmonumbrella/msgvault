@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-func decodeNotion(fields map[string]jsontext.Value) Content {
+func decodeNotion(fields map[string]jsontext.Value, metadata []byte) Content {
 	version, ok := rawInteger(fields["schema_version"])
 	if !ok || version != 1 {
 		return unavailableContent("unsupported_schema")
@@ -31,6 +31,16 @@ func decodeNotion(fields map[string]jsontext.Value) Content {
 	discovery, discoveryOK := notionDiscovery(fields["discovery"])
 	content.Actions, content.ActionCoverage, content.ActionReason = decodeNotionActions(fields, discovery, discoveryOK)
 	content.SourceParticipants = notionParticipants(fields, discovery)
+	if discoveryOK && discovery.Calendar.EventID != "" {
+		// Notion reports Google Calendar event IDs without naming the
+		// calendar, so the importer records the source's account email.
+		var meta struct {
+			CalendarOwner string `json:"calendar_owner"`
+		}
+		_ = json.Unmarshal(metadata, &meta)
+		content.LinkEvidence.GoogleEventID = discovery.Calendar.EventID
+		content.LinkEvidence.CalendarOwner = strings.TrimSpace(meta.CalendarOwner)
+	}
 	if discoveryOK {
 		if start, startOK := parseTimeString(discovery.Recording.Start); startOK {
 			if end, endOK := parseTimeString(discovery.Recording.End); endOK && end.After(start) {
@@ -53,7 +63,7 @@ type notionDiscoveryWire struct {
 	TranscriptID string
 	AttendeeIDs  []string
 	Recording    struct{ Start, End string }
-	Calendar     struct{ Start, End string }
+	Calendar     struct{ Start, End, EventID string }
 }
 
 func notionDiscovery(raw jsontext.Value) (notionDiscoveryWire, bool) {
@@ -69,6 +79,7 @@ func notionDiscovery(raw jsontext.Value) (notionDiscoveryWire, bool) {
 				End   string `json:"end_time"`
 			} `json:"recording"`
 			Calendar struct {
+				EventID   string   `json:"event_id"`
 				Start     string   `json:"start_time"`
 				End       string   `json:"end_time"`
 				Attendees []string `json:"attendees"`
@@ -85,6 +96,7 @@ func notionDiscovery(raw jsontext.Value) (notionDiscoveryWire, bool) {
 	out.AttendeeIDs = wire.MeetingNotes.Calendar.Attendees
 	out.Recording.Start, out.Recording.End = wire.MeetingNotes.Recording.Start, wire.MeetingNotes.Recording.End
 	out.Calendar.Start, out.Calendar.End = wire.MeetingNotes.Calendar.Start, wire.MeetingNotes.Calendar.End
+	out.Calendar.EventID = strings.TrimSpace(wire.MeetingNotes.Calendar.EventID)
 	return out, true
 }
 

@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-11-19"
+last_edited: "2026-11-24"
 title: CLI Reference
 description: Complete command reference for all msgvault commands.
 ---
@@ -1291,9 +1291,9 @@ you have only one entry, you can omit the identifier.
 
 ## sync-notion-meetings
 
-Sync Notion AI Meeting Notes from the attendee-visible recent window. The
-summary reports partial coverage when the query has more results or a meeting
-section cannot be read completely.
+Sync attendee-visible Notion AI Meeting Notes. The summary reports partial
+coverage when msgvault cannot list every meeting or a meeting section cannot be
+read completely.
 
 ```bash
 msgvault sync-notion-meetings [identifier]
@@ -1302,17 +1302,18 @@ msgvault sync-notion-meetings --full --after 2026-01-01
 msgvault sync-notion-meetings --probe
 ```
 
-Notion returns at most 50 meeting notes and provides no discovery cursor. Every
-run hydrates and checksum-verifies the selected visible meetings. Pass `--full`
-to also run matching snapshots through archive upsert so cursor and archive
-divergence can be repaired, and pass `--after` to filter the visible set
-locally. The summary reports partial coverage when Notion indicates more records
-exist. Due transcript maintenance runs outside `--limit`.
+Notion returns at most 50 meeting notes per query and provides no cursor, so
+msgvault pages back by creation time, up to 5,000 meetings per run. Every run
+hydrates and checksum-verifies the newest 50 meetings and any older meeting
+that is new or edited. Pass `--full` to hydrate every meeting and run matching
+snapshots through archive upsert so cursor and archive divergence can be
+repaired, and pass `--after` to filter discovered meetings locally. The summary
+reports partial coverage when msgvault could not list every meeting. Due transcript maintenance runs outside `--limit`.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--limit` | `0` | Maximum visible meetings hydrated and verified; due maintenance is additional |
-| `--after` | — | Local visible-set lower bound in `YYYY-MM-DD` form; implies `--full` |
+| `--limit` | `0` | Maximum meetings hydrated and verified; due maintenance is additional |
+| `--after` | — | Local lower bound on discovered meetings in `YYYY-MM-DD` form; implies `--full` |
 | `--full` | `false` | Force selected snapshots through archive upsert instead of skipping matching checksums |
 | `--probe` | `false` | Validate capabilities and result shape without printing meeting content |
 

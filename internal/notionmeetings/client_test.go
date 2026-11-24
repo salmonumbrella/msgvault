@@ -53,7 +53,7 @@ func TestClientQueryMeetingNotesUsesDocumentedReadContract(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "ntn_test_secret")
-	result, err := client.QueryMeetingNotes(t.Context(), 50)
+	result, err := client.QueryMeetingNotes(t.Context(), 50, time.Time{})
 	require.NoError(err)
 	require.Len(result.Results, 1)
 	assert.True(result.HasMore)
@@ -63,6 +63,31 @@ func TestClientQueryMeetingNotesUsesDocumentedReadContract(t *testing.T) {
 	assert.Equal("summary-1", result.Results[0].MeetingNotes.Children.SummaryBlockID)
 	assert.JSONEq(`{"kept":true}`, string(result.Results[0].Extra["future_field"]))
 	assert.Contains(string(result.Results[0].Raw), `"future_field"`)
+}
+
+func TestClientQueryMeetingNotesFiltersByCreationMinute(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		assert.NoError(err)
+		assert.JSONEq(`{
+			"filter":{"property":"created_time","filter":{
+				"operator":"date_is_on_or_before",
+				"value":{"type":"exact","value":{"type":"datetime","start_date":"2026-08-29","start_time":"16:59","time_zone":"UTC"}}
+			}},
+			"sort":[{"property":"created_time","direction":"descending"}],
+			"limit":50
+		}`, string(body))
+		_, _ = io.WriteString(w, `{"results":[],"has_more":false}`)
+	}))
+	defer server.Close()
+
+	// The bound is sent in UTC at minute precision.
+	zone := time.FixedZone("UTC-7", -7*60*60)
+	result, err := NewClient(server.URL, "ntn_test").QueryMeetingNotes(t.Context(), 50, time.Date(2026, 8, 29, 9, 59, 42, 0, zone))
+	require.NoError(err)
+	assert.Empty(result.Results)
 }
 
 func TestClientReadEndpointsPreserveRawResponses(t *testing.T) {
@@ -81,6 +106,7 @@ func TestClientReadEndpointsPreserveRawResponses(t *testing.T) {
 			_, _ = io.WriteString(w, `{"object":"list","results":[{"object":"block","id":"child-1","type":"paragraph","has_children":false,"paragraph":{}}],"next_cursor":"cursor-2","has_more":true}`)
 		case "/v1/pages/page-1/markdown":
 			assert.Equal("true", r.URL.Query().Get("include_transcript"))
+			assert.Equal("v2", r.URL.Query().Get("markdown_version"))
 			_, _ = io.WriteString(w, `{"object":"page_markdown","id":"page-1","markdown":"# Weekly planning\nTranscript: Ready","truncated":false,"unknown_block_ids":[]}`)
 		case "/v1/users/guest":
 			_, _ = io.WriteString(w, `{"object":"user","id":"guest","type":"person","person":{"email":"guest@example.com","email_verified":true}}`)
@@ -173,7 +199,7 @@ func TestClientClassifiesAndSanitizesProviderErrors(t *testing.T) {
 			var err error
 			switch tc.path {
 			case "/query":
-				_, err = client.QueryMeetingNotes(t.Context(), 1)
+				_, err = client.QueryMeetingNotes(t.Context(), 1, time.Time{})
 			case "/block":
 				_, err = client.RetrieveBlock(t.Context(), "block-1")
 			case "/user":
@@ -211,7 +237,7 @@ func TestClientRetriesRateLimitThenReturnsQuery(t *testing.T) {
 		waits = append(waits, duration)
 		return nil
 	}
-	result, err := client.QueryMeetingNotes(t.Context(), 50)
+	result, err := client.QueryMeetingNotes(t.Context(), 50, time.Time{})
 	require.NoError(err)
 	assert.Empty(result.Results)
 	assert.Equal(3, attempts)
@@ -227,7 +253,7 @@ func TestClientRejectsMalformedSuccessWithoutLeakingBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := NewClient(server.URL, "ntn_test").QueryMeetingNotes(t.Context(), 50)
+	_, err := NewClient(server.URL, "ntn_test").QueryMeetingNotes(t.Context(), 50, time.Time{})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrMalformedResponse)
 	assert.NotContains(t, err.Error(), "private meeting content")
@@ -253,7 +279,7 @@ func TestClientQueryMeetingNotesRejectsMalformedListEnvelopes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := newStaticNotionClient(t, tc.body)
 
-			result, err := client.QueryMeetingNotes(t.Context(), 50)
+			result, err := client.QueryMeetingNotes(t.Context(), 50, time.Time{})
 
 			require.ErrorIs(t, err, ErrMalformedResponse)
 			assert.Nil(t, result)
@@ -287,7 +313,7 @@ func TestClientQueryMeetingNotesAcceptsCompleteListEnvelopes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := newStaticNotionClient(t, tc.body)
 
-			result, err := client.QueryMeetingNotes(t.Context(), 50)
+			result, err := client.QueryMeetingNotes(t.Context(), 50, time.Time{})
 
 			require.NoError(t, err)
 			assert.Len(t, result.Results, tc.wantResult)
@@ -322,7 +348,7 @@ func TestClientQueryMeetingNotesRejectsNonMeetingBlocks(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			client := newStaticNotionClient(t, `{"results":[`+tt.block+`],"has_more":false}`)
 
-			result, err := client.QueryMeetingNotes(t.Context(), 50)
+			result, err := client.QueryMeetingNotes(t.Context(), 50, time.Time{})
 
 			require.ErrorIs(t, err, ErrMalformedResponse)
 			assert.Nil(t, result)

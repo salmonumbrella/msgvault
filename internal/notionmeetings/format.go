@@ -11,10 +11,15 @@ import (
 )
 
 type meetingMetadata struct {
-	Platform                   string         `json:"platform"`
-	SourceIdentifier           string         `json:"source_identifier,omitempty"`
-	MeetingNoteBlockID         string         `json:"meeting_note_block_id"`
-	PageID                     string         `json:"page_id"`
+	Platform           string `json:"platform"`
+	SourceIdentifier   string `json:"source_identifier,omitempty"`
+	MeetingNoteBlockID string `json:"meeting_note_block_id"`
+	PageID             string `json:"page_id"`
+	IsFullPage         bool   `json:"is_full_page,omitzero"`
+	CalendarEventID    string `json:"calendar_event_id,omitempty"`
+	// CalendarOwner is the configured account email, which names the Google
+	// calendar that CalendarEventID belongs to.
+	CalendarOwner              string         `json:"calendar_owner,omitempty"`
 	Status                     string         `json:"status,omitempty"`
 	Lifecycle                  string         `json:"lifecycle"`
 	CreatorUserID              string         `json:"creator_user_id,omitempty"`
@@ -73,11 +78,14 @@ func (h *HydratedMeeting) ArchiveSnapshot(sourceID int64, identifier, accountEma
 	metadata, err := json.Marshal(meetingMetadata{
 		Platform: SourceType, SourceIdentifier: identifier, MeetingNoteBlockID: h.Discovery.ID,
 		PageID: h.Discovery.Parent.PageID, Status: h.Discovery.MeetingNotes.Status,
-		Lifecycle:      lifecycleForStatus(h.Discovery.MeetingNotes.Status, h.Transcript),
-		CreatorUserID:  h.Discovery.CreatedBy.ID,
-		StartedAt:      startedAt.UTC().Format(time.RFC3339Nano),
-		EndedAt:        formatOptionalTime(endedAt),
-		SummaryBlockID: children.SummaryBlockID, NotesBlockID: children.NotesBlockID,
+		IsFullPage:      h.Discovery.MeetingNotes.IsFullPage,
+		CalendarEventID: h.Discovery.MeetingNotes.CalendarEvent.EventID,
+		CalendarOwner:   strings.TrimSpace(accountEmail),
+		Lifecycle:       lifecycleForStatus(h.Discovery.MeetingNotes.Status, h.Transcript),
+		CreatorUserID:   h.Discovery.CreatedBy.ID,
+		StartedAt:       startedAt.UTC().Format(time.RFC3339Nano),
+		EndedAt:         formatOptionalTime(endedAt),
+		SummaryBlockID:  children.SummaryBlockID, NotesBlockID: children.NotesBlockID,
 		TranscriptBlockID: children.TranscriptBlockID,
 		HasSummary:        h.Summary != "", HasNotes: h.Notes != "", HasTranscript: h.Transcript != "",
 		MarkdownTranscriptFallback: h.MarkdownTranscriptFallback,

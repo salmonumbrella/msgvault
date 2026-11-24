@@ -71,21 +71,25 @@ func NewClient(baseURL, token string) *Client {
 	}
 }
 
-func (c *Client) QueryMeetingNotes(ctx context.Context, limit int) (*QueryResult, error) {
+// QueryMeetingNotes returns the newest meeting notes, newest first. A non-zero
+// createdOnOrBefore keeps only notes created in or before that UTC minute;
+// the endpoint has no cursor, so callers page by moving this bound back.
+func (c *Client) QueryMeetingNotes(ctx context.Context, limit int, createdOnOrBefore time.Time) (*QueryResult, error) {
 	if limit <= 0 || limit > maxQueryResults {
 		limit = maxQueryResults
 	}
-	payload := struct {
-		Sort []struct {
-			Property  string `json:"property"`
-			Direction string `json:"direction"`
-		} `json:"sort"`
-		Limit int `json:"limit"`
-	}{Limit: limit}
-	payload.Sort = append(payload.Sort, struct {
+	type sortKey struct {
 		Property  string `json:"property"`
 		Direction string `json:"direction"`
-	}{Property: "created_time", Direction: "descending"})
+	}
+	payload := struct {
+		Filter *meetingNotesFilter `json:"filter,omitzero"`
+		Sort   []sortKey           `json:"sort"`
+		Limit  int                 `json:"limit"`
+	}{Sort: []sortKey{{Property: "created_time", Direction: "descending"}}, Limit: limit}
+	if !createdOnOrBefore.IsZero() {
+		payload.Filter = createdOnOrBeforeFilter(createdOnOrBefore)
+	}
 	var result QueryResult
 	raw, err := c.doJSON(ctx, http.MethodPost, "/v1/blocks/meeting_notes/query", payload, &result, operationQuery)
 	if err != nil {
@@ -101,6 +105,37 @@ func (c *Client) QueryMeetingNotes(ctx context.Context, limit int) (*QueryResult
 	}
 	result.Raw = raw
 	return &result, nil
+}
+
+type meetingNotesDateTime struct {
+	Type      string `json:"type"`
+	StartDate string `json:"start_date"`
+	StartTime string `json:"start_time"`
+	TimeZone  string `json:"time_zone"`
+}
+
+type meetingNotesFilter struct {
+	Property string `json:"property"`
+	Filter   struct {
+		Operator string `json:"operator"`
+		Value    struct {
+			Type  string               `json:"type"`
+			Value meetingNotesDateTime `json:"value"`
+		} `json:"value"`
+	} `json:"filter"`
+}
+
+// createdOnOrBeforeFilter builds the documented minute-precision
+// created_time filter. The bound includes its whole minute.
+func createdOnOrBeforeFilter(at time.Time) *meetingNotesFilter {
+	at = at.UTC()
+	filter := &meetingNotesFilter{Property: "created_time"}
+	filter.Filter.Operator = "date_is_on_or_before"
+	filter.Filter.Value.Type = "exact"
+	filter.Filter.Value.Value = meetingNotesDateTime{
+		Type: "datetime", StartDate: at.Format(time.DateOnly), StartTime: at.Format("15:04"), TimeZone: "UTC",
+	}
+	return filter
 }
 
 func (c *Client) RetrieveBlock(ctx context.Context, blockID string) (*Block, error) {
@@ -143,10 +178,8 @@ func (c *Client) RetrievePageMarkdown(ctx context.Context, pageID string, includ
 	if includeTranscript {
 		query.Set("include_transcript", "true")
 	}
-	path := "/v1/pages/" + url.PathEscape(pageID) + "/markdown"
-	if len(query) > 0 {
-		path += "?" + query.Encode()
-	}
+	query.Set("markdown_version", "v2")
+	path := "/v1/pages/" + url.PathEscape(pageID) + "/markdown?" + query.Encode()
 	var result MarkdownPage
 	raw, err := c.doJSON(ctx, http.MethodGet, path, nil, &result, operationContent)
 	if err != nil {

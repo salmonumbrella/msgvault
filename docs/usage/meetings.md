@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-11-19"
+last_edited: "2026-11-24"
 title: Meeting Transcripts
 description: Archive call recordings, AI meeting notes, and transcripts from Chatwoot, Omi, Twilio, Bland, Granola, Plaud, Pocket, Circleback, Notion, Muesli, and Twenty into your searchable local archive.
 ---
@@ -18,7 +18,7 @@ emails connect those meetings to the people you already have in msgvault.
 | [Bland](#bland) | Org API key | Calls and the postcall data Bland still retains |
 | [Chatwoot](../guides/chatwoot.md) calls | Account API token | Calls in selected inboxes; recordings and transcripts refresh for seven days |
 | [Granola](#granola) | API key | Requires access to Granola's public API |
-| [Notion AI Meeting Notes](#notion-ai-meeting-notes) | Meeting PAT or integration, optional users integration | At most 50 attendee-visible meetings per discovery query |
+| [Notion AI Meeting Notes](#notion-ai-meeting-notes) | Meeting PAT or integration, optional users integration | Attendee-visible meetings only; at most 5,000 per sync |
 | [Plaud](#plaud) | Browser authorization to its hosted MCP server | Requires Cloud Sync and existing Plaud transcription |
 | [Circleback](#circleback) | Browser authorization to its MCP server | Older note edits require a full refresh |
 | [Pocket](#pocket) | Personal API key | Requires Pocket API access and supported transcript/summary response shapes |
@@ -62,8 +62,11 @@ Automatic matching depends on the source format:
 - Twenty notes match on their iCalendar UID and scheduled time.
 - Granola notes match on their Google event ID only when their owner matches
   the archived calendar's mailbox.
-- Twenty notes with the same UID and time, and Granola notes with the same
-  instance-suffixed Google ID, can link even before you import a calendar.
+- Notion notes match on the Google event ID Notion records for the meeting's
+  calendar event. Notion does not say which calendar holds the event, so the
+  source's `account_email` must be the mailbox of the archived calendar.
+- Twenty notes with the same UID and time, and Granola or Notion notes with
+  the same instance-suffixed Google ID, can link even before you import a calendar.
 - A bare Google series ID cannot identify a single week, so those notes stay
   separate. A calendar single event or exception can prove that a bare ID names
   one event, including after a reschedule.
@@ -918,8 +921,8 @@ attendees survive failed or skipped lookups, and the next sync retries with
 fresh state. People without a Notion account cannot be resolved.
 
 After you add a users token, run `msgvault sync-notion-meetings <identifier>`
-to update participants on existing visible meetings. The 50-meeting discovery
-window still applies.
+to update participants on meetings in the newest discovery page. Use `--full`
+to update older meetings too.
 
 ### Sync and discovery limit
 
@@ -931,31 +934,32 @@ msgvault sync-notion-meetings --full
 msgvault sync-notion-meetings --after 2026-01-01
 ```
 
-Notion's Meeting Notes query currently returns at most 50 records and can
-indicate that more exist without returning a cursor. msgvault makes one
-maximum-size query per run, never loops the same page, and reports partial
-coverage when Notion sets `has_more`. Native sync is reliable for the visible
-recent window, but it is not a complete historical workspace export.
+Notion's Meeting Notes query returns at most 50 meetings and has no cursor.
+msgvault pages back through older meetings by creation time, one minute at a
+time, until Notion reports no more. One sync reads at most 5,000 meetings. If
+more than 50 meetings share a creation minute, msgvault skips the rest of that
+minute and reports partial coverage.
 
-Every run fetches the details of visible meetings that pass your filters and
-skips unchanged content. Run with `--full` to send those meetings through the
-archive update path again when stored sync state and archived content disagree.
-Even with `--full`, sync cannot discover history beyond the visible window.
+Every run fetches the newest 50 meetings again and skips unchanged content.
+Older meetings are fetched only when they are new to msgvault or Notion reports
+an edit. Run with `--full` to fetch every meeting and send it through the
+archive update path again, for example when stored sync state and archived
+content disagree.
 
-- `--after` filters meetings returned by Notion locally and implies `--full`.
-- `--limit` caps the visible meetings fetched and checked.
+- `--after` filters discovered meetings locally and implies `--full`.
+- `--limit` caps the meetings fetched and checked.
 - Due meeting retries run in addition to that limit.
 
 Meetings under data sources import their summary, notes, and transcript from
 their referenced section blocks. When a page meeting has no transcript section
 or its section reads completely empty, msgvault uses a complete transcript from
-the parent page's Markdown. An incomplete section keeps its saved text for
+the transcript section of the parent page's Markdown. An incomplete section keeps its saved text for
 retry.
 
 Provider or network errors, incomplete pagination, and request, response-size,
 block-count, and nesting limits can leave sections incomplete. msgvault keeps
 their archived text and evidence and retries section blocks every six hours,
-even after a meeting leaves the query window. Incomplete sections stay queued
+even after a meeting leaves the newest discovery page. Incomplete sections stay queued
 until a complete read is saved.
 
 If page Markdown is incomplete, msgvault keeps the saved transcript and
@@ -984,6 +988,10 @@ includes title, time, attendees, summary, notes, and transcript sections. The
 raw archive (`notion_meeting_json`) keeps the source meeting object, note
 blocks, Markdown, attendee labels, resolved user details, and warnings for
 later inspection.
+
+Metadata records whether the note is a full Notion page (`is_full_page`), the
+calendar event ID Notion reports (`calendar_event_id`), and the source's
+`account_email` as that event's calendar owner (`calendar_owner`).
 
 Notion's `created_by` user is stored as creator metadata and is never assumed
 to be the organizer. Only attendees with provider-verified email addresses

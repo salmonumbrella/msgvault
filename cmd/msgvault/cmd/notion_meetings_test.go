@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,7 +28,7 @@ func (fakeNotionProbe) RetrievePageMarkdown(_ context.Context, id string, _ bool
 	return &notionmeetings.MarkdownPage{Object: "page_markdown", ID: id, Raw: []byte(fmt.Sprintf(`{"object":"page_markdown","id":%q,"markdown":""}`, id))}, nil
 }
 
-func (f fakeNotionProbe) QueryMeetingNotes(context.Context, int) (*notionmeetings.QueryResult, error) {
+func (f fakeNotionProbe) QueryMeetingNotes(context.Context, int, time.Time) (*notionmeetings.QueryResult, error) {
 	return f.result, f.err
 }
 

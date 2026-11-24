@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/meetingcontent"
 )
 
 type fakeHydrationSource struct {
@@ -193,6 +194,34 @@ func TestHydratorBuildsCanonicalSnapshotWithoutInventingOrganizer(t *testing.T) 
 	assert.NotContains(string(snapshot.Raw), "user@example.com", "configured identity must not enter provider evidence")
 	assert.Contains(string(snapshot.Metadata), `"creator_user_id":"creator-1"`)
 	assert.Contains(string(snapshot.Metadata), `"unresolved_attendee_ids":["user-2"]`)
+	assert.NotContains(string(snapshot.Metadata), `"calendar_event_id"`)
+	assert.NotContains(string(snapshot.Metadata), `"is_full_page"`)
+}
+
+func TestArchiveSnapshotRecordsCalendarEventAndFullPage(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	meeting := hydrationMeeting()
+	meeting.MeetingNotes.IsFullPage = true
+	meeting.MeetingNotes.CalendarEvent.EventID = "event-a"
+	raw, err := json.Marshal(meeting)
+	require.NoError(err)
+	meeting.Raw = raw
+	source := completeHydrationSource()
+	source.blocks["meeting-1"].Raw = raw
+	hydrated, err := NewHydrator(source).Hydrate(t.Context(), meeting)
+	require.NoError(err)
+
+	snapshot, err := hydrated.ArchiveSnapshot(17, "work", " owner@example.com ")
+	require.NoError(err)
+	var metadata map[string]any
+	require.NoError(json.Unmarshal(snapshot.Metadata, &metadata))
+	assert.Equal(true, metadata["is_full_page"])
+	assert.Equal("event-a", metadata["calendar_event_id"])
+	assert.Equal("owner@example.com", metadata["calendar_owner"])
+	content := meetingcontent.Decode(RawFormat, snapshot.Raw, snapshot.Metadata)
+	assert.Equal("event-a", content.LinkEvidence.GoogleEventID)
+	assert.Equal("owner@example.com", content.LinkEvidence.CalendarOwner)
 }
 
 func TestHydratorResolvesParentForMarkdown(t *testing.T) {
@@ -311,6 +340,11 @@ func TestExtractMarkdownTranscript(t *testing.T) {
 		{"inline", "Transcript: Inline text\n## Notes\nExclude", "Inline text"},
 		{"absent", "# Notes\nSome notes", ""},
 		{"empty", "# Transcript\n", ""},
+		{"v2 section", "<meeting-notes>Sync\n<meeting-notes-section-summary>Done</meeting-notes-section-summary>\n<meeting-notes-section-transcript>\nTest Speaker: Ready.\n</meeting-notes-section-transcript>\n</meeting-notes>\n## Transcript\nExclude", "Test Speaker: Ready."},
+		{"v2 section with attributes", "<meeting-notes-section-transcript id=\"t-1\">Keep</meeting-notes-section-transcript>", "Keep"},
+		{"v2 omitted transcript", "<meeting-notes-section-transcript>Transcript omitted. Fetch with include_transcript.</meeting-notes-section-transcript>\n## Transcript\nExclude", ""},
+		{"v2 unclosed section", "<meeting-notes-section-transcript>Keep\n## Transcript\nFallback", "Fallback"},
+		{"other tag prefix", "<meeting-notes-section-transcripts>Exclude</meeting-notes-section-transcripts>\nTranscript: Fallback", "Fallback"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := extractMarkdownTranscript(tc.markdown)

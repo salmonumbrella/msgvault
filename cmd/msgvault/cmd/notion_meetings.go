@@ -65,14 +65,14 @@ func resolveNotionMeetingsSources(args []string, probe bool, cfg *config.Config)
 }
 
 type notionMeetingsQuerySource interface {
-	QueryMeetingNotes(ctx context.Context, limit int) (*notionmeetings.QueryResult, error)
+	QueryMeetingNotes(ctx context.Context, limit int, createdOnOrBefore time.Time) (*notionmeetings.QueryResult, error)
 	RetrieveBlock(ctx context.Context, blockID string) (*notionmeetings.Block, error)
 	RetrievePageMarkdown(ctx context.Context, pageID string, includeTranscript bool) (*notionmeetings.MarkdownPage, error)
 	ListUsers(ctx context.Context, cursor string) (*notionmeetings.UserPage, error)
 }
 
 func runNotionMeetingsProbe(ctx context.Context, out io.Writer, client notionMeetingsQuerySource, users notionmeetings.UserSource) error {
-	result, err := client.QueryMeetingNotes(ctx, 1)
+	result, err := client.QueryMeetingNotes(ctx, 1, time.Time{})
 	if err != nil {
 		return fmt.Errorf("probe Notion AI Meeting Notes access: %w", err)
 	}
@@ -219,12 +219,14 @@ var addNotionMeetingsCmd = &cobra.Command{
 var syncNotionMeetingsCmd = &cobra.Command{
 	Use:   "sync-notion-meetings [identifier]",
 	Short: "Sync Notion AI Meeting Notes",
-	Long: `Sync the latest visible Notion AI Meeting Notes into the canonical meeting archive.
+	Long: `Sync attendee-visible Notion AI Meeting Notes into the canonical meeting archive.
 
-Notion currently returns at most 50 attendee-visible meetings and does not
-provide a discovery cursor. Every run checks that visible window. --after is
-a local visible-set filter. --limit caps discovery work but not due transcript
-maintenance. --probe validates access without printing meeting content.`,
+Notion returns at most 50 meetings per query and has no discovery cursor, so
+msgvault pages back by creation time, up to 5,000 meetings per run. Every run
+checks the newest 50 meetings and any older meeting that is new or edited;
+--full checks them all. --after is a local filter on discovered meetings.
+--limit caps discovery work but not due transcript maintenance. --probe
+validates access without printing meeting content.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		state := invocationFromCommand(cmd)
